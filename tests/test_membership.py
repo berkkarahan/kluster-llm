@@ -28,6 +28,7 @@ STATUS_KEYS = (
     "inference_up",
     "apply_error",
     "apply_warning",
+    "download",
 )
 
 REGISTER_BODY = {

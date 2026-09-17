@@ -1,4 +1,5 @@
-import type { ChatMessage, ClusterView, GpuInfo, ModelInfo, Status } from './types';
+import type { ChatMessage, ClusterView, GpuInfo, HfTokenSource, HfTokenStatus, ModelInfo, Status } from './types';
+import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { pushToast } from './toast';
 
 let fingerprint = '';
@@ -37,6 +38,9 @@ class AppStore {
   gpuBackend = $state('cpu');
   selectedGpuIds = $state<number[]>([]);
   modelSource = $state('');
+  hfTokenInput = $state('');
+  hfTokenConfigured = $state(false);
+  hfTokenSource = $state<HfTokenSource>(null);
   selectedModel = $state('');
   context = $state(4096);
   contextAuto = $state(false);
@@ -85,6 +89,7 @@ class AppStore {
   start() {
     void this.refresh();
     void this.loadToken();
+    void this.loadHfToken();
     void this.loadModels();
     void this.loadConfig();
     void this.loadGpus();
@@ -140,6 +145,48 @@ class AppStore {
     }
   }
 
+  async loadHfToken() {
+    try {
+      const r = await fetch('/v1/hf-token');
+      if (!r.ok) return;
+      const data = (await r.json()) as HfTokenStatus;
+      this.hfTokenConfigured = !!data.configured;
+      this.hfTokenSource = data.source ?? null;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async saveHfToken() {
+    await this.putHfToken(this.hfTokenInput);
+    this.hfTokenInput = '';
+  }
+
+  async clearHfToken() {
+    this.hfTokenInput = '';
+    await this.putHfToken('');
+  }
+
+  private async putHfToken(token: string) {
+    this.busy = '/v1/hf-token';
+    try {
+      const r = await fetch('/v1/hf-token', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token })
+      });
+      const text = await r.text();
+      if (!r.ok) {
+        pushToast('danger', text || `hf-token ${r.status}`);
+        throw new Error(text);
+      }
+      pushToast('ok', token ? 'hf token saved' : 'hf token cleared');
+      await this.loadHfToken();
+    } finally {
+      this.busy = '';
+    }
+  }
+
   async loadModels() {
     try {
       const r = await fetch('/v1/models');
@@ -148,17 +195,33 @@ class AppStore {
       this.models = data.data ?? [];
       if (!this.selectedModel && this.models[0]) {
         await this.selectModel(this.models[0].id);
+      } else {
+        this.clampContextToModel();
       }
     } catch {
       /* ignore */
     }
   }
 
+  selectedModelMaxContext(): number {
+    const m = this.models.find((x) => x.id === this.selectedModel);
+    const n = m?.max_context;
+    if (typeof n === 'number' && n >= MIN_CONTEXT) return n;
+    return DEFAULT_MAX_CONTEXT;
+  }
+
+  clampContextToModel() {
+    const max = this.selectedModelMaxContext();
+    if (this.context > max) this.context = max;
+    if (this.context < MIN_CONTEXT) this.context = MIN_CONTEXT;
+  }
+
   applyParameterSet(ps: Record<string, unknown>) {
     if (typeof ps.context === 'number') this.context = ps.context;
     if (typeof ps.context_auto === 'boolean') this.contextAuto = ps.context_auto;
-    if (typeof ps.cache_type_k === 'string') this.cacheTypeK = ps.cache_type_k;
-    if (typeof ps.cache_type_v === 'string') this.cacheTypeV = ps.cache_type_v;
+    this.clampContextToModel();
+    if (typeof ps.cache_type_k === 'string') this.cacheTypeK = normalizeKvCacheType(ps.cache_type_k);
+    if (typeof ps.cache_type_v === 'string') this.cacheTypeV = normalizeKvCacheType(ps.cache_type_v);
     if (ps.parallel_slots === 'auto' || typeof ps.parallel_slots === 'number')
       this.parallelSlots = ps.parallel_slots as number | 'auto';
     if (ps.batch_size === 'auto' || typeof ps.batch_size === 'number')
@@ -187,16 +250,20 @@ class AppStore {
     this.selectedModel = id;
     try {
       const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
-      if (!r.ok) return;
+      if (!r.ok) {
+        this.clampContextToModel();
+        return;
+      }
       const data = await r.json();
       if (data.parameter_set) this.applyParameterSet(data.parameter_set);
+      else this.clampContextToModel();
     } catch {
-      /* ignore */
+      this.clampContextToModel();
     }
   }
 
   resetRunSettings() {
-    this.context = 4096;
+    this.context = Math.min(4096, this.selectedModelMaxContext());
     this.contextAuto = false;
     this.cacheTypeK = 'q8_0';
     this.cacheTypeV = 'q8_0';
@@ -229,7 +296,11 @@ class AppStore {
 
   validateRunSettings(): boolean {
     const err: Record<string, string> = {};
-    if (!this.contextAuto && this.context < 512) err.context = 'Context must be at least 512 when Auto is off.';
+    const maxCtx = this.selectedModelMaxContext();
+    if (!this.contextAuto && this.context < MIN_CONTEXT)
+      err.context = `Context must be at least ${MIN_CONTEXT} when Auto is off.`;
+    else if (!this.contextAuto && this.context > maxCtx)
+      err.context = `Context must be ≤ ${maxCtx} for this model.`;
     if (this.threads < 1) err.threads = 'Threads must be at least 1.';
     if (this.vramPercent < 10 || this.vramPercent > 100) err.vramPercent = 'GPU memory % must be 10–100.';
     if (this.ramPercent < 10 || this.ramPercent > 100) err.ramPercent = 'RAM % must be 10–100.';

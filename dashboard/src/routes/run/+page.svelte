@@ -1,5 +1,6 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
+  import { CONTEXT_STEP, KV_CACHE_TYPES, MIN_CONTEXT } from '$lib/types';
 
   function fmtBytes(n?: number | null) {
     if (n == null) return '—';
@@ -15,6 +16,8 @@
   const fitStatus = $derived(
     appStore.planResult?.fit_status ? String(appStore.planResult.fit_status) : null
   );
+  const maxContext = $derived(appStore.selectedModelMaxContext());
+  const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
 </script>
 
 <div class="max-w-2xl mx-auto p-4">
@@ -61,7 +64,7 @@
     </select>
 
     <div class="flex items-center gap-2">
-      <label class="mono text-[11px] flex-1" style="color: var(--muted)" title="Context window size for KV cache">
+      <label class="mono text-[11px] flex-1" style="color: var(--muted)" title="Context window size for KV cache" for="run-context">
         Context
       </label>
       <label class="mono text-[11px] flex items-center gap-1" style="color: var(--muted)">
@@ -69,14 +72,39 @@
         Auto
       </label>
     </div>
-    <input
-      class="field mono"
-      type="number"
-      bind:value={appStore.context}
-      min="512"
-      step="512"
-      disabled={appStore.contextAuto || !!appStore.busy}
-    />
+    <div class="flex items-center gap-2">
+      <input
+        id="run-context"
+        class="flex-1"
+        type="range"
+        min={MIN_CONTEXT}
+        max={maxContext}
+        step={CONTEXT_STEP}
+        value={appStore.context}
+        disabled={contextDisabled}
+        oninput={(e) => {
+          appStore.context = Number((e.currentTarget as HTMLInputElement).value);
+        }}
+      />
+      <input
+        class="field mono"
+        style="width: 5.5rem"
+        type="number"
+        min={MIN_CONTEXT}
+        max={maxContext}
+        step={CONTEXT_STEP}
+        value={appStore.context}
+        disabled={contextDisabled}
+        onchange={(e) => {
+          const raw = Number((e.currentTarget as HTMLInputElement).value);
+          const stepped = Math.round(raw / CONTEXT_STEP) * CONTEXT_STEP;
+          appStore.context = Math.min(maxContext, Math.max(MIN_CONTEXT, stepped || MIN_CONTEXT));
+        }}
+      />
+    </div>
+    <p class="mono text-[10px]" style="color: var(--muted)">
+      Max {maxContext.toLocaleString()} (model)
+    </p>
     {#if appStore.fieldErrors.context}
       <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.context}</p>
     {/if}
@@ -85,8 +113,16 @@
       KV cache dtype
     </label>
     <div class="flex gap-2">
-      <input class="field mono flex-1" bind:value={appStore.cacheTypeK} placeholder="cache-type-k" />
-      <input class="field mono flex-1" bind:value={appStore.cacheTypeV} placeholder="cache-type-v" />
+      <select class="field mono flex-1" bind:value={appStore.cacheTypeK} disabled={!!appStore.busy}>
+        {#each KV_CACHE_TYPES as t}
+          <option value={t}>{t}</option>
+        {/each}
+      </select>
+      <select class="field mono flex-1" bind:value={appStore.cacheTypeV} disabled={!!appStore.busy}>
+        {#each KV_CACHE_TYPES as t}
+          <option value={t}>{t}</option>
+        {/each}
+      </select>
     </div>
 
     <label class="mono text-[11px]" style="color: var(--muted)">Device</label>

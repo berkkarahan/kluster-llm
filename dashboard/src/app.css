@@ -145,6 +145,18 @@ textarea {
   color: var(--muted);
 }
 
+.progress {
+  height: 4px;
+  background: var(--border);
+}
+
+.progress > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
 /* Dark-theme range: Windows default track/thumb is nearly invisible on --surface */
 input[type='range'] {
   -webkit-appearance: none;

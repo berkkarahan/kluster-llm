@@ -258,18 +258,29 @@ pub fn parse_rocm_smi_vram_csv(text: &str) -> Option<u64> {
 
 #[cfg(target_os = "windows")]
 fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
+    // Win32_VideoController.AdapterRAM is a 32-bit field and saturates near
+    // 4 GB (often 4293918720) for large discrete cards. Prefer the registry
+    // QWORD HardwareInformation.qwMemorySize; fall back to AdapterRAM.
     let script = r#"
-Get-CimInstance Win32_VideoController |
-  Where-Object { $_.AdapterRAM -and $_.AdapterRAM -gt 0 } |
-  ForEach-Object { "{0}`t{1}" -f $_.Name, $_.AdapterRAM }
+$base = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+Get-ChildItem $base -ErrorAction SilentlyContinue | ForEach-Object {
+  $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+  if (-not $p) { return }
+  $name = $p.DriverDesc
+  if (-not $name) { return }
+  $qw = $p.'HardwareInformation.qwMemorySize'
+  $vram = 0
+  if ($null -ne $qw -and [int64]$qw -gt 0) { $vram = [int64]$qw }
+  elseif ($null -ne $p.AdapterRAM -and [int64]$p.AdapterRAM -gt 0) { $vram = [int64]$p.AdapterRAM }
+  if ($vram -gt 0) { "{0}`t{1}" -f $name, $vram }
+}
 "#;
     let output = Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
+    // PowerShell often exits non-zero on registry ACL noise even when devices
+    // printed successfully — trust parseable stdout over exit status.
     let text = String::from_utf8_lossy(&output.stdout);
     let devices = parse_wmi_gpu_lines(&text);
     if devices.is_empty() {
@@ -296,7 +307,9 @@ pub fn parse_wmi_gpu_lines(text: &str) -> Vec<GpuDevice> {
             Some(p) => p,
             None => continue,
         };
-        // AdapterRAM is often a signed i32 overflow for >2GB cards; treat carefully.
+        // Bytes from registry qwMemorySize (preferred) or WMI AdapterRAM.
+        // AdapterRAM alone saturates near 4GB on large cards — callers should
+        // prefer the QWORD registry value when available.
         let raw: i64 = match ram_s.trim().parse() {
             Ok(r) => r,
             Err(_) => continue,
@@ -366,6 +379,17 @@ card1,17179869184,1024
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].index, 0);
         assert_eq!(devices[0].vram_bytes, Some(25769803776));
+    }
+
+    #[test]
+    fn parse_wmi_lines_registry_qword_above_4gb() {
+        // Real RX 9070 XT qwMemorySize (WMI AdapterRAM would be 4293918720).
+        let sample = "AMD Radeon RX 9070 XT\t17095983104\nAMD Radeon(TM) Graphics\t536870912\n";
+        let devices = parse_wmi_gpu_lines(sample);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].vram_bytes, Some(17095983104));
+        assert_eq!(devices[1].vram_bytes, Some(536870912));
+        assert_eq!(sum_vram(&devices), Some(17095983104 + 536870912));
     }
 
     #[test]

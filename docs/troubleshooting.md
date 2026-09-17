@@ -1,0 +1,471 @@
+# Troubleshooting Guide
+
+This guide covers common issues and their solutions for the Kluster LLM project.
+
+---
+
+## Setup Issues
+
+### Preferred installer
+
+```bash
+python scripts/install.py
+```
+
+Installs Rust/Node (if missing), `kllm`, dashboard, `llama-server` + `rpc-server`, and WireGuard. Use `--backend vulkan|cuda|metal|cpu` as needed.
+
+Agent-oriented checklist (success criteria, flags, recovery): [agent-install.md](agent-install.md).
+
+### "setup_mac.sh: command not found"
+
+**Solution:** Prefer `python scripts/install.py --backend metal`, or:
+
+```bash
+chmod +x coordinator-macos/setup_mac.sh
+./coordinator-macos/setup_mac.sh
+```
+
+### "setup_windows.ps1: cannot be loaded because running scripts is disabled"
+
+**Solution:** Prefer `python scripts\install.py`, or:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+powershell -ExecutionPolicy Bypass -File worker-windows\setup_windows.ps1
+```
+
+### "Xcode Command Line Tools not installed"
+
+**Cause:** Missing CLT on macOS.
+
+**Solution:**
+```bash
+xcode-select --install
+# Follow installer prompts, then: python scripts/install.py --backend metal
+```
+
+---
+
+## Compilation Issues
+
+### "cmake: command not found"
+
+**Cause:** CMake not installed or not in PATH.
+
+**Solution:**
+```bash
+brew install cmake
+# Re-run setup_mac.sh
+```
+
+### "LLAMA_METAL=1: unrecognized option"
+
+**Cause:** Outdated llama.cpp version.
+
+**Solution:**
+```bash
+cd coordinator-macos/../vendor/llama.cpp
+git pull --rebase
+cmake -B build -DGGML_METAL=1 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target llama-server -j$(sysctl -n hw.ncpu)
+```
+
+### "clang: error: unsupported option '-fopenmp'"
+
+**Cause:** Incompatible compiler version.
+
+**Solution:**
+```bash
+brew install llvm
+export CC=/opt/homebrew/opt/llvm/bin/clang
+export CXX=/opt/homebrew/opt/llvm/bin/clang++
+# Re-run compilation
+```
+
+---
+
+## Runtime Issues
+
+### RPC must stay on a private LAN
+
+**Cause:** llama.cpp RPC is unauthenticated (upstream documents it as PoC / insecure on open networks; no in-app auth planned).
+
+**Solution:**
+- Default `kllm join` binds `rpc-server` to a **private interface IP** (check `kllm status` → `rpc_bind`), not `0.0.0.0`.
+- Prefer a dedicated 10GbE / Thunderbolt interface with **static IPs**.
+- Firewall TCP **50052** to cluster members only; never publish it to the internet. `kllm` best-effort creates/updates the `kllm-RPC` firewall rule.
+- Optional: `kllm start --overlay wireguard` / `kllm join --overlay wireguard` (WireGuard must be installed) so only join-key holders reach RPC on `10.66.87.0/24`.
+- Prefer the worker tensor cache (`-c`, enabled by `kllm` worker launch) so reconnects do not re-ship large tensors.
+- See [engine-decision.md](engine-decision.md).
+
+### WireGuard overlay fails on start/join
+
+**Cause:** `wg` / `wg-quick` (or WireGuard for Windows) not installed, or overlay mismatch (master `none`, worker `wireguard`).
+
+**Solution:**
+- Install WireGuard from https://www.wireguard.com/install/ and ensure `wg` is on `PATH` (or set `KLLM_WG`).
+- Use the same `--overlay` on master and workers.
+- Control plane stays on LAN — only RPC moves to the overlay. Verify with `kllm status` (`wg_address`, `overlay_status`).
+
+### "rpc-server.exe not found"
+
+**Cause:** Worker setup not completed.
+
+**Solution:**
+```powershell
+.\worker-windows\setup_windows.ps1
+```
+
+### "llama-server not found"
+
+**Cause:** Coordinator setup not completed.
+
+**Solution:**
+```bash
+cd coordinator-macos && ./setup_mac.sh
+```
+
+### "ERROR: --model <path> is required"
+
+**Cause:** Missing required argument.
+
+**Solution:**
+```bash
+./run_coordinator.sh --model /path/to/model.gguf --worker-ip 192.168.10.2
+```
+
+### "ERROR: Model file not found"
+
+**Cause:** Model path is incorrect or file doesn't exist.
+
+**Solution:**
+```bash
+# Verify model exists
+ls -lh /path/to/model.gguf
+
+# Use absolute path
+./run_coordinator.sh --model /absolute/path/to/model.gguf --worker-ip 192.168.10.2
+```
+
+---
+
+## Network Issues
+
+### "Connection timed out"
+
+**Cause:** Worker not running, firewall blocking, or wrong IP.
+
+**Solution:**
+```bash
+# Check worker is running (Windows)
+netstat -an | findstr 50052
+
+# Check firewall (Windows)
+Get-NetFirewallRule -Name "kllm-RPC" | Format-Table DisplayName, Enabled
+
+# Test connectivity
+ping -S 192.168.10.1 192.168.10.2
+```
+
+### "No route to host"
+
+**Cause:** IPs not in same subnet or interface disabled.
+
+**Solution:**
+```bash
+# Verify IPs (macOS)
+ifconfig thunderbolt1 | grep "inet "
+
+# Verify IPs (Windows)
+Get-NetIPAddress -InterfaceAlias "Ethernet1" | Format-Table IPAddress
+```
+
+### "High latency (>1 ms)"
+
+**Cause:** Using wrong network interface (Wi-Fi instead of Thunderbolt).
+
+**Solution:**
+```bash
+# Disable other interfaces (macOS)
+sudo networksetup -setairportpower airport off
+
+# Verify you're using Thunderbolt interface
+ping -S 192.168.10.1 192.168.10.2
+```
+
+### "DHCP reassignment mid-inference"
+
+**Cause:** DHCP lease renewal changed IP.
+
+**Solution:**
+```bash
+# Set static IPs (macOS)
+sudo networksetup -setstaticnetworksetup thunderbolt1 192.168.10.1 255.255.255.0 "" ""
+sudo networksetup -setdhcp thunderbolt1 off
+
+# Set static IPs (Windows)
+New-NetIPAddress -IPAddress 192.168.10.2 -PrefixLength 24 -InterfaceAlias "Ethernet1"
+Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Disabled
+```
+
+---
+
+## Memory Issues
+
+### "CUDA out of memory" or "Mach kernel reported"
+
+**Cause:** Model too large for available VRAM/RAM.
+
+**Solution:**
+```bash
+# Reduce context length
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --context 2048
+
+# Use smaller quantization (Q4_K_M instead of Q5_K_M)
+
+# Increase tensor-split to move more layers to Mac
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --tensor-split 0.75
+```
+
+### "OOM: Out of Memory"
+
+**Cause:** System RAM exceeded.
+
+**Solution:**
+```bash
+# Reduce micro-batch size
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --micro-batch 1
+
+# Close other applications to free RAM
+```
+
+### "Memory pressure exceeded threshold" (Prima.cpp)
+
+**Cause:** mmap threshold too low for model size.
+
+**Solution:**
+```bash
+# Increase mmap threshold
+./run_coordinator_prima.sh --model model.gguf --worker-ip 192.168.10.2 --mmap-threshold 0.15
+
+# Or switch to llama.cpp for manual control
+```
+
+---
+
+## Performance Issues
+
+### "Slow inference"
+
+**Cause:** Layers spilling to CPU/RAM.
+
+**Solution:**
+```bash
+# Check layer placement (look for "→ CPU" in logs)
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
+
+# Increase GPU layers (-ngl)
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 -ngl 40
+
+# Use smaller model or smaller quantization
+```
+
+### "Tokens/sec much lower than expected"
+
+**Cause:** Not using GPU, or network bottleneck.
+
+**Solution:**
+```bash
+# Verify GPU utilization (Windows)
+# Task Manager → Performance → GPU
+
+# Verify network bandwidth
+iperf3 -c 192.168.10.1 -t 10
+
+# Check for other network traffic
+# Disable other interfaces
+```
+
+### "Inference speed drops after few minutes"
+
+**Cause:** Thermal throttling or memory pressure.
+
+**Solution:**
+```bash
+# Monitor temperature (macOS)
+sudo powermetrics -samplers thermal
+
+# Reduce context length
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --context 2048
+
+# Ensure adequate cooling
+```
+
+---
+
+## Precision Issues
+
+### "Output quality degraded" or "precision drift"
+
+**Cause:** Using tensor-split mode instead of layer-split mode.
+
+**Solution:**
+```bash
+# Use layer-split mode (required for kllmgeneous hardware)
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --split-mode layer
+```
+
+### "Garbage output" or "nonsensical responses"
+
+**Cause:** Incorrect tensor-split ratio or model mismatch.
+
+**Solution:**
+```bash
+# Recalculate split ratio
+./calculate_split.sh --mac-memory 24 --worker-vram 12
+
+# Use calculated ratio
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --tensor-split 0.68
+```
+
+---
+
+## Prima.cpp Issues
+
+### "Halda scheduler failed to initialize"
+
+**Cause:** Prima.cpp not compiled or worker unreachable.
+
+**Solution:**
+```bash
+# Recompile Prima.cpp
+cd coordinator-macos/../vendor/prima.cpp
+cmake -B build -DGGML_METAL=1 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target prima-server -j$(sysctl -n hw.ncpu)
+
+# Verify worker is accessible
+ping 192.168.10.2
+```
+
+### "Variable performance" or "latency spikes"
+
+**Cause:** Automatic scheduling overhead.
+
+**Solution:**
+```bash
+# Enable verbose logging to see scheduler decisions
+./run_coordinator_prima.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
+
+# Consider switching to llama.cpp for predictable performance
+```
+
+---
+
+## Windows-Specific Issues
+
+### "rpc-server.exe access denied"
+
+**Cause:** Antivirus or Windows Defender blocking execution.
+
+**Solution:**
+```powershell
+# Add exception to Windows Defender
+Add-MpPreference -ExclusionPath "C:\path\to\worker-windows"
+
+# Or temporarily disable real-time protection
+Set-MpPreference -MapSchedulerEnabled $false
+```
+
+### "Firewall rule already exists"
+
+**Cause:** Rule created previously.
+
+**Solution:**
+```powershell
+# Remove existing rule
+Remove-NetFirewallRule -Name "kllm-RPC"
+
+# Re-create
+New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
+```
+
+---
+
+## macOS-Specific Issues
+
+### "Permission denied" on network setup
+
+**Cause:** Need sudo for network configuration.
+
+**Solution:**
+```bash
+sudo ./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2
+```
+
+### "Thunderbolt interface not found"
+
+**Cause:** Interface name different on your system.
+
+**Solution:**
+```bash
+# List all interfaces
+networksetup -listnetworkserviceorder
+
+# Use correct interface name
+sudo networksetup -setstaticnetworksetup thunderbolt2 192.168.10.1 255.255.255.0 "" ""
+```
+
+---
+
+## General Debugging Tips
+
+### Enable verbose logging
+
+```bash
+./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
+```
+
+### Check system logs
+
+```bash
+# macOS
+log show --predicate 'process == "llama-server"' --last 10m
+
+# Windows
+Get-Content C:\Windows\System32\LogFiles\WMI\*.log | Select-String "rpc-server"
+```
+
+### Verify hardware detection
+
+```bash
+# macOS
+sysctl -n hw.memsize
+sysctl -n hw.ncpu
+sysctl -n hw.machine
+
+# Windows
+Get-WmiObject Win32_PnPEntity | Where-Object { $_.Name -match "AMD" } | ForEach-Object { $_.Name }
+Get-WmiObject Win32_Processor | Select-Object Name, NumberOfLogicalProcessors
+```
+
+### Test network independently
+
+```bash
+# From macOS
+iperf3 -s -B 192.168.10.1
+
+# From Windows (another terminal)
+iperf3 -c 192.168.10.1 -t 10
+```
+
+---
+
+## Getting Help
+
+If issues persist:
+
+1. **Check logs**: Enable verbose logging and review output
+2. **Verify prerequisites**: Ensure all hardware and software requirements are met
+3. **Test components separately**: Run worker and coordinator independently
+4. **Check documentation**: Review [docs/layer-split-calculator.md](layer-split-calculator.md) and [docs/memory-constraints.md](memory-constraints.md)
+5. **File an issue**: Provide full error output and system info

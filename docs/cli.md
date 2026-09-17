@@ -1,0 +1,132 @@
+# CLI — Kluster LLM router
+
+Cross-platform entrypoint for starting/stopping a cluster, joining workers, downloading models, distributing them, and launching llama.cpp with a VRAM/RAM-aware layer split.
+
+## Requirements
+
+- Python 3.10+
+- One command installs the rest:
+
+```bash
+python scripts/install.py
+```
+
+This creates `.venv`, installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
+
+CLI/UI rebuild only: `python scripts/build.py`. Optional: set `KLLM_LLAMA_SERVER` / `KLLM_RPC_SERVER` if binaries live outside `vendor/`.
+
+**Agents:** step-by-step install + verify + recovery → [agent-install.md](agent-install.md).
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard]` | Start as master, advertise via mDNS, print join key |
+| `kllm join --key KEY [--master HOST] [--rpc-bind HOST] [--overlay none\|wireguard]` | Join as worker (auto-discover or explicit master) |
+| `kllm leave` | Worker leaves the cluster |
+| `kllm stop` | Stop local session (master ends the cluster session) |
+| `kllm status` | Role, members, capacity, last plan, RPC bind / overlay |
+| `kllm model download <URL\|org/repo:file.gguf>` | Master downloads into `~/.kllm/models/` |
+| `kllm model distribute <name>` | Master pushes GGUF to all workers (SHA-256 verified) |
+| `kllm plan --model NAME [--device cpu\|gpu]` | Dry-run capacity-aware `--tensor-split` |
+| `kllm run --model NAME [--device cpu\|gpu]` | Plan + launch `llama-server` with `--rpc` workers |
+| `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
+| `kllm connect <agent>` | Launch Claude/OpenCode/Codex/… with kllm API baked in |
+
+Control plane default port: **18765**. Worker RPC default: **50052**. Inference HTTP: **8080** (also proxied on the control port as OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`).
+
+### RPC bind and optional WireGuard
+
+By default workers bind `rpc-server` to a **private interface IP** (not `0.0.0.0`) and `kllm` best-effort opens the host firewall for TCP 50052. Pass `--rpc-bind 0.0.0.0` only for debugging.
+
+Optional overlay (must match on master and workers):
+
+```bash
+kllm start --overlay wireguard
+kllm join --key <key> --overlay wireguard
+```
+
+Requires system WireGuard (`wg` on PATH, plus `wg-quick` on Linux/macOS or WireGuard for Windows). PSK is derived from the join key; RPC moves to `10.66.87.0/24` while control-plane HTTP stays on the LAN. Dashboard Cluster panel exposes the same **RPC bind** and **Overlay** controls.
+
+## Device preference (CPU / GPU)
+
+Default is **GPU**. Preference is stored on the master in `~/.kllm/config.toml`:
+
+```toml
+device = "gpu"
+```
+
+Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`.
+
+- **GPU:** VRAM-aware budgets; `-ngl` = estimated layers when at least one node can use GPU/Metal.
+- **CPU:** RAM-only budgets; `-ngl 0`.
+- **Fallback:** if GPU is preferred but a node has unknown/zero VRAM (and is not Metal), that node falls back to RAM/CPU silently. Plan responses include `device_requested`, `device_effective`, and per-node `node_devices`.
+
+Dashboard Plan & Run exposes the same control and persists via `PUT /v1/config`.
+
+## Dashboard
+
+Build once, then serve via the agent:
+
+```bash
+cd dashboard && npm install && npm run build
+kllm ui
+```
+
+The dashboard mirrors CLI actions (start/join/leave/stop, models, plan/run, chat) plus a Connect page for harness commands. Design tokens live in [`dashboard/DESIGN.md`](../dashboard/DESIGN.md).
+
+## Connect harnesses (Unsloth-style)
+
+`kllm start` remains “become cluster master”. Use **`kllm connect`** to wrap coding agents:
+
+```bash
+kllm run --model my-model.Q4_K_M.gguf
+kllm connect claude
+kllm connect opencode --model my-model.Q4_K_M.gguf
+kllm connect claude --no-launch   # print env + argv only
+```
+
+| Agent | Command |
+|-------|---------|
+| Claude Code | `kllm connect claude` |
+| OpenCode | `kllm connect opencode` |
+| OpenAI Codex | `kllm connect codex` |
+| Hermes | `kllm connect hermes` |
+| OpenClaw | `kllm connect openclaw` |
+| Pi | `kllm connect pi` |
+
+Flags: `--model`, `--api-key` / `KLLM_API_KEY`, `--launch`/`--no-launch`, `--serve`/`--no-serve`, `--persist`, `--yolo`, `--context`. Extra args after the agent name are passed through to the harness.
+
+Session-scoped env points agents at `http://127.0.0.1:18765` (token in `~/.kllm/api_token`).
+
+## Typical flow
+
+```bash
+# Machine A (master)
+kllm start
+kllm model download 'TheBloke/Llama-3.1-8B-Instruct-GGUF:llama-3.1-8b-instruct.Q4_K_M.gguf'
+# note the printed join key
+
+# Machine B (worker)
+kllm join --key '<join-key>'
+# or: kllm join --key '<join-key>' --master 192.168.10.1
+
+# Machine A
+kllm model distribute llama-3.1-8b-instruct.Q4_K_M.gguf
+kllm plan --model llama-3.1-8b-instruct.Q4_K_M.gguf
+kllm run --model llama-3.1-8b-instruct.Q4_K_M.gguf
+```
+
+## Architecture notes
+
+- **Python** owns CLI, FastAPI agent, mDNS, membership, and model transfer.
+- **Rust (`kllm_native`)** owns HW capacity probe, layer-split planner, and process supervision (generalized from the old `.sh` / `.ps1` scripts).
+- Split mode is always **layer** (required for Metal + AMD mixed clusters).
+
+## Manual two-machine checklist
+
+1. High-speed link up; firewall allows TCP 18765 and 50052.
+2. `kllm start` on master; copy join key.
+3. `kllm join --key …` on worker; `kllm status` on master shows the member.
+4. Download + distribute model; confirm file under `~/.kllm/models` on both.
+5. `kllm run --model …`; hit `http://<master>:8080` for inference.

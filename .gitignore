@@ -1,0 +1,49 @@
+# Build artifacts
+coordinator-macos/llama-server
+worker-windows/rpc-server.exe
+worker-windows/vulkan*.dll
+worker-windows/rocm*.dll
+
+# Model files (download separately)
+*.gguf
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temp
+*.tmp
+*.swp
+
+# Credentials
+*.key
+*.pem
+
+# Python / Rust
+.venv/
+__pycache__/
+*.py[cod]
+venv/
+dist/
+*.egg-info/
+.pytest_cache/
+target/
+*.pyd
+*.pdb
+*.so
+.mypy_cache/
+
+# Vendored third-party (cloned by scripts/install.py)
+vendor/
+
+# Editor / agent
+.cursor/
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.svelte-kit/
+dashboard/build/

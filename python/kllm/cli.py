@@ -181,6 +181,25 @@ def _resolve_cli_gpus(client: httpx.Client, gpus_flag: str | None) -> list[int] 
     return _prompt_gpu_ids(gpus, backend)
 
 
+def _headroom_override(
+    device: str | None,
+    vram_percent: int | None,
+    ram_percent: int | None,
+) -> float | None:
+    """Map CLI percent flags to plan/run headroom for this call only."""
+    if vram_percent is not None and ram_percent is not None:
+        raise typer.BadParameter("pass only one of --vram-percent or --ram-percent")
+    if vram_percent is not None:
+        if device is not None and device.strip().lower() == "cpu":
+            raise typer.BadParameter("--vram-percent requires GPU device")
+        return vram_percent / 100.0
+    if ram_percent is not None:
+        if device is not None and device.strip().lower() == "gpu":
+            raise typer.BadParameter("--ram-percent requires CPU device")
+        return ram_percent / 100.0
+    return None
+
+
 @app.command()
 def start(
     key: Optional[str] = typer.Option(None, "--key", help="Cluster join key (auto-generated if omitted)"),
@@ -390,12 +409,21 @@ def plan_cmd(
     device: Optional[str] = typer.Option(
         None, "--device", help="cpu|gpu (default: config, else gpu)"
     ),
+    vram_percent: Optional[int] = typer.Option(
+        None, "--vram-percent", min=10, max=100, help="Override VRAM budget %% for this call (GPU)"
+    ),
+    ram_percent: Optional[int] = typer.Option(
+        None, "--ram-percent", min=10, max=100, help="Override RAM budget %% for this call (CPU)"
+    ),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
     """Dry-run capacity-aware layer split."""
     payload: dict = {"model": model, "context": context}
     if device:
         payload["device"] = device
+    headroom = _headroom_override(device, vram_percent, ram_percent)
+    if headroom is not None:
+        payload["headroom"] = headroom
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
         if r.status_code >= 400:
@@ -412,12 +440,21 @@ def run(
     device: Optional[str] = typer.Option(
         None, "--device", help="cpu|gpu (default: config, else gpu)"
     ),
+    vram_percent: Optional[int] = typer.Option(
+        None, "--vram-percent", min=10, max=100, help="Override VRAM budget %% for this call (GPU)"
+    ),
+    ram_percent: Optional[int] = typer.Option(
+        None, "--ram-percent", min=10, max=100, help="Override RAM budget %% for this call (CPU)"
+    ),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
     """Plan and launch master llama-server with RPC workers."""
     payload: dict = {"model": model, "context": context}
     if device:
         payload["device"] = device
+    headroom = _headroom_override(device, vram_percent, ram_percent)
+    if headroom is not None:
+        payload["headroom"] = headroom
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)
         if r.status_code >= 400:
@@ -508,6 +545,26 @@ def model_distribute(
             console.print(f"[red]{r.text}[/red]")
             raise typer.Exit(1)
         data = r.json()
+    for row in data.get("results") or []:
+        if row.get("ok"):
+            console.print(f"  [green]ok[/green] {row.get('host')}")
+        else:
+            console.print(f"  [red]fail[/red] {row.get('host')}: {row.get('error')}")
+
+
+@model_app.command("delete")
+def model_delete(
+    name: str = typer.Argument(..., help="Local model name or path"),
+    port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
+) -> None:
+    """Delete a local model and remove copies from joined workers."""
+    with _client(port) as c:
+        r = c.post("/v1/models/delete", json={"name": name}, timeout=None)
+        if r.status_code >= 400:
+            console.print(f"[red]{r.text}[/red]")
+            raise typer.Exit(1)
+        data = r.json()
+    console.print(f"[green]Deleted[/green] {data.get('name') or name}")
     for row in data.get("results") or []:
         if row.get("ok"):
             console.print(f"  [green]ok[/green] {row.get('host')}")

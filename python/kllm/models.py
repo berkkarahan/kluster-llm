@@ -115,3 +115,35 @@ def push_model_to_worker(
             resp = client.put(url, content=f, headers=headers)
             resp.raise_for_status()
             return resp.json()
+
+
+def delete_local_model(name: str) -> Path:
+    """Delete a GGUF under models_dir(). Rejects paths outside that directory."""
+    path = resolve_local_model(name).resolve()
+    root = models_dir().resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"model is outside models directory: {path}") from exc
+    if not path.is_file():
+        raise FileNotFoundError(f"model not found: {name}")
+    path.unlink()
+    return path
+
+
+def delete_model_on_worker(
+    host: str,
+    port: int,
+    join_key: str,
+    filename: str,
+    timeout: float = 60.0,
+) -> dict:
+    url = f"http://{host}:{port}/v1/models/file"
+    headers = {
+        "X-Kllm-Key": join_key,
+        "X-Kllm-Filename": Path(filename).name,
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.delete(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()

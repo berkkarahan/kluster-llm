@@ -90,6 +90,42 @@ def test_start_defaults_all_gpus(client, monkeypatch):
     assert mem["vram_bytes"] == 48 * 1024**3
 
 
+def test_start_uses_config_gpu_ids_when_body_omits(client, monkeypatch):
+    c, agent = client
+    import importlib
+
+    import kllm.config as config_mod
+
+    importlib.reload(config_mod)
+    config_mod.save_config({"device": "gpu", "gpu_ids": [1]})
+
+    with (
+        patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 16 * 1024**3,
+                "vram_bytes": 48 * 1024**3,
+                "backend": "cuda",
+            },
+        ),
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="10.0.0.1"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.discovery, "MasterAdvertiser") as Adv,
+    ):
+        Adv.return_value.start = lambda: None
+        Adv.return_value.stop = lambda: None
+        r = c.post("/v1/start", json={"overlay": "none"})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == [1]
+
+
 def test_start_selects_subset(client, monkeypatch):
     c, agent = client
     with (

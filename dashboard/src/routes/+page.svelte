@@ -13,10 +13,10 @@
 <div class="grid h-[calc(100vh-40px)] grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_360px]">
   <!-- Cluster controls -->
   <aside class="panel border-r flex flex-col min-h-0" style="border-color: var(--border)">
-    <div class="px-3 py-2 border-b mono text-[11px] uppercase tracking-wider" style="border-color: var(--border); color: var(--muted)">
+    <div class="px-3 py-2 border-b mono text-[11px] uppercase tracking-wider shrink-0" style="border-color: var(--border); color: var(--muted)">
       Cluster
     </div>
-    <div class="p-3 flex flex-col gap-2">
+    <div class="p-3 flex flex-col gap-2 overflow-y-auto flex-1 min-h-0">
       <label class="mono text-[11px]" style="color: var(--muted)">Join key</label>
       <input class="field mono" bind:value={appStore.joinKeyInput} placeholder="auto or paste" />
       <label class="mono text-[11px]" style="color: var(--muted)">RPC bind (optional)</label>
@@ -26,26 +26,117 @@
         <option value="none">Off (LAN bind)</option>
         <option value="wireguard">WireGuard</option>
       </select>
-      {#if appStore.gpus.length > 0}
-        <label class="mono text-[11px] mt-1" style="color: var(--muted)">
-          GPUs ({appStore.gpuBackend})
+      <label class="mono text-[11px] mt-1" style="color: var(--muted)">Device</label>
+      <select
+        class="field mono"
+        value={appStore.device}
+        disabled={!!appStore.busy}
+        onchange={(e) => {
+          const v = (e.currentTarget as HTMLSelectElement).value;
+          if (v === 'cpu' || v === 'gpu') void appStore.setDevice(v);
+        }}
+      >
+        <option value="gpu">GPU</option>
+        <option value="cpu">CPU</option>
+      </select>
+      {#if appStore.device === 'gpu'}
+        {#if appStore.gpus.length > 0}
+          <label class="mono text-[11px] mt-1" style="color: var(--muted)">
+            GPUs ({appStore.gpuBackend})
+          </label>
+          <div class="flex flex-col gap-1">
+            {#each appStore.gpus as g}
+              <label class="mono text-[11px] flex items-start gap-2 cursor-pointer" style="color: var(--fg)">
+                <input
+                  type="checkbox"
+                  class="mt-0.5"
+                  checked={appStore.selectedGpuIds.includes(g.index)}
+                  disabled={appStore.gpus.length === 1 || !!appStore.busy}
+                  onchange={() => {
+                    appStore.toggleGpu(g.index);
+                    void appStore.persistGpuSelection();
+                  }}
+                />
+                <span>
+                  [{g.index}] {g.name}
+                  <span style="color: var(--muted)"> {fmtBytes(g.vram_bytes)}</span>
+                </span>
+              </label>
+            {/each}
+          </div>
+        {/if}
+        <label class="mono text-[11px] mt-1" style="color: var(--muted)" for="home-vram-pct">
+          VRAM budget (%)
         </label>
-        <div class="flex flex-col gap-1">
-          {#each appStore.gpus as g}
-            <label class="mono text-[11px] flex items-start gap-2 cursor-pointer" style="color: var(--fg)">
-              <input
-                type="checkbox"
-                class="mt-0.5"
-                checked={appStore.selectedGpuIds.includes(g.index)}
-                disabled={appStore.gpus.length === 1}
-                onchange={() => appStore.toggleGpu(g.index)}
-              />
-              <span>
-                [{g.index}] {g.name}
-                <span style="color: var(--muted)"> {fmtBytes(g.vram_bytes)}</span>
-              </span>
-            </label>
-          {/each}
+        <div class="flex items-center gap-2">
+          <input
+            id="home-vram-pct"
+            class="flex-1"
+            type="range"
+            min="10"
+            max="100"
+            step="1"
+            value={appStore.vramPercent}
+            disabled={!!appStore.busy}
+            oninput={(e) => {
+              appStore.vramPercent = Number((e.currentTarget as HTMLInputElement).value);
+            }}
+            onchange={(e) => {
+              const v = Number((e.currentTarget as HTMLInputElement).value);
+              void appStore.setVramPercent(v);
+            }}
+          />
+          <input
+            class="field mono"
+            style="width: 4.5rem"
+            type="number"
+            min="10"
+            max="100"
+            step="1"
+            value={appStore.vramPercent}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              const v = Number((e.currentTarget as HTMLInputElement).value);
+              void appStore.setVramPercent(v);
+            }}
+          />
+        </div>
+      {:else if appStore.device === 'cpu'}
+        <label class="mono text-[11px] mt-1" style="color: var(--muted)" for="home-ram-pct">
+          RAM budget (%)
+        </label>
+        <div class="flex items-center gap-2">
+          <input
+            id="home-ram-pct"
+            class="flex-1"
+            type="range"
+            min="10"
+            max="100"
+            step="1"
+            value={appStore.ramPercent}
+            disabled={!!appStore.busy}
+            oninput={(e) => {
+              appStore.ramPercent = Number((e.currentTarget as HTMLInputElement).value);
+            }}
+            onchange={(e) => {
+              const v = Number((e.currentTarget as HTMLInputElement).value);
+              void appStore.setRamPercent(v);
+            }}
+          />
+          <input
+            class="field mono"
+            style="width: 4.5rem"
+            type="number"
+            min="10"
+            max="100"
+            step="1"
+            value={appStore.ramPercent}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              const v = Number((e.currentTarget as HTMLInputElement).value);
+              void appStore.setRamPercent(v);
+            }}
+          />
         </div>
       {/if}
       <div class="grid grid-cols-2 gap-2 mt-1">
@@ -75,7 +166,15 @@
       </p>
       {#if appStore.status?.gpu_ids?.length}
         <p class="mono text-[11px]" style="color: var(--muted)">
-          gpus <span style="color: var(--fg)">{appStore.status.gpu_ids.join(',')}</span>
+          active GPUs
+          <span style="color: var(--fg)">
+            {appStore.status.gpu_ids
+              .map((id) => {
+                const g = appStore.gpus.find((x) => x.index === id);
+                return g ? `${id}:${g.name}` : String(id);
+              })
+              .join(' · ')}
+          </span>
         </p>
       {/if}
       {#if appStore.status?.overlay_status}

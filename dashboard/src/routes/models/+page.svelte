@@ -43,14 +43,21 @@
               {/if}
             </td>
             <td class="px-3 py-2 border-b text-right" style="border-color: var(--border)">
-              <button
-                class="btn"
-                disabled={!!appStore.busy}
-                onclick={() => {
-                  appStore.selectedModel = m.id;
-                  void appStore.distributeModel();
-                }}>Distribute</button
-              >
+              <div class="inline-flex gap-2">
+                <button
+                  class="btn"
+                  disabled={!!appStore.busy}
+                  onclick={() => {
+                    appStore.selectedModel = m.id;
+                    void appStore.distributeModel();
+                  }}>Distribute</button
+                >
+                <button
+                  class="btn btn-danger"
+                  disabled={!!appStore.busy}
+                  onclick={() => void appStore.deleteModel(m.id)}>Delete</button
+                >
+              </div>
             </td>
           </tr>
         {:else}

@@ -363,10 +363,28 @@ def build_rust(python: Path, *, release: bool) -> None:
     if not built:
         raise SystemExit(f"error: maturin produced no wheel in {wheels}")
     wheel = str(built[-1])
+    # --no-deps: only replace the kllm wheel / extension. Force-reinstalling
+    # the full dependency tree races with running agents and can corrupt
+    # packages like pydantic_core on Windows (locked .pyd / missing RECORD).
     if uv:
-        _run([uv, "pip", "install", "--python", str(python), "--force-reinstall", wheel], env=env)
+        _run(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "--force-reinstall",
+                "--no-deps",
+                wheel,
+            ],
+            env=env,
+        )
     else:
-        _run([str(python), "-m", "pip", "install", "--force-reinstall", wheel], env=env)
+        _run(
+            [str(python), "-m", "pip", "install", "--force-reinstall", "--no-deps", wheel],
+            env=env,
+        )
 
 
 def build_ui(*, skip_install: bool) -> None:

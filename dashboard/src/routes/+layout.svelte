@@ -47,6 +47,9 @@
         <span class="chip chip-danger">offline</span>
       {/if}
       <span class="chip chip-muted mono">{appStore.status?.role ?? (appStore.statusSeen ? '…' : 'loading')}</span>
+      {#if appStore.status?.download}
+        <span class="chip chip-ok">dl {Math.round(appStore.status.download.pct)}%</span>
+      {/if}
       {#if appStore.status?.inference_up}
         <span class="chip chip-ok">infer</span>
       {/if}

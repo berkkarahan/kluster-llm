@@ -217,7 +217,8 @@ Join uses the join key fingerprint over mDNS to find the master; `--master` is o
 ### 4.3 Model + inference (master)
 
 ```bash
-kllm model download 'org/repo:file.Q4_K_M.gguf'
+kllm model download 'org/repo:Q4_K_M'
+# or 'org/repo:file.Q4_K_M.gguf' / a direct URL
 kllm model distribute <name>
 kllm run --model <name>
 kllm ui
@@ -235,6 +236,7 @@ Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay priva
 | `KLLM_RPC_SERVER` | Absolute path to `rpc-server` |
 | `KLLM_WG` | Absolute path to `wg` / `wg.exe` |
 | `KLLM_API_KEY` | Inference API token override for harnesses |
+| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face Hub token (overridden by `~/.kllm/hf_token`) |
 
 ---
 
@@ -277,7 +279,7 @@ kllm status
 kllm start
 kllm join --key KEY
 # if needed: kllm join --key KEY --master MASTER_IP
-kllm model download 'ORG/REPO:file.gguf'
+kllm model download 'ORG/REPO:Q4_K_M'
 kllm model distribute file.gguf
 kllm run --model file.gguf
 ```
@@ -295,7 +297,7 @@ kllm run --model file.gguf
 | `vendor/bin/` | Staged `llama-server` / `rpc-server` |
 | `vendor/llama.cpp/` | Source + cmake build tree |
 | `worker-windows/rpc-server.exe` | Windows worker binary location |
-| `~/.kllm/` | Runtime state (`cluster.json`, models, WG keys, API token) |
+| `~/.kllm/` | Runtime state (`cluster.json`, models, WG keys, API token, `hf_token`) |
 
 ---
 

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from kllm import config as kllm_config
 from kllm import discovery, gateway, models as model_ops, native, netsec, runtime
 from kllm.auth import ensure_api_token, verify_api_token
+from kllm.hf_token import hf_token_status, save_hf_token
 from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
 from kllm.run_planning import (
@@ -350,6 +351,10 @@ class DownloadBody(BaseModel):
     name: str | None = None
 
 
+class HfTokenBody(BaseModel):
+    token: str
+
+
 class DistributeBody(BaseModel):
     name: str
 
@@ -401,6 +406,8 @@ def list_models() -> dict[str, Any]:
 def download_model(body: DownloadBody) -> dict[str, Any]:
     try:
         path = model_ops.download_model(body.source, dest_name=body.name)
+    except model_ops.DownloadInProgressError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "path": str(path), "name": path.name}
@@ -494,6 +501,18 @@ def get_api_token() -> dict[str, Any]:
     return {"api_token": ensure_api_token(), "base_url": f"http://127.0.0.1:{STATE.control_port}"}
 
 
+@app.get("/v1/hf-token")
+def get_hf_token() -> dict[str, Any]:
+    """Whether an HF token is configured. Never returns the secret."""
+    return hf_token_status()
+
+
+@app.put("/v1/hf-token")
+def put_hf_token(body: HfTokenBody) -> dict[str, Any]:
+    """Save ~/.kllm/hf_token (chmod 600). Empty string deletes the file."""
+    return save_hf_token(body.token)
+
+
 @app.get("/v1/config")
 def get_config() -> dict[str, Any]:
     return kllm_config.load_config()
@@ -543,6 +562,7 @@ def status() -> dict[str, Any]:
         "process_role": STATE.process_role,
         "last_plan": STATE.last_plan,
         "model_name": STATE.model_name,
+        "download": model_ops.get_download_progress(),
         "capacity": capacity,
         "control_port": STATE.control_port,
         "rpc_port": STATE.rpc_port,

@@ -1,21 +1,91 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
+  import type { DownloadProgress } from '$lib/types';
 
   function fmtBytes(n?: number) {
     if (n == null) return '—';
     return `${(n / 1e9).toFixed(2)} GB`;
   }
+
+  function fmtGb(n: number) {
+    return (n / 1e9).toFixed(1);
+  }
+
+  function downloadLabel(d: DownloadProgress) {
+    const pct = Math.round(d.pct);
+    if (d.total == null) return `${pct}% · ${fmtGb(d.bytes)} GB`;
+    return `${pct}% · ${fmtGb(d.bytes)} / ${fmtGb(d.total)} GB`;
+  }
+
+  const dl = $derived(appStore.status?.download ?? null);
 </script>
 
 <div class="max-w-4xl mx-auto p-4">
   <h1 class="mono text-[12px] uppercase tracking-wider mb-3" style="color: var(--muted)">Models</h1>
 
   <div class="panel p-3 mb-4 flex flex-col gap-2" style="border-color: var(--border)">
-    <label class="mono text-[11px]" style="color: var(--muted)">Download (org/repo:file.gguf or URL)</label>
+    <label class="mono text-[11px]" style="color: var(--muted)" for="model-source">Download</label>
     <div class="flex gap-2">
-      <input class="field mono flex-1" bind:value={appStore.modelSource} placeholder="TheBloke/…:model.Q4_K_M.gguf" />
-      <button class="btn btn-accent" disabled={!appStore.modelSource || !!appStore.busy} onclick={() => appStore.downloadModel()}
-        >Download</button
+      <input
+        id="model-source"
+        class="field mono flex-1"
+        bind:value={appStore.modelSource}
+        placeholder="org/repo:file.gguf, org/repo:Q4_K_M, or URL"
+      />
+      <button
+        class="btn btn-accent"
+        disabled={!appStore.modelSource || !!appStore.busy}
+        onclick={() => appStore.downloadModel()}>Download</button
+      >
+    </div>
+    {#if dl}
+      <div class="flex flex-col gap-1">
+        <div
+          class="progress"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(dl.pct)}
+          aria-label="Model download"
+        >
+          <span style:width={`${Math.min(100, Math.max(0, dl.pct))}%`}></span>
+        </div>
+        <div class="mono text-[11px]" style="color: var(--muted)">
+          {downloadLabel(dl)}{#if dl.filename}<span> · {dl.filename}</span>{/if}
+        </div>
+      </div>
+    {:else if appStore.busy === '/v1/models/download'}
+      <div class="mono text-[11px]" style="color: var(--muted)">starting…</div>
+    {/if}
+
+    <label class="mono text-[11px] mt-2 flex items-center gap-2" style="color: var(--muted)" for="hf-token">
+      Hugging Face token
+      {#if appStore.hfTokenConfigured}
+        <span class="chip chip-ok">saved</span>
+        {#if appStore.hfTokenSource === 'env'}
+          <span class="chip chip-muted">env</span>
+        {/if}
+      {/if}
+    </label>
+    <div class="flex gap-2">
+      <input
+        id="hf-token"
+        class="field mono flex-1"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        bind:value={appStore.hfTokenInput}
+        placeholder="hf_…"
+      />
+      <button
+        class="btn btn-accent"
+        disabled={!appStore.hfTokenInput.trim() || !!appStore.busy}
+        onclick={() => appStore.saveHfToken()}>Save</button
+      >
+      <button
+        class="btn"
+        disabled={!!appStore.busy || (!appStore.hfTokenConfigured && !appStore.hfTokenInput)}
+        onclick={() => appStore.clearHfToken()}>Clear</button
       >
     </div>
   </div>

@@ -64,7 +64,7 @@ uvx --from . kllm status
 
 # Master
 kllm start
-kllm model download 'org/repo:model.Q4_K_M.gguf'
+kllm model download 'org/repo:Q4_K_M'
 
 # Worker (another machine — run install.py there too)
 kllm join --key '<join-key-from-master>'

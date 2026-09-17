@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,6 +49,34 @@ def test_list_models_with_file(client, tmp_path, monkeypatch):
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
     assert "toy.gguf" in ids
+
+
+def test_list_models_includes_max_context(client):
+    c, _, _ = client
+    import os
+    import struct
+
+    def write_string(buf: bytearray, s: str) -> None:
+        b = s.encode("utf-8")
+        buf += struct.pack("<Q", len(b))
+        buf += b
+
+    meta = bytearray()
+    write_string(meta, "general.architecture")
+    meta += struct.pack("<I", 8)
+    write_string(meta, "qwen2")
+    write_string(meta, "qwen2.context_length")
+    meta += struct.pack("<I", 4)
+    meta += struct.pack("<I", 32768)
+    payload = struct.pack("<4sIQQ", b"GGUF", 3, 0, 2) + bytes(meta)
+
+    models = Path(os.environ["KLLM_HOME"]) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    (models / "ctx-model.gguf").write_bytes(payload)
+    r = c.get("/v1/models")
+    assert r.status_code == 200
+    entry = next(m for m in r.json()["data"] if m["id"] == "ctx-model.gguf")
+    assert entry["max_context"] == 32768
 
 
 def test_chat_requires_token(client):
@@ -138,6 +169,8 @@ def test_config_get_put_and_status_device(client):
     assert r.json()["ram_percent"] == 55
     assert "apply_error" in r.json()
     assert "apply_warning" in r.json()
+    assert "download" in r.json()
+    assert r.json()["download"] is None
     assert isinstance(r.json()["members"], dict)
 
     r = c.put(
@@ -248,3 +281,102 @@ def test_delete_model_master_fanout(client):
     assert len(body["results"]) == 1
     assert body["results"][0]["ok"] is True
     mocked.assert_called_once()
+
+
+def _clear_hf_env(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+
+
+def test_hf_token_get_never_returns_secret(client, monkeypatch):
+    _clear_hf_env(monkeypatch)
+    c, _, _ = client
+    secret = "hf_super_secret_token"
+    r = c.put("/v1/hf-token", json={"token": secret})
+    assert r.status_code == 200
+    put_body = r.json()
+    assert put_body == {"configured": True, "source": "file"}
+    assert secret not in r.text
+    assert "token" not in put_body
+
+    r = c.get("/v1/hf-token")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"configured": True, "source": "file"}
+    assert set(body) == {"configured", "source"}
+    assert secret not in r.text
+    assert secret not in json.dumps(body)
+
+
+def test_hf_token_put_save_and_clear(client, monkeypatch):
+    _clear_hf_env(monkeypatch)
+    c, _, _ = client
+    r = c.get("/v1/hf-token")
+    assert r.json() == {"configured": False, "source": None}
+
+    r = c.put("/v1/hf-token", json={"token": "hf_saved"})
+    assert r.status_code == 200
+    assert r.json() == {"configured": True, "source": "file"}
+    path = Path(os.environ["KLLM_HOME"]) / "hf_token"
+    assert path.read_text(encoding="utf-8").strip() == "hf_saved"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    r = c.put("/v1/hf-token", json={"token": ""})
+    assert r.status_code == 200
+    assert r.json() == {"configured": False, "source": None}
+    assert not path.exists()
+
+
+def test_status_download_during_mocked_download(client, monkeypatch):
+    _clear_hf_env(monkeypatch)
+    c, _, _ = client
+    started = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    class FakeResp:
+        headers = {"Content-Length": "8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self, chunk_size=8192):
+            started.set()
+            assert release.wait(timeout=5)
+            yield b"abcdefgh"
+
+    def run():
+        try:
+            with patch("kllm.models.httpx.stream", return_value=FakeResp()):
+                from kllm import models as model_ops
+
+                model_ops.download_model("https://example.com/model.gguf")
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=run)
+    t.start()
+    try:
+        assert started.wait(timeout=5)
+        r = c.get("/v1/status")
+        assert r.status_code == 200
+        dl = r.json()["download"]
+        assert dl is not None
+        assert dl["filename"] == "model.gguf"
+        assert dl["total"] == 8
+        assert dl["bytes"] >= 0
+        assert "pct" in dl
+    finally:
+        release.set()
+        t.join(timeout=5)
+
+    assert errors == []
+    r = c.get("/v1/status")
+    assert r.status_code == 200
+    assert r.json()["download"] is None

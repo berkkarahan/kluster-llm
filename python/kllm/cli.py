@@ -667,7 +667,10 @@ def connect_cmd(
 
 @model_app.command("download")
 def model_download(
-    source: str = typer.Argument(..., help="HF org/repo:file.gguf or HTTP(S) URL"),
+    source: str = typer.Argument(
+        ...,
+        help="HF org/repo:file.gguf, org/repo:Q4_K_M, or HTTP(S) URL",
+    ),
     name: Optional[str] = typer.Option(None, "--name"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:

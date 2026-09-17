@@ -28,6 +28,21 @@ STATE = ClusterState.load()
 if not STATE.node_id:
     STATE.node_id = secrets.token_hex(4)
     STATE.save()
+
+
+def _refresh_persisted_netsec_warnings() -> None:
+    """Drop stale firewall warnings after agent reload (e.g. code upgrade)."""
+    if STATE.role not in ("master", "worker"):
+        return
+    bind = STATE.rpc_bind
+    port = STATE.rpc_port or DEFAULT_RPC_PORT
+    if not bind:
+        return
+    STATE.netsec_warnings = netsec.refresh_rpc_firewall_warnings(port, bind)
+    STATE.save()
+
+
+_refresh_persisted_netsec_warnings()
 # Ensure loopback inference token exists for harness connect
 ensure_api_token()
 

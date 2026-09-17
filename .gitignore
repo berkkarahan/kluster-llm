@@ -1,5 +1,6 @@
 # Build artifacts
 coordinator-macos/llama-server
+worker-windows/rpc-server
 worker-windows/rpc-server.exe
 worker-windows/vulkan*.dll
 worker-windows/rocm*.dll

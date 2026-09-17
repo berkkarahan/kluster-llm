@@ -2,10 +2,11 @@
 """Full Kluster LLM install: toolchains, kllm CLI, llama.cpp binaries, WireGuard.
 
 Usage:
+  uv run python scripts/install.py
   python scripts/install.py
-  python scripts/install.py --skip-ui
-  python scripts/install.py --backend vulkan
-  python scripts/install.py --skip-wireguard --skip-llama
+  uv run python scripts/install.py --skip-ui
+  uv run python scripts/install.py --backend vulkan
+  uv run python scripts/install.py --skip-wireguard --skip-llama
 
 This is the one-shot installer. ``scripts/build.py`` remains a thinner
 CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
@@ -38,6 +39,8 @@ BIN_DIR = ROOT / "vendor" / "bin"
 WORKER_WIN = ROOT / "worker-windows"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 GITHUB_HEADERS = {"User-Agent": "kllm-install", "Accept": "application/vnd.github+json"}
+# Upstream llama.cpp ≥2025 ships ggml-rpc-server; older trees used rpc-server.
+_RPC_UPSTREAM_NAMES = ("ggml-rpc-server", "rpc-server")
 
 
 # ── shared helpers (also used by build.py) ───────────────────────────────────
@@ -80,6 +83,7 @@ def _venv_ok(python: Path) -> bool:
 def _augment_path(path: str) -> str:
     extras: list[str] = []
     for candidate in (
+        Path.home() / ".local" / "bin",
         Path.home() / ".cargo" / "bin",
         Path.home() / "scoop" / "apps" / "rustup" / "current" / ".cargo" / "bin",
         Path(r"C:\Program Files\WireGuard"),
@@ -154,23 +158,82 @@ def _download(url: str, dest: Path) -> None:
 # ── toolchains ───────────────────────────────────────────────────────────────
 
 
-def ensure_venv() -> Path:
-    import venv
+def _python_version_spec() -> str:
+    spec_path = ROOT / ".python-version"
+    if spec_path.is_file():
+        line = spec_path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        if line:
+            return line
+    return "3.12"
 
+
+def _find_uv() -> str | None:
+    uv = _which("uv")
+    if uv:
+        return uv
+    local = Path.home() / ".local" / "bin" / ("uv.exe" if _is_windows() else "uv")
+    return str(local) if local.is_file() else None
+
+
+def ensure_uv() -> str:
+    found = _find_uv()
+    if found:
+        return found
+    print("Installing uv (Python toolchain manager)…")
+    if _is_windows():
+        _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://astral.sh/uv/install.ps1 | iex",
+            ],
+            check=False,
+        )
+    else:
+        _run(["bash", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"], check=False)
+    found = _find_uv()
+    if not found:
+        raise SystemExit(
+            "error: uv not found after install. Install from https://docs.astral.sh/uv/ "
+            "and re-run, or add ~/.local/bin to PATH."
+        )
+    return found
+
+
+def ensure_venv() -> Path:
     python = _venv_python()
     if _venv_ok(python):
         print(f"Using existing venv: {VENV_DIR}")
         return python
+
+    uv = ensure_uv()
+    py_spec = _python_version_spec()
     if VENV_DIR.exists():
         print(f"Recreating broken venv at {VENV_DIR}")
         shutil.rmtree(VENV_DIR)
     else:
-        print(f"Creating venv at {VENV_DIR}")
-    venv.EnvBuilder(with_pip=True, clear=False).create(VENV_DIR)
+        print(f"Creating venv with uv (Python {py_spec}) at {VENV_DIR}")
+    _run([uv, "venv", str(VENV_DIR), "--python", py_spec])
     python = _venv_python()
     if not _venv_ok(python):
         raise SystemExit(f"error: failed to create usable venv at {VENV_DIR}")
     return python
+
+
+def _sync_python_deps(python: Path) -> None:
+    uv = _find_uv()
+    env = _venv_env(python)
+    if uv:
+        _run([uv, "sync", "--python", str(python)], env=env)
+        return
+    _run([str(python), "-m", "pip", "install", "--upgrade", "pip"], env=env)
+    _run(
+        [str(python), "-m", "pip", "install", "maturin>=1.7,<2.0", "pytest>=8.0", "pytest-asyncio>=0.24"],
+        env=env,
+    )
 
 
 def ensure_rust() -> None:
@@ -275,18 +338,17 @@ def ensure_cmake() -> bool:
 def build_rust(python: Path, *, release: bool) -> None:
     ensure_rust()
     env = _venv_env(python)
-    _run([str(python), "-m", "pip", "install", "--upgrade", "pip"], env=env)
-    _run([str(python), "-m", "pip", "install", "maturin>=1.7,<2.0"], env=env)
+    _sync_python_deps(python)
 
     wheels = ROOT / "target" / "wheels"
     wheels.mkdir(parents=True, exist_ok=True)
     for old in wheels.glob("kllm-*.whl"):
         old.unlink(missing_ok=True)
 
+    uv = _find_uv()
+    maturin_prefix = [uv, "run", "--python", str(python), "maturin"] if uv else [str(python), "-m", "maturin"]
     maturin_cmd = [
-        str(python),
-        "-m",
-        "maturin",
+        *maturin_prefix,
         "build",
         "--out",
         str(wheels),
@@ -300,8 +362,11 @@ def build_rust(python: Path, *, release: bool) -> None:
     built = sorted(wheels.glob("kllm-*.whl"))
     if not built:
         raise SystemExit(f"error: maturin produced no wheel in {wheels}")
-    _run([str(python), "-m", "pip", "install", "--force-reinstall", str(built[-1])], env=env)
-    _run([str(python), "-m", "pip", "install", "pytest>=8.0", "pytest-asyncio>=0.24"], env=env)
+    wheel = str(built[-1])
+    if uv:
+        _run([uv, "pip", "install", "--python", str(python), "--force-reinstall", wheel], env=env)
+    else:
+        _run([str(python), "-m", "pip", "install", "--force-reinstall", wheel], env=env)
 
 
 def build_ui(*, skip_install: bool) -> None:
@@ -437,15 +502,19 @@ def build_llama_from_source(backend: str) -> bool:
     try:
         _run(["cmake", "-B", str(build_dir), *flags], cwd=VENDOR_LLAMA)
         jobs = str(os.cpu_count() or 4)
-        # Target names vary slightly; build both server and rpc-server.
-        targets = ["llama-server", "rpc-server"]
-        for t in targets:
+        # llama-server + RPC worker (target name varies by upstream revision).
+        rpc_target_ok = False
+        for t in ["llama-server", *_RPC_UPSTREAM_NAMES]:
+            if t in _RPC_UPSTREAM_NAMES and rpc_target_ok:
+                continue
             result = _run(
                 ["cmake", "--build", str(build_dir), "--config", "Release", "--target", t, "-j", jobs],
                 cwd=VENDOR_LLAMA,
                 check=False,
             )
-            if result.returncode != 0:
+            if result.returncode == 0 and t in _RPC_UPSTREAM_NAMES:
+                rpc_target_ok = True
+            elif result.returncode != 0:
                 _warn(f"cmake target {t} failed (exit {result.returncode})")
         return _find_built_binary("llama-server") is not None
     except Exception as exc:
@@ -453,19 +522,26 @@ def build_llama_from_source(backend: str) -> bool:
         return False
 
 
+def _upstream_binary_names(logical: str) -> tuple[str, ...]:
+    if logical == "rpc-server":
+        return _RPC_UPSTREAM_NAMES
+    return (logical,)
+
+
 def _find_built_binary(name: str) -> Path | None:
-    exe = f"{name}.exe" if _is_windows() else name
-    candidates = [
-        VENDOR_LLAMA / "build" / "bin" / exe,
-        VENDOR_LLAMA / "build" / "bin" / "Release" / exe,
-        VENDOR_LLAMA / "build" / "Release" / "bin" / exe,
-        VENDOR_LLAMA / "build" / exe,
-        BIN_DIR / exe,
-        WORKER_WIN / exe if name == "rpc-server" else Path(),
-    ]
-    for p in candidates:
-        if p and p.is_file():
-            return p
+    for base in _upstream_binary_names(name):
+        exe = f"{base}.exe" if _is_windows() else base
+        candidates = [
+            VENDOR_LLAMA / "build" / "bin" / exe,
+            VENDOR_LLAMA / "build" / "bin" / "Release" / exe,
+            VENDOR_LLAMA / "build" / "Release" / "bin" / exe,
+            VENDOR_LLAMA / "build" / exe,
+            BIN_DIR / exe,
+            WORKER_WIN / exe if name == "rpc-server" else Path(),
+        ]
+        for p in candidates:
+            if p and p.is_file():
+                return p
     return None
 
 
@@ -612,6 +688,9 @@ def _copy_llama_binaries_from(root: Path) -> bool:
     for base in names:
         exe = f"{base}.exe" if _is_windows() else base
         matches = list(root.rglob(exe))
+        if not matches and base == "rpc-server":
+            alt = "ggml-rpc-server.exe" if _is_windows() else "ggml-rpc-server"
+            matches = list(root.rglob(alt))
         if not matches:
             continue
         src = matches[0]
@@ -646,12 +725,12 @@ def stage_built_binaries() -> None:
         src = _find_built_binary(name)
         if not src:
             continue
-        exe = src.name
-        shutil.copy2(src, BIN_DIR / exe)
-        print(f"  staged {BIN_DIR / exe}")
+        staged = f"{name}.exe" if _is_windows() else name
+        shutil.copy2(src, BIN_DIR / staged)
+        print(f"  staged {BIN_DIR / staged}")
         if name == "rpc-server":
             WORKER_WIN.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, WORKER_WIN / exe)
+            shutil.copy2(src, WORKER_WIN / staged)
 
 
 def install_llama(backend: str, *, prefer_prebuilt: bool) -> None:
@@ -763,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_rust:
         activate = r".\.venv\Scripts\Activate.ps1" if _is_windows() else "source .venv/bin/activate"
         print(f"Activate the venv with: {activate}")
+        print("Or without activate: uv run kllm start   |   uvx --from . kllm join --key <key>")
         print("Then: kllm start   |   kllm join --key <key>")
     if not args.skip_ui:
         print("Dashboard: kllm ui")

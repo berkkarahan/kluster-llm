@@ -60,6 +60,57 @@ def test_normalize_overlay():
         normalize_overlay("tailscale")
 
 
+def test_firewall_darwin_already_permitted(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: "/opt/rpc-server")
+    monkeypatch.setattr(netsec, "_macos_app_firewall_permits", lambda _p: True)
+    called = {"run": 0}
+
+    def fail_run(*a, **k):
+        called["run"] += 1
+        raise AssertionError("should not run socketfilterfw when already permitted")
+
+    monkeypatch.setattr(netsec, "_macos_socketfilterfw_run", fail_run)
+    out = netsec._firewall_darwin(50052, "192.168.68.62")
+    assert out == {"ok": True, "applied": False, "warning": None}
+    assert called["run"] == 0
+
+
+def test_firewall_darwin_applies_add_and_unblock(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: "/opt/rpc-server")
+    permits = {"n": 0}
+
+    def fake_permits(_p):
+        permits["n"] += 1
+        return permits["n"] > 1
+
+    monkeypatch.setattr(netsec, "_macos_app_firewall_permits", fake_permits)
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(list(args))
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(netsec, "_macos_socketfilterfw_run", fake_run)
+    out = netsec._firewall_darwin(50052, "192.168.68.62")
+    assert out == {"ok": True, "applied": True, "warning": None}
+    assert calls == [["--add", "/opt/rpc-server"], ["--unblockapp", "/opt/rpc-server"]]
+
+
+def test_firewall_darwin_missing_binary_warns(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: None)
+    out = netsec._firewall_darwin(50052, "192.168.68.62")
+    assert out["ok"] is True
+    assert out["applied"] is False
+    assert "192.168.68.62" in out["warning"]
+    assert "50052" in out["warning"]
+
+
 def test_next_wg_address_skips_used():
     from kllm.netsec import next_wg_address
 

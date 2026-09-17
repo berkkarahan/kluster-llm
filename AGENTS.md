@@ -29,4 +29,4 @@ Do not invent alternate install flows until that guide’s recovery tree is exha
 
 - Prefer editing existing modules under `python/kllm/` and `crates/kllm-native/`; keep changes scoped.
 - RPC is unauthenticated upstream — never recommend exposing port **50052** publicly.
-- After packaging changes, rebuild with `python scripts/install.py` or `python scripts/build.py` (maturin), not plain `pip install -e .` alone.
+- Python is managed with **uv** (`.python-version`, `uv.lock`). After packaging changes, rebuild with `uv run python scripts/install.py` or `uv run python scripts/build.py` (maturin), not plain `pip install -e .` alone.

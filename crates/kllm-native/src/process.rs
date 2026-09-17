@@ -236,9 +236,14 @@ pub fn resolve_rpc_server(repo_root: Option<&str>) -> Option<String> {
         "worker-windows/rpc-server.exe",
         "vendor/llama.cpp/build/bin/rpc-server",
         "vendor/llama.cpp/build/bin/rpc-server.exe",
+        "vendor/llama.cpp/build/bin/ggml-rpc-server",
+        "vendor/llama.cpp/build/bin/ggml-rpc-server.exe",
         "vendor/llama.cpp/build/bin/Release/rpc-server.exe",
+        "vendor/llama.cpp/build/bin/Release/ggml-rpc-server.exe",
         "vendor/llama.cpp/rpc-server",
         "vendor/llama.cpp/rpc-server.exe",
+        "vendor/llama.cpp/ggml-rpc-server",
+        "vendor/llama.cpp/ggml-rpc-server.exe",
     ];
     for root in &roots {
         for rel in rels {

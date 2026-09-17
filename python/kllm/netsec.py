@@ -26,6 +26,22 @@ WG_LISTEN_PORT = 51820
 WG_IFACE = "kllm0"
 WG_PSK_INFO = b"kllm-wg-psk-v1"
 FIREWALL_RULE_NAME = "kllm-RPC"
+SOCKETFILTERFW = Path("/usr/libexec/ApplicationFirewall/socketfilterfw")
+_RPC_SERVER_REL_PATHS = (
+    "vendor/bin/rpc-server",
+    "vendor/bin/rpc-server.exe",
+    "worker-windows/rpc-server.exe",
+    "vendor/llama.cpp/build/bin/rpc-server",
+    "vendor/llama.cpp/build/bin/rpc-server.exe",
+    "vendor/llama.cpp/build/bin/ggml-rpc-server",
+    "vendor/llama.cpp/build/bin/ggml-rpc-server.exe",
+    "vendor/llama.cpp/build/bin/Release/rpc-server.exe",
+    "vendor/llama.cpp/build/bin/Release/ggml-rpc-server.exe",
+    "vendor/llama.cpp/rpc-server",
+    "vendor/llama.cpp/rpc-server.exe",
+    "vendor/llama.cpp/ggml-rpc-server",
+    "vendor/llama.cpp/ggml-rpc-server.exe",
+)
 
 
 def pick_rpc_bind_host(preferred: str | None = None) -> str:
@@ -116,15 +132,152 @@ def ensure_rpc_firewall(port: int, bind_host: str) -> dict[str, Any]:
         if system == "Linux":
             return _firewall_linux(port)
         if system == "Darwin":
-            return {
-                "ok": True,
-                "applied": False,
-                "warning": "macOS firewall is application-based; ensure rpc-server is allowed for TCP "
-                f"{port} (bind {bind_host})",
-            }
+            return _firewall_darwin(port, bind_host)
         return {"ok": True, "applied": False, "warning": f"no firewall helper for {system}"}
     except Exception as exc:
         return {"ok": False, "applied": False, "warning": str(exc)}
+
+
+def _resolve_rpc_server_path() -> str | None:
+    """Locate rpc-server the same way the native launcher does (best-effort)."""
+    env = os.environ.get("KLLM_RPC_SERVER")
+    if env and Path(env).is_file():
+        return str(Path(env).resolve())
+
+    repo_root_path: Path | None = None
+    try:
+        from kllm.state import repo_root
+
+        repo_root_path = repo_root()
+    except Exception:
+        repo_root_path = None
+    repo_root_str = str(repo_root_path) if repo_root_path else None
+
+    try:
+        from kllm import native
+
+        resolved = native.resolve_rpc_server(repo_root_str)
+        if resolved and Path(resolved).is_file():
+            return str(Path(resolved).resolve())
+    except Exception:
+        pass
+
+    roots: list[Path] = []
+    repo = os.environ.get("KLLM_REPO_ROOT")
+    if repo:
+        roots.append(Path(repo))
+    if repo_root_path:
+        roots.append(repo_root_path)
+    try:
+        cwd = Path.cwd()
+        roots.append(cwd)
+        if cwd.parent != cwd:
+            roots.append(cwd.parent)
+    except OSError:
+        pass
+
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.resolve()) if root.exists() else str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        for rel in _RPC_SERVER_REL_PATHS:
+            candidate = (root / rel).resolve()
+            if candidate.is_file():
+                return str(candidate)
+    found = shutil.which("rpc-server")
+    return str(Path(found).resolve()) if found else None
+
+
+def _macos_app_firewall_permits(binary: str) -> bool:
+    if not SOCKETFILTERFW.is_file():
+        return False
+    result = subprocess.run(
+        [str(SOCKETFILTERFW), "--getappblocked", binary],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        return False
+    out = (result.stdout or result.stderr or "").lower()
+    return "permitted" in out or "allow incoming" in out
+
+
+def _macos_socketfilterfw_run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run socketfilterfw; retry with non-interactive sudo when not root."""
+    cmd = [str(SOCKETFILTERFW), *args]
+    direct = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if direct.returncode == 0:
+        return direct
+    combined = (direct.stderr or direct.stdout or "").lower()
+    if "must be root" not in combined and "not permitted" not in combined:
+        return direct
+    sudo = shutil.which("sudo")
+    if not sudo:
+        return direct
+    return subprocess.run(
+        [sudo, "-n", str(SOCKETFILTERFW), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _firewall_darwin(port: int, bind_host: str) -> dict[str, Any]:
+    if not SOCKETFILTERFW.is_file():
+        return {
+            "ok": True,
+            "applied": False,
+            "warning": "macOS Application Firewall helper not found",
+        }
+
+    rpc = _resolve_rpc_server_path()
+    if not rpc:
+        return {
+            "ok": True,
+            "applied": False,
+            "warning": (
+                f"rpc-server not found; macOS firewall is application-based — allow rpc-server "
+                f"for inbound TCP {port} (bind {bind_host}) in System Settings → Network → Firewall"
+            ),
+        }
+
+    if _macos_app_firewall_permits(rpc):
+        return {"ok": True, "applied": False, "warning": None}
+
+    for flag in ("--add", "--unblockapp"):
+        result = _macos_socketfilterfw_run([flag, rpc])
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or f"socketfilterfw {flag} failed").strip()
+            sf = str(SOCKETFILTERFW)
+            return {
+                "ok": True,
+                "applied": False,
+                "warning": (
+                    f"macOS firewall is application-based; allow rpc-server for TCP {port} "
+                    f"(bind {bind_host}): sudo {sf} --add {rpc!r} && "
+                    f"sudo {sf} --unblockapp {rpc!r} ({err})"
+                ),
+            }
+
+    if _macos_app_firewall_permits(rpc):
+        return {"ok": True, "applied": True, "warning": None}
+
+    return {
+        "ok": True,
+        "applied": True,
+        "warning": None,
+    }
+
+
+def refresh_rpc_firewall_warnings(port: int, bind_host: str) -> list[str]:
+    """Re-run macOS/Linux/Windows RPC firewall helper; return active warnings only."""
+    fw = ensure_rpc_firewall(port, bind_host)
+    if fw.get("warning"):
+        return [str(fw["warning"])]
+    return []
 
 
 def _firewall_windows(port: int) -> dict[str, Any]:

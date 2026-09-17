@@ -4,16 +4,18 @@ Cross-platform entrypoint for starting/stopping a cluster, joining workers, down
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.12 (pinned in `.python-version`; uv installs it if missing)
 - One command installs the rest:
 
 ```bash
-python scripts/install.py
+uv run python scripts/install.py
 ```
 
-This creates `.venv`, installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
+This creates `.venv` with **uv** (Python version from `.python-version`), installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
 
-CLI/UI rebuild only: `python scripts/build.py`. Optional: set `KLLM_LLAMA_SERVER` / `KLLM_RPC_SERVER` if binaries live outside `vendor/`.
+Run the CLI without activating the venv: `uv run kllm …` or `uvx --from . kllm …` from the repo root.
+
+CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA_SERVER` / `KLLM_RPC_SERVER` if binaries live outside `vendor/`.
 
 **Agents:** step-by-step install + verify + recovery → [agent-install.md](agent-install.md).
 

@@ -2,18 +2,32 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kllm import config as kllm_config
 from kllm import discovery, gateway, models as model_ops, native, netsec, runtime
 from kllm.auth import ensure_api_token, verify_api_token
+from kllm import model_settings as model_settings_store
+from kllm.extra_args import sanitize_extra_args
+from kllm.run_planning import (
+    build_master_launch,
+    execute_plan,
+    merge_and_sanitize_extra,
+    validate_vision_for_run,
+)
+from kllm.run_settings import PlanBody, RunBody
+from kllm import membership as membership_mod
 from kllm.state import (
     DEFAULT_CONTROL_PORT,
     DEFAULT_RPC_PORT,
@@ -24,6 +38,14 @@ from kllm.state import (
 )
 
 app = FastAPI(title="kllm-agent", version="0.1.0")
+
+
+@app.exception_handler(RequestValidationError)
+async def _plan_run_validation_handler(request: Request, exc: RequestValidationError):
+    if request.url.path in ("/v1/plan", "/v1/run"):
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
 _advertiser: discovery.MasterAdvertiser | None = None
 STATE = ClusterState.load()
 if not STATE.node_id:
@@ -46,6 +68,135 @@ def _refresh_persisted_netsec_warnings() -> None:
 _refresh_persisted_netsec_warnings()
 # Ensure loopback inference token exists for harness connect
 ensure_api_token()
+
+_membership_lock = threading.Lock()
+_membership_thread_started = False
+
+
+def _persist_last_settings(body: PlanBody | RunBody) -> None:
+    data = body.model_dump()
+    data.pop("tensor_split", None)
+    STATE.last_settings = data
+
+
+def _sync_master_liveness(*, shrink: bool = True) -> list[str]:
+    """Sweep stale workers. Optionally replan-and-apply on shrink (master only)."""
+    if STATE.role != "master":
+        return []
+    with _membership_lock:
+        dropped = membership_mod.sweep_liveness(STATE)
+        if dropped:
+            STATE.save()
+            if shrink:
+                membership_mod.on_membership_shrink(STATE)
+        return dropped
+
+
+def _heartbeat_payload() -> dict[str, Any]:
+    mem = STATE.members.get(STATE.node_id) or {}
+    return {
+        "node_id": STATE.node_id,
+        "host": STATE.rpc_bind or mem.get("host") or mem.get("lan_host") or "",
+        "control_port": STATE.control_port,
+        "rpc_port": STATE.rpc_port,
+        "total_ram_bytes": mem.get("total_ram_bytes") or 0,
+        "available_ram_bytes": mem.get("available_ram_bytes") or 0,
+        "vram_bytes": mem.get("vram_bytes"),
+        "backend": mem.get("backend") or "unknown",
+        "lan_host": mem.get("lan_host"),
+        "wg_public_key": STATE.wg_public_key,
+        "gpu_ids": STATE.gpu_ids,
+    }
+
+
+def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
+    snapshot = data.get("cluster_members")
+    if isinstance(snapshot, dict):
+        STATE.members = dict(snapshot)
+    if "last_plan" in data:
+        STATE.last_plan = data.get("last_plan")
+    if "apply_error" in data:
+        STATE.apply_error = data.get("apply_error")
+    if "apply_warning" in data:
+        STATE.apply_warning = data.get("apply_warning")
+
+
+def _worker_local_leave() -> None:
+    """Idle this worker locally without calling unregister (already dropped)."""
+    if STATE.process_pid:
+        native.stop_process(STATE.process_pid, force=True)
+        STATE.process_pid = None
+        STATE.process_role = None
+        runtime.clear_children()
+    _reset_netsec_state()
+    membership_mod.clear_membership_fields(STATE)
+    STATE.role = "idle"
+    STATE.join_key = None
+    STATE.master_host = None
+    STATE.gpu_ids = None
+    STATE.save()
+
+
+def _worker_post_heartbeat() -> None:
+    if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
+        return
+    import httpx
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                f"http://{STATE.master_host}:{STATE.master_port}/v1/heartbeat",
+                json=_heartbeat_payload(),
+                headers={"X-Kllm-Key": STATE.join_key},
+            )
+    except Exception:
+        membership_mod.mark_master_unreachable(STATE)
+        return
+    if resp.status_code != 200:
+        membership_mod.mark_master_unreachable(STATE)
+        return
+    try:
+        data = resp.json()
+    except Exception:
+        membership_mod.mark_master_unreachable(STATE)
+        return
+    membership_mod.clear_master_unreachable(STATE)
+    snapshot = data.get("cluster_members")
+    accepted = data.get("accepted")
+    omitted = isinstance(snapshot, dict) and STATE.node_id not in snapshot
+    if accepted is False or omitted:
+        _worker_local_leave()
+        return
+    _apply_cluster_snapshot(data)
+    STATE.save()
+
+
+def _tick_membership() -> None:
+    if STATE.role == "master":
+        _sync_master_liveness(shrink=True)
+    elif STATE.role == "worker":
+        _worker_post_heartbeat()
+
+
+def _membership_loop() -> None:
+    while True:
+        time.sleep(membership_mod.HEARTBEAT_INTERVAL_S)
+        try:
+            _tick_membership()
+        except Exception:
+            pass
+
+
+def _start_membership_thread() -> None:
+    global _membership_thread_started
+    if _membership_thread_started:
+        return
+    _membership_thread_started = True
+    threading.Thread(target=_membership_loop, name="kllm-membership", daemon=True).start()
+
+
+if "pytest" not in sys.modules:
+    _start_membership_thread()
 
 
 def _require_key(x_kllm_key: str | None = Header(default=None)) -> None:
@@ -185,24 +336,6 @@ def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, st
             "ROCR_VISIBLE_DEVICES": csv,
         }
     return {}
-
-
-class RunBody(BaseModel):
-    model: str
-    context: int = 4096
-    headroom: float | None = None
-    tensor_split: list[float] | None = None
-    threads: int = 8
-    micro_batch: int = 2
-    device: Optional[Literal["cpu", "gpu"]] = None
-
-
-class PlanBody(BaseModel):
-    model: str
-    context: int = 4096
-    headroom: float | None = None
-    tensor_split: list[float] | None = None
-    device: Optional[Literal["cpu", "gpu"]] = None
 
 
 class ConfigBody(BaseModel):
@@ -393,6 +526,7 @@ def put_config(body: ConfigBody) -> dict[str, Any]:
 
 @app.get("/v1/status")
 def status() -> dict[str, Any]:
+    _sync_master_liveness(shrink=True)
     capacity = None
     try:
         capacity = native.probe_capacity()
@@ -424,6 +558,8 @@ def status() -> dict[str, Any]:
         "wg_address": STATE.wg_address,
         "overlay_status": STATE.overlay_status,
         "netsec_warnings": list(STATE.netsec_warnings or []),
+        "apply_error": STATE.apply_error,
+        "apply_warning": STATE.apply_warning,
     }
 
 
@@ -496,6 +632,8 @@ def start_master(body: StartBody) -> dict[str, Any]:
     STATE.wg_address = None
     STATE.wg_public_key = None
     STATE.overlay_status = None
+    STATE.apply_error = None
+    STATE.apply_warning = None
 
     lan_host = netsec.pick_rpc_bind_host(body.rpc_bind)
     STATE.rpc_bind = lan_host
@@ -567,9 +705,9 @@ def stop() -> dict[str, Any]:
         if _advertiser:
             _advertiser.stop()
             _advertiser = None
-        STATE.members.clear()
         STATE.join_key = None
     _reset_netsec_state()
+    membership_mod.clear_membership_fields(STATE)
     STATE.role = "idle"
     STATE.master_host = None
     STATE.gpu_ids = None
@@ -658,8 +796,17 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
         resp = client.post(url, json=payload, headers={"X-Kllm-Key": body.key})
         if resp.status_code == 401:
             raise HTTPException(401, "invalid join key")
+        if resp.status_code >= 400:
+            try:
+                payload = resp.json()
+                detail = payload.get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
         resp.raise_for_status()
         reg = resp.json()
+
+    _apply_cluster_snapshot(reg)
 
     rpc_bind_host = lan_host
     if overlay == netsec.OVERLAY_WIREGUARD:
@@ -746,7 +893,9 @@ def leave() -> dict[str, Any]:
         STATE.process_role = None
         runtime.clear_children()
     _reset_netsec_state()
+    membership_mod.clear_membership_fields(STATE)
     STATE.role = "idle"
+    STATE.join_key = None
     STATE.master_host = None
     STATE.gpu_ids = None
     STATE.save()
@@ -757,6 +906,7 @@ def leave() -> dict[str, Any]:
 def register(body: RegisterBody, _: None = Depends(_require_key)) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "not a master")
+    _sync_master_liveness(shrink=True)
 
     lan_host = body.lan_host or body.host
     member: dict[str, Any] = {
@@ -806,6 +956,7 @@ def register(body: RegisterBody, _: None = Depends(_require_key)) -> dict[str, A
     STATE.members[body.node_id] = member
     STATE.save()
     response["members"] = len(STATE.members)
+    response.update(membership_mod.snapshot_payload(STATE))
     return response
 
 
@@ -847,18 +998,29 @@ def _rewrite_master_wg_peers() -> None:
 
 @app.post("/v1/unregister")
 def unregister(body: dict[str, str], _: None = Depends(_require_key)) -> dict[str, Any]:
-    STATE.members.pop(body.get("node_id", ""), None)
-    STATE.save()
+    _sync_master_liveness(shrink=True)
+    nid = body.get("node_id", "")
+    if nid and nid != STATE.node_id and nid in STATE.members:
+        STATE.members.pop(nid, None)
+        membership_mod.on_membership_shrink(STATE)
+    else:
+        STATE.save()
     return {"ok": True}
 
 
 @app.post("/v1/heartbeat")
 def heartbeat(body: RegisterBody, _: None = Depends(_require_key)) -> dict[str, Any]:
-    if body.node_id in STATE.members:
+    _sync_master_liveness(shrink=True)
+    accepted = body.node_id in STATE.members
+    if accepted:
         STATE.members[body.node_id].update(body.model_dump())
         STATE.members[body.node_id]["last_seen"] = time.time()
         STATE.save()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "accepted": accepted,
+        **membership_mod.snapshot_payload(STATE),
+    }
 
 
 @app.put("/v1/models/receive")
@@ -909,45 +1071,44 @@ def delete_model_file(
     return {"ok": True, "path": str(deleted), "name": deleted.name}
 
 
+def _maybe_remember(body: PlanBody | RunBody) -> None:
+    if not body.remember:
+        return
+    model_settings_store.upsert_model_settings(body.model, body.snapshot_for_remember())
+
+
+@app.get("/v1/model-settings/{model}")
+def get_model_settings(model: str) -> dict[str, Any]:
+    saved = model_settings_store.get_model_settings(model)
+    if saved:
+        return saved
+    from kllm.run_settings import RunSettingsFields
+
+    return {
+        "model": model,
+        "parameter_set": RunSettingsFields.default_snapshot(model),
+        "updated_at": None,
+    }
+
+
+def _guard_context(body: PlanBody | RunBody) -> None:
+    if not body.context_auto and body.context < 512:
+        raise HTTPException(400, detail={"context": "context must be >= 512 when context_auto is false"})
+
+
 @app.post("/v1/plan")
 def plan(body: PlanBody) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "plan requires master role")
+    _guard_context(body)
+    merge_and_sanitize_extra(body)
+    result = execute_plan(body, STATE.members)
     path = model_ops.resolve_local_model(body.model)
-    nodes = []
-    for m in STATE.members.values():
-        nodes.append(
-            {
-                "node_id": m["node_id"],
-                "total_ram_bytes": m.get("total_ram_bytes", 0),
-                "available_ram_bytes": m.get("available_ram_bytes", 0),
-                "vram_bytes": m.get("vram_bytes"),
-                "backend": m.get("backend", "unknown"),
-                "unified_memory": m.get("backend") == "metal",
-            }
-        )
-    if not nodes:
-        raise HTTPException(400, "no cluster members")
-    device = kllm_config.resolve_device(body.device)
-    headroom = (
-        body.headroom
-        if body.headroom is not None
-        else kllm_config.resolve_memory_fraction(device)
-    )
-    try:
-        result = native.plan_split(
-            nodes=nodes,
-            model_size_bytes=path.stat().st_size,
-            context=body.context,
-            headroom=headroom,
-            tensor_split=body.tensor_split,
-            device=device,
-        )
-    except Exception as exc:
-        raise HTTPException(400, str(exc)) from exc
     STATE.last_plan = result
     STATE.model_name = path.name
+    _persist_last_settings(body)
     STATE.save()
+    _maybe_remember(body)
     return result
 
 
@@ -955,20 +1116,21 @@ def plan(body: PlanBody) -> dict[str, Any]:
 def run(body: RunBody) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "run requires master role")
-    plan_result = plan(
-        PlanBody(
-            model=body.model,
-            context=body.context,
-            headroom=body.headroom,
-            tensor_split=body.tensor_split,
-            device=body.device,
+    _guard_context(body)
+    merge_and_sanitize_extra(body)
+    validate_vision_for_run(body)
+    plan_result = execute_plan(body, STATE.members)
+    if plan_result.get("fit_status") == "overflow":
+        raise HTTPException(
+            400,
+            plan_result.get("hint") or "model and context exceed cluster budget (overflow)",
         )
-    )
     path = model_ops.resolve_local_model(body.model)
     rpc_servers = []
     for m in STATE.members.values():
         if m.get("role") == "worker":
-            rpc_servers.append(f"{m['host']}:{m.get('rpc_port', DEFAULT_RPC_PORT)}")
+            host = m.get("host") or m.get("lan_host") or "127.0.0.1"
+            rpc_servers.append(f"{host}:{m.get('rpc_port', DEFAULT_RPC_PORT)}")
     root = repo_root()
     if STATE.process_pid:
         native.stop_process(STATE.process_pid, force=True)
@@ -977,28 +1139,36 @@ def run(body: RunBody) -> dict[str, Any]:
         (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
         STATE.gpu_ids,
     )
+    extra = sanitize_extra_args(body.extra_args) if body.extra_args else []
+    launch_cfg = build_master_launch(
+        body,
+        plan_result,
+        model_path=path,
+        rpc_servers=rpc_servers,
+        infer_port=STATE.infer_port,
+        repo_root=str(root) if root else None,
+        gpu_env=gpu_env,
+        extra_args=extra,
+    )
     try:
-        launched = native.start_master(
-            model=str(path),
-            tensor_split=plan_result["tensor_split_csv"],
-            ngl=plan_result["ngl"],
-            context=body.context,
-            threads=body.threads,
-            micro_batch=body.micro_batch,
-            rpc_servers=rpc_servers,
-            repo_root=str(root) if root else None,
-            port=STATE.infer_port,
-            env=gpu_env or None,
-        )
+        launched = native.start_master(**launch_cfg)
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc
     STATE.process_pid = launched["pid"]
     STATE.process_role = "master"
     STATE.model_name = path.name
+    STATE.last_plan = plan_result
+    STATE.apply_error = None
+    STATE.apply_warning = plan_result.get("warning") if plan_result.get("fit_status") == "tight" else None
+    _persist_last_settings(body)
     if launched.get("pid"):
         runtime.register_child(int(launched["pid"]), "llama-server")
     STATE.save()
-    return {"plan": plan_result, "launch": launched}
+    _maybe_remember(body)
+    out: dict[str, Any] = {"plan": plan_result, "launch": launched}
+    if plan_result.get("fit_status") == "tight":
+        out["warning"] = plan_result.get("warning") or plan_result.get("hint")
+    return out
 
 
 def _mount_dashboard() -> None:

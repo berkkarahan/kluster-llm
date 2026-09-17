@@ -46,7 +46,7 @@
       {:else}
         <span class="chip chip-danger">offline</span>
       {/if}
-      <span class="chip chip-muted mono">{appStore.status?.role ?? '…'}</span>
+      <span class="chip chip-muted mono">{appStore.status?.role ?? (appStore.statusSeen ? '…' : 'loading')}</span>
       {#if appStore.status?.inference_up}
         <span class="chip chip-ok">infer</span>
       {/if}

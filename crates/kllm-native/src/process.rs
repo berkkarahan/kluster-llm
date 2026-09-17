@@ -61,6 +61,31 @@ fn extract_env(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, String>> {
     }
 }
 
+fn opt_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.extract()?)),
+        None => Ok(None),
+    }
+}
+
+fn opt_string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(Vec::new()),
+        Some(v) => v.extract(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn push_auto_i32(argv: &mut Vec<String>, flag: &str, value: Option<String>, fallback: i32) {
+    let n = match value.as_deref() {
+        Some("auto") | None => fallback,
+        Some(s) => s.parse::<i32>().unwrap_or(fallback),
+    };
+    argv.push(flag.into());
+    argv.push(n.to_string());
+}
+
 impl LaunchConfig {
     pub fn master_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         let model: String = dict
@@ -87,11 +112,24 @@ impl LaunchConfig {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(8);
-        let micro_batch: u32 = dict
-            .get_item("micro_batch")?
-            .map(|v| v.extract())
+        let micro_batch = opt_string(dict, "micro_batch")?;
+        let cache_type_k = opt_string(dict, "cache_type_k")?.unwrap_or_else(|| "q8_0".into());
+        let cache_type_v = opt_string(dict, "cache_type_v")?.unwrap_or_else(|| "q8_0".into());
+        let parallel = opt_string(dict, "parallel")?;
+        let batch_size = opt_string(dict, "batch_size")?;
+        let load_mode = opt_string(dict, "load_mode")?;
+        let ctx_checkpoints = opt_string(dict, "ctx_checkpoints")?;
+        let cache_ram = opt_string(dict, "cache_ram")?;
+        let chat_template = opt_string(dict, "chat_template")?;
+        let chat_template_file = opt_string(dict, "chat_template_file")?;
+        let mmproj = opt_string(dict, "mmproj")?;
+        let mmproj_auto = dict
+            .get_item("mmproj_auto")?
+            .map(|v| v.extract::<bool>())
             .transpose()?
-            .unwrap_or(2);
+            .unwrap_or(false);
+        let draft_model = opt_string(dict, "draft_model")?;
+        let extra_args = opt_string_list(dict, "extra_args")?;
         let tensor_split: String = dict
             .get_item("tensor_split")?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("tensor_split"))?
@@ -131,23 +169,52 @@ impl LaunchConfig {
             "--tensor-split".into(),
             tensor_split,
             "--cache-type-k".into(),
-            "q8_0".into(),
+            cache_type_k.clone(),
             "--cache-type-v".into(),
-            "q8_0".into(),
+            cache_type_v,
             "-ngl".into(),
             ngl.to_string(),
             "--threads".into(),
             threads.to_string(),
             "--ctx-size".into(),
             context.to_string(),
-            "--ubatch-size".into(),
-            micro_batch.to_string(),
         ];
+        push_auto_i32(&mut argv, "--ubatch-size", micro_batch, 2);
+        push_auto_i32(&mut argv, "--parallel", parallel, -1);
+        push_auto_i32(&mut argv, "--batch-size", batch_size, -1);
+        if let Some(mode) = load_mode {
+            if mode != "auto" {
+                argv.push("--load-mode".into());
+                argv.push(mode);
+            }
+        }
+        push_auto_i32(&mut argv, "--ctx-checkpoints", ctx_checkpoints, -1);
+        push_auto_i32(&mut argv, "--cache-ram", cache_ram, -1);
+        if let Some(path) = chat_template_file {
+            argv.push("--chat-template-file".into());
+            argv.push(path);
+        } else if let Some(tmpl) = chat_template {
+            if tmpl != "default" && !tmpl.is_empty() {
+                argv.push("--chat-template".into());
+                argv.push(tmpl);
+            }
+        }
+        if mmproj_auto {
+            argv.push("--mmproj-auto".into());
+        } else if let Some(path) = mmproj {
+            argv.push("--mmproj".into());
+            argv.push(path);
+        }
+        if let Some(draft) = draft_model {
+            argv.push("--model-draft".into());
+            argv.push(draft);
+        }
 
         if !rpc_servers.is_empty() {
             argv.push("--rpc".into());
             argv.push(rpc_servers.join(","));
         }
+        argv.extend(extra_args);
 
         Ok(Self {
             role: "master".into(),

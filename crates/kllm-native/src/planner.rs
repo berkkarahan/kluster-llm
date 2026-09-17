@@ -3,8 +3,12 @@ use pyo3::types::{PyDict, PyList};
 use thiserror::Error;
 
 const DEFAULT_HEADROOM: f64 = 0.80;
+/// When estimated need exceeds this fraction of budget (but not budget), status is `tight`.
+pub const TIGHT_RATIO: f64 = 0.90;
 /// Rough bytes-per-token for q8_0 KV estimate (K+V), conservative.
 const KV_BYTES_PER_TOKEN_PER_LAYER: f64 = 256.0;
+const MAX_AUTO_CONTEXT: u32 = 131_072;
+const AUTO_CONTEXT_STEP: u32 = 512;
 
 #[derive(Error, Debug)]
 pub enum PlanError {
@@ -58,6 +62,7 @@ pub struct PlanRequest {
     pub nodes: Vec<NodeCapacity>,
     pub model_size_bytes: u64,
     pub context: u32,
+    pub context_auto: bool,
     pub headroom: f64,
     pub tensor_split_override: Option<Vec<f64>>,
     /// Preferred device: "cpu" | "gpu" (default gpu).
@@ -75,6 +80,11 @@ impl PlanRequest {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(4096);
+        let context_auto: bool = dict
+            .get_item("context_auto")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(false);
         let headroom: f64 = dict
             .get_item("headroom")?
             .map(|v| v.extract())
@@ -153,6 +163,7 @@ impl PlanRequest {
             nodes,
             model_size_bytes,
             context,
+            context_auto,
             headroom,
             tensor_split_override,
             device,
@@ -191,6 +202,16 @@ pub struct PlanResult {
     /// Per-node fallback flag, parallel to node_ids.
     #[pyo3(get)]
     pub node_fallbacks: Vec<bool>,
+    #[pyo3(get)]
+    pub fit_status: String,
+    #[pyo3(get)]
+    pub estimated_bytes: u64,
+    #[pyo3(get)]
+    pub budget_bytes: u64,
+    #[pyo3(get)]
+    pub hint: String,
+    #[pyo3(get)]
+    pub context_effective: u32,
 }
 
 #[pymethods]
@@ -289,6 +310,78 @@ fn estimate_kv(model_size_bytes: u64, context: u32, layers: u32) -> u64 {
     ((context as f64) * (layers as f64) * KV_BYTES_PER_TOKEN_PER_LAYER) as u64
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FitStatus {
+    Fits,
+    Tight,
+    Overflow,
+}
+
+impl FitStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            FitStatus::Fits => "fits",
+            FitStatus::Tight => "tight",
+            FitStatus::Overflow => "overflow",
+        }
+    }
+}
+
+pub fn classify_fit(needed: u64, budget: u64) -> (FitStatus, String) {
+    if budget == 0 {
+        return (
+            FitStatus::Overflow,
+            "cluster budget is zero; add workers or reduce context".into(),
+        );
+    }
+    if needed > budget {
+        return (
+            FitStatus::Overflow,
+            format!(
+                "need ~{} MB but cluster budget is ~{} MB; reduce context or add capacity",
+                needed / (1024 * 1024),
+                budget / (1024 * 1024)
+            ),
+        );
+    }
+    let tight_line = (budget as f64 * TIGHT_RATIO) as u64;
+    if needed > tight_line {
+        return (
+            FitStatus::Tight,
+            format!(
+                "usage ~{} MB is above {:.0}% of ~{} MB budget; run may be tight",
+                needed / (1024 * 1024),
+                TIGHT_RATIO * 100.0,
+                budget / (1024 * 1024)
+            ),
+        );
+    }
+    (FitStatus::Fits, String::new())
+}
+
+fn auto_context_candidates(max_ctx: u32) -> Vec<u32> {
+    let cap = max_ctx.min(MAX_AUTO_CONTEXT).max(AUTO_CONTEXT_STEP);
+    let mut pow = AUTO_CONTEXT_STEP;
+    while pow * 2 <= cap {
+        pow *= 2;
+    }
+    let mut out = Vec::new();
+    let mut c = pow;
+    while c >= AUTO_CONTEXT_STEP {
+        if c <= cap {
+            out.push(c);
+        }
+        if c == AUTO_CONTEXT_STEP {
+            break;
+        }
+        c /= 2;
+    }
+    if out.is_empty() {
+        out.push(AUTO_CONTEXT_STEP);
+    }
+    out
+}
+
 pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
     if req.nodes.is_empty() {
         return Err(PlanError::Message("at least one node is required".into()));
@@ -315,13 +408,7 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
         node_fallbacks.push(nb.fallback);
     }
     let total_budget: u64 = budgets.iter().sum();
-    if total_budget < needed {
-        return Err(PlanError::Message(format!(
-            "cluster budget too small: need ~{} MB (model+KV), have ~{} MB",
-            needed / (1024 * 1024),
-            total_budget / (1024 * 1024)
-        )));
-    }
+    let (fit_status, hint) = classify_fit(needed, total_budget);
 
     let tensor_split = if let Some(ref override_split) = req.tensor_split_override {
         if override_split.len() != req.nodes.len() {
@@ -367,7 +454,46 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
         device_effective: device_effective.into(),
         node_effective_devices: node_effective,
         node_fallbacks,
+        fit_status: fit_status.as_str().into(),
+        estimated_bytes: needed,
+        budget_bytes: total_budget,
+        hint,
+        context_effective: req.context,
     })
+}
+
+pub fn plan_split_auto_context(req: &PlanRequest) -> Result<PlanResult, PlanError> {
+    if !req.context_auto {
+        return plan_split(req);
+    }
+    let candidates = auto_context_candidates(req.context.max(AUTO_CONTEXT_STEP));
+    let mut best_tight: Option<PlanResult> = None;
+    for ctx in candidates {
+        let mut sub = req.clone();
+        sub.context = ctx;
+        sub.context_auto = false;
+        let plan = plan_split(&sub)?;
+        match plan.fit_status.as_str() {
+            "fits" => return Ok(plan),
+            "tight" if best_tight.is_none() => best_tight = Some(plan),
+            _ => {}
+        }
+    }
+    if let Some(plan) = best_tight {
+        return Ok(plan);
+    }
+    let mut fallback = req.clone();
+    fallback.context = AUTO_CONTEXT_STEP;
+    fallback.context_auto = false;
+    plan_split(&fallback)
+}
+
+pub fn plan_split_entry(req: &PlanRequest) -> Result<PlanResult, PlanError> {
+    if req.context_auto {
+        plan_split_auto_context(req)
+    } else {
+        plan_split(req)
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +521,7 @@ mod tests {
             nodes,
             model_size_bytes,
             context: 4096,
+            context_auto: false,
             headroom: 0.80,
             tensor_split_override: None,
             device: device.into(),
@@ -473,12 +600,35 @@ mod tests {
     }
 
     #[test]
-    fn refuses_insufficient_budget() {
-        let err = plan_split(&req(
+    fn insufficient_budget_returns_overflow() {
+        let plan = plan_split(&req(
             vec![node("m", 4, None, true)],
             40 * 1024 * 1024 * 1024,
             "gpu",
-        ));
-        assert!(err.is_err());
+        ))
+        .unwrap();
+        assert_eq!(plan.fit_status, "overflow");
+        assert!(plan.estimated_bytes > plan.budget_bytes);
+    }
+
+    #[test]
+    fn tight_ratio_threshold() {
+        let budget = 1000u64;
+        let (s, _) = classify_fit(950, budget);
+        assert_eq!(s, FitStatus::Tight);
+        let (s2, _) = classify_fit(899, budget);
+        assert_eq!(s2, FitStatus::Fits);
+        let (s3, _) = classify_fit(1001, budget);
+        assert_eq!(s3, FitStatus::Overflow);
+    }
+
+    #[test]
+    fn auto_context_prefers_fits() {
+        let mut r = req(vec![node("m", 64, None, true)], 512 * 1024 * 1024, "gpu");
+        r.context_auto = true;
+        r.context = 4096;
+        let plan = plan_split_auto_context(&r).unwrap();
+        assert!(plan.context_effective >= 512);
+        assert!(plan.fit_status == "fits" || plan.fit_status == "tight");
     }
 }

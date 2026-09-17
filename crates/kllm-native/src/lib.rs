@@ -23,7 +23,7 @@ fn list_gpus() -> PyResult<(Vec<GpuDevice>, String)> {
 #[pyfunction]
 fn plan_split(request: &Bound<'_, PyDict>) -> PyResult<PlanResult> {
     let req = PlanRequest::from_pydict(request)?;
-    planner::plan_split(&req).map_err(|e| {
+    planner::plan_split_entry(&req).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(e.to_string())
     })
 }

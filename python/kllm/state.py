@@ -114,6 +114,9 @@ class ClusterState:
     wg_public_key: str | None = None
     overlay_status: str | None = None
     netsec_warnings: list[str] = field(default_factory=list)
+    last_settings: dict[str, Any] | None = None
+    apply_error: str | None = None
+    apply_warning: str | None = None
 
     def save(self) -> None:
         ensure_home()

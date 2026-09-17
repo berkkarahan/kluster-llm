@@ -42,7 +42,11 @@ export type Status = {
   wg_address?: string | null;
   overlay_status?: string | null;
   netsec_warnings?: string[];
+  apply_error?: string | null;
+  apply_warning?: string | null;
 };
+
+export type ClusterView = 'loading' | 'offline' | 'idle' | 'live';
 
 export type ModelInfo = {
   id: string;

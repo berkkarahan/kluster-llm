@@ -8,6 +8,13 @@
   }
 
   const members = $derived(Object.values(appStore.status?.members ?? {}));
+  const view = $derived(appStore.viewState());
+  const live = $derived(view === 'live');
+  const idle = $derived(view === 'idle');
+  const isMaster = $derived(appStore.status?.role === 'master');
+  const isWorker = $derived(appStore.status?.role === 'worker');
+  const startJoinDisabled = $derived(!idle || !!appStore.busy);
+  const networkLocked = $derived(live);
 </script>
 
 <div class="grid h-[calc(100vh-40px)] grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_360px]">
@@ -17,12 +24,28 @@
       Cluster
     </div>
     <div class="p-3 flex flex-col gap-2 overflow-y-auto flex-1 min-h-0">
-      <label class="mono text-[11px]" style="color: var(--muted)">Join key</label>
-      <input class="field mono" bind:value={appStore.joinKeyInput} placeholder="auto or paste" />
+      {#if !isWorker}
+        <label class="mono text-[11px]" style="color: var(--muted)">Join key</label>
+        <input
+          class="field mono"
+          bind:value={appStore.joinKeyInput}
+          placeholder={idle ? 'auto or paste' : '—'}
+          readonly={networkLocked}
+          disabled={view === 'loading' || view === 'offline'}
+        />
+      {:else}
+        <p class="mono text-[11px]" style="color: var(--muted)">Joined as worker</p>
+      {/if}
       <label class="mono text-[11px]" style="color: var(--muted)">RPC bind (optional)</label>
-      <input class="field mono" bind:value={appStore.rpcBindInput} placeholder="auto private IP" />
+      <input
+        class="field mono"
+        bind:value={appStore.rpcBindInput}
+        placeholder={idle ? 'auto private IP' : '—'}
+        readonly={networkLocked}
+        disabled={view === 'loading' || view === 'offline'}
+      />
       <label class="mono text-[11px]" style="color: var(--muted)">Overlay</label>
-      <select class="field mono" bind:value={appStore.overlay}>
+      <select class="field mono" bind:value={appStore.overlay} disabled={!idle || !!appStore.busy}>
         <option value="none">Off (LAN bind)</option>
         <option value="wireguard">WireGuard</option>
       </select>
@@ -140,12 +163,20 @@
         </div>
       {/if}
       <div class="grid grid-cols-2 gap-2 mt-1">
-        <button class="btn btn-accent" disabled={!!appStore.busy} onclick={() => appStore.startMaster()}>Start</button>
-        <button class="btn btn-danger" disabled={!!appStore.busy} onclick={() => appStore.stopCluster()}>Stop</button>
-        <button class="btn" disabled={!!appStore.busy || !appStore.joinKeyInput} onclick={() => appStore.joinCluster()}
-          >Join</button
+        <button class="btn btn-accent" disabled={startJoinDisabled} onclick={() => appStore.startMaster()}
+          >Start</button
         >
-        <button class="btn" disabled={!!appStore.busy} onclick={() => appStore.leaveCluster()}>Leave</button>
+        <button class="btn btn-danger" disabled={!!appStore.busy || !isMaster} onclick={() => appStore.stopCluster()}
+          >Stop</button
+        >
+        <button
+          class="btn"
+          disabled={startJoinDisabled || !appStore.joinKeyInput}
+          onclick={() => appStore.joinCluster()}>Join</button
+        >
+        <button class="btn" disabled={!!appStore.busy || !isWorker} onclick={() => appStore.leaveCluster()}
+          >Leave</button
+        >
       </div>
       {#if appStore.status?.join_key}
         <p class="mono text-[11px] mt-2 break-all" style="color: var(--muted)">
@@ -205,26 +236,44 @@
           </tr>
         </thead>
         <tbody>
-          {#each members as m}
-            <tr class="mono">
-              <td class="py-1.5 border-b" style="border-color: var(--border)">{m.node_id}</td>
-              <td class="py-1.5 border-b" style="border-color: var(--border)">{m.host}</td>
-              <td class="py-1.5 border-b" style="border-color: var(--border)">{m.role}</td>
-              <td class="py-1.5 border-b" style="border-color: var(--border)">{m.backend}</td>
-              <td class="py-1.5 border-b" style="border-color: var(--border)"
-                >{m.gpu_ids?.length ? m.gpu_ids.join(',') : '—'}</td
-              >
-              <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.total_ram_bytes)}</td>
-              <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.vram_bytes)}</td>
+          {#if view === 'loading'}
+            <tr>
+              <td colspan="7" class="py-6 mono" style="color: var(--muted)">Loading cluster…</td>
             </tr>
-          {:else}
+          {:else if members.length}
+            {#each members as m}
+              <tr class="mono">
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.node_id}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.host}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.role}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.backend}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)"
+                  >{m.gpu_ids?.length ? m.gpu_ids.join(',') : '—'}</td
+                >
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.total_ram_bytes)}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.vram_bytes)}</td>
+              </tr>
+            {/each}
+          {:else if idle}
             <tr>
               <td colspan="7" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
             </tr>
-          {/each}
+          {:else}
+            <tr>
+              <td colspan="7" class="py-6 mono" style="color: var(--muted)">
+                {view === 'offline' ? 'Disconnected — keeping last cluster view.' : 'Waiting for members…'}
+              </td>
+            </tr>
+          {/if}
         </tbody>
       </table>
 
+      {#if appStore.status?.apply_error}
+        <p class="mono text-[11px] mt-3" style="color: var(--danger, #c44)">{appStore.status.apply_error}</p>
+      {/if}
+      {#if appStore.status?.apply_warning}
+        <p class="mono text-[11px] mt-2" style="color: var(--warn, #b80)">{appStore.status.apply_warning}</p>
+      {/if}
       {#if appStore.status?.last_plan}
         <pre
           class="mt-4 p-3 panel mono text-[11px] overflow-auto max-h-48"

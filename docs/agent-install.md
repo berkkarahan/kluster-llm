@@ -100,14 +100,23 @@ python3 scripts/install.py --backend cuda --from-source
 ### 2.3 What the installer does (in order)
 
 1. Ensures **git** (and other toolchains unless `--skip-toolchains`).  
-2. Creates/repairs **`.venv`**, installs **Rust** if missing, builds **`kllm`** with maturin, installs wheel + pytest.  
+2. Ensures **uv**, creates/repairs **`.venv`** (Python from **`.python-version`**), runs **`uv sync`**, installs **Rust** if missing, builds **`kllm`** with maturin, installs wheel + pytest.  
 3. Ensures **Node/npm**, runs `dashboard` `npm install` + `npm run build`.  
 4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`): prebuilt GitHub `b*` assets and/or cmake source with `-DGGML_RPC=ON`; stages to `vendor/bin/` and `worker-windows/` as needed.  
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).
 
-### 2.4 Activate the venv (mandatory for subsequent CLI)
+### 2.4 Run the CLI
+
+Prefer **uv** (no shell activation):
+
+```bash
+uv run kllm status
+uvx --from . kllm start
+```
+
+Or activate **`.venv`**:
 
 ```powershell
 # Windows PowerShell

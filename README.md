@@ -49,12 +49,18 @@ kllm/
 
 ### Cluster CLI (recommended)
 
-One-shot install (Python 3.10+). Pulls Rust/Node if missing, builds `kllm`, fetches/builds `llama-server` + `rpc-server`, and installs WireGuard for optional overlay:
+One-shot install ([uv](https://docs.astral.sh/uv/) pins Python via `.python-version`). Pulls Rust/Node if missing, builds `kllm`, fetches/builds `llama-server` + `rpc-server`, and installs WireGuard for optional overlay:
 
 ```bash
-python scripts/install.py
-# Windows: .\.venv\Scripts\Activate.ps1
-# macOS/Linux: source .venv/bin/activate
+uv run python scripts/install.py
+# Or: python scripts/install.py  (uses uv for .venv when available)
+
+# CLI without activating .venv:
+uv run kllm start
+# Ephemeral (from repo checkout):
+uvx --from . kllm status
+
+# Optional: source .venv/bin/activate  (Windows: .\.venv\Scripts\Activate.ps1)
 
 # Master
 kllm start

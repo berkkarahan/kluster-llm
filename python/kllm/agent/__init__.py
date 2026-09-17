@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kllm import config as kllm_config
-from kllm import discovery, gateway, models as model_ops, native, netsec
+from kllm import discovery, gateway, models as model_ops, native, netsec, runtime
 from kllm.auth import ensure_api_token, verify_api_token
 from kllm.state import (
     DEFAULT_CONTROL_PORT,
@@ -219,7 +220,7 @@ class DistributeBody(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "role": STATE.role, "node_id": STATE.node_id}
+    return {"ok": True, "role": STATE.role, "node_id": STATE.node_id, "pid": os.getpid()}
 
 
 @app.get("/v1/discover")
@@ -504,6 +505,7 @@ def stop() -> dict[str, Any]:
         native.stop_process(STATE.process_pid, force=True)
         STATE.process_pid = None
         STATE.process_role = None
+        runtime.clear_children()
     if STATE.role == "master":
         if _advertiser:
             _advertiser.stop()
@@ -620,6 +622,8 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
         )
         STATE.process_pid = launched["pid"]
         STATE.process_role = "worker"
+        if launched.get("pid"):
+            runtime.register_child(int(launched["pid"]), "rpc-server")
     except Exception as exc:
         # Allow join without binary for dry setups
         launched = {"error": str(exc), "pid": None}
@@ -682,6 +686,7 @@ def leave() -> dict[str, Any]:
         native.stop_process(STATE.process_pid, force=True)
         STATE.process_pid = None
         STATE.process_role = None
+        runtime.clear_children()
     _reset_netsec_state()
     STATE.role = "idle"
     STATE.master_host = None
@@ -885,6 +890,7 @@ def run(body: RunBody) -> dict[str, Any]:
     root = repo_root()
     if STATE.process_pid:
         native.stop_process(STATE.process_pid, force=True)
+        runtime.clear_children()
     gpu_env = _gpu_visibility_env(
         (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
         STATE.gpu_ids,
@@ -907,6 +913,8 @@ def run(body: RunBody) -> dict[str, Any]:
     STATE.process_pid = launched["pid"]
     STATE.process_role = "master"
     STATE.model_name = path.name
+    if launched.get("pid"):
+        runtime.register_child(int(launched["pid"]), "llama-server")
     STATE.save()
     return {"plan": plan_result, "launch": launched}
 

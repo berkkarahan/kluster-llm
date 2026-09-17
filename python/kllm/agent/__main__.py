@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import uvicorn
 
+from kllm import runtime
 from kllm.state import DEFAULT_CONTROL_PORT, ensure_home
 
 
@@ -13,6 +15,7 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_CONTROL_PORT)
     args = parser.parse_args()
+    runtime.register_agent(os.getpid(), args.port)
     uvicorn.run(
         "kllm.agent:app",
         host=args.host,

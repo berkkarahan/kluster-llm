@@ -27,7 +27,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm join --key KEY [--master HOST] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery) |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm leave` | Worker leaves the cluster |
-| `kllm stop` | Stop local session (master ends the cluster session) |
+| `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm status` | Role, members, capacity, last plan, RPC bind / overlay |
 | `kllm model download <URL\|org/repo:file.gguf>` | Master downloads into `~/.kllm/models/` |
 | `kllm model distribute <name>` | Master pushes GGUF to all workers (SHA-256 verified) |

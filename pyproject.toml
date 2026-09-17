@@ -1,0 +1,41 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kllm"
+version = "0.1.0"
+description = "Cross-platform cluster router CLI for Kluster LLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Kluster LLM" }]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "zeroconf>=0.132",
+    "huggingface_hub>=0.24",
+]
+
+[project.urls]
+Repository = "https://github.com/berkkarahan/kluster-llm"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+kllm = "kllm.cli:app"
+kllm-agent = "kllm.agent.__main__:main"
+
+[tool.maturin]
+manifest-path = "crates/kllm-native/Cargo.toml"
+module-name = "kllm._native"
+python-source = "python"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]

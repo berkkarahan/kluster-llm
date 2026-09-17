@@ -167,6 +167,15 @@ Get-NetFirewallRule -Name "kllm-RPC" | Format-Table DisplayName, Enabled
 ping -S 192.168.10.1 192.168.10.2
 ```
 
+### "Access is denied" creating `kllm-RPC` firewall rule
+
+**Cause:** `New-NetFirewallRule` requires an elevated (Administrator) PowerShell. The agent runs without elevation and only best-effort creates the rule.
+
+**Solution:** Open **PowerShell as Administrator** once and run:
+```powershell
+New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
+```
+Then restart/join again. After the rule exists, non-elevated starts reuse it without prompting.
 ### "No route to host"
 
 **Cause:** IPs not in same subnet or interface disabled.

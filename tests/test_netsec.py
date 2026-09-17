@@ -111,6 +111,46 @@ def test_firewall_darwin_missing_binary_warns(monkeypatch):
     assert "50052" in out["warning"]
 
 
+def test_firewall_windows_reuses_existing_rule(monkeypatch):
+    from kllm import netsec
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        # First call is existence check → rule present
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(netsec.subprocess, "run", fake_run)
+    out = netsec._firewall_windows(50052)
+    assert out == {"ok": True, "applied": True, "warning": None}
+    assert len(calls) == 1
+    assert "Get-NetFirewallRule" in " ".join(calls[0])
+
+
+def test_firewall_windows_access_denied_hint(monkeypatch):
+    from kllm import netsec
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(cmd)
+        if "Get-NetFirewallRule" in joined:
+            return MagicMock(returncode=1, stdout="", stderr="")
+        return MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="New-NetFirewallRule : Access is denied.\nFullyQualifiedErrorId : Windows System Error 5",
+        )
+
+    monkeypatch.setattr(netsec.subprocess, "run", fake_run)
+    out = netsec._firewall_windows(50052)
+    assert out["ok"] is False
+    assert out["applied"] is False
+    assert "Administrator" in out["warning"]
+    assert "New-NetFirewallRule" in out["warning"]
+    assert "50052" in out["warning"]
+    assert "Access is denied" not in out["warning"]
+
+
 def test_next_wg_address_skips_used():
     from kllm.netsec import next_wg_address
 

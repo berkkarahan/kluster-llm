@@ -280,34 +280,66 @@ def refresh_rpc_firewall_warnings(port: int, bind_host: str) -> list[str]:
     return []
 
 
+def _firewall_windows_create_cmd(port: int) -> str:
+    return (
+        f"New-NetFirewallRule -Name '{FIREWALL_RULE_NAME}' "
+        f"-DisplayName 'Kluster LLM RPC Worker' -Direction Inbound -Action Allow "
+        f"-Protocol TCP -LocalPort {port} -Profile Any"
+    )
+
+
+def _firewall_windows_elevation_hint(port: int) -> str:
+    return (
+        f"Windows Firewall rule '{FIREWALL_RULE_NAME}' needs Administrator once. "
+        f"Open elevated PowerShell and run: {_firewall_windows_create_cmd(port)}"
+    )
+
+
 def _firewall_windows(port: int) -> dict[str, Any]:
-    # Remove stale rule then recreate (idempotent enough for lab use).
-    subprocess.run(
+    """Allow TCP ``port`` for RPC. Creating/updating the rule needs elevation.
+
+    If the rule already exists, succeed without admin. Do not delete/recreate on
+    every start — that forced Access Denied for non-elevated agents.
+    """
+    check = subprocess.run(
         [
             "powershell",
             "-NoProfile",
             "-Command",
-            f"Remove-NetFirewallRule -Name '{FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue",
+            f"if (Get-NetFirewallRule -Name '{FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue) "
+            "{ exit 0 } else { exit 1 }",
         ],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    cmd = (
-        f"New-NetFirewallRule -Name '{FIREWALL_RULE_NAME}' "
-        f"-DisplayName 'Kluster LLM RPC Worker' -Direction Inbound -Action Allow "
-        f"-Protocol TCP -LocalPort {port} -Profile Any"
-    )
+    if check.returncode == 0:
+        return {"ok": True, "applied": True, "warning": None}
+
+    create = _firewall_windows_create_cmd(port)
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
+        ["powershell", "-NoProfile", "-Command", create],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "firewall rule failed").strip()
-        return {"ok": False, "applied": False, "warning": err}
-    return {"ok": True, "applied": True, "warning": None}
+    if result.returncode == 0:
+        return {"ok": True, "applied": True, "warning": None}
+
+    err = (result.stderr or result.stdout or "firewall rule failed").strip()
+    lowered = err.lower()
+    if (
+        "access is denied" in lowered
+        or "permissiondenied" in lowered
+        or "access denied" in lowered
+        or "error 5" in lowered
+    ):
+        return {
+            "ok": False,
+            "applied": False,
+            "warning": _firewall_windows_elevation_hint(port),
+        }
+    return {"ok": False, "applied": False, "warning": err or _firewall_windows_elevation_hint(port)}
 
 
 def _firewall_linux(port: int) -> dict[str, Any]:

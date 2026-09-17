@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -49,6 +50,15 @@ pub struct LaunchConfig {
     pub role: String,
     pub binary: PathBuf,
     pub argv: Vec<String>,
+    /// Extra environment variables (e.g. CUDA_VISIBLE_DEVICES).
+    pub env: HashMap<String, String>,
+}
+
+fn extract_env(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, String>> {
+    match dict.get_item("env")? {
+        Some(v) => v.extract(),
+        None => Ok(HashMap::new()),
+    }
 }
 
 impl LaunchConfig {
@@ -100,6 +110,7 @@ impl LaunchConfig {
             .get_item("repo_root")?
             .map(|v| v.extract())
             .transpose()?;
+        let env = extract_env(dict)?;
 
         let binary = resolve_llama_server(repo_root.as_deref()).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -142,6 +153,7 @@ impl LaunchConfig {
             role: "master".into(),
             binary: PathBuf::from(&binary),
             argv,
+            env,
         })
     }
 
@@ -165,6 +177,7 @@ impl LaunchConfig {
             .get_item("repo_root")?
             .map(|v| v.extract())
             .transpose()?;
+        let env = extract_env(dict)?;
 
         let binary = resolve_rpc_server(repo_root.as_deref()).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -191,6 +204,7 @@ impl LaunchConfig {
             role: "worker".into(),
             binary: PathBuf::from(&binary),
             argv,
+            env,
         })
     }
 }
@@ -301,6 +315,9 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
     let mut cmd = Command::new(&cfg.binary);
     if cfg.argv.len() > 1 {
         cmd.args(&cfg.argv[1..]);
+    }
+    if !cfg.env.is_empty() {
+        cmd.envs(&cfg.env);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())

@@ -19,8 +19,6 @@
     <div class="p-3 flex flex-col gap-2">
       <label class="mono text-[11px]" style="color: var(--muted)">Join key</label>
       <input class="field mono" bind:value={appStore.joinKeyInput} placeholder="auto or paste" />
-      <label class="mono text-[11px]" style="color: var(--muted)">Master host (join)</label>
-      <input class="field mono" bind:value={appStore.masterHost} placeholder="192.168.10.1" />
       <label class="mono text-[11px]" style="color: var(--muted)">RPC bind (optional)</label>
       <input class="field mono" bind:value={appStore.rpcBindInput} placeholder="auto private IP" />
       <label class="mono text-[11px]" style="color: var(--muted)">Overlay</label>
@@ -28,10 +26,32 @@
         <option value="none">Off (LAN bind)</option>
         <option value="wireguard">WireGuard</option>
       </select>
+      {#if appStore.gpus.length > 0}
+        <label class="mono text-[11px] mt-1" style="color: var(--muted)">
+          GPUs ({appStore.gpuBackend})
+        </label>
+        <div class="flex flex-col gap-1">
+          {#each appStore.gpus as g}
+            <label class="mono text-[11px] flex items-start gap-2 cursor-pointer" style="color: var(--fg)">
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                checked={appStore.selectedGpuIds.includes(g.index)}
+                disabled={appStore.gpus.length === 1}
+                onchange={() => appStore.toggleGpu(g.index)}
+              />
+              <span>
+                [{g.index}] {g.name}
+                <span style="color: var(--muted)"> {fmtBytes(g.vram_bytes)}</span>
+              </span>
+            </label>
+          {/each}
+        </div>
+      {/if}
       <div class="grid grid-cols-2 gap-2 mt-1">
         <button class="btn btn-accent" disabled={!!appStore.busy} onclick={() => appStore.startMaster()}>Start</button>
         <button class="btn btn-danger" disabled={!!appStore.busy} onclick={() => appStore.stopCluster()}>Stop</button>
-        <button class="btn" disabled={!!appStore.busy || !appStore.joinKeyInput || !appStore.masterHost} onclick={() => appStore.joinCluster()}
+        <button class="btn" disabled={!!appStore.busy || !appStore.joinKeyInput} onclick={() => appStore.joinCluster()}
           >Join</button
         >
         <button class="btn" disabled={!!appStore.busy} onclick={() => appStore.leaveCluster()}>Leave</button>
@@ -53,6 +73,11 @@
           <span style="color: var(--accent)"> {appStore.status.wg_address}</span>
         {/if}
       </p>
+      {#if appStore.status?.gpu_ids?.length}
+        <p class="mono text-[11px]" style="color: var(--muted)">
+          gpus <span style="color: var(--fg)">{appStore.status.gpu_ids.join(',')}</span>
+        </p>
+      {/if}
       {#if appStore.status?.overlay_status}
         <p class="mono text-[11px]" style="color: var(--muted)">{appStore.status.overlay_status}</p>
       {/if}
@@ -75,6 +100,7 @@
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">host</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">role</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">backend</th>
+            <th class="font-medium py-1 border-b" style="border-color: var(--border)">gpus</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">ram</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">vram</th>
           </tr>
@@ -86,12 +112,15 @@
               <td class="py-1.5 border-b" style="border-color: var(--border)">{m.host}</td>
               <td class="py-1.5 border-b" style="border-color: var(--border)">{m.role}</td>
               <td class="py-1.5 border-b" style="border-color: var(--border)">{m.backend}</td>
+              <td class="py-1.5 border-b" style="border-color: var(--border)"
+                >{m.gpu_ids?.length ? m.gpu_ids.join(',') : '—'}</td
+              >
               <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.total_ram_bytes)}</td>
               <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.vram_bytes)}</td>
             </tr>
           {:else}
             <tr>
-              <td colspan="6" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
+              <td colspan="7" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
             </tr>
           {/each}
         </tbody>

@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+import typer
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
+    import importlib
+
+    import kllm.state as state_mod
+    import kllm.agent as agent_mod
+
+    importlib.reload(state_mod)
+    agent_mod.STATE = state_mod.ClusterState.load()
+    if not agent_mod.STATE.node_id:
+        agent_mod.STATE.node_id = "testnode"
+        agent_mod.STATE.save()
+    return TestClient(agent_mod.app), agent_mod
+
+
+FAKE_GPUS = {
+    "backend": "cuda",
+    "gpus": [
+        {"index": 0, "name": "RTX 4090", "vram_bytes": 24 * 1024**3},
+        {"index": 1, "name": "RTX 3090", "vram_bytes": 24 * 1024**3},
+    ],
+}
+
+
+def test_parse_gpu_ids():
+    from kllm.cli import parse_gpu_ids
+
+    assert parse_gpu_ids(None) is None
+    assert parse_gpu_ids("0") == [0]
+    assert parse_gpu_ids("0,1") == [0, 1]
+    assert parse_gpu_ids(" 1, 0, 1 ") == [1, 0]
+    with pytest.raises(typer.BadParameter):
+        parse_gpu_ids("")
+    with pytest.raises(typer.BadParameter):
+        parse_gpu_ids("a")
+    with pytest.raises(typer.BadParameter):
+        parse_gpu_ids("-1")
+
+
+def test_get_gpus(client, monkeypatch):
+    c, agent = client
+    monkeypatch.setattr(agent.native, "list_gpus", lambda: FAKE_GPUS)
+    r = c.get("/v1/gpus")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["backend"] == "cuda"
+    assert len(data["gpus"]) == 2
+
+
+def test_start_defaults_all_gpus(client, monkeypatch):
+    c, agent = client
+    with (
+        patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 16 * 1024**3,
+                "vram_bytes": 48 * 1024**3,
+                "backend": "cuda",
+            },
+        ),
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="10.0.0.1"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.discovery, "MasterAdvertiser") as Adv,
+    ):
+        Adv.return_value.start = lambda: None
+        Adv.return_value.stop = lambda: None
+        r = c.post("/v1/start", json={"overlay": "none"})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == [0, 1]
+    assert agent.STATE.gpu_ids == [0, 1]
+    mem = agent.STATE.members[agent.STATE.node_id]
+    assert mem["gpu_ids"] == [0, 1]
+    assert mem["vram_bytes"] == 48 * 1024**3
+
+
+def test_start_selects_subset(client, monkeypatch):
+    c, agent = client
+    with (
+        patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 16 * 1024**3,
+                "vram_bytes": 48 * 1024**3,
+                "backend": "cuda",
+            },
+        ),
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="10.0.0.1"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.discovery, "MasterAdvertiser") as Adv,
+    ):
+        Adv.return_value.start = lambda: None
+        Adv.return_value.stop = lambda: None
+        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [1]})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == [1]
+    mem = agent.STATE.members[agent.STATE.node_id]
+    assert mem["vram_bytes"] == 24 * 1024**3
+
+
+def test_start_rejects_unknown_gpu(client, monkeypatch):
+    c, agent = client
+    with patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS):
+        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [9]})
+    assert r.status_code == 400
+    assert "unknown gpu_ids" in r.json()["detail"]
+
+
+def test_gpu_visibility_env():
+    from kllm.agent import _gpu_visibility_env
+
+    assert _gpu_visibility_env("cuda", [0, 1]) == {"CUDA_VISIBLE_DEVICES": "0,1"}
+    assert _gpu_visibility_env("rocm", [0]) == {
+        "HIP_VISIBLE_DEVICES": "0",
+        "ROCR_VISIBLE_DEVICES": "0",
+    }
+    assert _gpu_visibility_env("metal", [0]) == {}
+    assert _gpu_visibility_env("cuda", []) == {}
+
+
+def test_join_passes_gpu_env(client, monkeypatch):
+    c, agent = client
+    from kllm.discovery import DiscoveredMaster, join_key_id
+
+    kid = join_key_id("secret")
+    captured: dict = {}
+
+    def fake_browse(timeout: float = 2.0, key: str | None = None):
+        return [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "members": 2}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, *a, **k):
+            captured["payload"] = k.get("json")
+            return FakeResp()
+
+    def fake_start_worker(**kwargs):
+        captured["worker_kwargs"] = kwargs
+        return {"pid": 42, "binary": "rpc", "argv": [], "role": "worker"}
+
+    monkeypatch.setattr(agent.discovery, "browse_masters", fake_browse)
+    with (
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="192.168.10.2"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 8,
+                "available_ram_bytes": 4,
+                "vram_bytes": 1,
+                "backend": "cuda",
+            },
+        ),
+        patch.object(agent.native, "start_worker", side_effect=fake_start_worker),
+        patch("httpx.Client", FakeClient),
+    ):
+        r = c.post("/v1/join", json={"key": "secret", "overlay": "none", "gpu_ids": [0]})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == [0]
+    assert captured["payload"]["gpu_ids"] == [0]
+    assert captured["payload"]["vram_bytes"] == 24 * 1024**3
+    assert captured["worker_kwargs"]["env"] == {"CUDA_VISIBLE_DEVICES": "0"}

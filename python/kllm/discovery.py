@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import socket
 import time
 from dataclasses import dataclass
@@ -9,11 +10,17 @@ from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 from kllm.state import DEFAULT_CONTROL_PORT, SERVICE_TYPE
 
 
+def join_key_id(key: str) -> str:
+    """Non-secret fingerprint of a join key for mDNS matching (SHA-256 hex, 16 chars)."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
 @dataclass
 class DiscoveredMaster:
     name: str
     host: str
     port: int
+    key_id: str | None = None
 
 
 class _MasterListener(ServiceListener):
@@ -30,7 +37,13 @@ class _MasterListener(ServiceListener):
         props = {k.decode(): v.decode() if isinstance(v, bytes) else str(v) for k, v in (info.properties or {}).items()}
         if props.get("role") != "master":
             return
-        self.masters[name] = DiscoveredMaster(name=name, host=host, port=info.port or DEFAULT_CONTROL_PORT)
+        kid = props.get("kid") or None
+        self.masters[name] = DiscoveredMaster(
+            name=name,
+            host=host,
+            port=info.port or DEFAULT_CONTROL_PORT,
+            key_id=kid,
+        )
 
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         self.masters.pop(name, None)
@@ -39,20 +52,30 @@ class _MasterListener(ServiceListener):
         self.add_service(zc, type_, name)
 
 
-def browse_masters(timeout: float = 2.0) -> list[DiscoveredMaster]:
+def browse_masters(timeout: float = 2.0, key: str | None = None) -> list[DiscoveredMaster]:
     zc = Zeroconf()
     listener = _MasterListener()
     browser = ServiceBrowser(zc, SERVICE_TYPE, listener)
     time.sleep(timeout)
     browser.cancel()
     zc.close()
-    return list(listener.masters.values())
+    found = list(listener.masters.values())
+    if key is not None:
+        want = join_key_id(key)
+        found = [m for m in found if m.key_id == want]
+    return found
 
 
 class MasterAdvertiser:
-    def __init__(self, cluster_name: str, port: int = DEFAULT_CONTROL_PORT) -> None:
+    def __init__(
+        self,
+        cluster_name: str,
+        port: int = DEFAULT_CONTROL_PORT,
+        join_key: str | None = None,
+    ) -> None:
         self.cluster_name = cluster_name
         self.port = port
+        self.join_key = join_key
         self._zc: Zeroconf | None = None
         self._info: ServiceInfo | None = None
 
@@ -61,15 +84,18 @@ class MasterAdvertiser:
         local_ip = _local_ip()
         self._zc = Zeroconf()
         service_name = f"{self.cluster_name}.{SERVICE_TYPE}"
+        props: dict[bytes, bytes] = {
+            b"role": b"master",
+            b"name": self.cluster_name.encode(),
+        }
+        if self.join_key:
+            props[b"kid"] = join_key_id(self.join_key).encode()
         self._info = ServiceInfo(
             SERVICE_TYPE,
             service_name,
             addresses=[socket.inet_aton(local_ip)],
             port=self.port,
-            properties={
-                b"role": b"master",
-                b"name": self.cluster_name.encode(),
-            },
+            properties=props,
             server=f"{hostname}.local.",
         )
         self._zc.register_service(self._info)

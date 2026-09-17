@@ -89,15 +89,17 @@ class StartBody(BaseModel):
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_bind: str | None = None
     overlay: str = netsec.OVERLAY_NONE
+    gpu_ids: list[int] | None = None
 
 
 class JoinBody(BaseModel):
     key: str
-    master_host: str
+    master_host: str | None = None
     master_port: int = DEFAULT_CONTROL_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_bind: str | None = None
     overlay: str = netsec.OVERLAY_NONE
+    gpu_ids: list[int] | None = None
 
 
 class RegisterBody(BaseModel):
@@ -112,6 +114,76 @@ class RegisterBody(BaseModel):
     lan_host: str | None = None
     wg_public_key: str | None = None
     wg_listen_port: int = netsec.WG_LISTEN_PORT
+    gpu_ids: list[int] | None = None
+
+
+def _resolve_gpu_selection(gpu_ids: list[int] | None) -> dict[str, Any]:
+    """Validate optional gpu_ids against list_gpus(); default = all indices.
+
+    Returns dict with keys: gpu_ids, backend, gpus (selected device dicts),
+    vram_bytes (sum of selected discrete VRAM, or None).
+    """
+    listed = native.list_gpus()
+    backend = listed.get("backend") or "cpu"
+    gpus = list(listed.get("gpus") or [])
+    available = {int(g["index"]): g for g in gpus}
+
+    if not available:
+        if gpu_ids:
+            raise HTTPException(400, f"no GPUs available; cannot select {gpu_ids}")
+        return {
+            "gpu_ids": [],
+            "backend": backend,
+            "gpus": [],
+            "vram_bytes": None,
+        }
+
+    if gpu_ids is None:
+        selected_ids = sorted(available.keys())
+    else:
+        if not gpu_ids:
+            raise HTTPException(400, "gpu_ids must be non-empty when provided")
+        unknown = [i for i in gpu_ids if i not in available]
+        if unknown:
+            raise HTTPException(
+                400,
+                f"unknown gpu_ids {unknown}; available={sorted(available.keys())}",
+            )
+        # Preserve order, drop duplicates
+        seen: set[int] = set()
+        selected_ids = []
+        for i in gpu_ids:
+            if i not in seen:
+                seen.add(i)
+                selected_ids.append(i)
+
+    selected = [available[i] for i in selected_ids]
+    vram_total: int | None = None
+    for g in selected:
+        v = g.get("vram_bytes")
+        if v is not None:
+            vram_total = (vram_total or 0) + int(v)
+    return {
+        "gpu_ids": selected_ids,
+        "backend": backend,
+        "gpus": selected,
+        "vram_bytes": vram_total,
+    }
+
+
+def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, str]:
+    """Env vars so the engine only sees the selected physical GPUs."""
+    if not gpu_ids:
+        return {}
+    csv = ",".join(str(i) for i in gpu_ids)
+    if backend == "cuda":
+        return {"CUDA_VISIBLE_DEVICES": csv}
+    if backend == "rocm":
+        return {
+            "HIP_VISIBLE_DEVICES": csv,
+            "ROCR_VISIBLE_DEVICES": csv,
+        }
+    return {}
 
 
 class RunBody(BaseModel):
@@ -151,10 +223,12 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/v1/discover")
-def discover(timeout: float = 2.0) -> dict[str, Any]:
-    found = discovery.browse_masters(timeout=timeout)
+def discover(timeout: float = 2.0, key: str | None = None) -> dict[str, Any]:
+    found = discovery.browse_masters(timeout=timeout, key=key)
     return {
-        "masters": [{"name": m.name, "host": m.host, "port": m.port} for m in found],
+        "masters": [
+            {"name": m.name, "host": m.host, "port": m.port, "key_id": m.key_id} for m in found
+        ],
     }
 
 
@@ -247,6 +321,15 @@ def get_config() -> dict[str, Any]:
     return kllm_config.load_config()
 
 
+@app.get("/v1/gpus")
+def get_gpus() -> dict[str, Any]:
+    """Enumerate local GPUs for pre-start selection."""
+    try:
+        return native.list_gpus()
+    except Exception as exc:
+        return {"backend": "cpu", "gpus": [], "error": str(exc)}
+
+
 @app.put("/v1/config")
 def put_config(body: ConfigBody) -> dict[str, Any]:
     try:
@@ -278,6 +361,7 @@ def status() -> dict[str, Any]:
         "infer_port": STATE.infer_port,
         "inference_up": bool(STATE.process_pid and STATE.process_role == "master"),
         "device": kllm_config.get_device(),
+        "gpu_ids": STATE.gpu_ids,
         "rpc_bind": STATE.rpc_bind,
         "overlay": STATE.overlay,
         "wg_address": STATE.wg_address,
@@ -362,7 +446,14 @@ def start_master(body: StartBody) -> dict[str, Any]:
     if fw.get("warning"):
         STATE.netsec_warnings.append(str(fw["warning"]))
 
+    gpu_sel = _resolve_gpu_selection(body.gpu_ids)
+    STATE.gpu_ids = gpu_sel["gpu_ids"]
+
     cap = native.probe_capacity()
+    # Prefer selected VRAM sum when discrete GPUs were chosen
+    vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
+    backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
+
     STATE.members[STATE.node_id] = {
         "node_id": STATE.node_id,
         "host": lan_host,
@@ -372,8 +463,9 @@ def start_master(body: StartBody) -> dict[str, Any]:
         "role": "master",
         "total_ram_bytes": cap["total_ram_bytes"],
         "available_ram_bytes": cap["available_ram_bytes"],
-        "vram_bytes": cap["vram_bytes"],
-        "backend": cap["backend"],
+        "vram_bytes": vram,
+        "backend": backend,
+        "gpu_ids": STATE.gpu_ids,
         "last_seen": time.time(),
     }
 
@@ -386,7 +478,11 @@ def start_master(body: StartBody) -> dict[str, Any]:
 
     if _advertiser:
         _advertiser.stop()
-    _advertiser = discovery.MasterAdvertiser(f"kllm-{STATE.node_id}", STATE.control_port)
+    _advertiser = discovery.MasterAdvertiser(
+        f"kllm-{STATE.node_id}",
+        STATE.control_port,
+        join_key=STATE.join_key,
+    )
     _advertiser.start()
     return {
         "role": "master",
@@ -397,6 +493,7 @@ def start_master(body: StartBody) -> dict[str, Any]:
         "wg_address": STATE.wg_address,
         "overlay_status": STATE.overlay_status,
         "netsec_warnings": STATE.netsec_warnings,
+        "gpu_ids": STATE.gpu_ids,
     }
 
 
@@ -416,6 +513,7 @@ def stop() -> dict[str, Any]:
     _reset_netsec_state()
     STATE.role = "idle"
     STATE.master_host = None
+    STATE.gpu_ids = None
     STATE.save()
     return {"role": "idle"}
 
@@ -435,7 +533,30 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
             "WireGuard tooling not found (wg). Install WireGuard or use overlay=none",
         )
 
+    master_host = body.master_host
+    master_port = body.master_port
+    if not master_host:
+        found = discovery.browse_masters(timeout=2.5, key=body.key)
+        if not found:
+            raise HTTPException(
+                404,
+                "no matching master discovered on LAN; pass master_host or check join key",
+            )
+        if len(found) > 1:
+            hosts = ", ".join(f"{m.host}:{m.port}" for m in found)
+            raise HTTPException(
+                409,
+                f"multiple masters match join key; pass master_host ({hosts})",
+            )
+        master_host = found[0].host
+        master_port = found[0].port
+
+    gpu_sel = _resolve_gpu_selection(body.gpu_ids)
+    STATE.gpu_ids = gpu_sel["gpu_ids"]
+
     cap = native.probe_capacity()
+    vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
+    backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
     lan_host = netsec.pick_rpc_bind_host(body.rpc_bind)
     STATE.rpc_bind = lan_host
     STATE.overlay = overlay
@@ -464,14 +585,15 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
         "rpc_port": body.rpc_port,
         "total_ram_bytes": cap["total_ram_bytes"],
         "available_ram_bytes": cap["available_ram_bytes"],
-        "vram_bytes": cap["vram_bytes"],
-        "backend": cap["backend"],
+        "vram_bytes": vram,
+        "backend": backend,
+        "gpu_ids": STATE.gpu_ids,
         "wg_public_key": wg_pub,
         "wg_listen_port": netsec.WG_LISTEN_PORT,
     }
     import httpx
 
-    url = f"http://{body.master_host}:{body.master_port}/v1/register"
+    url = f"http://{master_host}:{master_port}/v1/register"
     with httpx.Client(timeout=15.0) as client:
         resp = client.post(url, json=payload, headers={"X-Kllm-Key": body.key})
         if resp.status_code == 401:
@@ -482,17 +604,19 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
     rpc_bind_host = lan_host
     if overlay == netsec.OVERLAY_WIREGUARD:
         try:
-            rpc_bind_host = _worker_bring_up_wg(body.key, body.master_host, reg)
+            rpc_bind_host = _worker_bring_up_wg(body.key, master_host, reg)
         except Exception as exc:
             raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
 
     # Start local rpc-server bound to the RPC address (LAN or WG), not 0.0.0.0 by default
     root = repo_root()
+    gpu_env = _gpu_visibility_env(backend, STATE.gpu_ids)
     try:
         launched = native.start_worker(
             host=rpc_bind_host,
             port=body.rpc_port,
             repo_root=str(root) if root else None,
+            env=gpu_env or None,
         )
         STATE.process_pid = launched["pid"]
         STATE.process_role = "worker"
@@ -502,20 +626,21 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
 
     STATE.role = "worker"
     STATE.join_key = body.key
-    STATE.master_host = body.master_host
-    STATE.master_port = body.master_port
+    STATE.master_host = master_host
+    STATE.master_port = master_port
     STATE.rpc_port = body.rpc_port
     STATE.rpc_bind = rpc_bind_host
     STATE.save()
     return {
         "role": "worker",
-        "master": body.master_host,
+        "master": master_host,
         "launch": launched,
         "rpc_bind": STATE.rpc_bind,
         "overlay": STATE.overlay,
         "wg_address": STATE.wg_address,
         "overlay_status": STATE.overlay_status,
         "netsec_warnings": STATE.netsec_warnings,
+        "gpu_ids": STATE.gpu_ids,
     }
 
 
@@ -560,6 +685,7 @@ def leave() -> dict[str, Any]:
     _reset_netsec_state()
     STATE.role = "idle"
     STATE.master_host = None
+    STATE.gpu_ids = None
     STATE.save()
     return {"role": "idle"}
 
@@ -759,6 +885,10 @@ def run(body: RunBody) -> dict[str, Any]:
     root = repo_root()
     if STATE.process_pid:
         native.stop_process(STATE.process_pid, force=True)
+    gpu_env = _gpu_visibility_env(
+        (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
+        STATE.gpu_ids,
+    )
     try:
         launched = native.start_master(
             model=str(path),
@@ -770,6 +900,7 @@ def run(body: RunBody) -> dict[str, Any]:
             rpc_servers=rpc_servers,
             repo_root=str(root) if root else None,
             port=STATE.infer_port,
+            env=gpu_env or None,
         )
     except Exception as exc:
         raise HTTPException(500, str(exc)) from exc

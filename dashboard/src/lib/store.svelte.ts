@@ -1,4 +1,4 @@
-import type { ChatMessage, ModelInfo, Status } from './types';
+import type { ChatMessage, GpuInfo, ModelInfo, Status } from './types';
 import { pushToast } from './toast';
 
 let fingerprint = '';
@@ -16,7 +16,8 @@ function fp(s: Status | null): string {
     overlay: s.overlay,
     wg_address: s.wg_address,
     overlay_status: s.overlay_status,
-    netsec_warnings: s.netsec_warnings
+    netsec_warnings: s.netsec_warnings,
+    gpu_ids: s.gpu_ids
   });
 }
 
@@ -27,9 +28,11 @@ class AppStore {
   apiToken = $state('');
   busy = $state('');
   joinKeyInput = $state('');
-  masterHost = $state('');
   rpcBindInput = $state('');
   overlay = $state<'none' | 'wireguard'>('none');
+  gpus = $state<GpuInfo[]>([]);
+  gpuBackend = $state('cpu');
+  selectedGpuIds = $state<number[]>([]);
   modelSource = $state('');
   selectedModel = $state('');
   context = $state(4096);
@@ -40,12 +43,14 @@ class AppStore {
   chatStreaming = $state(false);
   private timer: ReturnType<typeof setInterval> | null = null;
   private abort: AbortController | null = null;
+  private gpusLoaded = false;
 
   start() {
     void this.refresh();
     void this.loadToken();
     void this.loadModels();
     void this.loadConfig();
+    void this.loadGpus();
     this.timer = setInterval(() => void this.refresh(), 1000);
   }
 
@@ -108,6 +113,32 @@ class AppStore {
     }
   }
 
+  async loadGpus() {
+    try {
+      const r = await fetch('/v1/gpus');
+      if (!r.ok) return;
+      const data = await r.json();
+      this.gpuBackend = data.backend ?? 'cpu';
+      const list = (data.gpus ?? []) as GpuInfo[];
+      this.gpus = list;
+      if (!this.gpusLoaded) {
+        this.selectedGpuIds = list.map((g) => g.index);
+        this.gpusLoaded = true;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  toggleGpu(index: number) {
+    if (this.selectedGpuIds.includes(index)) {
+      if (this.selectedGpuIds.length <= 1) return;
+      this.selectedGpuIds = this.selectedGpuIds.filter((i) => i !== index);
+    } else {
+      this.selectedGpuIds = [...this.selectedGpuIds, index].sort((a, b) => a - b);
+    }
+  }
+
   async setDevice(device: 'cpu' | 'gpu') {
     this.device = device;
     this.busy = '/v1/config';
@@ -158,11 +189,13 @@ class AppStore {
   }
 
   async startMaster() {
-    await this.post('/v1/start', {
+    const body: Record<string, unknown> = {
       key: this.joinKeyInput || null,
       rpc_bind: this.rpcBindInput || null,
       overlay: this.overlay
-    });
+    };
+    if (this.gpus.length > 0) body.gpu_ids = this.selectedGpuIds;
+    await this.post('/v1/start', body);
   }
 
   async stopCluster() {
@@ -170,14 +203,15 @@ class AppStore {
   }
 
   async joinCluster() {
-    await this.post('/v1/join', {
+    const body: Record<string, unknown> = {
       key: this.joinKeyInput,
-      master_host: this.masterHost,
       master_port: 18765,
       rpc_port: 50052,
       rpc_bind: this.rpcBindInput || null,
       overlay: this.overlay
-    });
+    };
+    if (this.gpus.length > 0) body.gpu_ids = this.selectedGpuIds;
+    await this.post('/v1/join', body);
   }
 
   async leaveCluster() {

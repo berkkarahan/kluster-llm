@@ -206,12 +206,13 @@ Record the printed **join key**. Control port default **18765**.
 
 ```bash
 source .venv/bin/activate
-kllm join --key '<join-key>' [--master <master-lan-ip>]
+kllm join --key '<join-key>'
+# if mDNS fails: kllm join --key '<join-key>' --master <master-lan-ip>
 # If master used overlay:
-# kllm join --key '<join-key>' --overlay wireguard [--master <master-lan-ip>]
+# kllm join --key '<join-key>' --overlay wireguard
 ```
 
-Overlay must match master (`none` vs `wireguard`). Control plane stays on LAN; RPC may move to `10.66.87.0/24` when overlay is on.
+Join uses the join key fingerprint over mDNS to find the master; `--master` is only needed when discovery fails. Overlay must match master (`none` vs `wireguard`). Control plane stays on LAN; RPC may move to `10.66.87.0/24` when overlay is on.
 
 ### 4.3 Model + inference (master)
 
@@ -274,7 +275,8 @@ kllm status
 
 # Cluster
 kllm start
-kllm join --key KEY --master MASTER_IP
+kllm join --key KEY
+# if needed: kllm join --key KEY --master MASTER_IP
 kllm model download 'ORG/REPO:file.gguf'
 kllm model distribute file.gguf
 kllm run --model file.gguf

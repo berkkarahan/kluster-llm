@@ -121,15 +121,127 @@ def test_config_get_put_and_status_device(client):
     c, _, _ = client
     r = c.get("/v1/config")
     assert r.status_code == 200
-    assert r.json()["device"] == "gpu"
+    body = r.json()
+    assert body["device"] == "gpu"
+    assert body["vram_percent"] == 80
+    assert body["ram_percent"] == 80
+    assert body.get("gpu_ids") is None
 
-    r = c.put("/v1/config", json={"device": "cpu"})
+    r = c.put("/v1/config", json={"device": "cpu", "ram_percent": 55})
     assert r.status_code == 200
     assert r.json()["device"] == "cpu"
+    assert r.json()["ram_percent"] == 55
 
     r = c.get("/v1/status")
     assert r.status_code == 200
     assert r.json()["device"] == "cpu"
+    assert r.json()["ram_percent"] == 55
+
+    r = c.put(
+        "/v1/config",
+        json={"device": "gpu", "vram_percent": 70, "gpu_ids": [0, 1]},
+    )
+    assert r.status_code == 200
+    assert r.json()["vram_percent"] == 70
+    assert r.json()["gpu_ids"] == [0, 1]
 
     r = c.put("/v1/config", json={"device": "tpu"})
     assert r.status_code == 422
+
+
+def test_delete_model_local(client):
+    c, _, _ = client
+    import os
+
+    models = Path(os.environ["KLLM_HOME"]) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    gguf = models / "toy-del.gguf"
+    gguf.write_bytes(b"gguf")
+
+    r = c.post("/v1/models/delete", json={"name": "toy-del.gguf"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["name"] == "toy-del.gguf"
+    assert not gguf.exists()
+
+    r = c.get("/v1/models")
+    assert "toy-del.gguf" not in [m["id"] for m in r.json()["data"]]
+
+
+def test_delete_model_loaded_returns_409(client):
+    c, agent, _ = client
+    import os
+
+    models = Path(os.environ["KLLM_HOME"]) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    gguf = models / "loaded.gguf"
+    gguf.write_bytes(b"gguf")
+
+    agent.STATE.model_name = "loaded.gguf"
+    agent.STATE.process_pid = 1
+    agent.STATE.process_role = "master"
+
+    r = c.post("/v1/models/delete", json={"name": "loaded.gguf"})
+    assert r.status_code == 409
+    assert gguf.exists()
+
+
+def test_delete_model_file_worker_auth(client):
+    c, agent, _ = client
+    import os
+
+    models = Path(os.environ["KLLM_HOME"]) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    gguf = models / "worker-toy.gguf"
+    gguf.write_bytes(b"gguf")
+    agent.STATE.join_key = "secret-key"
+
+    r = c.delete("/v1/models/file", headers={"X-Kllm-Filename": "worker-toy.gguf"})
+    assert r.status_code == 401
+    assert gguf.exists()
+
+    r = c.delete(
+        "/v1/models/file",
+        headers={"X-Kllm-Key": "wrong", "X-Kllm-Filename": "worker-toy.gguf"},
+    )
+    assert r.status_code == 401
+    assert gguf.exists()
+
+    r = c.delete(
+        "/v1/models/file",
+        headers={"X-Kllm-Key": "secret-key", "X-Kllm-Filename": "worker-toy.gguf"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert not gguf.exists()
+
+
+def test_delete_model_master_fanout(client):
+    c, agent, _ = client
+    import os
+
+    models = Path(os.environ["KLLM_HOME"]) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    gguf = models / "fanout.gguf"
+    gguf.write_bytes(b"gguf")
+
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "secret-key"
+    agent.STATE.members = {
+        "w1": {
+            "node_id": "w1",
+            "role": "worker",
+            "lan_host": "127.0.0.1",
+            "control_port": 18765,
+        }
+    }
+
+    with patch("kllm.models.delete_model_on_worker", return_value={"ok": True}) as mocked:
+        r = c.post("/v1/models/delete", json={"name": "fanout.gguf"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert not gguf.exists()
+    assert len(body["results"]) == 1
+    assert body["results"][0]["ok"] is True
+    mocked.assert_called_once()

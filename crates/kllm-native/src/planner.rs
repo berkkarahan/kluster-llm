@@ -239,7 +239,7 @@ fn gpu_budget(node: &NodeCapacity, headroom: f64) -> u64 {
     if node.unified_memory || node.backend == "metal" {
         return ram;
     }
-    let vram = node.vram_bytes.unwrap_or(0);
+    let vram = ((node.vram_bytes.unwrap_or(0) as f64) * headroom) as u64;
     let spill = (node.available_ram_bytes.max(1) as f64 * (1.0 - headroom)).min(ram as f64) as u64 / 4;
     vram.saturating_add(spill)
 }
@@ -453,6 +453,23 @@ mod tests {
             plan.budgets_bytes[0],
             (32u64 * 1024 * 1024 * 1024) * 80 / 100
         );
+    }
+
+    #[test]
+    fn gpu_budget_scales_vram_by_headroom() {
+        let plan = plan_split(&req(
+            vec![node("w", 32, Some(10), false)],
+            1_000_000,
+            "gpu",
+        ))
+        .unwrap();
+        assert_eq!(plan.device_effective, "gpu");
+        let vram = 10u64 * 1024 * 1024 * 1024;
+        let ram = 32u64 * 1024 * 1024 * 1024;
+        let headroom = 0.80;
+        let spill = ((ram / 2) as f64 * (1.0 - headroom)).min((ram as f64) * headroom) as u64 / 4;
+        let expected = ((vram as f64) * headroom) as u64 + spill;
+        assert_eq!(plan.budgets_bytes[0], expected);
     }
 
     #[test]

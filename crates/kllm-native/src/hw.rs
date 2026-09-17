@@ -274,13 +274,15 @@ Get-ChildItem $base -ErrorAction SilentlyContinue | ForEach-Object {
   elseif ($null -ne $p.AdapterRAM -and [int64]$p.AdapterRAM -gt 0) { $vram = [int64]$p.AdapterRAM }
   if ($vram -gt 0) { "{0}`t{1}" -f $name, $vram }
 }
+# Registry ACL noise can leave a non-zero exit otherwise.
+exit 0
 "#;
     let output = Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()
         .ok()?;
-    // PowerShell often exits non-zero on registry ACL noise even when devices
-    // printed successfully — trust parseable stdout over exit status.
+    // Still trust parseable stdout over exit status — older hosts may ignore
+    // the trailing `exit 0` if `-Command` parsing fails partway.
     let text = String::from_utf8_lossy(&output.stdout);
     let devices = parse_wmi_gpu_lines(&text);
     if devices.is_empty() {

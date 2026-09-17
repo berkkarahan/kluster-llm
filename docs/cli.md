@@ -65,7 +65,7 @@ kllm join --key <key> --gpus 0
 
 - **Default:** all discovered GPUs (summed VRAM for planning).
 - **Interactive:** if multiple GPUs are present, `--gpus` is omitted, and stdin is a TTY, the CLI prompts for a comma-separated list (Enter = all).
-- **Dashboard:** Cluster panel checkboxes mirror the same `gpu_ids` on Start/Join.
+- **Dashboard:** Cluster and Plan & Run checkboxes share the same selection; Plan & Run also persists `gpu_ids` / percents via `PUT /v1/config`.
 - Selection sets `CUDA_VISIBLE_DEVICES` (CUDA) or `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (ROCm) when launching `llama-server` / `rpc-server`. Metal has a single logical device and needs no env remap.
 
 ## Device preference (CPU / GPU)
@@ -74,15 +74,25 @@ Default is **GPU**. Preference is stored on the master in `~/.kllm/config.toml`:
 
 ```toml
 device = "gpu"
+gpu_ids = [0, 1]      # optional; omitted = all local GPUs at Start/Join
+vram_percent = 80     # used when device = gpu (scales selected VRAM)
+ram_percent = 80      # used when device = cpu (scales total RAM)
 ```
 
 Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`.
 
-- **GPU:** VRAM-aware budgets; `-ngl` = estimated layers when at least one node can use GPU/Metal.
-- **CPU:** RAM-only budgets; `-ngl 0`.
+Memory budget for plan/run uses `vram_percent` or `ram_percent` from config (as planner `headroom`) unless the request passes an explicit `headroom` / `--vram-percent` / `--ram-percent`.
+
+- **GPU:** VRAM-aware budgets scaled by `vram_percent`; GPU multi-select via `gpu_ids` / `--gpus`; `-ngl` = estimated layers when at least one node can use GPU/Metal.
+- **CPU:** RAM-only budgets scaled by `ram_percent`; `-ngl 0` (GPU picker ignored).
 - **Fallback:** if GPU is preferred but a node has unknown/zero VRAM (and is not Metal), that node falls back to RAM/CPU silently. Plan responses include `device_requested`, `device_effective`, and per-node `node_devices`.
 
-Dashboard Plan & Run exposes the same control and persists via `PUT /v1/config`.
+Dashboard Plan & Run exposes device-gated controls (GPUs + VRAM % vs RAM %) and persists via `PUT /v1/config`.
+
+```bash
+kllm plan --model NAME --device gpu --vram-percent 70
+kllm run --model NAME --device cpu --ram-percent 50
+```
 
 ## Dashboard
 

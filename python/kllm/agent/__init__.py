@@ -190,7 +190,7 @@ def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, st
 class RunBody(BaseModel):
     model: str
     context: int = 4096
-    headroom: float = 0.80
+    headroom: float | None = None
     tensor_split: list[float] | None = None
     threads: int = 8
     micro_batch: int = 2
@@ -200,13 +200,16 @@ class RunBody(BaseModel):
 class PlanBody(BaseModel):
     model: str
     context: int = 4096
-    headroom: float = 0.80
+    headroom: float | None = None
     tensor_split: list[float] | None = None
     device: Optional[Literal["cpu", "gpu"]] = None
 
 
 class ConfigBody(BaseModel):
     device: Literal["cpu", "gpu"] = Field(default="gpu")
+    gpu_ids: list[int] | None = None
+    vram_percent: int | None = Field(default=None, ge=10, le=100)
+    ram_percent: int | None = Field(default=None, ge=10, le=100)
 
 
 class DownloadBody(BaseModel):
@@ -215,6 +218,10 @@ class DownloadBody(BaseModel):
 
 
 class DistributeBody(BaseModel):
+    name: str
+
+
+class DeleteBody(BaseModel):
     name: str
 
 
@@ -295,6 +302,43 @@ def distribute_model(body: DistributeBody) -> dict[str, Any]:
     return {"ok": True, "results": results}
 
 
+@app.post("/v1/models/delete")
+def delete_model(body: DeleteBody) -> dict[str, Any]:
+    try:
+        path = model_ops.resolve_local_model(body.name)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if (
+        STATE.model_name
+        and STATE.process_pid
+        and STATE.process_role == "master"
+        and path.name == STATE.model_name
+    ):
+        raise HTTPException(409, f"model is currently loaded: {STATE.model_name}")
+    try:
+        deleted = model_ops.delete_local_model(path.name)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(400 if isinstance(exc, ValueError) else 404, str(exc)) from exc
+
+    results: list[dict[str, Any]] = []
+    if STATE.role == "master" and STATE.join_key:
+        for m in STATE.members.values():
+            if m.get("role") != "worker":
+                continue
+            ctrl_host = m.get("lan_host") or m.get("host")
+            try:
+                result = model_ops.delete_model_on_worker(
+                    host=ctrl_host,
+                    port=m.get("control_port", STATE.control_port),
+                    join_key=STATE.join_key,
+                    filename=deleted.name,
+                )
+                results.append({"host": ctrl_host, "ok": True, "result": result})
+            except Exception as exc:
+                results.append({"host": ctrl_host, "ok": False, "error": str(exc)})
+    return {"ok": True, "name": deleted.name, "path": str(deleted), "results": results}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
@@ -334,7 +378,15 @@ def get_gpus() -> dict[str, Any]:
 @app.put("/v1/config")
 def put_config(body: ConfigBody) -> dict[str, Any]:
     try:
-        return kllm_config.save_config({"device": body.device})
+        payload: dict[str, Any] = {"device": body.device}
+        # Include gpu_ids when the client sent the field (including explicit null = all).
+        if "gpu_ids" in body.model_fields_set:
+            payload["gpu_ids"] = body.gpu_ids
+        if body.vram_percent is not None:
+            payload["vram_percent"] = body.vram_percent
+        if body.ram_percent is not None:
+            payload["ram_percent"] = body.ram_percent
+        return kllm_config.save_config(payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -346,6 +398,7 @@ def status() -> dict[str, Any]:
         capacity = native.probe_capacity()
     except Exception as exc:
         capacity = {"error": str(exc)}
+    cfg = kllm_config.load_config()
     return {
         "role": STATE.role,
         "node_id": STATE.node_id,
@@ -361,7 +414,10 @@ def status() -> dict[str, Any]:
         "rpc_port": STATE.rpc_port,
         "infer_port": STATE.infer_port,
         "inference_up": bool(STATE.process_pid and STATE.process_role == "master"),
-        "device": kllm_config.get_device(),
+        "device": cfg.get("device", kllm_config.DEFAULT_DEVICE),
+        "vram_percent": cfg.get("vram_percent"),
+        "ram_percent": cfg.get("ram_percent"),
+        "config_gpu_ids": cfg.get("gpu_ids"),
         "gpu_ids": STATE.gpu_ids,
         "rpc_bind": STATE.rpc_bind,
         "overlay": STATE.overlay,
@@ -447,7 +503,8 @@ def start_master(body: StartBody) -> dict[str, Any]:
     if fw.get("warning"):
         STATE.netsec_warnings.append(str(fw["warning"]))
 
-    gpu_sel = _resolve_gpu_selection(body.gpu_ids)
+    gpu_ids = body.gpu_ids if body.gpu_ids is not None else kllm_config.get_gpu_ids()
+    gpu_sel = _resolve_gpu_selection(gpu_ids)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
     cap = native.probe_capacity()
@@ -553,7 +610,8 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
         master_host = found[0].host
         master_port = found[0].port
 
-    gpu_sel = _resolve_gpu_selection(body.gpu_ids)
+    gpu_ids = body.gpu_ids if body.gpu_ids is not None else kllm_config.get_gpu_ids()
+    gpu_sel = _resolve_gpu_selection(gpu_ids)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
     cap = native.probe_capacity()
@@ -832,6 +890,25 @@ async def receive_model(
     return {"ok": True, "path": str(dest), "sha256": digest}
 
 
+@app.delete("/v1/models/file")
+def delete_model_file(
+    x_kllm_key: str | None = Header(default=None),
+    x_kllm_filename: str = Header(...),
+) -> dict[str, Any]:
+    """Worker endpoint: delete a received model file (authenticated with join key)."""
+    if STATE.join_key and x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid join key")
+    filename = Path(x_kllm_filename).name
+    dest = models_dir() / filename
+    if not dest.is_file():
+        raise HTTPException(404, f"model not found: {filename}")
+    try:
+        deleted = model_ops.delete_local_model(filename)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(400 if isinstance(exc, ValueError) else 404, str(exc)) from exc
+    return {"ok": True, "path": str(deleted), "name": deleted.name}
+
+
 @app.post("/v1/plan")
 def plan(body: PlanBody) -> dict[str, Any]:
     if STATE.role != "master":
@@ -852,12 +929,17 @@ def plan(body: PlanBody) -> dict[str, Any]:
     if not nodes:
         raise HTTPException(400, "no cluster members")
     device = kllm_config.resolve_device(body.device)
+    headroom = (
+        body.headroom
+        if body.headroom is not None
+        else kllm_config.resolve_memory_fraction(device)
+    )
     try:
         result = native.plan_split(
             nodes=nodes,
             model_size_bytes=path.stat().st_size,
             context=body.context,
-            headroom=body.headroom,
+            headroom=headroom,
             tensor_split=body.tensor_split,
             device=device,
         )
@@ -927,17 +1009,30 @@ def _mount_dashboard() -> None:
     if assets.is_dir():
         app.mount("/_app", StaticFiles(directory=str(assets)), name="dashboard-assets")
 
-    @app.get("/{full_path:path}")
-    async def spa_fallback(full_path: str) -> FileResponse:
+    # Accept all methods so missing API routes return 404 instead of Starlette's
+    # 405 Method Not Allowed when only a GET SPA catch-all matched the path.
+    @app.api_route(
+        "/{full_path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
+    async def spa_fallback(full_path: str, request: Request) -> FileResponse:
         # Do not shadow API — FastAPI matches more specific routes first when registered earlier.
         if full_path.startswith("v1/") or full_path in ("health",):
-            raise HTTPException(404)
+            raise HTTPException(404, "not found")
+        if request.method not in ("GET", "HEAD"):
+            raise HTTPException(404, "not found")
         candidate = dash / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
         index = dash / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            return FileResponse(
+                index,
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate",
+                    "Pragma": "no-cache",
+                },
+            )
         raise HTTPException(404, "dashboard not built — run: cd dashboard && npm run build")
 
 

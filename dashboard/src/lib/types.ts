@@ -33,6 +33,9 @@ export type Status = {
   infer_port?: number;
   inference_up?: boolean;
   device?: 'cpu' | 'gpu';
+  vram_percent?: number;
+  ram_percent?: number;
+  config_gpu_ids?: number[] | null;
   gpu_ids?: number[] | null;
   rpc_bind?: string | null;
   overlay?: 'none' | 'wireguard' | string;

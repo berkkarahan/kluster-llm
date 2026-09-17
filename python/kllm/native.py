@@ -39,6 +39,24 @@ def probe_capacity() -> dict[str, Any]:
     }
 
 
+def list_gpus() -> dict[str, Any]:
+    """Return ``{backend, gpus: [{index, name, vram_bytes}, ...]}``."""
+    if _NATIVE is None or not hasattr(_NATIVE, "list_gpus"):
+        return {"backend": "cpu", "gpus": []}
+    devices, backend = _NATIVE.list_gpus()
+    return {
+        "backend": backend,
+        "gpus": [
+            {
+                "index": int(d.index),
+                "name": str(d.name),
+                "vram_bytes": d.vram_bytes,
+            }
+            for d in devices
+        ],
+    }
+
+
 def plan_split(
     nodes: list[dict[str, Any]],
     model_size_bytes: int,
@@ -88,6 +106,8 @@ def plan_split(
 
 def start_master(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    if kwargs.get("env") is None:
+        kwargs.pop("env", None)
     result = n.start_master(kwargs)
     return {
         "pid": result.pid,
@@ -99,6 +119,8 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    if kwargs.get("env") is None:
+        kwargs.pop("env", None)
     result = n.start_worker(kwargs)
     return {
         "pid": result.pid,

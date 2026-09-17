@@ -23,8 +23,9 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 
 | Command | Description |
 |---------|-------------|
-| `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard]` | Start as master, advertise via mDNS, print join key |
-| `kllm join --key KEY [--master HOST] [--rpc-bind HOST] [--overlay none\|wireguard]` | Join as worker (auto-discover or explicit master) |
+| `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
+| `kllm join --key KEY [--master HOST] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery) |
+| `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop local session (master ends the cluster session) |
 | `kllm status` | Role, members, capacity, last plan, RPC bind / overlay |
@@ -49,6 +50,23 @@ kllm join --key <key> --overlay wireguard
 ```
 
 Requires system WireGuard (`wg` on PATH, plus `wg-quick` on Linux/macOS or WireGuard for Windows). PSK is derived from the join key; RPC moves to `10.66.87.0/24` while control-plane HTTP stays on the LAN. Dashboard Cluster panel exposes the same **RPC bind** and **Overlay** controls.
+
+Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN. Pass `--master` only when mDNS is unavailable.
+
+## GPU selection (multi-GPU hosts)
+
+Before `start` / `join`, pick which local GPUs this node contributes:
+
+```bash
+kllm gpus                    # list indices / names / VRAM
+kllm start --gpus 0,1
+kllm join --key <key> --gpus 0
+```
+
+- **Default:** all discovered GPUs (summed VRAM for planning).
+- **Interactive:** if multiple GPUs are present, `--gpus` is omitted, and stdin is a TTY, the CLI prompts for a comma-separated list (Enter = all).
+- **Dashboard:** Cluster panel checkboxes mirror the same `gpu_ids` on Start/Join.
+- Selection sets `CUDA_VISIBLE_DEVICES` (CUDA) or `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (ROCm) when launching `llama-server` / `rpc-server`. Metal has a single logical device and needs no env remap.
 
 ## Device preference (CPU / GPU)
 
@@ -111,7 +129,7 @@ kllm model download 'TheBloke/Llama-3.1-8B-Instruct-GGUF:llama-3.1-8b-instruct.Q
 
 # Machine B (worker)
 kllm join --key '<join-key>'
-# or: kllm join --key '<join-key>' --master 192.168.10.1
+# if mDNS fails: kllm join --key '<join-key>' --master 192.168.10.1
 
 # Machine A
 kllm model distribute llama-3.1-8b-instruct.Q4_K_M.gguf

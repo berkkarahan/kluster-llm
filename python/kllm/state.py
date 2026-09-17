@@ -100,6 +100,8 @@ class ClusterState:
     process_role: str | None = None
     last_plan: dict[str, Any] | None = None
     model_name: str | None = None
+    # Selected local GPU indices (None = not yet chosen / use all at next start)
+    gpu_ids: list[int] | None = None
     # RPC netsec — LAN bind by default; optional WireGuard overlay
     rpc_bind: str | None = None
     overlay: str = "none"  # none | wireguard

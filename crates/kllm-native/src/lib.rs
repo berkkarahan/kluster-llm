@@ -5,13 +5,19 @@ mod process;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use hw::CapacitySnapshot;
+use hw::{CapacitySnapshot, GpuDevice};
 use planner::{NodeCapacity, PlanRequest, PlanResult};
 use process::{LaunchConfig, LaunchResult, ProcessHandle};
 
 #[pyfunction]
 fn probe_capacity() -> PyResult<CapacitySnapshot> {
     Ok(hw::probe_capacity())
+}
+
+#[pyfunction]
+fn list_gpus() -> PyResult<(Vec<GpuDevice>, String)> {
+    let (devices, backend) = hw::list_gpus();
+    Ok((devices, backend.as_str().to_string()))
 }
 
 #[pyfunction]
@@ -63,6 +69,7 @@ fn process_alive(pid: u32) -> PyResult<bool> {
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(probe_capacity, m)?)?;
+    m.add_function(wrap_pyfunction!(list_gpus, m)?)?;
     m.add_function(wrap_pyfunction!(plan_split, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_llama_server, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_rpc_server, m)?)?;
@@ -71,6 +78,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stop_process, m)?)?;
     m.add_function(wrap_pyfunction!(process_alive, m)?)?;
     m.add_class::<CapacitySnapshot>()?;
+    m.add_class::<GpuDevice>()?;
     m.add_class::<NodeCapacity>()?;
     m.add_class::<PlanResult>()?;
     m.add_class::<LaunchResult>()?;

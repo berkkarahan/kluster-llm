@@ -1,3 +1,9 @@
+export type GpuInfo = {
+  index: number;
+  name: string;
+  vram_bytes?: number | null;
+};
+
 export type Member = {
   node_id: string;
   host: string;
@@ -8,6 +14,7 @@ export type Member = {
   available_ram_bytes?: number;
   control_port?: number;
   rpc_port?: number;
+  gpu_ids?: number[] | null;
 };
 
 export type Status = {
@@ -26,6 +33,7 @@ export type Status = {
   infer_port?: number;
   inference_up?: boolean;
   device?: 'cpu' | 'gpu';
+  gpu_ids?: number[] | null;
   rpc_bind?: string | null;
   overlay?: 'none' | 'wireguard' | string;
   wg_address?: string | null;

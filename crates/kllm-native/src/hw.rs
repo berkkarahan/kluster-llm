@@ -32,6 +32,28 @@ impl BackendHint {
 
 #[pyclass]
 #[derive(Clone, Debug)]
+pub struct GpuDevice {
+    #[pyo3(get)]
+    pub index: u32,
+    #[pyo3(get)]
+    pub name: String,
+    /// Discrete VRAM in bytes. `None` for unified memory (Metal).
+    #[pyo3(get)]
+    pub vram_bytes: Option<u64>,
+}
+
+#[pymethods]
+impl GpuDevice {
+    fn __repr__(&self) -> String {
+        format!(
+            "GpuDevice(index={}, name={:?}, vram={:?})",
+            self.index, self.name, self.vram_bytes
+        )
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Debug)]
 pub struct CapacitySnapshot {
     #[pyo3(get)]
     pub total_ram_bytes: u64,
@@ -62,7 +84,8 @@ pub fn probe_capacity() -> CapacitySnapshot {
 
     let total_ram_bytes = sys.total_memory();
     let available_ram_bytes = sys.available_memory();
-    let (vram_bytes, backend) = probe_gpu();
+    let (devices, backend) = enumerate_gpus();
+    let vram_bytes = sum_vram(&devices);
 
     CapacitySnapshot {
         total_ram_bytes,
@@ -73,34 +96,66 @@ pub fn probe_capacity() -> CapacitySnapshot {
     }
 }
 
+/// Enumerate local GPUs with index, name, and VRAM.
+pub fn list_gpus() -> (Vec<GpuDevice>, BackendHint) {
+    enumerate_gpus()
+}
+
 fn hostname() -> String {
     System::host_name().unwrap_or_else(|| "unknown".into())
 }
 
-fn probe_gpu() -> (Option<u64>, BackendHint) {
+fn sum_vram(devices: &[GpuDevice]) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut any = false;
+    for d in devices {
+        if let Some(v) = d.vram_bytes {
+            total = total.saturating_add(v);
+            any = true;
+        }
+    }
+    if any {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+fn enumerate_gpus() -> (Vec<GpuDevice>, BackendHint) {
     if cfg!(target_os = "macos") {
-        // Apple Silicon: unified memory — treat as Metal with no separate VRAM pool.
-        return (None, BackendHint::Metal);
+        return (
+            vec![GpuDevice {
+                index: 0,
+                name: "Apple GPU".into(),
+                vram_bytes: None,
+            }],
+            BackendHint::Metal,
+        );
     }
 
     // Preference: CUDA > ROCm > Vulkan. Never report two backends for one card.
-    if let Some(vram) = probe_nvidia_smi() {
-        return (Some(vram), BackendHint::Cuda);
+    if let Some(devices) = list_nvidia_gpus() {
+        if !devices.is_empty() {
+            return (devices, BackendHint::Cuda);
+        }
     }
-    if let Some(vram) = probe_rocm_smi() {
-        return (Some(vram), BackendHint::Rocm);
+    if let Some(devices) = list_rocm_gpus() {
+        if !devices.is_empty() {
+            return (devices, BackendHint::Rocm);
+        }
     }
-    if let Some(vram) = probe_windows_wmi_vram() {
-        // Windows discrete GPU without CUDA/ROCm tools → Vulkan path (AMD default).
-        return (Some(vram), BackendHint::Vulkan);
+    if let Some(devices) = list_windows_wmi_gpus() {
+        if !devices.is_empty() {
+            return (devices, BackendHint::Vulkan);
+        }
     }
-    (None, BackendHint::Cpu)
+    (Vec::new(), BackendHint::Cpu)
 }
 
-fn probe_nvidia_smi() -> Option<u64> {
+fn list_nvidia_gpus() -> Option<Vec<GpuDevice>> {
     let output = Command::new("nvidia-smi")
         .args([
-            "--query-gpu=memory.total",
+            "--query-gpu=index,name,memory.total",
             "--format=csv,noheader,nounits",
         ])
         .output()
@@ -109,13 +164,45 @@ fn probe_nvidia_smi() -> Option<u64> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let first = text.lines().next()?.trim();
-    let mb: u64 = first.parse().ok()?;
-    Some(mb * 1024 * 1024)
+    let devices = parse_nvidia_smi_csv(&text);
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
+    }
 }
 
-/// Probe AMD ROCm VRAM via `rocm-smi` (Linux; skipped when unavailable).
-fn probe_rocm_smi() -> Option<u64> {
+/// Parse `nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits`.
+pub fn parse_nvidia_smi_csv(text: &str) -> Vec<GpuDevice> {
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // index, name (may contain commas), memory_mb — split index then rsplit memory.
+        let Some((index_s, rest)) = line.split_once(',') else {
+            continue;
+        };
+        let Some((name, mem_s)) = rest.rsplit_once(',') else {
+            continue;
+        };
+        let Ok(index) = index_s.trim().parse::<u32>() else {
+            continue;
+        };
+        let Ok(mb) = mem_s.trim().parse::<u64>() else {
+            continue;
+        };
+        devices.push(GpuDevice {
+            index,
+            name: name.trim().to_string(),
+            vram_bytes: Some(mb * 1024 * 1024),
+        });
+    }
+    devices
+}
+
+fn list_rocm_gpus() -> Option<Vec<GpuDevice>> {
     let output = Command::new("rocm-smi")
         .args(["--showmeminfo", "vram", "--csv"])
         .output()
@@ -123,36 +210,58 @@ fn probe_rocm_smi() -> Option<u64> {
     if !output.status.success() {
         return None;
     }
-    parse_rocm_smi_vram_csv(&String::from_utf8_lossy(&output.stdout))
+    let devices = parse_rocm_smi_devices(&String::from_utf8_lossy(&output.stdout));
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
+    }
 }
 
-/// Parse `rocm-smi --showmeminfo vram --csv` and return the largest total VRAM in bytes.
-fn parse_rocm_smi_vram_csv(text: &str) -> Option<u64> {
-    let mut best: Option<u64> = None;
-    for line in text.lines().skip(1) {
+/// Parse `rocm-smi --showmeminfo vram --csv` into per-card devices.
+pub fn parse_rocm_smi_devices(text: &str) -> Vec<GpuDevice> {
+    let mut devices = Vec::new();
+    for (i, line) in text.lines().skip(1).enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         // Typical: card0,<total_bytes>,<used_bytes>
         let mut parts = line.split(',');
-        let _device = parts.next()?;
-        let total: u64 = parts.next()?.trim().parse().ok()?;
-        if total == 0 {
-            continue;
-        }
-        best = Some(best.map_or(total, |b| b.max(total)));
+        let device_name = parts.next().unwrap_or("").trim();
+        let total: u64 = match parts.next().and_then(|s| s.trim().parse().ok()) {
+            Some(t) if t > 0 => t,
+            _ => continue,
+        };
+        let index = device_name
+            .strip_prefix("card")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(i as u32);
+        devices.push(GpuDevice {
+            index,
+            name: if device_name.is_empty() {
+                format!("AMD GPU {index}")
+            } else {
+                device_name.to_string()
+            },
+            vram_bytes: Some(total),
+        });
     }
-    best
+    devices
+}
+
+/// Sum of VRAM across devices (for capacity); None if no discrete VRAM.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn parse_rocm_smi_vram_csv(text: &str) -> Option<u64> {
+    sum_vram(&parse_rocm_smi_devices(text))
 }
 
 #[cfg(target_os = "windows")]
-fn probe_windows_wmi_vram() -> Option<u64> {
+fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
     let script = r#"
 Get-CimInstance Win32_VideoController |
   Where-Object { $_.AdapterRAM -and $_.AdapterRAM -gt 0 } |
-  Sort-Object AdapterRAM -Descending |
-  Select-Object -First 1 -ExpandProperty AdapterRAM
+  ForEach-Object { "{0}`t{1}" -f $_.Name, $_.AdapterRAM }
 "#;
     let output = Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
@@ -162,18 +271,46 @@ Get-CimInstance Win32_VideoController |
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().next()?.trim();
-    // AdapterRAM is often a signed i32 overflow for >2GB cards; treat carefully.
-    let raw: i64 = line.parse().ok()?;
-    if raw <= 0 {
-        return None;
+    let devices = parse_wmi_gpu_lines(&text);
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
     }
-    Some(raw as u64)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn probe_windows_wmi_vram() -> Option<u64> {
+fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
     None
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn parse_wmi_gpu_lines(text: &str) -> Vec<GpuDevice> {
+    let mut devices = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (name, ram_s) = match line.split_once('\t') {
+            Some(p) => p,
+            None => continue,
+        };
+        // AdapterRAM is often a signed i32 overflow for >2GB cards; treat carefully.
+        let raw: i64 = match ram_s.trim().parse() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if raw <= 0 {
+            continue;
+        }
+        devices.push(GpuDevice {
+            index: i as u32,
+            name: name.trim().to_string(),
+            vram_bytes: Some(raw as u64),
+        });
+    }
+    devices
 }
 
 #[cfg(test)]
@@ -188,18 +325,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_rocm_smi_csv_picks_largest() {
+    fn parse_rocm_smi_csv_sums_all() {
         let sample = "\
 device,VRAM Total Memory (B),VRAM Total Used Memory (B)
 card0,8589934592,0
 card1,17179869184,1024
 ";
-        assert_eq!(parse_rocm_smi_vram_csv(sample), Some(17179869184));
+        assert_eq!(parse_rocm_smi_vram_csv(sample), Some(8589934592 + 17179869184));
+        let devices = parse_rocm_smi_devices(sample);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].index, 0);
+        assert_eq!(devices[1].index, 1);
+        assert_eq!(devices[1].vram_bytes, Some(17179869184));
     }
 
     #[test]
     fn parse_rocm_smi_csv_empty() {
         assert_eq!(parse_rocm_smi_vram_csv("device,total,used\n"), None);
+    }
+
+    #[test]
+    fn parse_nvidia_smi_multi() {
+        let sample = "\
+0, NVIDIA GeForce RTX 4090, 24564
+1, NVIDIA GeForce RTX 3090, 24576
+";
+        let devices = parse_nvidia_smi_csv(sample);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].index, 0);
+        assert_eq!(devices[0].name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(devices[0].vram_bytes, Some(24564 * 1024 * 1024));
+        assert_eq!(devices[1].index, 1);
+        assert_eq!(sum_vram(&devices), Some((24564 + 24576) * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_wmi_lines() {
+        let sample = "AMD Radeon RX 7900 XTX\t25769803776\nIntel UHD\t1073741824\n";
+        let devices = parse_wmi_gpu_lines(sample);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].index, 0);
+        assert_eq!(devices[0].vram_bytes, Some(25769803776));
     }
 
     #[test]

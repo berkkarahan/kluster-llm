@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from kllm import discovery, models as model_ops
+from kllm import models as model_ops
 from kllm.connect import AGENTS, build_launch_plan, print_plan, run_plan
 from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, home_dir
 
@@ -60,6 +60,76 @@ def _client(port: int = DEFAULT_CONTROL_PORT) -> httpx.Client:
     return httpx.Client(base_url=_agent_base(port), timeout=120.0)
 
 
+def parse_gpu_ids(value: str | None) -> list[int] | None:
+    """Parse ``--gpus 0,1`` into a list of ints. ``None`` means unspecified."""
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        raise typer.BadParameter("expected comma-separated GPU indices, e.g. 0,1")
+    ids: list[int] = []
+    seen: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            idx = int(part)
+        except ValueError as exc:
+            raise typer.BadParameter(f"invalid GPU index {part!r}") from exc
+        if idx < 0:
+            raise typer.BadParameter(f"GPU index must be >= 0, got {idx}")
+        if idx not in seen:
+            seen.add(idx)
+            ids.append(idx)
+    if not ids:
+        raise typer.BadParameter("expected comma-separated GPU indices, e.g. 0,1")
+    return ids
+
+
+def _fmt_vram(vram_bytes: int | None) -> str:
+    if vram_bytes is None:
+        return "—"
+    return f"{vram_bytes / 1e9:.1f} GB"
+
+
+def _prompt_gpu_ids(gpus: list[dict], backend: str) -> list[int] | None:
+    """Interactive multi-select when multiple GPUs and stdin is a TTY.
+
+    Returns None to mean \"all\" (omit from payload).
+    """
+    if len(gpus) <= 1 or not sys.stdin.isatty():
+        return None
+    console.print(f"[bold]Select GPUs[/bold] (backend={backend})")
+    for g in gpus:
+        console.print(
+            f"  [{g['index']}] {g.get('name', 'GPU')}  {_fmt_vram(g.get('vram_bytes'))}"
+        )
+    default = ",".join(str(g["index"]) for g in gpus)
+    raw = typer.prompt(
+        "GPU indices (comma-separated, Enter = all)",
+        default=default,
+        show_default=True,
+    )
+    return parse_gpu_ids(raw)
+
+
+def _resolve_cli_gpus(client: httpx.Client, gpus_flag: str | None) -> list[int] | None:
+    """Resolve --gpus / interactive pick; None = let agent default to all."""
+    explicit = parse_gpu_ids(gpus_flag)
+    if explicit is not None:
+        return explicit
+    try:
+        r = client.get("/v1/gpus")
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return None
+    gpus = data.get("gpus") or []
+    backend = data.get("backend") or "cpu"
+    return _prompt_gpu_ids(gpus, backend)
+
+
 @app.command()
 def start(
     key: Optional[str] = typer.Option(None, "--key", help="Cluster join key (auto-generated if omitted)"),
@@ -70,13 +140,22 @@ def start(
     overlay: str = typer.Option(
         "none", "--overlay", help="RPC overlay: none | wireguard (join-key gated WireGuard mesh)"
     ),
+    gpus: Optional[str] = typer.Option(
+        None, "--gpus", help="Comma-separated GPU indices to use (default: all / interactive)"
+    ),
 ) -> None:
     """Become cluster master and advertise on the LAN."""
     with _client(port) as c:
-        r = c.post(
-            "/v1/start",
-            json={"key": key, "control_port": port, "rpc_bind": rpc_bind, "overlay": overlay},
-        )
+        gpu_ids = _resolve_cli_gpus(c, gpus)
+        payload: dict = {
+            "key": key,
+            "control_port": port,
+            "rpc_bind": rpc_bind,
+            "overlay": overlay,
+        }
+        if gpu_ids is not None:
+            payload["gpu_ids"] = gpu_ids
+        r = c.post("/v1/start", json=payload)
         if r.status_code >= 400:
             console.print(f"[red]{r.text}[/red]")
             raise typer.Exit(1)
@@ -84,6 +163,8 @@ def start(
     console.print(f"[green]Master started[/green] node={data['node_id']}")
     console.print(f"Join key: [bold]{data['join_key']}[/bold]")
     console.print(f"RPC bind: {data.get('rpc_bind')}  overlay={data.get('overlay')}")
+    if data.get("gpu_ids") is not None:
+        console.print(f"GPUs: {data.get('gpu_ids')}")
     if data.get("wg_address"):
         console.print(f"WireGuard: {data.get('wg_address')} ({data.get('overlay_status')})")
     for w in data.get("netsec_warnings") or []:
@@ -103,7 +184,9 @@ def stop(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
 @app.command()
 def join(
     key: Optional[str] = typer.Option(None, "--key", help="Cluster join key"),
-    master: Optional[str] = typer.Option(None, "--master", help="Master host (skip discovery)"),
+    master: Optional[str] = typer.Option(
+        None, "--master", help="Master host (skip key-based mDNS discovery)"
+    ),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
     rpc_port: int = typer.Option(50052, "--rpc-port"),
     rpc_bind: Optional[str] = typer.Option(
@@ -112,39 +195,32 @@ def join(
     overlay: str = typer.Option(
         "none", "--overlay", help="RPC overlay: none | wireguard (must match master when using WG)"
     ),
+    gpus: Optional[str] = typer.Option(
+        None, "--gpus", help="Comma-separated GPU indices to use (default: all / interactive)"
+    ),
 ) -> None:
-    """Discover or target a master and join as worker."""
+    """Join as worker using the join key (mDNS discovery) or an explicit --master."""
     if not key:
         console.print("[red]--key is required[/red]")
         raise typer.Exit(2)
-    master_host = master
-    master_port = port
-    if not master_host:
-        console.print("[dim]Browsing LAN for masters…[/dim]")
-        found = discovery.browse_masters(timeout=2.5)
-        if not found:
-            console.print("[red]No masters discovered. Pass --master HOST[/red]")
-            raise typer.Exit(1)
-        if len(found) > 1 and not master:
-            console.print("Multiple masters found; specify --master:")
-            for m in found:
-                console.print(f"  {m.host}:{m.port} ({m.name})")
-            raise typer.Exit(2)
-        master_host = found[0].host
-        master_port = found[0].port
+
+    payload: dict = {
+        "key": key,
+        "master_port": port,
+        "rpc_port": rpc_port,
+        "rpc_bind": rpc_bind,
+        "overlay": overlay,
+    }
+    if master:
+        payload["master_host"] = master
+    else:
+        console.print("[dim]Discovering master via join key…[/dim]")
 
     with _client(port) as c:
-        r = c.post(
-            "/v1/join",
-            json={
-                "key": key,
-                "master_host": master_host,
-                "master_port": master_port,
-                "rpc_port": rpc_port,
-                "rpc_bind": rpc_bind,
-                "overlay": overlay,
-            },
-        )
+        gpu_ids = _resolve_cli_gpus(c, gpus)
+        if gpu_ids is not None:
+            payload["gpu_ids"] = gpu_ids
+        r = c.post("/v1/join", json=payload)
         if r.status_code == 401:
             console.print("[red]Invalid join key[/red]")
             raise typer.Exit(1)
@@ -154,12 +230,38 @@ def join(
         data = r.json()
     console.print(f"[green]Joined[/green] master={data['master']}")
     console.print(f"RPC bind: {data.get('rpc_bind')}  overlay={data.get('overlay')}")
+    if data.get("gpu_ids") is not None:
+        console.print(f"GPUs: {data.get('gpu_ids')}")
     if data.get("wg_address"):
         console.print(f"WireGuard: {data.get('wg_address')} ({data.get('overlay_status')})")
     for w in data.get("netsec_warnings") or []:
         console.print(f"[yellow]netsec:[/yellow] {w}")
     if data.get("launch", {}).get("error"):
         console.print(f"[yellow]RPC launch warning:[/yellow] {data['launch']['error']}")
+
+
+@app.command()
+def gpus(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
+    """List local GPUs available for --gpus / dashboard selection."""
+    with _client(port) as c:
+        r = c.get("/v1/gpus")
+        if r.status_code >= 400:
+            console.print(f"[red]{r.text}[/red]")
+            raise typer.Exit(1)
+        data = r.json()
+    backend = data.get("backend") or "cpu"
+    rows = data.get("gpus") or []
+    console.print(f"backend={backend}")
+    if not rows:
+        console.print("[dim]No GPUs detected[/dim]")
+        return
+    table = Table(title="Local GPUs")
+    table.add_column("index")
+    table.add_column("name")
+    table.add_column("vram")
+    for g in rows:
+        table.add_row(str(g.get("index")), str(g.get("name")), _fmt_vram(g.get("vram_bytes")))
+    console.print(table)
 
 
 @app.command()
@@ -193,6 +295,7 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         "overlay",
         "wg_address",
         "overlay_status",
+        "gpu_ids",
     ):
         table.add_row(k, str(data.get(k)))
     console.print(table)
@@ -211,6 +314,7 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         mt.add_column("host")
         mt.add_column("role")
         mt.add_column("backend")
+        mt.add_column("gpus")
         mt.add_column("vram")
         for m in members.values():
             mt.add_row(
@@ -218,6 +322,7 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
                 str(m.get("host")),
                 str(m.get("role")),
                 str(m.get("backend")),
+                str(m.get("gpu_ids") or "—"),
                 str(m.get("vram_bytes")),
             )
         console.print(mt)

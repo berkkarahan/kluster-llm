@@ -76,3 +76,120 @@ def test_generate_join_key_unique():
     b = generate_join_key()
     assert a != b
     assert len(a) >= 8
+
+
+def test_discover_includes_key_id(client, monkeypatch):
+    c, agent = client
+    from kllm.discovery import DiscoveredMaster, join_key_id
+
+    kid = join_key_id("cluster-secret")
+
+    def fake_browse(timeout: float = 2.0, key: str | None = None):
+        masters = [
+            DiscoveredMaster(name="kllm-a", host="192.168.1.10", port=18765, key_id=kid),
+            DiscoveredMaster(name="kllm-b", host="192.168.1.11", port=18765, key_id="ffffffffffff0000"),
+        ]
+        if key is not None:
+            want = join_key_id(key)
+            masters = [m for m in masters if m.key_id == want]
+        return masters
+
+    monkeypatch.setattr(agent.discovery, "browse_masters", fake_browse)
+    r = c.get("/v1/discover")
+    assert r.status_code == 200
+    masters = r.json()["masters"]
+    assert len(masters) == 2
+    assert masters[0]["key_id"] == kid
+
+    r2 = c.get("/v1/discover", params={"key": "cluster-secret"})
+    assert r2.status_code == 200
+    assert len(r2.json()["masters"]) == 1
+    assert r2.json()["masters"][0]["host"] == "192.168.1.10"
+
+
+def test_join_discovers_master_by_key(client, monkeypatch):
+    c, agent = client
+    from unittest.mock import patch
+
+    from kllm.discovery import DiscoveredMaster, join_key_id
+
+    kid = join_key_id("secret")
+
+    def fake_browse(timeout: float = 2.0, key: str | None = None):
+        masters = [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
+        if key is not None:
+            want = join_key_id(key)
+            masters = [m for m in masters if m.key_id == want]
+        return masters
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "members": 2}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, *a, **k):
+            assert "192.168.10.1:18765" in url
+            return FakeResp()
+
+    monkeypatch.setattr(agent.discovery, "browse_masters", fake_browse)
+    with (
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="192.168.10.2"),
+        patch.object(agent.netsec, "ensure_rpc_firewall", return_value={"ok": True, "applied": False, "warning": None}),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 8,
+                "available_ram_bytes": 4,
+                "vram_bytes": 1,
+                "backend": "vulkan",
+            },
+        ),
+        patch.object(agent.native, "start_worker", return_value={"pid": 99}),
+        patch("httpx.Client", FakeClient),
+    ):
+        r = c.post("/v1/join", json={"key": "secret", "overlay": "none"})
+    assert r.status_code == 200
+    assert r.json()["master"] == "192.168.10.1"
+    assert agent.STATE.master_host == "192.168.10.1"
+
+
+def test_join_no_matching_master_returns_404(client, monkeypatch):
+    c, agent = client
+
+    monkeypatch.setattr(agent.discovery, "browse_masters", lambda timeout=2.0, key=None: [])
+    r = c.post("/v1/join", json={"key": "missing", "overlay": "none"})
+    assert r.status_code == 404
+    assert "no matching master" in r.text.lower() or "no matching master" in r.json()["detail"].lower()
+
+
+def test_join_multiple_matching_masters_returns_409(client, monkeypatch):
+    c, agent = client
+    from kllm.discovery import DiscoveredMaster, join_key_id
+
+    kid = join_key_id("dup-key")
+
+    def fake_browse(timeout: float = 2.0, key: str | None = None):
+        return [
+            DiscoveredMaster(name="a", host="10.0.0.1", port=18765, key_id=kid),
+            DiscoveredMaster(name="b", host="10.0.0.2", port=18765, key_id=kid),
+        ]
+
+    monkeypatch.setattr(agent.discovery, "browse_masters", fake_browse)
+    r = c.post("/v1/join", json={"key": "dup-key", "overlay": "none"})
+    assert r.status_code == 409
+    assert "multiple masters" in r.json()["detail"].lower()

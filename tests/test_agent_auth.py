@@ -67,6 +67,10 @@ def test_join_key_accepts_good_key(client):
     )
     assert r.status_code == 200
     assert "w1" in agent.STATE.members
+    body = r.json()
+    assert body["ok"] is True
+    assert isinstance(body["members"], int)
+    assert "w1" in body.get("cluster_members", {})
 
 
 def test_generate_join_key_unique():
@@ -129,7 +133,17 @@ def test_join_discovers_master_by_key(client, monkeypatch):
             return None
 
         def json(self):
-            return {"ok": True, "members": 2}
+            return {
+                "ok": True,
+                "members": 2,
+                "cluster_members": {
+                    "kllm-m": {"node_id": "kllm-m", "host": "192.168.10.1", "role": "master"},
+                    "testnode": {"node_id": "testnode", "host": "192.168.10.2", "role": "worker"},
+                },
+                "last_plan": None,
+                "apply_error": None,
+                "apply_warning": None,
+            }
 
     class FakeClient:
         def __init__(self, *a, **k):

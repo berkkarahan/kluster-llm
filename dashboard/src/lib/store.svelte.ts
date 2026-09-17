@@ -1,4 +1,4 @@
-import type { ChatMessage, GpuInfo, ModelInfo, Status } from './types';
+import type { ChatMessage, ClusterView, GpuInfo, ModelInfo, Status } from './types';
 import { pushToast } from './toast';
 
 let fingerprint = '';
@@ -17,13 +17,16 @@ function fp(s: Status | null): string {
     wg_address: s.wg_address,
     overlay_status: s.overlay_status,
     netsec_warnings: s.netsec_warnings,
-    gpu_ids: s.gpu_ids
+    gpu_ids: s.gpu_ids,
+    apply_error: s.apply_error,
+    apply_warning: s.apply_warning
   });
 }
 
 class AppStore {
   status = $state<Status | null>(null);
   connected = $state(false);
+  statusSeen = $state(false);
   models = $state<ModelInfo[]>([]);
   apiToken = $state('');
   busy = $state('');
@@ -36,6 +39,26 @@ class AppStore {
   modelSource = $state('');
   selectedModel = $state('');
   context = $state(4096);
+  contextAuto = $state(false);
+  cacheTypeK = $state('q8_0');
+  cacheTypeV = $state('q8_0');
+  parallelSlots = $state<number | 'auto'>('auto');
+  batchSize = $state<number | 'auto'>('auto');
+  microBatch = $state<number | 'auto'>('auto');
+  speculative = $state('auto');
+  draftModel = $state('');
+  vision = $state(false);
+  mmproj = $state('');
+  chatTemplate = $state('default');
+  chatTemplateText = $state('');
+  mmapMlock = $state<'auto' | 'mmap' | 'mlock' | 'mmap+mlock' | 'none'>('auto');
+  checkpoints = $state<number | 'auto'>('auto');
+  cacheRam = $state<number | 'auto'>('auto');
+  threads = $state(8);
+  extraArgsText = $state('');
+  remember = $state(true);
+  advancedOpen = $state(false);
+  fieldErrors = $state<Record<string, string>>({});
   device = $state<'cpu' | 'gpu'>('gpu');
   vramPercent = $state(80);
   ramPercent = $state(80);
@@ -48,6 +71,16 @@ class AppStore {
   private gpusLoaded = false;
   private configGpuIds: number[] | null = null;
   private selectionHydrated = false;
+  private lastApplyError: string | null = null;
+  private lastApplyWarning: string | null = null;
+
+  viewState(): ClusterView {
+    if (!this.statusSeen) return 'loading';
+    if (!this.connected) return 'offline';
+    const role = this.status?.role;
+    if (role === 'master' || role === 'worker') return 'live';
+    return 'idle';
+  }
 
   start() {
     void this.refresh();
@@ -68,18 +101,29 @@ class AppStore {
       const r = await fetch('/v1/status');
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = (await r.json()) as Status;
+      this.statusSeen = true;
+      this.status = data;
+      this.connected = true;
+      const live = data.role === 'master' || data.role === 'worker';
+      if (live) {
+        if (data.join_key) this.joinKeyInput = data.join_key;
+        if (data.rpc_bind) this.rpcBindInput = data.rpc_bind;
+        if (data.overlay === 'none' || data.overlay === 'wireguard') this.overlay = data.overlay;
+      }
       const next = fp(data);
       if (next !== fingerprint) {
         fingerprint = next;
-        this.status = data;
         if (data.model_name && !this.selectedModel) this.selectedModel = data.model_name;
-        if (data.join_key && !this.joinKeyInput) this.joinKeyInput = data.join_key;
-        // One-time hydrate only — do not fight user checkbox toggles on every poll.
+        if (data.last_plan) this.planResult = data.last_plan as Record<string, unknown>;
+        else if (data.role === 'idle') this.planResult = null;
+        const err = data.apply_error ?? null;
+        const warn = data.apply_warning ?? null;
+        if (err && err !== this.lastApplyError) pushToast('danger', err);
+        if (warn && warn !== this.lastApplyWarning) pushToast('warn', warn);
+        this.lastApplyError = err;
+        this.lastApplyWarning = warn;
         if (!this.selectionHydrated) this.hydrateGpuSelection();
-      } else if (!this.status) {
-        this.status = data;
       }
-      this.connected = true;
     } catch {
       this.connected = false;
     }
@@ -102,10 +146,129 @@ class AppStore {
       if (!r.ok) return;
       const data = await r.json();
       this.models = data.data ?? [];
-      if (!this.selectedModel && this.models[0]) this.selectedModel = this.models[0].id;
+      if (!this.selectedModel && this.models[0]) {
+        await this.selectModel(this.models[0].id);
+      }
     } catch {
       /* ignore */
     }
+  }
+
+  applyParameterSet(ps: Record<string, unknown>) {
+    if (typeof ps.context === 'number') this.context = ps.context;
+    if (typeof ps.context_auto === 'boolean') this.contextAuto = ps.context_auto;
+    if (typeof ps.cache_type_k === 'string') this.cacheTypeK = ps.cache_type_k;
+    if (typeof ps.cache_type_v === 'string') this.cacheTypeV = ps.cache_type_v;
+    if (ps.parallel_slots === 'auto' || typeof ps.parallel_slots === 'number')
+      this.parallelSlots = ps.parallel_slots as number | 'auto';
+    if (ps.batch_size === 'auto' || typeof ps.batch_size === 'number')
+      this.batchSize = ps.batch_size as number | 'auto';
+    if (ps.micro_batch === 'auto' || typeof ps.micro_batch === 'number')
+      this.microBatch = ps.micro_batch as number | 'auto';
+    if (typeof ps.speculative === 'string') this.speculative = ps.speculative;
+    if (typeof ps.draft_model === 'string') this.draftModel = ps.draft_model;
+    if (typeof ps.vision === 'boolean') this.vision = ps.vision;
+    if (typeof ps.mmproj === 'string') this.mmproj = ps.mmproj ?? '';
+    if (typeof ps.chat_template === 'string') this.chatTemplate = ps.chat_template;
+    if (typeof ps.chat_template_text === 'string') this.chatTemplateText = ps.chat_template_text;
+    if (typeof ps.mmap_mlock === 'string') this.mmapMlock = ps.mmap_mlock as typeof this.mmapMlock;
+    if (ps.checkpoints === 'auto' || typeof ps.checkpoints === 'number')
+      this.checkpoints = ps.checkpoints as number | 'auto';
+    if (ps.cache_ram === 'auto' || typeof ps.cache_ram === 'number')
+      this.cacheRam = ps.cache_ram as number | 'auto';
+    if (typeof ps.threads === 'number') this.threads = ps.threads;
+    if (Array.isArray(ps.extra_args)) this.extraArgsText = (ps.extra_args as string[]).join(' ');
+    if (typeof ps.remember === 'boolean') this.remember = ps.remember;
+    if (typeof ps.advanced_open === 'boolean') this.advancedOpen = ps.advanced_open;
+    if (ps.device === 'cpu' || ps.device === 'gpu') this.device = ps.device;
+  }
+
+  async selectModel(id: string) {
+    this.selectedModel = id;
+    try {
+      const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.parameter_set) this.applyParameterSet(data.parameter_set);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  resetRunSettings() {
+    this.context = 4096;
+    this.contextAuto = false;
+    this.cacheTypeK = 'q8_0';
+    this.cacheTypeV = 'q8_0';
+    this.parallelSlots = 'auto';
+    this.batchSize = 'auto';
+    this.microBatch = 'auto';
+    this.speculative = 'auto';
+    this.draftModel = '';
+    this.vision = false;
+    this.mmproj = '';
+    this.chatTemplate = 'default';
+    this.chatTemplateText = '';
+    this.mmapMlock = 'auto';
+    this.checkpoints = 'auto';
+    this.cacheRam = 'auto';
+    this.threads = 8;
+    this.extraArgsText = '';
+    this.advancedOpen = false;
+    this.fieldErrors = {};
+    this.planResult = null;
+  }
+
+  planRunBlockedReason(): string | null {
+    if (!this.models.length) return 'Add a local model before planning or running.';
+    if (this.status?.role !== 'master') return 'Start as cluster master before Plan & Run.';
+    const members = this.status?.members ?? {};
+    if (Object.keys(members).length === 0) return 'Register at least one cluster member.';
+    return null;
+  }
+
+  validateRunSettings(): boolean {
+    const err: Record<string, string> = {};
+    if (!this.contextAuto && this.context < 512) err.context = 'Context must be at least 512 when Auto is off.';
+    if (this.threads < 1) err.threads = 'Threads must be at least 1.';
+    if (this.vramPercent < 10 || this.vramPercent > 100) err.vramPercent = 'GPU memory % must be 10–100.';
+    if (this.ramPercent < 10 || this.ramPercent > 100) err.ramPercent = 'RAM % must be 10–100.';
+    this.fieldErrors = err;
+    return Object.keys(err).length === 0;
+  }
+
+  planPayload() {
+    const extra = this.extraArgsText
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const body: Record<string, unknown> = {
+      model: this.selectedModel,
+      context: this.context,
+      context_auto: this.contextAuto,
+      cache_type_k: this.cacheTypeK,
+      cache_type_v: this.cacheTypeV,
+      speculative: this.speculative,
+      draft_model: this.draftModel || null,
+      parallel_slots: this.parallelSlots,
+      batch_size: this.batchSize,
+      micro_batch: this.microBatch,
+      vision: this.vision,
+      mmproj: this.mmproj || null,
+      device: this.device,
+      vram_percent: this.device === 'gpu' ? this.vramPercent : undefined,
+      ram_percent: this.device === 'cpu' ? this.ramPercent : undefined,
+      chat_template: this.chatTemplate,
+      chat_template_text: this.chatTemplateText || null,
+      mmap_mlock: this.mmapMlock,
+      checkpoints: this.checkpoints,
+      cache_ram: this.cacheRam,
+      threads: this.threads,
+      extra_args: extra,
+      remember: this.remember,
+      advanced_open: this.advancedOpen
+    };
+    return body;
   }
 
   async loadConfig() {
@@ -219,7 +382,12 @@ class AppStore {
   }
 
   async setDevice(device: 'cpu' | 'gpu') {
-    await this.saveConfig({ device });
+    // Do not silently apply the opposing budget field when toggling GPU↔CPU.
+    if (device === 'gpu') {
+      await this.saveConfig({ device, vram_percent: this.vramPercent });
+    } else {
+      await this.saveConfig({ device, ram_percent: this.ramPercent });
+    }
   }
 
   async setVramPercent(value: number) {
@@ -321,21 +489,23 @@ class AppStore {
   }
 
   async plan() {
-    if (!this.selectedModel) return;
-    this.planResult = (await this.post('/v1/plan', {
-      model: this.selectedModel,
-      context: this.context,
-      device: this.device
-    })) as Record<string, unknown>;
+    if (this.planRunBlockedReason()) return;
+    if (!this.validateRunSettings()) return;
+    this.planResult = (await this.post('/v1/plan', this.planPayload())) as Record<string, unknown>;
   }
 
   async run() {
-    if (!this.selectedModel) return;
-    await this.post('/v1/run', {
-      model: this.selectedModel,
-      context: this.context,
-      device: this.device
-    });
+    if (this.planRunBlockedReason()) return;
+    if (!this.validateRunSettings()) return;
+    if (this.planResult?.fit_status === 'overflow') {
+      pushToast('danger', String(this.planResult.hint ?? 'overflow — adjust context and re-plan'));
+      return;
+    }
+    const data = (await this.post('/v1/run', this.planPayload())) as Record<string, unknown>;
+    const plan = (data.plan ?? {}) as Record<string, unknown>;
+    if (plan.fit_status === 'tight' || data.warning) {
+      pushToast('warn', String(data.warning ?? plan.hint ?? 'tight fit'));
+    }
   }
 
   stopChat() {

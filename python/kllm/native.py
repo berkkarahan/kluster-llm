@@ -64,12 +64,14 @@ def plan_split(
     headroom: float = 0.80,
     tensor_split: list[float] | None = None,
     device: str = "gpu",
+    context_auto: bool = False,
 ) -> dict[str, Any]:
     n = require_native()
     req: dict[str, Any] = {
         "nodes": nodes,
         "model_size_bytes": model_size_bytes,
         "context": context,
+        "context_auto": context_auto,
         "headroom": headroom,
         "device": device,
     }
@@ -101,6 +103,11 @@ def plan_split(
         "device_requested": plan.device_requested,
         "device_effective": plan.device_effective,
         "node_devices": node_devices,
+        "fit_status": plan.fit_status,
+        "estimated_bytes": plan.estimated_bytes,
+        "budget_bytes": plan.budget_bytes,
+        "hint": plan.hint,
+        "context_effective": plan.context_effective,
     }
 
 

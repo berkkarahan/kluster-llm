@@ -28,15 +28,17 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
-| `kllm status` | Role, members, capacity, last plan, RPC bind / overlay |
+| `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm model download <URL\|org/repo:file.gguf>` | Master downloads into `~/.kllm/models/` |
 | `kllm model distribute <name>` | Master pushes GGUF to all workers (SHA-256 verified) |
-| `kllm plan --model NAME [--device cpu\|gpu]` | Dry-run capacity-aware `--tensor-split` |
-| `kllm run --model NAME [--device cpu\|gpu]` | Plan + launch `llama-server` with `--rpc` workers |
+| `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`) |
+| `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` with mapped flags + `--rpc` workers |
 | `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
 | `kllm connect <agent>` | Launch Claude/OpenCode/Codex/… with kllm API baked in |
 
-Control plane default port: **18765**. Worker RPC default: **50052**. Inference HTTP: **8080** (also proxied on the control port as OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`).
+Control plane default port: **18765**. Worker RPC default: **50052** (LAN-only; do not expose on the public internet). Inference HTTP: **8080** (also proxied on the control port as OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`).
+
+`kllm status` prints the same member map the dashboard Home topology uses on that node (`node_id`, `host`, `role`, capacity). When a shrink replan cannot apply (overflow) or applied with a tight fit, `apply_error` / `apply_warning` are printed; a non-zero exit is not required because the cluster is still up. RPC port **50052** stays on the private bind / overlay and is never published as a public service.
 
 ### RPC bind and optional WireGuard
 
@@ -93,6 +95,24 @@ Dashboard Plan & Run exposes device-gated controls (GPUs + VRAM % vs RAM %) and 
 kllm plan --model NAME --device gpu --vram-percent 70
 kllm run --model NAME --device cpu --ram-percent 50
 ```
+
+### Plan / run RUN SETTINGS flags
+
+`kllm plan` and `kllm run` share the same body as the dashboard Plan & Run panel. Overflow (`fit_status=overflow`) blocks **run** (exit code 1); **tight** prints a warning and still launches.
+
+| Flag | Default | Notes |
+|------|---------|--------|
+| `--context` / `--context-auto` | 4096 / off | Auto picks largest viable context under budget |
+| `--cache-type-k`, `--cache-type-v` | `q8_0` | KV cache dtype |
+| `--parallel`, `--batch-size`, `--micro-batch` | `auto` | Maps to llama-server parallel / batch / ubatch |
+| `--vision`, `--mmproj` | off / — | Vision requires a usable mmproj on run |
+| `--load-mode` | `auto` | mmap / mlock mapping |
+| `--ctx-checkpoints`, `--cache-ram` | `auto` | Checkpoint / cache-RAM controls |
+| `--threads` | 8 | CPU threads for llama-server |
+| `--extra-arg` (repeatable) | — | Sanitized; cannot override `--host` / `--port` / `--rpc` |
+| `--remember` / `--no-remember` | remember on | Upserts `~/.kllm/model-settings.json` after successful plan/run |
+
+No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement).
 
 ## Dashboard
 

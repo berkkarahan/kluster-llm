@@ -136,6 +136,9 @@ def test_config_get_put_and_status_device(client):
     assert r.status_code == 200
     assert r.json()["device"] == "cpu"
     assert r.json()["ram_percent"] == 55
+    assert "apply_error" in r.json()
+    assert "apply_warning" in r.json()
+    assert isinstance(r.json()["members"], dict)
 
     r = c.put(
         "/v1/config",

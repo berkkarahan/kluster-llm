@@ -13,6 +13,7 @@ from rich.table import Table
 
 from kllm import models as model_ops
 from kllm import runtime
+from kllm.cli_payload import build_plan_run_payload
 from kllm.connect import AGENTS, build_launch_plan, print_plan, run_plan
 from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, home_dir
 
@@ -368,9 +369,15 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         "wg_address",
         "overlay_status",
         "gpu_ids",
+        "apply_error",
+        "apply_warning",
     ):
         table.add_row(k, str(data.get(k)))
     console.print(table)
+    if data.get("apply_error"):
+        console.print(f"[red]apply_error:[/red] {data['apply_error']}")
+    if data.get("apply_warning"):
+        console.print(f"[yellow]apply_warning:[/yellow] {data['apply_warning']}")
     for w in data.get("netsec_warnings") or []:
         console.print(f"[yellow]netsec:[/yellow] {w}")
     cap = data.get("capacity") or {}
@@ -402,10 +409,65 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         console.print(f"Last plan: {data['last_plan']}")
 
 
+def _run_settings_options(
+    model: str,
+    context: int,
+    context_auto: bool,
+    device: Optional[str],
+    vram_percent: Optional[int],
+    ram_percent: Optional[int],
+    cache_type_k: str,
+    cache_type_v: str,
+    speculative: str,
+    draft_model: Optional[str],
+    parallel: str,
+    batch_size: str,
+    micro_batch: str,
+    vision: bool,
+    mmproj: Optional[str],
+    chat_template: str,
+    chat_template_file: Optional[str],
+    load_mode: str,
+    ctx_checkpoints: str,
+    cache_ram: str,
+    threads: int,
+    extra_arg: list[str],
+    remember: bool,
+) -> dict:
+    headroom = _headroom_override(device, vram_percent, ram_percent)
+    return build_plan_run_payload(
+        model=model,
+        context=context,
+        context_auto=context_auto,
+        device=device,
+        headroom=headroom,
+        vram_percent=vram_percent,
+        ram_percent=ram_percent,
+        cache_type_k=cache_type_k,
+        cache_type_v=cache_type_v,
+        speculative=speculative,
+        draft_model=draft_model,
+        parallel=parallel,
+        batch_size=batch_size,
+        micro_batch=micro_batch,
+        vision=vision,
+        mmproj=mmproj,
+        chat_template=chat_template,
+        chat_template_file=chat_template_file,
+        load_mode=load_mode,
+        ctx_checkpoints=ctx_checkpoints,
+        cache_ram=cache_ram,
+        threads=threads,
+        extra_args=extra_arg,
+        remember=remember,
+    )
+
+
 @app.command("plan")
 def plan_cmd(
     model: str = typer.Option(..., "--model"),
     context: int = typer.Option(4096, "--context"),
+    context_auto: bool = typer.Option(False, "--context-auto"),
     device: Optional[str] = typer.Option(
         None, "--device", help="cpu|gpu (default: config, else gpu)"
     ),
@@ -415,21 +477,67 @@ def plan_cmd(
     ram_percent: Optional[int] = typer.Option(
         None, "--ram-percent", min=10, max=100, help="Override RAM budget %% for this call (CPU)"
     ),
+    cache_type_k: str = typer.Option("q8_0", "--cache-type-k"),
+    cache_type_v: str = typer.Option("q8_0", "--cache-type-v"),
+    speculative: str = typer.Option("auto", "--speculative"),
+    draft_model: Optional[str] = typer.Option(None, "--draft-model"),
+    parallel: str = typer.Option("auto", "--parallel"),
+    batch_size: str = typer.Option("auto", "--batch-size"),
+    micro_batch: str = typer.Option("auto", "--micro-batch"),
+    vision: bool = typer.Option(False, "--vision"),
+    mmproj: Optional[str] = typer.Option(None, "--mmproj"),
+    chat_template: str = typer.Option("default", "--chat-template"),
+    chat_template_file: Optional[str] = typer.Option(None, "--chat-template-file"),
+    load_mode: str = typer.Option("auto", "--load-mode"),
+    ctx_checkpoints: str = typer.Option("auto", "--ctx-checkpoints"),
+    cache_ram: str = typer.Option("auto", "--cache-ram"),
+    threads: int = typer.Option(8, "--threads"),
+    extra_arg: list[str] = typer.Option([], "--extra-arg"),
+    remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
-    """Dry-run capacity-aware layer split."""
-    payload: dict = {"model": model, "context": context}
-    if device:
-        payload["device"] = device
-    headroom = _headroom_override(device, vram_percent, ram_percent)
-    if headroom is not None:
-        payload["headroom"] = headroom
+    """Dry-run capacity-aware layer split with RUN SETTINGS parity."""
+    payload = _run_settings_options(
+        model,
+        context,
+        context_auto,
+        device,
+        vram_percent,
+        ram_percent,
+        cache_type_k,
+        cache_type_v,
+        speculative,
+        draft_model,
+        parallel,
+        batch_size,
+        micro_batch,
+        vision,
+        mmproj,
+        chat_template,
+        chat_template_file,
+        load_mode,
+        ctx_checkpoints,
+        cache_ram,
+        threads,
+        extra_arg,
+        remember,
+    )
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
         if r.status_code >= 400:
             console.print(f"[red]{r.text}[/red]")
             raise typer.Exit(1)
         data = r.json()
+    console.print(
+        f"[bold]fit[/bold]={data.get('fit_status')} "
+        f"estimated={data.get('estimated_bytes')} budget={data.get('budget_bytes')}"
+    )
+    console.print(
+        f"[bold]placement[/bold] device {data.get('device_requested')}→{data.get('device_effective')} "
+        f"split={data.get('tensor_split')}"
+    )
+    if data.get("warning"):
+        console.print(f"[yellow]{data['warning']}[/yellow]")
     console.print(data)
 
 
@@ -437,6 +545,7 @@ def plan_cmd(
 def run(
     model: str = typer.Option(..., "--model"),
     context: int = typer.Option(4096, "--context"),
+    context_auto: bool = typer.Option(False, "--context-auto"),
     device: Optional[str] = typer.Option(
         None, "--device", help="cpu|gpu (default: config, else gpu)"
     ),
@@ -446,21 +555,62 @@ def run(
     ram_percent: Optional[int] = typer.Option(
         None, "--ram-percent", min=10, max=100, help="Override RAM budget %% for this call (CPU)"
     ),
+    cache_type_k: str = typer.Option("q8_0", "--cache-type-k"),
+    cache_type_v: str = typer.Option("q8_0", "--cache-type-v"),
+    speculative: str = typer.Option("auto", "--speculative"),
+    draft_model: Optional[str] = typer.Option(None, "--draft-model"),
+    parallel: str = typer.Option("auto", "--parallel"),
+    batch_size: str = typer.Option("auto", "--batch-size"),
+    micro_batch: str = typer.Option("auto", "--micro-batch"),
+    vision: bool = typer.Option(False, "--vision"),
+    mmproj: Optional[str] = typer.Option(None, "--mmproj"),
+    chat_template: str = typer.Option("default", "--chat-template"),
+    chat_template_file: Optional[str] = typer.Option(None, "--chat-template-file"),
+    load_mode: str = typer.Option("auto", "--load-mode"),
+    ctx_checkpoints: str = typer.Option("auto", "--ctx-checkpoints"),
+    cache_ram: str = typer.Option("auto", "--cache-ram"),
+    threads: int = typer.Option(8, "--threads"),
+    extra_arg: list[str] = typer.Option([], "--extra-arg"),
+    remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
     """Plan and launch master llama-server with RPC workers."""
-    payload: dict = {"model": model, "context": context}
-    if device:
-        payload["device"] = device
-    headroom = _headroom_override(device, vram_percent, ram_percent)
-    if headroom is not None:
-        payload["headroom"] = headroom
+    payload = _run_settings_options(
+        model,
+        context,
+        context_auto,
+        device,
+        vram_percent,
+        ram_percent,
+        cache_type_k,
+        cache_type_v,
+        speculative,
+        draft_model,
+        parallel,
+        batch_size,
+        micro_batch,
+        vision,
+        mmproj,
+        chat_template,
+        chat_template_file,
+        load_mode,
+        ctx_checkpoints,
+        cache_ram,
+        threads,
+        extra_arg,
+        remember,
+    )
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)
         if r.status_code >= 400:
             console.print(f"[red]{r.text}[/red]")
+            if r.status_code == 400 and "overflow" in r.text.lower():
+                raise typer.Exit(1)
             raise typer.Exit(1)
         data = r.json()
+    plan = data.get("plan") or {}
+    if plan.get("fit_status") == "tight" or data.get("warning"):
+        console.print(f"[yellow]warning:[/yellow] {data.get('warning') or plan.get('hint')}")
     console.print("[green]Inference started[/green]")
     console.print(data)
 

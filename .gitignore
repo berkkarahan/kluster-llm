@@ -23,6 +23,8 @@ logs/
 # Credentials
 *.key
 *.pem
+.env
+.env.*
 
 # Python / Rust
 .venv/
@@ -48,3 +50,7 @@ vendor/
 dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
+
+# Specify
+.specify/
+specs/

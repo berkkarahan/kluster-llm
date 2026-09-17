@@ -49,22 +49,29 @@ if ($Threads -eq 0) {
 Write-Host ""
 Write-Host "[INFO] Configuring Windows Firewall..." -ForegroundColor Yellow
 
-$firewallRuleName = "kllm-Worker-RPC"
+$firewallRuleName = "kllm-RPC"
 $existingRule = Get-NetFirewallRule -Name $firewallRuleName -ErrorAction SilentlyContinue
 
 if ($existingRule) {
     Write-Host "  Firewall rule '$firewallRuleName' already exists." -ForegroundColor Green
 } else {
-    New-NetFirewallRule -Name $firewallRuleName `
-        -DisplayName "Kluster LLM Worker RPC" `
-        -Description "Kluster LLM RPC worker" `
-        -Direction Inbound `
-        -Action Allow `
-        -Protocol TCP `
-        -LocalPort $Port `
-        -Profile Any `
-        -Enabled True
-    Write-Host "  Opened TCP port $Port in Windows Firewall." -ForegroundColor Green
+    try {
+        New-NetFirewallRule -Name $firewallRuleName `
+            -DisplayName "Kluster LLM RPC Worker" `
+            -Description "Kluster LLM RPC worker" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort $Port `
+            -Profile Any `
+            -Enabled True `
+            -ErrorAction Stop
+        Write-Host "  Opened TCP port $Port in Windows Firewall." -ForegroundColor Green
+    } catch {
+        Write-Host "  WARNING: Could not create firewall rule (needs Administrator)." -ForegroundColor Yellow
+        Write-Host "  Open elevated PowerShell and run:" -ForegroundColor Yellow
+        Write-Host "  New-NetFirewallRule -Name '$firewallRuleName' -DisplayName 'Kluster LLM RPC Worker' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Any" -ForegroundColor Cyan
+    }
 }
 
 # ── Bind to static IP ────────────────────────────────────────────────────────

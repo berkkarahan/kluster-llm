@@ -35,6 +35,11 @@ def config_path() -> Path:
     return home_dir() / "config.toml"
 
 
+def runtime_path() -> Path:
+    """Hidden registry of processes started by kllm (agent + children)."""
+    return home_dir() / ".runtime.json"
+
+
 def ensure_home() -> Path:
     d = home_dir()
     d.mkdir(parents=True, exist_ok=True)

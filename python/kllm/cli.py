@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from kllm import models as model_ops
+from kllm import runtime
 from kllm.connect import AGENTS, build_launch_plan, print_plan, run_plan
 from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, home_dir
 
@@ -25,26 +26,76 @@ def _agent_base(port: int = DEFAULT_CONTROL_PORT) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
-    ensure_home()
+def _agent_healthy(port: int = DEFAULT_CONTROL_PORT) -> dict | None:
     try:
         with httpx.Client(timeout=1.0) as client:
             r = client.get(f"{_agent_base(port)}/health")
             if r.status_code == 200:
-                return
+                return r.json()
     except Exception:
         pass
+    return None
+
+
+def _stop_local(port: int = DEFAULT_CONTROL_PORT, *, graceful: bool = True) -> bool:
+    """Tear down tracked kllm processes. Does not start the agent."""
+    stopped = False
+    health = _agent_healthy(port) if graceful else None
+    if health is not None:
+        try:
+            with httpx.Client(base_url=_agent_base(port), timeout=30.0) as client:
+                client.post("/v1/stop")
+            stopped = True
+        except Exception:
+            pass
+        # Ensure agent PID is recorded so kill_tracked can terminate it.
+        agent_pid = health.get("pid")
+        if isinstance(agent_pid, int) and agent_pid > 0:
+            info = runtime.load()
+            if info.agent_pid != agent_pid:
+                runtime.register_agent(agent_pid, port)
+    if runtime.kill_tracked():
+        stopped = True
+    runtime.clear()
+    return stopped
+
+
+def _replace_tracked_instance(port: int = DEFAULT_CONTROL_PORT) -> None:
+    """Stop any live tracked instance before start/join (replace semantics)."""
+    if not runtime.any_live() and _agent_healthy(port) is None:
+        return
+    console.print("[dim]Replacing existing kllm instance…[/dim]")
+    _stop_local(port)
+
+
+def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
+    ensure_home()
+    health = _agent_healthy(port)
+    if health is not None:
+        info = runtime.load()
+        agent_pid = health.get("pid")
+        if isinstance(agent_pid, int) and agent_pid > 0:
+            if info.agent_pid != agent_pid or info.control_port != port:
+                runtime.register_agent(agent_pid, port)
+        elif info.control_port != port:
+            info.control_port = port
+            runtime.save(info)
+        return
+
+    # Dead or missing agent: clear stale tracked PIDs, then spawn one.
+    _stop_local(port, graceful=False)
 
     console.print("[dim]Starting local kllm-agent…[/dim]")
     log = home_dir() / "logs" / "agent.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as lf:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, "-m", "kllm.agent", "--host", "0.0.0.0", "--port", str(port)],
             stdout=lf,
             stderr=lf,
             start_new_session=True,
         )
+    runtime.register_agent(proc.pid, port)
     for _ in range(40):
         try:
             with httpx.Client(timeout=0.5) as client:
@@ -145,6 +196,7 @@ def start(
     ),
 ) -> None:
     """Become cluster master and advertise on the LAN."""
+    _replace_tracked_instance(port)
     with _client(port) as c:
         gpu_ids = _resolve_cli_gpus(c, gpus)
         payload: dict = {
@@ -174,11 +226,11 @@ def start(
 
 @app.command()
 def stop(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
-    """Stop local role session (master tears down the cluster session)."""
-    with _client(port) as c:
-        r = c.post("/v1/stop")
-        r.raise_for_status()
-    console.print("[green]Stopped[/green]")
+    """Stop the local kllm agent and any processes it started."""
+    if _stop_local(port):
+        console.print("[green]Stopped[/green]")
+    else:
+        console.print("[dim]Nothing to stop[/dim]")
 
 
 @app.command()
@@ -216,6 +268,7 @@ def join(
     else:
         console.print("[dim]Discovering master via join key…[/dim]")
 
+    _replace_tracked_instance(port)
     with _client(port) as c:
         gpu_ids = _resolve_cli_gpus(c, gpus)
         if gpu_ids is not None:

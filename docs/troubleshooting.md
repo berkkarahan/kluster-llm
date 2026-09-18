@@ -17,8 +17,8 @@ Installs Rust/Node (if missing), `kllm`, dashboard, `llama-server` + `rpc-server
 llama.cpp only (run on **every** node; pin is committed `llama-release`):
 
 ```bash
-python scripts/setup-llama.py
-python scripts/setup-llama.py --check
+python scripts/install.py --llama-only
+python scripts/install.py --check
 ```
 
 Agent-oriented checklist (success criteria, flags, recovery): [agent-install.md](agent-install.md).
@@ -121,7 +121,7 @@ export CXX=/opt/homebrew/opt/llvm/bin/clang++
 **Solution:**
 ```bash
 uv run python scripts/install.py --backend vulkan
-uv run python scripts/setup-llama.py --backend vulkan
+uv run python scripts/install.py --llama-only --backend vulkan
 export KLLM_ACCEL_BACKEND=vulkan   # add to shell profile for kllm-agent
 uv run kllm join --key '<key>' --master <windows-lan-ip>
 ```
@@ -133,7 +133,7 @@ Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`
 
 **Solution:**
 1. Confirm the committed pin: `cat llama-release` (must be the same git revision on every node).
-2. On **every** node: `python scripts/setup-llama.py` then `python scripts/setup-llama.py --check`.
+2. On **every** node: `python scripts/install.py --llama-only` then `python scripts/install.py --check`.
 3. Do not TCP-probe port 50052 (a connect+close can hang or kill `rpc-server`).
 4. After binaries match: `kllm leave` on the worker, then `kllm join --key … --rpc-bind 0.0.0.0` if the master's LAN IP cannot bind the worker interface.
 5. Re-run `kllm run`. If HELLO still fails, `--force` the setup on both sides and confirm `vendor/bin/llama-release.txt` shows the same `tag=`.

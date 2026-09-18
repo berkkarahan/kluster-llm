@@ -21,7 +21,7 @@ After install on **this** machine:
 | 4 | Dashboard built | `dashboard/build/index.html` exists |
 | 5 | `llama-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
 | 6 | `rpc-server` found | same locations and/or `worker-windows/rpc-server.exe` |
-| 6b | llama.cpp pin matches | `python scripts/setup-llama.py --check` exits 0; stamp `vendor/bin/llama-release.txt` equals committed [`llama-release`](../llama-release) |
+| 6b | llama.cpp pin matches | `python scripts/install.py --check` exits 0; stamp `vendor/bin/llama-release.txt` equals committed [`llama-release`](../llama-release) |
 | 7 | WireGuard CLI present (for overlay) | `wg --version` or `C:\Program Files\WireGuard\wg.exe` |
 | 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK) |
 
@@ -179,9 +179,9 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 **llama.cpp only** (pin in `llama-release`; run on every node after a pin bump or RPC mismatch):
 
 ```bash
-python scripts/setup-llama.py
-python scripts/setup-llama.py --check
-python scripts/setup-llama.py --backend vulkan   # Mac worker joining a Vulkan master
+python scripts/install.py --llama-only
+python scripts/install.py --check
+python scripts/install.py --llama-only --backend vulkan   # Mac worker joining a Vulkan master
 ```
 
 **CLI/UI rebuild only** (no llama/WG/toolchains):
@@ -259,14 +259,14 @@ Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay priva
 | `cargo` missing after install | PATH not refreshed | New shell; ensure `~/.cargo/bin` or `%USERPROFILE%\.cargo\bin` on PATH; re-run |
 | `npm` missing after install | PATH / winget needs new shell | New shell; re-run with `--skip-rust` if kllm already built |
 | maturin / Rust compile fails | Broken toolchain | Re-run rustup; `rustup default stable`; re-run install |
-| `llama-server` missing | Prebuilt miss or cmake fail | `python scripts/setup-llama.py --force`; or `--from-source`; set `KLLM_LLAMA_SERVER` if you have a binary |
-| `rpc-server` missing | Some prebuilt packs omit it | `python scripts/setup-llama.py --from-source` (`-DGGML_RPC=ON`); copy to `vendor/bin/` and `worker-windows/` |
-| `setup-llama.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/setup-llama.py` on **every** node; do not mix HEAD source with a pinned nightly |
+| `llama-server` missing | Prebuilt miss or cmake fail | `python scripts/install.py --llama-only --force`; or `--from-source`; set `KLLM_LLAMA_SERVER` if you have a binary |
+| `rpc-server` missing | Some prebuilt packs omit it | `python scripts/install.py --llama-only --from-source` (`-DGGML_RPC=ON`); copy to `vendor/bin/` and `worker-windows/` |
+| `install.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/install.py --llama-only` on **every** node; do not mix HEAD source with a pinned nightly |
 | WireGuard warning | No admin / no package manager | Install WG manually from https://www.wireguard.com/install/ ; do **not** use `--overlay wireguard` until `wg` works |
 | `kllm` command not found | Venv not activated | Activate `.venv` (§2.4) |
 | `native_available()` False | Extension not installed | Re-run `python scripts/install.py` without `--skip-rust` |
 | Join key 401 | Wrong key / master stopped | Re-`kllm start` on master; copy new key |
-| Worker join OK but `run` fails | RPC unreachable, wrong bind, or **llama.cpp tag mismatch** | `python scripts/setup-llama.py --check` on every node; `kllm status` → `rpc_bind`, firewall 50052; see troubleshooting.md |
+| Worker join OK but `run` fails | RPC unreachable, wrong bind, or **llama.cpp tag mismatch** | `python scripts/install.py --check` on every node; `kllm status` → `rpc_bind`, firewall 50052; see troubleshooting.md |
 | Overlay start/join 400 | `wg` missing or overlay mismatch | Install WG; match `--overlay` on all nodes |
 
 **Do not:** download random third-party llama builds; mix llama.cpp tags across nodes; leave `rpc-server` on `0.0.0.0` on untrusted networks; expose 50052 to the internet; skip venv activation and install into system Python.
@@ -280,8 +280,8 @@ Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay priva
 python scripts/install.py
 
 # llama.cpp pin only (same tag on every node)
-python scripts/setup-llama.py
-python scripts/setup-llama.py --check
+python scripts/install.py --llama-only
+python scripts/install.py --check
 
 # Activate
 source .venv/bin/activate          # Unix
@@ -307,7 +307,7 @@ kllm run --model file.gguf
 | Path | Role |
 |------|------|
 | `scripts/install.py` | Full installer |
-| `scripts/setup-llama.py` | llama.cpp only, pinned by `llama-release` |
+| `scripts/install.py --llama-only` | llama.cpp only, pinned by `llama-release` |
 | `llama-release` | Committed ggml-org/llama.cpp GitHub tag (e.g. `b11026`) |
 | `scripts/build.py` | CLI + dashboard rebuild only |
 | `.venv/` | Project virtualenv |
@@ -327,7 +327,7 @@ kllm run --model file.gguf
 3. **Activate `.venv`** before every `kllm` command in a new shell.  
 4. **Match** `--backend` to the GPU on that node; mixed backends across nodes are supported (layer split).  
 5. **Treat RPC as insecure** at the app layer; rely on LAN isolation or WireGuard overlay.  
-6. **Keep every node on the same llama.cpp tag** (`llama-release` + `python scripts/setup-llama.py`). Mixed nightlies break RPC HELLO.  
+6. **Keep every node on the same llama.cpp tag** (`llama-release` + `python scripts/install.py --llama-only`). Mixed nightlies break RPC HELLO.  
 7. After changes to Rust/Python packaging, re-run install or `python scripts/build.py` (not only `pip install -e .` unless you know maturin is required).  
 8. When reporting status to the user, cite which §0 checks passed/failed.
 
@@ -336,7 +336,7 @@ kllm run --model file.gguf
 ## 9. Quick links
 
 - Installer: [`scripts/install.py`](../scripts/install.py)  
-- llama.cpp pin: [`llama-release`](../llama-release) / [`scripts/setup-llama.py`](../scripts/setup-llama.py)  
+- llama.cpp pin: [`llama-release`](../llama-release); sync with `python scripts/install.py --llama-only`  
 - CLI reference: [cli.md](cli.md)  
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)  
 - Engine / RPC policy: [engine-decision.md](engine-decision.md)  

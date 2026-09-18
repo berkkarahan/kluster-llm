@@ -74,7 +74,7 @@ def install_cached_llama_pack(
     if archive is None:
         raise FileNotFoundError(
             f"no llama-{pin}-bin-* archive in {models_dir()}; "
-            "run python scripts/setup-llama.py or pull the GitHub pack"
+            "run python scripts/install.py --llama-only or pull the GitHub pack"
         )
     with tempfile.TemporaryDirectory() as td:
         extract_dir = Path(td) / "out"

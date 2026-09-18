@@ -7,7 +7,9 @@ Usage:
   uv run python scripts/install.py --skip-ui
   uv run python scripts/install.py --backend vulkan
   uv run python scripts/install.py --skip-wireguard --skip-llama
-  python scripts/setup-llama.py          # llama.cpp only, pinned in llama-release
+  python scripts/install.py --llama-only
+  python scripts/install.py --check
+  python scripts/install.py --llama-only --from-source --force
 
 This is the one-shot installer. ``scripts/build.py`` remains a thinner
 CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
@@ -1070,6 +1072,28 @@ def install_llama(
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
+def print_llama_check(tag: str) -> int:
+    status = llama_install_status(tag)
+    print(f"pin:          {status['pin']}")
+    print(f"installed:    {status['stamp'] or '(no stamp)'}")
+    print(f"llama-server: {status['llama_server'] or 'MISSING'}")
+    print(f"rpc-server:   {status['rpc_server'] or 'MISSING'}")
+    if status["ok"]:
+        print("status:       ok")
+        return 0
+    print("status:       mismatch - run python scripts/install.py --llama-only")
+    return 1
+
+
+def verify_llama_installed(tag: str) -> None:
+    status = llama_install_status(tag)
+    if not status["ok"]:
+        raise SystemExit(
+            f"error: llama.cpp {tag} is not installed (stamp={status['stamp']!r}). "
+            "Retry with --force or --from-source."
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
     p.add_argument("--skip-ui", action="store_true", help="Skip dashboard npm build")
@@ -1105,11 +1129,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Reinstall llama.cpp even when vendor/bin/llama-release.txt matches the pin",
     )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Print pin vs installed stamp and exit 0 only when they match",
+    )
+    p.add_argument(
+        "--llama-only",
+        action="store_true",
+        help="Install only llama-server / rpc-server (pinned in llama-release)",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    tag = read_pinned_release(args.tag)
+
+    if args.llama_only:
+        args.skip_rust = True
+        args.skip_ui = True
+        args.skip_wireguard = True
+        args.skip_toolchains = True
+
+    if args.check:
+        return print_llama_check(tag)
+
     print(f"Repo root: {ROOT}")
     print(f"Python:    {sys.version.split()[0]} ({sys.executable})")
     print(f"Platform:  {platform.system()} {platform.machine()}")
@@ -1132,13 +1177,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.skip_llama:
         print("\n=== llama.cpp (llama-server + rpc-server) ===")
+        if args.llama_only:
+            print(f"Pin file:  {PIN_FILE} ({tag})")
         prefer_prebuilt = not args.from_source
         install_llama(
             args.backend,
             prefer_prebuilt=prefer_prebuilt,
             force=args.force,
-            tag=args.tag,
+            tag=tag,
         )
+        verify_llama_installed(tag)
+        if args.llama_only:
+            print(f"llama.cpp {tag} ready.")
 
     if not args.skip_wireguard:
         print("\n=== WireGuard ===")

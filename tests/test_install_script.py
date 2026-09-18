@@ -168,17 +168,41 @@ def test_parse_args_llama_pin_flags(install):
     assert args.from_source is True
 
 
-def test_setup_llama_parse_args():
-    spec = importlib.util.spec_from_file_location(
-        "kllm_setup_llama_script", ROOT / "scripts" / "setup-llama.py"
-    )
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["kllm_setup_llama_script"] = mod
-    spec.loader.exec_module(mod)
-    args = mod.parse_args(["--check", "--backend", "vulkan"])
+def test_parse_args_llama_only_and_check(install):
+    args = install.parse_args(["--check", "--llama-only", "--backend", "vulkan"])
     assert args.check is True
+    assert args.llama_only is True
     assert args.backend == "vulkan"
+
+
+def test_print_llama_check_ok(install, monkeypatch):
+    monkeypatch.setattr(
+        install,
+        "llama_install_status",
+        lambda tag: {
+            "pin": tag,
+            "stamp": tag,
+            "llama_server": "/bin/llama-server",
+            "rpc_server": "/bin/rpc-server",
+            "ok": True,
+        },
+    )
+    assert install.print_llama_check("b11026") == 0
+
+
+def test_print_llama_check_mismatch(install, monkeypatch):
+    monkeypatch.setattr(
+        install,
+        "llama_install_status",
+        lambda tag: {
+            "pin": tag,
+            "stamp": None,
+            "llama_server": None,
+            "rpc_server": None,
+            "ok": False,
+        },
+    )
+    assert install.print_llama_check("b11026") == 1
 
 
 def test_cached_llama_archive_prefers_platform_pack(install, monkeypatch, tmp_path):

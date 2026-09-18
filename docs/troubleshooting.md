@@ -12,7 +12,14 @@ This guide covers common issues and their solutions for the Kluster LLM project.
 python scripts/install.py
 ```
 
-Installs Rust/Node (if missing), `kllm`, dashboard, `llama-server` + `rpc-server`, and WireGuard. Use `--backend vulkan|cuda|metal|cpu` as needed.
+Installs Rust/Node (if missing), `kllm`, dashboard, `llama-server` + `rpc-server` at the tag in `llama-release`, and WireGuard. Use `--backend vulkan|cuda|metal|cpu` as needed.
+
+llama.cpp only (run on **every** node; pin is committed `llama-release`):
+
+```bash
+python scripts/setup-llama.py
+python scripts/setup-llama.py --check
+```
 
 Agent-oriented checklist (success criteria, flags, recovery): [agent-install.md](agent-install.md).
 
@@ -114,10 +121,24 @@ export CXX=/opt/homebrew/opt/llvm/bin/clang++
 **Solution:**
 ```bash
 uv run python scripts/install.py --backend vulkan
+uv run python scripts/setup-llama.py --backend vulkan
 export KLLM_ACCEL_BACKEND=vulkan   # add to shell profile for kllm-agent
 uv run kllm join --key '<key>' --master <windows-lan-ip>
 ```
-Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Requires Vulkan SDK / MoltenVK for the source build (see llama.cpp docs).
+Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. GitHub macOS packs are Metal-only but still match the pinned RPC protocol. A Vulkan `rpc-server` source build needs Vulkan SDK / MoltenVK.
+
+### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
+
+**Cause:** Master and worker are on different llama.cpp builds. RPC HELLO (`RPC_CMD_HELLO`) is unversioned across nightlies; a Windows `b11026` `llama-server` talking to a Mac HEAD/`git pull` `rpc-server` closes the socket.
+
+**Solution:**
+1. Confirm the committed pin: `cat llama-release` (must be the same git revision on every node).
+2. On **every** node: `python scripts/setup-llama.py` then `python scripts/setup-llama.py --check`.
+3. Do not TCP-probe port 50052 (a connect+close can hang or kill `rpc-server`).
+4. After binaries match: `kllm leave` on the worker, then `kllm join --key … --rpc-bind 0.0.0.0` if the master's LAN IP cannot bind the worker interface.
+5. Re-run `kllm run`. If HELLO still fails, `--force` the setup on both sides and confirm `vendor/bin/llama-release.txt` shows the same `tag=`.
+
+Do **not** mix `vendor/llama.cpp` HEAD with a GitHub nightly on the other machine.
 
 ### "rpc-server.exe not found"
 

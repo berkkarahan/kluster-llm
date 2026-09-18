@@ -14,7 +14,7 @@ from kllm import models as model_ops
 from kllm import native
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.run_settings import RunBody, RunSettingsFields
-from kllm.state import DEFAULT_RPC_PORT, ensure_home
+from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
 
 # Prefer cluster `host` (WG overlay address when set) over LAN — matches worker RPC bind.
 _RPC_CONNECT_TIMEOUT_S = 2.0
@@ -56,22 +56,32 @@ def rpc_server_endpoints(members: dict[str, Any]) -> list[str]:
 def ensure_rpc_peers_reachable(
     endpoints: list[str], *, timeout_s: float = _RPC_CONNECT_TIMEOUT_S
 ) -> None:
-    """TCP-check each RPC endpoint; raise HTTPException if any peer is down."""
+    """Confirm each worker still has rpc-server tracked.
+
+    Do not raw-TCP-connect :50052. Some llama.cpp rpc-server builds tear down the
+    listener after a non-RPC handshake/close, which made `kllm run` kill the
+    peers it was probing.
+    """
+    del timeout_s
     unreachable: list[str] = []
     for ep in endpoints:
-        host, _, port_s = ep.rpartition(":")
-        if not host or not port_s:
+        host, _, _port_s = ep.rpartition(":")
+        if not host:
             unreachable.append(ep)
             continue
         try:
-            port = int(port_s)
-        except ValueError:
-            unreachable.append(ep)
-            continue
-        try:
-            with socket.create_connection((host, port), timeout=timeout_s):
-                pass
-        except OSError:
+            import httpx
+
+            url = f"http://{host}:{DEFAULT_CONTROL_PORT}/v1/status"
+            with httpx.Client(timeout=3.0) as client:
+                resp = client.get(url)
+            if resp.status_code != 200:
+                unreachable.append(ep)
+                continue
+            data = resp.json()
+            if not data.get("process_pid") or data.get("process_role") != "worker":
+                unreachable.append(ep)
+        except Exception:
             unreachable.append(ep)
     if unreachable:
         joined = ", ".join(unreachable)

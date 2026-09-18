@@ -21,6 +21,7 @@ After install on **this** machine:
 | 4 | Dashboard built | `dashboard/build/index.html` exists |
 | 5 | `llama-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
 | 6 | `rpc-server` found | same locations and/or `worker-windows/rpc-server.exe` |
+| 6b | llama.cpp pin matches | `python scripts/setup-llama.py --check` exits 0; stamp `vendor/bin/llama-release.txt` equals committed [`llama-release`](../llama-release) |
 | 7 | WireGuard CLI present (for overlay) | `wg --version` or `C:\Program Files\WireGuard\wg.exe` |
 | 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK) |
 
@@ -35,7 +36,7 @@ After install on **this** machine:
 | Item | Notes |
 |------|--------|
 | **Python ≥ 3.10** | `python --version` or `python3 --version`. On Windows prefer `python`, not the Store stub. |
-| **Repo root** | Directory containing `pyproject.toml`, `scripts/install.py`, `python/kllm/`. |
+| **Repo root** | Directory containing `pyproject.toml`, `scripts/install.py`, `llama-release`, `python/kllm/`. |
 | **Network** | Outbound HTTPS to GitHub, PyPI, npm registry, rustup (or offline mirrors). |
 | **Admin/sudo** (often) | WireGuard / apt / winget package installs may need elevation. If denied, continue and report; overlay will be unavailable until WG is installed. |
 
@@ -51,9 +52,9 @@ After install on **this** machine:
 
 | Host OS | Default `--backend` | Notes |
 |---------|---------------------|--------|
-| Windows | `vulkan` (auto) | Prefer `--prefer-prebuilt`. CUDA if `nvcc` / CUDA toolkit present → auto may pick `cuda`. |
-| macOS | `metal` (standalone) or **`vulkan`** (join a Vulkan master) | Standalone: `--backend metal`. **Cluster worker** on a Windows/Linux Vulkan master: `--backend vulkan` and `export KLLM_ACCEL_BACKEND=vulkan` so membership/planning report `vulkan` (MoltenVK), not Metal. |
-| Linux | `vulkan` or `cuda` if toolkit present | Source build preferred when cmake works. |
+| Windows | `vulkan` (auto) | Prebuilt GitHub zip for the pin in `llama-release`. CUDA if `nvcc` / CUDA toolkit present → auto may pick `cuda`. |
+| macOS | `metal` (standalone) or **`vulkan`** (join a Vulkan master) | Standalone: `--backend metal`. **Cluster worker** on a Windows/Linux Vulkan master: `--backend vulkan` and `export KLLM_ACCEL_BACKEND=vulkan` so membership/planning report `vulkan` (MoltenVK), not Metal. GitHub macOS packs are Metal-only; they still match the pinned RPC protocol. |
+| Linux | `vulkan` or `cuda` if toolkit present | Prebuilt Ubuntu asset for the pin; `--from-source` when cmake/CUDA is required. |
 
 ---
 
@@ -102,7 +103,7 @@ python3 scripts/install.py --backend cuda --from-source
 1. Ensures **git** (and other toolchains unless `--skip-toolchains`).  
 2. Ensures **uv**, creates/repairs **`.venv`** (Python from **`.python-version`**), runs **`uv sync`**, installs **Rust** if missing, builds **`kllm`** with maturin, installs wheel + pytest.  
 3. Ensures **Node/npm**, runs `dashboard` `npm install` + `npm run build`.  
-4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`): prebuilt GitHub `b*` assets and/or cmake source with `-DGGML_RPC=ON`; stages to `vendor/bin/` and `worker-windows/` as needed.  
+4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): GitHub prebuilt assets first, cmake source at that tag if the pack is missing; stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.  
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).
@@ -163,8 +164,10 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 | Flag | When to use |
 |------|-------------|
 | `--backend auto\|metal\|cuda\|vulkan\|cpu` | Force accelerator; default `auto`. |
-| `--prefer-prebuilt` | Prefer GitHub release zips (default-ish on Windows). |
-| `--from-source` | Prefer cmake build of `vendor/llama.cpp`. |
+| `--prefer-prebuilt` | Prefer GitHub release zips (default on every OS unless `--from-source`). |
+| `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp`. |
+| `--tag TAG` | Override `llama-release` (keep every node on the same tag). |
+| `--force` | Reinstall llama.cpp even when `vendor/bin/llama-release.txt` matches. |
 | `--release` | Release-mode maturin build. |
 | `--skip-ui` | No dashboard (CLI-only node). |
 | `--skip-rust` | Skip kllm package build (already built). |
@@ -172,6 +175,14 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 | `--skip-wireguard` | Skip WG (LAN-only RPC; no overlay). |
 | `--skip-toolchains` | Do not auto-install Rust/Node/git/cmake. |
 | `--skip-npm-install` | Dashboard `npm run build` only. |
+
+**llama.cpp only** (pin in `llama-release`; run on every node after a pin bump or RPC mismatch):
+
+```bash
+python scripts/setup-llama.py
+python scripts/setup-llama.py --check
+python scripts/setup-llama.py --backend vulkan   # Mac worker joining a Vulkan master
+```
 
 **CLI/UI rebuild only** (no llama/WG/toolchains):
 
@@ -248,16 +259,17 @@ Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay priva
 | `cargo` missing after install | PATH not refreshed | New shell; ensure `~/.cargo/bin` or `%USERPROFILE%\.cargo\bin` on PATH; re-run |
 | `npm` missing after install | PATH / winget needs new shell | New shell; re-run with `--skip-rust` if kllm already built |
 | maturin / Rust compile fails | Broken toolchain | Re-run rustup; `rustup default stable`; re-run install |
-| `llama-server` missing | Prebuilt miss or cmake fail | Retry `--prefer-prebuilt` **or** `--from-source` with cmake; set `KLLM_LLAMA_SERVER` if you have a binary |
-| `rpc-server` missing | Some prebuilt packs omit it | Build from source with `-DGGML_RPC=ON` targeting `rpc-server`; copy to `vendor/bin/` and `worker-windows/` |
+| `llama-server` missing | Prebuilt miss or cmake fail | `python scripts/setup-llama.py --force`; or `--from-source`; set `KLLM_LLAMA_SERVER` if you have a binary |
+| `rpc-server` missing | Some prebuilt packs omit it | `python scripts/setup-llama.py --from-source` (`-DGGML_RPC=ON`); copy to `vendor/bin/` and `worker-windows/` |
+| `setup-llama.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/setup-llama.py` on **every** node; do not mix HEAD source with a pinned nightly |
 | WireGuard warning | No admin / no package manager | Install WG manually from https://www.wireguard.com/install/ ; do **not** use `--overlay wireguard` until `wg` works |
 | `kllm` command not found | Venv not activated | Activate `.venv` (§2.4) |
 | `native_available()` False | Extension not installed | Re-run `python scripts/install.py` without `--skip-rust` |
 | Join key 401 | Wrong key / master stopped | Re-`kllm start` on master; copy new key |
-| Worker join OK but `run` fails | RPC unreachable / wrong bind | `kllm status` → check `rpc_bind`, firewall 50052, same L2/VPN; see troubleshooting.md |
+| Worker join OK but `run` fails | RPC unreachable, wrong bind, or **llama.cpp tag mismatch** | `python scripts/setup-llama.py --check` on every node; `kllm status` → `rpc_bind`, firewall 50052; see troubleshooting.md |
 | Overlay start/join 400 | `wg` missing or overlay mismatch | Install WG; match `--overlay` on all nodes |
 
-**Do not:** download random third-party llama builds; leave `rpc-server` on `0.0.0.0` on untrusted networks; expose 50052 to the internet; skip venv activation and install into system Python.
+**Do not:** download random third-party llama builds; mix llama.cpp tags across nodes; leave `rpc-server` on `0.0.0.0` on untrusted networks; expose 50052 to the internet; skip venv activation and install into system Python.
 
 ---
 
@@ -266,6 +278,10 @@ Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay priva
 ```bash
 # Full install
 python scripts/install.py
+
+# llama.cpp pin only (same tag on every node)
+python scripts/setup-llama.py
+python scripts/setup-llama.py --check
 
 # Activate
 source .venv/bin/activate          # Unix
@@ -291,10 +307,13 @@ kllm run --model file.gguf
 | Path | Role |
 |------|------|
 | `scripts/install.py` | Full installer |
+| `scripts/setup-llama.py` | llama.cpp only, pinned by `llama-release` |
+| `llama-release` | Committed ggml-org/llama.cpp GitHub tag (e.g. `b11026`) |
 | `scripts/build.py` | CLI + dashboard rebuild only |
 | `.venv/` | Project virtualenv |
 | `dashboard/build/` | Static UI served by agent |
 | `vendor/bin/` | Staged `llama-server` / `rpc-server` |
+| `vendor/bin/llama-release.txt` | Local stamp of the installed tag (gitignored under `vendor/`) |
 | `vendor/llama.cpp/` | Source + cmake build tree |
 | `worker-windows/rpc-server.exe` | Windows worker binary location |
 | `~/.kllm/` | Runtime state (`cluster.json`, models, WG keys, API token, `hf_token`) |
@@ -308,14 +327,16 @@ kllm run --model file.gguf
 3. **Activate `.venv`** before every `kllm` command in a new shell.  
 4. **Match** `--backend` to the GPU on that node; mixed backends across nodes are supported (layer split).  
 5. **Treat RPC as insecure** at the app layer; rely on LAN isolation or WireGuard overlay.  
-6. After changes to Rust/Python packaging, re-run install or `python scripts/build.py` (not only `pip install -e .` unless you know maturin is required).  
-7. When reporting status to the user, cite which §0 checks passed/failed.
+6. **Keep every node on the same llama.cpp tag** (`llama-release` + `python scripts/setup-llama.py`). Mixed nightlies break RPC HELLO.  
+7. After changes to Rust/Python packaging, re-run install or `python scripts/build.py` (not only `pip install -e .` unless you know maturin is required).  
+8. When reporting status to the user, cite which §0 checks passed/failed.
 
 ---
 
 ## 9. Quick links
 
 - Installer: [`scripts/install.py`](../scripts/install.py)  
+- llama.cpp pin: [`llama-release`](../llama-release) / [`scripts/setup-llama.py`](../scripts/setup-llama.py)  
 - CLI reference: [cli.md](cli.md)  
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)  
 - Engine / RPC policy: [engine-decision.md](engine-decision.md)  

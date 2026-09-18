@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import sys
@@ -195,7 +196,7 @@ def _probe_worker_latencies() -> None:
         raw = member or {}
         if not raw.get("host") and not raw.get("lan_host"):
             continue
-        host = member_rpc_host(raw)
+        host = raw.get("lan_host") or member_rpc_host(raw)
         port = int(raw.get("control_port") or DEFAULT_CONTROL_PORT)
         url = f"http://{host}:{port}/health"
         try:
@@ -497,22 +498,16 @@ def distribute_model(body: DistributeBody) -> dict[str, Any]:
         path = model_ops.resolve_local_model(body.name)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
-    results = []
-    for m in STATE.members.values():
-        if m.get("role") != "worker":
-            continue
-        # Control plane stays on LAN even when RPC rides WireGuard
-        ctrl_host = m.get("lan_host") or m.get("host")
-        try:
-            result = model_ops.push_model_to_worker(
-                host=ctrl_host,
-                port=m.get("control_port", STATE.control_port),
-                join_key=STATE.join_key,
-                model_path=path,
-            )
-            results.append({"host": ctrl_host, "ok": True, "result": result})
-        except Exception as exc:
-            results.append({"host": ctrl_host, "ok": False, "error": str(exc)})
+    workers = [m for m in STATE.members.values() if m.get("role") == "worker"]
+    try:
+        results = model_ops.distribute_to_workers(
+            path,
+            workers,
+            STATE.join_key,
+            default_port=STATE.control_port,
+        )
+    except model_ops.DistributeInProgressError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "results": results}
 
 
@@ -638,6 +633,8 @@ def status() -> dict[str, Any]:
         "last_plan": membership_mod.public_last_plan(STATE),
         "model_name": STATE.model_name,
         "download": model_ops.get_download_progress(),
+        "distribute": model_ops.get_distribute_progress(),
+        "receive": model_ops.get_receive_progress(),
         "capacity": capacity,
         "control_port": STATE.control_port,
         "rpc_port": STATE.rpc_port,
@@ -851,7 +848,7 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
     cap = native.probe_capacity()
     vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
     backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
-    lan_host = netsec.pick_rpc_bind_host(body.rpc_bind)
+    lan_host = netsec.pick_rpc_bind_host(body.rpc_bind, toward=master_host)
     STATE.rpc_bind = lan_host
     STATE.overlay = overlay
     STATE.netsec_warnings = []
@@ -905,6 +902,19 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
     _apply_cluster_snapshot(reg)
 
     rpc_bind_host = lan_host
+    # Master may correct a multi-NIC mis-pick to the TCP peer address that reached it.
+    hint = reg.get("rpc_bind_hint")
+    if (
+        overlay == netsec.OVERLAY_NONE
+        and not body.rpc_bind
+        and isinstance(hint, str)
+        and netsec.is_usable_lan_peer(hint)
+        and hint != rpc_bind_host
+    ):
+        rpc_bind_host = hint
+        STATE.netsec_warnings = list(STATE.netsec_warnings or []) + [
+            f"rpc bind corrected to {hint} (master peer address)"
+        ]
     if overlay == netsec.OVERLAY_WIREGUARD:
         try:
             rpc_bind_host = _worker_bring_up_wg(body.key, master_host, reg)
@@ -999,20 +1009,36 @@ def leave() -> dict[str, Any]:
 
 
 @app.post("/v1/register")
-def register(body: RegisterBody, _: None = Depends(_require_key)) -> dict[str, Any]:
+def register(
+    body: RegisterBody,
+    request: Request,
+    _: None = Depends(_require_key),
+) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "not a master")
     _sync_master_liveness(shrink=True)
 
     lan_host = body.lan_host or body.host
+    peer = request.client.host if request.client else None
+    response: dict[str, Any] = {"ok": True}
+
+    # Multi-NIC workers sometimes advertise a Hyper-V/VPN address the master cannot
+    # reach. Prefer the TCP peer address that actually completed this register call.
+    if (
+        STATE.overlay == netsec.OVERLAY_NONE
+        and netsec.is_usable_lan_peer(peer)
+        and peer != lan_host
+    ):
+        response["rpc_bind_hint"] = peer
+        lan_host = peer
+
     member: dict[str, Any] = {
         **body.model_dump(),
+        "host": lan_host,
         "lan_host": lan_host,
         "role": "worker",
         "last_seen": time.time(),
     }
-
-    response: dict[str, Any] = {"ok": True}
 
     if STATE.overlay == netsec.OVERLAY_WIREGUARD:
         if not body.wg_public_key:
@@ -1021,8 +1047,9 @@ def register(body: RegisterBody, _: None = Depends(_require_key)) -> dict[str, A
         member["wg_address"] = wg_addr
         member["wg_public_key"] = body.wg_public_key
         member["host"] = wg_addr  # master dials RPC over overlay
+        member["lan_host"] = body.lan_host or body.host
         psk = netsec.derive_wg_psk(STATE.join_key or "")
-        endpoint = f"{lan_host}:{body.wg_listen_port or netsec.WG_LISTEN_PORT}"
+        endpoint = f"{member['lan_host']}:{body.wg_listen_port or netsec.WG_LISTEN_PORT}"
         live = netsec.add_peer_to_running(
             public_key=body.wg_public_key,
             allowed_ips=f"{wg_addr}/32",
@@ -1105,11 +1132,25 @@ def unregister(body: dict[str, str], _: None = Depends(_require_key)) -> dict[st
 
 
 @app.post("/v1/heartbeat")
-def heartbeat(body: RegisterBody, _: None = Depends(_require_key)) -> dict[str, Any]:
+def heartbeat(
+    body: RegisterBody,
+    request: Request,
+    _: None = Depends(_require_key),
+) -> dict[str, Any]:
     _sync_master_liveness(shrink=True)
     accepted = body.node_id in STATE.members
     if accepted:
-        STATE.members[body.node_id].update(body.model_dump())
+        update = body.model_dump()
+        peer = request.client.host if request.client else None
+        # Keep dial address aligned with the path that reaches the master (LAN).
+        if (
+            STATE.overlay == netsec.OVERLAY_NONE
+            and netsec.is_usable_lan_peer(peer)
+            and (update.get("host") != peer or update.get("lan_host") != peer)
+        ):
+            update["host"] = peer
+            update["lan_host"] = peer
+        STATE.members[body.node_id].update(update)
         STATE.members[body.node_id]["last_seen"] = time.time()
         STATE.save()
     return {
@@ -1130,22 +1171,61 @@ async def receive_model(
     # Workers receive from master — authenticate with the cluster key
     if STATE.join_key and x_kllm_key != STATE.join_key:
         raise HTTPException(401, "invalid join key")
-    dest = models_dir() / Path(x_kllm_filename).name
-    tmp = dest.with_suffix(dest.suffix + ".partial")
+    filename = Path(x_kllm_filename).name
+    dest = models_dir() / filename
+    expected = (x_kllm_sha256 or "").lower()
+    tmp: Path | None = None
+    try:
+        tmp = model_ops.begin_receive(filename, x_kllm_size)
+    except model_ops.ReceiveInProgressError as exc:
+        raise HTTPException(409, str(exc)) from exc
     size = 0
-    with tmp.open("wb") as f:
-        async for chunk in request.stream():
-            f.write(chunk)
-            size += len(chunk)
-    if size != x_kllm_size:
-        tmp.unlink(missing_ok=True)
-        raise HTTPException(400, f"size mismatch: got {size} expected {x_kllm_size}")
-    digest = model_ops.sha256_file(tmp)
-    if digest != x_kllm_sha256:
-        tmp.unlink(missing_ok=True)
-        raise HTTPException(400, "sha256 mismatch")
-    tmp.replace(dest)
-    return {"ok": True, "path": str(dest), "sha256": digest}
+    hasher = hashlib.sha256()
+    throttle = model_ops._Throttle()
+    try:
+        with tmp.open("wb") as f:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                f.write(chunk)
+                hasher.update(chunk)
+                size += len(chunk)
+                model_ops.finish_receive_chunk(
+                    filename=filename,
+                    nbytes=size,
+                    total=x_kllm_size,
+                    throttle=throttle,
+                )
+        if size != x_kllm_size:
+            model_ops.abort_receive(tmp)
+            raise HTTPException(400, f"size mismatch: got {size} expected {x_kllm_size}")
+        digest = hasher.hexdigest()
+        if digest != expected:
+            model_ops.abort_receive(tmp)
+            raise HTTPException(400, "sha256 mismatch")
+        return model_ops.complete_receive(tmp, dest, digest=digest, size=size)
+    except HTTPException:
+        raise
+    except Exception:
+        model_ops.abort_receive(tmp)
+        raise
+
+
+@app.get("/v1/models/file")
+def get_model_file_meta(
+    x_kllm_key: str | None = Header(default=None),
+    x_kllm_filename: str = Header(...),
+) -> dict[str, Any]:
+    """Probe whether a model exists locally (size + sidecar sha256)."""
+    if STATE.join_key and x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid join key")
+    filename = Path(x_kllm_filename).name
+    dest = models_dir() / filename
+    if not dest.is_file():
+        raise HTTPException(404, f"model not found: {filename}")
+    meta = model_ops.local_model_meta(dest)
+    meta["path"] = str(dest)
+    return meta
 
 
 @app.delete("/v1/models/file")

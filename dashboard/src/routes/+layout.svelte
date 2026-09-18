@@ -50,6 +50,11 @@
       {#if appStore.status?.download}
         <span class="chip chip-ok">dl {Math.round(appStore.status.download.pct)}%</span>
       {/if}
+      {#if appStore.status?.distribute}
+        <span class="chip chip-ok">xfer {Math.round(appStore.status.distribute.pct)}%</span>
+      {:else if appStore.status?.receive}
+        <span class="chip chip-ok">xfer {Math.round(appStore.status.receive.pct)}%</span>
+      {/if}
       {#if appStore.status?.inference_up}
         <span class="chip chip-ok">infer</span>
       {/if}

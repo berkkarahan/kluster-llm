@@ -137,6 +137,27 @@ def merge_and_sanitize_extra(body: RunSettingsFields) -> list[str]:
         raise HTTPException(400, str(exc)) from exc
 
 
+def _file_size_bytes(path: str | None) -> int:
+    if not path:
+        return 0
+    try:
+        p = Path(path)
+        if p.is_file():
+            return int(p.stat().st_size)
+    except OSError:
+        return 0
+    return 0
+
+
+def _parallel_slots_for_estimate(value: int | str) -> int:
+    if value == "auto":
+        return 1
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
     path = model_ops.resolve_local_model(body.model)
     nodes = cluster_nodes(members)
@@ -155,6 +176,12 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             device=device,
             vram_weight=body.vram_weight,
             latency_weight=body.latency_weight,
+            cache_type_k=body.cache_type_k,
+            cache_type_v=body.cache_type_v,
+            parallel_slots=_parallel_slots_for_estimate(body.parallel_slots),
+            mmproj_size_bytes=_file_size_bytes(body.mmproj),
+            draft_model_size_bytes=_file_size_bytes(body.draft_model),
+            vision=bool(body.vision),
         )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc

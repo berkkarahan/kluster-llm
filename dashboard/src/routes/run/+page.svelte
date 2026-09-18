@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AutoEditField from '$lib/components/AutoEditField.svelte';
   import { appStore } from '$lib/store.svelte';
   import { CONTEXT_STEP, KV_CACHE_TYPES, MIN_CONTEXT } from '$lib/types';
 
@@ -10,6 +11,11 @@
   function onGpuToggle(index: number) {
     appStore.toggleGpu(index);
     void appStore.persistGpuSelection();
+    appStore.scheduleEstimate();
+  }
+
+  function bumpEstimate() {
+    appStore.scheduleEstimate();
   }
 
   const blocked = $derived(appStore.planRunBlockedReason());
@@ -18,6 +24,14 @@
   );
   const maxContext = $derived(appStore.selectedModelMaxContext());
   const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
+  const estimateLabel = $derived(appStore.device === 'cpu' ? 'Estimated memory' : 'Estimated VRAM');
+
+  const parallelMode = $derived(appStore.parallelSlots === 'auto' ? 'auto' : 'edit');
+  const batchMode = $derived(appStore.batchSize === 'auto' ? 'auto' : 'edit');
+  const microMode = $derived(appStore.microBatch === 'auto' ? 'auto' : 'edit');
+  const checkpointMode = $derived(appStore.checkpoints === 'auto' ? 'auto' : 'edit');
+  const cacheRamMode = $derived(appStore.cacheRam === 'auto' ? 'auto' : 'edit');
+  const speculativeMode = $derived(appStore.speculative === 'auto' ? 'auto' : 'edit');
 </script>
 
 <div class="max-w-2xl mx-auto p-4">
@@ -40,11 +54,14 @@
   <div class="panel p-3 flex flex-col gap-3" style="border-color: var(--border)">
     {#if !blocked && appStore.planResult?.estimated_bytes != null}
       <div class="mono text-[11px] p-2 rounded" style="background: var(--bg); border: 1px solid var(--border)">
-        Estimated memory (last Plan):
+        {estimateLabel}:
         {fmtBytes(Number(appStore.planResult.estimated_bytes))}
         / budget {fmtBytes(Number(appStore.planResult.budget_bytes))}
         {#if fitStatus}
           · <span style="color: var(--accent)">{fitStatus}</span>
+        {/if}
+        {#if appStore.estimating}
+          · <span style="color: var(--muted)">updating…</span>
         {/if}
       </div>
     {/if}
@@ -55,7 +72,7 @@
       value={appStore.selectedModel}
       onchange={(e) => {
         const v = (e.currentTarget as HTMLSelectElement).value;
-        void appStore.selectModel(v);
+        void appStore.selectModel(v).then(() => bumpEstimate());
       }}
     >
       {#each appStore.models as m}
@@ -68,7 +85,12 @@
         Context
       </label>
       <label class="mono text-[11px] flex items-center gap-1" style="color: var(--muted)">
-        <input type="checkbox" bind:checked={appStore.contextAuto} disabled={!!blocked || !!appStore.busy} />
+        <input
+          type="checkbox"
+          bind:checked={appStore.contextAuto}
+          disabled={!!blocked || !!appStore.busy}
+          onchange={bumpEstimate}
+        />
         Auto
       </label>
     </div>
@@ -84,6 +106,7 @@
         disabled={contextDisabled}
         oninput={(e) => {
           appStore.context = Number((e.currentTarget as HTMLInputElement).value);
+          bumpEstimate();
         }}
       />
       <input
@@ -99,6 +122,7 @@
           const raw = Number((e.currentTarget as HTMLInputElement).value);
           const stepped = Math.round(raw / CONTEXT_STEP) * CONTEXT_STEP;
           appStore.context = Math.min(maxContext, Math.max(MIN_CONTEXT, stepped || MIN_CONTEXT));
+          bumpEstimate();
         }}
       />
     </div>
@@ -113,12 +137,22 @@
       KV cache dtype
     </label>
     <div class="flex gap-2">
-      <select class="field mono flex-1" bind:value={appStore.cacheTypeK} disabled={!!appStore.busy}>
+      <select
+        class="field mono flex-1"
+        bind:value={appStore.cacheTypeK}
+        disabled={!!appStore.busy}
+        onchange={bumpEstimate}
+      >
         {#each KV_CACHE_TYPES as t}
           <option value={t}>{t}</option>
         {/each}
       </select>
-      <select class="field mono flex-1" bind:value={appStore.cacheTypeV} disabled={!!appStore.busy}>
+      <select
+        class="field mono flex-1"
+        bind:value={appStore.cacheTypeV}
+        disabled={!!appStore.busy}
+        onchange={bumpEstimate}
+      >
         {#each KV_CACHE_TYPES as t}
           <option value={t}>{t}</option>
         {/each}
@@ -132,7 +166,9 @@
       disabled={!!appStore.busy}
       onchange={(e) => {
         const v = (e.currentTarget as HTMLSelectElement).value;
-        if (v === 'cpu' || v === 'gpu') void appStore.setDevice(v);
+        if (v === 'cpu' || v === 'gpu') {
+          void appStore.setDevice(v).then(() => bumpEstimate());
+        }
       }}
     >
       <option value="gpu">GPU (default)</option>
@@ -165,7 +201,7 @@
         max="100"
         bind:value={appStore.vramPercent}
         disabled={!!appStore.busy}
-        onchange={() => void appStore.setVramPercent(appStore.vramPercent)}
+        onchange={() => void appStore.setVramPercent(appStore.vramPercent).then(() => bumpEstimate())}
       />
       <label class="mono text-[11px]" style="color: var(--muted)">Placement weights (VRAM / latency)</label>
       <div class="flex gap-2">
@@ -177,6 +213,7 @@
           step="0.05"
           bind:value={appStore.vramWeight}
           disabled={!!appStore.busy}
+          onchange={bumpEstimate}
         />
         <input
           class="field mono flex-1"
@@ -186,6 +223,7 @@
           step="0.05"
           bind:value={appStore.latencyWeight}
           disabled={!!appStore.busy}
+          onchange={bumpEstimate}
         />
       </div>
       {#if appStore.fieldErrors.placementWeights}
@@ -200,35 +238,183 @@
         max="100"
         bind:value={appStore.ramPercent}
         disabled={!!appStore.busy}
-        onchange={() => void appStore.setRamPercent(appStore.ramPercent)}
+        onchange={() => void appStore.setRamPercent(appStore.ramPercent).then(() => bumpEstimate())}
       />
     {/if}
 
     <details bind:open={appStore.advancedOpen}>
       <summary class="mono text-[11px] cursor-pointer" style="color: var(--muted)">Advanced</summary>
-      <div class="flex flex-col gap-2 mt-2 pl-1">
-        <input class="field mono" placeholder="Draft model path" bind:value={appStore.draftModel} />
-        <input class="field mono" placeholder="Parallel slots (auto or number)" bind:value={appStore.parallelSlots} />
-        <input class="field mono" placeholder="Batch size (auto or number)" bind:value={appStore.batchSize} />
-        <input class="field mono" placeholder="Micro-batch (auto or number)" bind:value={appStore.microBatch} />
-        <label class="mono text-[11px] flex items-center gap-2">
-          <input type="checkbox" bind:checked={appStore.vision} /> Vision
+      <div class="flex flex-col gap-3 mt-2 pl-1">
+        <AutoEditField
+          label="Speculative / draft model"
+          mode={speculativeMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setSpeculativeMode(m)}
+        >
+          <input
+            class="field mono w-full"
+            placeholder="Draft model path"
+            bind:value={appStore.draftModel}
+            disabled={!!appStore.busy}
+            onchange={bumpEstimate}
+          />
+        </AutoEditField>
+
+        <AutoEditField
+          label="Parallel slots"
+          mode={parallelMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setAutoInt('parallelSlots', m)}
+        >
+          <input
+            class="field mono w-full"
+            type="number"
+            min="1"
+            value={typeof appStore.parallelSlots === 'number' ? appStore.parallelSlots : 2}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              appStore.parallelSlots = Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 1);
+              bumpEstimate();
+            }}
+          />
+        </AutoEditField>
+
+        <AutoEditField
+          label="Batch size"
+          mode={batchMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setAutoInt('batchSize', m)}
+        >
+          <input
+            class="field mono w-full"
+            type="number"
+            min="1"
+            value={typeof appStore.batchSize === 'number' ? appStore.batchSize : 512}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              appStore.batchSize = Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 1);
+            }}
+          />
+        </AutoEditField>
+
+        <AutoEditField
+          label="Micro-batch"
+          mode={microMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setAutoInt('microBatch', m)}
+        >
+          <input
+            class="field mono w-full"
+            type="number"
+            min="1"
+            value={typeof appStore.microBatch === 'number' ? appStore.microBatch : 2}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              appStore.microBatch = Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 1);
+            }}
+          />
+        </AutoEditField>
+
+        <label class="mono text-[11px] flex items-center gap-2" style="color: var(--fg)">
+          <input
+            type="checkbox"
+            bind:checked={appStore.vision}
+            disabled={!!appStore.busy}
+            onchange={bumpEstimate}
+          />
+          Vision
         </label>
-        <input class="field mono" placeholder="mmproj path" bind:value={appStore.mmproj} />
-        <input class="field mono" placeholder="Chat template name" bind:value={appStore.chatTemplate} />
-        <textarea class="field mono" rows="3" placeholder="Chat template jinja" bind:value={appStore.chatTemplateText}
+        {#if appStore.vision}
+          <label class="mono text-[11px]" style="color: var(--muted)">mmproj path</label>
+          <input
+            class="field mono"
+            placeholder="Path to mmproj GGUF"
+            bind:value={appStore.mmproj}
+            disabled={!!appStore.busy}
+            onchange={bumpEstimate}
+          />
+        {/if}
+
+        <label class="mono text-[11px]" style="color: var(--muted)">Chat template</label>
+        <input
+          class="field mono"
+          placeholder="Template name (default)"
+          bind:value={appStore.chatTemplate}
+          disabled={!!appStore.busy}
+        />
+        <label class="mono text-[11px]" style="color: var(--muted)">Chat template (jinja)</label>
+        <textarea
+          class="field mono"
+          rows="3"
+          placeholder="Optional custom jinja"
+          bind:value={appStore.chatTemplateText}
+          disabled={!!appStore.busy}
         ></textarea>
-        <select class="field mono" bind:value={appStore.mmapMlock}>
-          <option value="auto">mmap/mlock auto</option>
+
+        <label class="mono text-[11px]" style="color: var(--muted)">mmap / mlock</label>
+        <select class="field mono" bind:value={appStore.mmapMlock} disabled={!!appStore.busy}>
+          <option value="auto">auto</option>
           <option value="mmap">mmap</option>
           <option value="mlock">mlock</option>
           <option value="mmap+mlock">mmap+mlock</option>
           <option value="none">none</option>
         </select>
-        <input class="field mono" placeholder="Checkpoints (auto or number)" bind:value={appStore.checkpoints} />
-        <input class="field mono" placeholder="Cache RAM MiB (auto or number)" bind:value={appStore.cacheRam} />
-        <input class="field mono" type="number" min="1" bind:value={appStore.threads} />
-        <input class="field mono" placeholder="Extra args (space-separated)" bind:value={appStore.extraArgsText} />
+
+        <AutoEditField
+          label="Checkpoints"
+          mode={checkpointMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setAutoInt('checkpoints', m)}
+        >
+          <input
+            class="field mono w-full"
+            type="number"
+            min="0"
+            value={typeof appStore.checkpoints === 'number' ? appStore.checkpoints : 0}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              appStore.checkpoints = Math.max(0, Number((e.currentTarget as HTMLInputElement).value) || 0);
+            }}
+          />
+        </AutoEditField>
+
+        <AutoEditField
+          label="Cache RAM (MiB)"
+          mode={cacheRamMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setAutoInt('cacheRam', m)}
+        >
+          <input
+            class="field mono w-full"
+            type="number"
+            min="0"
+            value={typeof appStore.cacheRam === 'number' ? appStore.cacheRam : 0}
+            disabled={!!appStore.busy}
+            onchange={(e) => {
+              appStore.cacheRam = Math.max(0, Number((e.currentTarget as HTMLInputElement).value) || 0);
+            }}
+          />
+        </AutoEditField>
+
+        <label class="mono text-[11px]" style="color: var(--muted)">Threads</label>
+        <input
+          class="field mono"
+          type="number"
+          min="1"
+          bind:value={appStore.threads}
+          disabled={!!appStore.busy}
+        />
+        {#if appStore.fieldErrors.threads}
+          <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.threads}</p>
+        {/if}
+
+        <label class="mono text-[11px]" style="color: var(--muted)">Extra args</label>
+        <input
+          class="field mono"
+          placeholder="Space-separated llama-server args"
+          bind:value={appStore.extraArgsText}
+          disabled={!!appStore.busy}
+        />
       </div>
     </details>
 
@@ -241,7 +427,14 @@
     </p>
 
     <div class="flex gap-2 flex-wrap">
-      <button class="btn" type="button" onclick={() => appStore.resetRunSettings()}>Reset</button>
+      <button
+        class="btn"
+        type="button"
+        onclick={() => {
+          appStore.resetRunSettings();
+          bumpEstimate();
+        }}>Reset</button
+      >
       <button
         class="btn"
         disabled={!!blocked || !appStore.selectedModel || !!appStore.busy}

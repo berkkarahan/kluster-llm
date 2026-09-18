@@ -26,6 +26,14 @@ function isAccelBackend(v: unknown): v is AccelBackend {
 
 let fingerprint = '';
 
+function apiErrorMessage(data: unknown, text: string, status: number, fallback: string): string {
+  if (typeof data === 'object' && data !== null && 'detail' in data) {
+    return String((data as { detail: unknown }).detail);
+  }
+  if (typeof data === 'string') return data;
+  return text || `${fallback} ${status}`;
+}
+
 function fp(s: Status | null): string {
   if (!s) return '';
   return JSON.stringify({
@@ -662,12 +670,7 @@ class AppStore {
         data = text;
       }
       if (!r.ok) {
-        const msg =
-          typeof data === 'object' && data !== null && 'detail' in data
-            ? String((data as { detail: unknown }).detail)
-            : typeof data === 'string'
-              ? data
-              : text || `search ${r.status}`;
+        const msg = apiErrorMessage(data, text, r.status, 'search');
         this.searchError = msg;
         pushToast('danger', msg);
         throw new Error(msg);
@@ -696,9 +699,60 @@ class AppStore {
     await this.post('/v1/models/download', { source: src });
   }
 
-  async distributeModel() {
-    if (!this.selectedModel) return;
-    await this.post('/v1/models/distribute', { name: this.selectedModel });
+  async distributeModel(name?: string) {
+    const model = (name ?? this.selectedModel).trim();
+    if (!model) return;
+    this.selectedModel = model;
+    this.busy = '/v1/models/distribute';
+    try {
+      const r = await fetch('/v1/models/distribute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: model })
+      });
+      const text = await r.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      if (!r.ok) {
+        const msg = apiErrorMessage(data, text, r.status, 'distribute');
+        pushToast('danger', msg);
+        throw new Error(msg);
+      }
+      const body = data as { results?: Array<Record<string, unknown>> };
+      const results = Array.isArray(body?.results) ? body.results : [];
+      const failed = results.filter((row) => !row.ok);
+      if (failed.length) {
+        const msg = failed
+          .map((row) => `fail ${String(row.host ?? '?')}: ${String(row.error ?? 'error')}`)
+          .join(' | ');
+        pushToast('danger', msg);
+        throw new Error(msg);
+      }
+      if (
+        results.length > 0 &&
+        results.every((row) => {
+          const result = row.result;
+          return (
+            typeof result === 'object' &&
+            result !== null &&
+            (result as { skipped?: boolean }).skipped === true
+          );
+        })
+      ) {
+        pushToast('ok', 'distribute skipped (already on workers)');
+      } else {
+        pushToast('ok', 'distribute ok');
+      }
+      await this.refresh();
+      await this.loadModels();
+      return data;
+    } finally {
+      this.busy = '';
+    }
   }
 
   async deleteModel(name: string) {

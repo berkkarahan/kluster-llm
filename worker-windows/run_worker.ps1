@@ -108,4 +108,9 @@ if ($Model -ne "") {
 $env:VK_ICD_FILE_NAMES = "C:\Vulkan\SDK\icd.ics"
 $env:HIP_PLATFORM = "amd"
 
+$dllDir = Join-Path $PSScriptRoot "src"
+if (Test-Path $dllDir) {
+    $env:PATH = "$dllDir;$env:PATH"
+}
+
 & "$rpcServer" $args

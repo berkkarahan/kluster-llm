@@ -66,3 +66,36 @@ def test_parse_args_defaults(install):
     assert args.backend == "auto"
     assert args.skip_llama is False
     assert args.skip_wireguard is False
+
+
+def test_migrate_worker_root_dlls(install, monkeypatch, tmp_path):
+    worker = tmp_path / "worker-windows"
+    worker.mkdir()
+    src_dir = worker / "src"
+    (worker / "a.dll").write_bytes(b"a")
+    (worker / "b.dll").write_bytes(b"b")
+
+    monkeypatch.setattr(install, "WORKER_WIN", worker)
+    monkeypatch.setattr(install, "WORKER_WIN_SRC", src_dir)
+
+    install._migrate_worker_root_dlls()
+
+    assert not list(worker.glob("*.dll"))
+    assert (src_dir / "a.dll").read_bytes() == b"a"
+    assert (src_dir / "b.dll").read_bytes() == b"b"
+
+
+def test_copy_dlls_to_worker_src(install, monkeypatch, tmp_path):
+    worker = tmp_path / "worker-windows"
+    worker.mkdir()
+    src_dir = worker / "src"
+    from_dir = tmp_path / "extract"
+    from_dir.mkdir()
+    (from_dir / "ggml.dll").write_bytes(b"ggml")
+
+    monkeypatch.setattr(install, "WORKER_WIN", worker)
+    monkeypatch.setattr(install, "WORKER_WIN_SRC", src_dir)
+
+    install._copy_dlls(from_dir, install._ensure_worker_src())
+
+    assert (src_dir / "ggml.dll").read_bytes() == b"ggml"

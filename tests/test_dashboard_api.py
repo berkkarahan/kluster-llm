@@ -398,7 +398,7 @@ def test_status_distribute_and_receive_fields(client):
             {
                 "node_id": "w1",
                 "host": "10.0.0.2",
-                "phase": "sending",
+                "phase": "pulling",
                 "bytes": 50,
                 "total": 100,
                 "pct": 50,
@@ -425,6 +425,50 @@ def test_status_distribute_and_receive_fields(client):
         assert recv["phase"] == "receiving"
     finally:
         model_ops._clear_receive_progress()
+
+
+def test_distribute_requires_master(client):
+    c, agent, _ = client
+    agent.STATE.role = "worker"
+    agent.STATE.join_key = "secret-key"
+    r = c.post("/v1/models/distribute", json={"name": "toy.gguf"})
+    assert r.status_code == 400
+    assert "master" in r.json()["detail"]
+
+
+def test_distribute_returns_mixed_worker_results(client):
+    c, agent, _ = client
+    models = Path(os.environ["KLLM_HOME"]) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    (models / "toy.gguf").write_bytes(b"gguf")
+
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "secret-key"
+    agent.STATE.members = {
+        "w1": {"node_id": "w1", "role": "worker", "lan_host": "10.0.0.2"},
+        "w2": {"node_id": "w2", "role": "worker", "lan_host": "10.0.0.3"},
+    }
+    mixed = [
+        {
+            "host": "10.0.0.2",
+            "node_id": "w1",
+            "ok": True,
+            "result": {"ok": True, "skipped": True},
+        },
+        {
+            "host": "10.0.0.3",
+            "node_id": "w2",
+            "ok": False,
+            "error": "seed dropped",
+        },
+    ]
+    with patch("kllm.models.distribute_to_workers", return_value=mixed) as mocked:
+        r = c.post("/v1/models/distribute", json={"name": "toy.gguf"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["results"] == mixed
+    mocked.assert_called_once()
 
 
 def test_receive_endpoint_progress_and_meta(client):
@@ -480,24 +524,69 @@ def test_receive_endpoint_progress_and_meta(client):
     assert meta["size_bytes"] == len(payload)
     assert meta["sha256"] == digest
 
-    # Full PUT receive path
-    payload2 = b"second-receive"
-    digest2 = hashlib.sha256(payload2).hexdigest()
-    r = c.put(
-        "/v1/models/receive",
-        content=payload2,
+    r = c.get("/v1/models/blob", headers={"X-Kllm-Filename": "got.gguf"})
+    assert r.status_code == 401
+
+    r = c.get(
+        "/v1/models/blob",
         headers={
             "X-Kllm-Key": "secret",
-            "X-Kllm-Filename": "got2.gguf",
-            "X-Kllm-Sha256": digest2,
-            "X-Kllm-Size": str(len(payload2)),
-            "Content-Type": "application/octet-stream",
+            "X-Kllm-Filename": "got.gguf",
+            "Range": "bytes=1-4",
         },
     )
+    assert r.status_code == 206
+    assert r.content == payload[1:5]
+    assert r.headers["content-range"] == f"bytes 1-4/{len(payload)}"
+    assert r.headers["accept-ranges"] == "bytes"
+
+    r = c.get(
+        "/v1/models/blob",
+        headers={"X-Kllm-Key": "secret", "X-Kllm-Filename": "got.gguf"},
+    )
     assert r.status_code == 200
-    assert r.json()["sha256"] == digest2
-    assert (models_dir() / "got2.gguf").read_bytes() == payload2
-    assert model_ops.get_receive_progress() is None
+    assert r.content == payload
+
+    # Skip pull when local file already matches
+    r = c.post(
+        "/v1/models/pull",
+        json={
+            "filename": "got.gguf",
+            "sha256": digest,
+            "size": len(payload),
+            "source": {"host": "10.0.0.1", "port": 18765},
+        },
+        headers={"X-Kllm-Key": "secret"},
+    )
+    assert r.status_code == 200
+    assert r.json()["skipped"] is True
+
+    r = c.post(
+        "/v1/models/pull",
+        json={
+            "filename": "got.gguf",
+            "sha256": digest,
+            "size": len(payload),
+            "source": {"host": "10.0.0.1", "port": 18765},
+        },
+    )
+    assert r.status_code == 401
+
+    model_ops.begin_receive("busy.gguf", 10)
+    try:
+        r = c.post(
+            "/v1/models/pull",
+            json={
+                "filename": "other.gguf",
+                "sha256": "a" * 64,
+                "size": 10,
+                "source": {"host": "10.0.0.1", "port": 18765},
+            },
+            headers={"X-Kllm-Key": "secret"},
+        )
+        assert r.status_code == 409
+    finally:
+        model_ops.abort_receive()
 
 
 ORCA_REPO = "orcarouter/Qwen3.8-27B-Uncensored-GGUF"

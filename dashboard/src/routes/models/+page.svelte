@@ -27,7 +27,7 @@
 
   function transferLabel(d: DistributeProgress) {
     const pct = Math.round(d.pct);
-    const phase = d.phase ?? 'pushing';
+    const phase = d.phase ?? 'pulling';
     if (phase === 'hashing' && d.total != null && d.bytes != null) {
       return `hashing ${pct}% · ${fmtGb(d.bytes)} / ${fmtGb(d.total)} GB`;
     }
@@ -58,6 +58,7 @@
   const dl = $derived(appStore.status?.download ?? null);
   const dist = $derived(appStore.status?.distribute ?? null);
   const recv = $derived(appStore.status?.receive ?? null);
+  const isMaster = $derived(appStore.status?.role === 'master');
 
   $effect(() => {
     if (!modalOpen) return;
@@ -131,18 +132,16 @@
         <div class="mono text-[11px]" style="color: var(--muted)">
           {transferLabel(dist)}{#if dist.filename}<span> · {dist.filename}</span>{/if}
         </div>
-        {#if dist.phase === 'hashing'}
-          <div
-            class="progress"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(dist.pct)}
-            aria-label="Model hashing"
-          >
-            <span style:width={`${Math.min(100, Math.max(0, dist.pct))}%`}></span>
-          </div>
-        {/if}
+        <div
+          class="progress"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(dist.pct)}
+          aria-label={dist.phase === 'hashing' ? 'Model hashing' : 'Model distribute'}
+        >
+          <span style:width={`${Math.min(100, Math.max(0, dist.pct))}%`}></span>
+        </div>
         {#each dist.workers as w (w.host + (w.node_id ?? ''))}
           <div class="flex flex-col gap-1">
             <div
@@ -238,14 +237,13 @@
             </td>
             <td class="px-3 py-2 border-b text-right" style="border-color: var(--border)">
               <div class="inline-flex gap-2">
-                <button
-                  class="btn"
-                  disabled={!!appStore.busy}
-                  onclick={() => {
-                    appStore.selectedModel = m.id;
-                    void appStore.distributeModel();
-                  }}>Distribute</button
-                >
+                {#if isMaster}
+                  <button
+                    class="btn"
+                    disabled={!!appStore.busy}
+                    onclick={() => void appStore.distributeModel(m.id)}>Distribute</button
+                  >
+                {/if}
                 <button
                   class="btn btn-danger"
                   disabled={!!appStore.busy}

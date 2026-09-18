@@ -30,7 +30,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard) |
-| `kllm model distribute <name>` | Master pushes GGUF to all workers (SHA-256 verified) |
+| `kllm model distribute <name>` | Master coordinates a LAN pull to workers; finished workers seed others (SHA-256 verified) |
 | `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`) |
 | `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` with mapped flags + `--rpc` workers |
 | `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
@@ -168,6 +168,7 @@ kllm join --key '<join-key>'
 
 # Machine A
 kllm model distribute llama-3.1-8b-instruct.Q4_K_M.gguf
+# master coordinates a LAN pull; finished workers seed others
 kllm plan --model llama-3.1-8b-instruct.Q4_K_M.gguf
 kllm run --model llama-3.1-8b-instruct.Q4_K_M.gguf
 ```

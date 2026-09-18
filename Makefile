@@ -73,4 +73,4 @@ clean:
 	@rm -rf coordinator-macos/../vendor/llama.cpp/build
 	@rm -rf coordinator-macos/../vendor/prima.cpp/build
 	@rm -f worker-windows/rpc-server.exe
-	@rm -f worker-windows/vulkan*.dll
+	@rm -rf worker-windows/src

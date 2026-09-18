@@ -372,6 +372,17 @@ fn which(name: &str) -> Option<String> {
     None
 }
 
+#[cfg(windows)]
+fn worker_dll_path_for(binary: &Path) -> Option<PathBuf> {
+    let parent = binary.parent()?;
+    let dll_dir = parent.join("src");
+    if dll_dir.is_dir() {
+        Some(dll_dir)
+    } else {
+        None
+    }
+}
+
 pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
     if !cfg.binary.is_file() {
         return Err(ProcessError::Message(format!(
@@ -385,6 +396,20 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
     }
     if !cfg.env.is_empty() {
         cmd.envs(&cfg.env);
+    }
+    #[cfg(windows)]
+    if let Some(dll_dir) = worker_dll_path_for(&cfg.binary) {
+        let path_key = "PATH";
+        let existing = cfg
+            .env
+            .get(path_key)
+            .cloned()
+            .or_else(|| env::var(path_key).ok());
+        let merged = match existing {
+            Some(path) => format!("{};{}", dll_dir.display(), path),
+            None => dll_dir.to_string_lossy().into_owned(),
+        };
+        cmd.env(path_key, merged);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())

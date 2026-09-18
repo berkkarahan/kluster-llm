@@ -72,16 +72,18 @@ class MasterAdvertiser:
         cluster_name: str,
         port: int = DEFAULT_CONTROL_PORT,
         join_key: str | None = None,
+        advertise_host: str | None = None,
     ) -> None:
         self.cluster_name = cluster_name
         self.port = port
         self.join_key = join_key
+        self.advertise_host = advertise_host
         self._zc: Zeroconf | None = None
         self._info: ServiceInfo | None = None
 
     def start(self) -> None:
         hostname = socket.gethostname()
-        local_ip = _local_ip()
+        local_ip = self.advertise_host or _local_ip()
         self._zc = Zeroconf()
         service_name = f"{self.cluster_name}.{SERVICE_TYPE}"
         props: dict[bytes, bytes] = {

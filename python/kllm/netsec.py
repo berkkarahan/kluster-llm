@@ -149,6 +149,7 @@ def _list_ipv4_addresses() -> list[str]:
         pass
 
     # Enumerate via OS when possible for multi-NIC hosts.
+    # Linux `ip` is not on macOS; hostname getaddrinfo also fails on many Macs.
     system = platform.system()
     try:
         if system == "Windows":
@@ -163,14 +164,39 @@ def _list_ipv4_addresses() -> list[str]:
                 line = line.strip()
                 if re.match(r"^\d+\.\d+\.\d+\.\d+$", line):
                     found.add(line)
+        elif system == "Darwin":
+            _collect_ifconfig_ipv4(found)
         else:
-            out = subprocess.check_output(["ip", "-4", "-o", "addr", "show"], text=True, timeout=5, stderr=subprocess.DEVNULL)
-            for m in re.finditer(r"inet\s+(\d+\.\d+\.\d+\.\d+)", out):
-                found.add(m.group(1))
+            try:
+                out = subprocess.check_output(
+                    ["ip", "-4", "-o", "addr", "show"],
+                    text=True,
+                    timeout=5,
+                    stderr=subprocess.DEVNULL,
+                )
+                for m in re.finditer(r"inet\s+(\d+\.\d+\.\d+\.\d+)", out):
+                    found.add(m.group(1))
+            except Exception:
+                _collect_ifconfig_ipv4(found)
     except Exception:
         pass
 
     return [ip for ip in found if not ip.startswith("127.")]
+
+
+def _collect_ifconfig_ipv4(found: set[str]) -> None:
+    """Parse ``ifconfig -a`` IPv4 addresses (macOS / BSD)."""
+    try:
+        out = subprocess.check_output(
+            ["ifconfig", "-a"],
+            text=True,
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return
+    for m in re.finditer(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", out):
+        found.add(m.group(1))
 
 
 def ensure_rpc_firewall(port: int, bind_host: str) -> dict[str, Any]:

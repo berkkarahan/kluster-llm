@@ -39,6 +39,36 @@ def test_pick_rpc_bind_host_default_not_wildcard(monkeypatch):
     assert netsec.pick_rpc_bind_host(None) == "192.168.10.5"
 
 
+def test_pick_rpc_bind_host_prefers_rfc1918_over_cgnat(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_addresses",
+        lambda: ["100.64.0.1", "192.168.68.66"],
+    )
+    assert netsec.pick_rpc_bind_host(None) == "192.168.68.66"
+
+
+def test_collect_ifconfig_ipv4_parses_macos_output():
+    from kllm import netsec
+
+    sample = """
+lo0: flags=8049
+	inet 127.0.0.1 netmask 0xff000000
+en0: flags=8863
+	inet 192.168.68.66 netmask 0xfffffc00 broadcast 192.168.71.255
+utun4: flags=8051
+	inet 100.64.0.1 --> 100.64.0.1 netmask 0xffff0000
+"""
+    found: set[str] = set()
+    with patch.object(netsec.subprocess, "check_output", return_value=sample):
+        netsec._collect_ifconfig_ipv4(found)
+    assert "192.168.68.66" in found
+    assert "100.64.0.1" in found
+    assert "127.0.0.1" in found
+
+
 def test_pick_rpc_bind_host_toward_beats_lexicographic_private(monkeypatch):
     from kllm import netsec
 

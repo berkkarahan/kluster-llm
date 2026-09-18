@@ -771,6 +771,7 @@ def start_master(body: StartBody) -> dict[str, Any]:
         f"kllm-{STATE.node_id}",
         STATE.control_port,
         join_key=STATE.join_key,
+        advertise_host=lan_host,
     )
     _advertiser.start()
     return {

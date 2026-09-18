@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,89 @@ from kllm import models as model_ops
 from kllm import native
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.run_settings import RunBody, RunSettingsFields
-from kllm.state import ensure_home
+from kllm.state import DEFAULT_RPC_PORT, ensure_home
+
+# Prefer cluster `host` (WG overlay address when set) over LAN — matches worker RPC bind.
+_RPC_CONNECT_TIMEOUT_S = 2.0
+_POST_SPAWN_ALIVE_CHECKS = 3
+_POST_SPAWN_ALIVE_INTERVAL_S = 0.15
+
+
+def member_rpc_host(member: dict[str, Any] | None) -> str:
+    """Host used for RPC dial and latency probes (host, then lan_host)."""
+    m = member or {}
+    return str(m.get("host") or m.get("lan_host") or "127.0.0.1")
+
+
+def ordered_members(members: dict[str, Any]) -> list[dict[str, Any]]:
+    """Workers in registration order, then master — matches llama.cpp RPC device order."""
+    workers: list[dict[str, Any]] = []
+    master: dict[str, Any] | None = None
+    for m in members.values():
+        src = dict(m or {})
+        if src.get("role") == "master":
+            master = src
+        else:
+            workers.append(src)
+    out = workers
+    if master is not None:
+        out = [*workers, master]
+    return out
+
+
+def rpc_server_endpoints(members: dict[str, Any]) -> list[str]:
+    endpoints: list[str] = []
+    for m in ordered_members(members):
+        if m.get("role") == "worker":
+            host = member_rpc_host(m)
+            endpoints.append(f"{host}:{m.get('rpc_port', DEFAULT_RPC_PORT)}")
+    return endpoints
+
+
+def ensure_rpc_peers_reachable(
+    endpoints: list[str], *, timeout_s: float = _RPC_CONNECT_TIMEOUT_S
+) -> None:
+    """TCP-check each RPC endpoint; raise HTTPException if any peer is down."""
+    unreachable: list[str] = []
+    for ep in endpoints:
+        host, _, port_s = ep.rpartition(":")
+        if not host or not port_s:
+            unreachable.append(ep)
+            continue
+        try:
+            port = int(port_s)
+        except ValueError:
+            unreachable.append(ep)
+            continue
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s):
+                pass
+        except OSError:
+            unreachable.append(ep)
+    if unreachable:
+        joined = ", ".join(unreachable)
+        raise HTTPException(
+            503,
+            f"RPC peer(s) unreachable: {joined}; ensure workers joined with rpc-server running",
+        )
+
+
+def ensure_master_alive_after_spawn(pid: int | None) -> None:
+    """Fail Run if llama-server exits immediately after spawn."""
+    if not pid:
+        raise HTTPException(500, "llama-server failed to start (no pid)")
+    for _ in range(_POST_SPAWN_ALIVE_CHECKS):
+        if not native.process_alive(int(pid)):
+            raise HTTPException(
+                500,
+                "llama-server exited immediately after start; check RPC peers and model path",
+            )
+        time.sleep(_POST_SPAWN_ALIVE_INTERVAL_S)
+    if not native.process_alive(int(pid)):
+        raise HTTPException(
+            500,
+            "llama-server exited immediately after start; check RPC peers and model path",
+        )
 
 
 def resolve_headroom(body: RunSettingsFields) -> float:
@@ -28,7 +112,8 @@ def resolve_headroom(body: RunSettingsFields) -> float:
 
 def cluster_nodes(members: dict[str, Any]) -> list[dict[str, Any]]:
     nodes = []
-    for m in members.values():
+    for m in ordered_members(members):
+        lat = m.get("latency_ms")
         nodes.append(
             {
                 "node_id": m["node_id"],
@@ -37,6 +122,9 @@ def cluster_nodes(members: dict[str, Any]) -> list[dict[str, Any]]:
                 "vram_bytes": m.get("vram_bytes"),
                 "backend": m.get("backend", "unknown"),
                 "unified_memory": m.get("backend") == "metal",
+                "latency_ms": float(lat) if lat is not None else None,
+                "role": m.get("role", "worker"),
+                "is_master": m.get("role") == "master",
             }
         )
     return nodes
@@ -65,6 +153,8 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             context_auto=body.context_auto,
             headroom=headroom,
             device=device,
+            vram_weight=body.vram_weight,
+            latency_weight=body.latency_weight,
         )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc

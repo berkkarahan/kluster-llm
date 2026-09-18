@@ -38,7 +38,7 @@
   {/if}
 
   <div class="panel p-3 flex flex-col gap-3" style="border-color: var(--border)">
-    {#if appStore.planResult?.estimated_bytes != null}
+    {#if !blocked && appStore.planResult?.estimated_bytes != null}
       <div class="mono text-[11px] p-2 rounded" style="background: var(--bg); border: 1px solid var(--border)">
         Estimated memory (last Plan):
         {fmtBytes(Number(appStore.planResult.estimated_bytes))}
@@ -167,6 +167,30 @@
         disabled={!!appStore.busy}
         onchange={() => void appStore.setVramPercent(appStore.vramPercent)}
       />
+      <label class="mono text-[11px]" style="color: var(--muted)">Placement weights (VRAM / latency)</label>
+      <div class="flex gap-2">
+        <input
+          class="field mono flex-1"
+          type="number"
+          min="0"
+          max="1"
+          step="0.05"
+          bind:value={appStore.vramWeight}
+          disabled={!!appStore.busy}
+        />
+        <input
+          class="field mono flex-1"
+          type="number"
+          min="0"
+          max="1"
+          step="0.05"
+          bind:value={appStore.latencyWeight}
+          disabled={!!appStore.busy}
+        />
+      </div>
+      {#if appStore.fieldErrors.placementWeights}
+        <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.placementWeights}</p>
+      {/if}
     {:else}
       <label class="mono text-[11px]" style="color: var(--muted)">CPU memory (%)</label>
       <input
@@ -236,15 +260,50 @@
       </p>
     {/if}
 
-    {#if appStore.planResult}
+    {#if !blocked && appStore.planResult}
       {#if appStore.planResult.hint}
         <p class="mono text-[11px]" style="color: var(--muted)">{String(appStore.planResult.hint)}</p>
       {/if}
       {#if appStore.planResult.device_requested}
         <p class="mono text-[12px]" style="color: var(--muted)">
           Placement: {String(appStore.planResult.device_requested)} → {String(appStore.planResult.device_effective)}
-          · split {JSON.stringify(appStore.planResult.tensor_split)}
         </p>
+      {/if}
+      {#if Array.isArray(appStore.planResult.node_ids)}
+        <table class="w-full text-left border-collapse mono text-[11px] mt-2">
+          <thead>
+            <tr style="color: var(--muted)">
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">node</th>
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">split</th>
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">alloc</th>
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">score</th>
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">latency</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each appStore.planResult.node_ids as nid, i}
+              <tr>
+                <td class="py-1 border-b" style="border-color: var(--border)">{String(nid)}</td>
+                <td class="py-1 border-b" style="border-color: var(--border)">
+                  {Number((appStore.planResult.tensor_split as number[])?.[i] ?? 0).toFixed(3)}
+                </td>
+                <td class="py-1 border-b" style="border-color: var(--border)">
+                  {fmtBytes(Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0))}
+                </td>
+                <td class="py-1 border-b" style="border-color: var(--border)">
+                  {Number((appStore.planResult.node_scores as number[])?.[i] ?? 0).toFixed(3)}
+                </td>
+                <td class="py-1 border-b" style="border-color: var(--border)">
+                  {#if (appStore.planResult.node_latency_ms as number[])?.[i] != null}
+                    {Number((appStore.planResult.node_latency_ms as number[])[i]).toFixed(1)} ms
+                  {:else}
+                    —
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       {/if}
     {/if}
   </div>

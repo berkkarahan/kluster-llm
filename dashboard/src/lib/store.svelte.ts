@@ -1,4 +1,14 @@
-import type { ChatMessage, ClusterView, GpuInfo, HfTokenSource, HfTokenStatus, ModelInfo, Status } from './types';
+import type {
+  ChatMessage,
+  ClusterView,
+  GpuInfo,
+  HfTokenSource,
+  HfTokenStatus,
+  ModelInfo,
+  ModelSearchHit,
+  ModelSearchResponse,
+  Status
+} from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { pushToast } from './toast';
 
@@ -38,6 +48,10 @@ class AppStore {
   gpuBackend = $state('cpu');
   selectedGpuIds = $state<number[]>([]);
   modelSource = $state('');
+  searchResults = $state<ModelSearchHit[]>([]);
+  searchTotalVram = $state<number | null>(null);
+  searchError = $state('');
+  searching = $state(false);
   hfTokenInput = $state('');
   hfTokenConfigured = $state(false);
   hfTokenSource = $state<HfTokenSource>(null);
@@ -66,6 +80,8 @@ class AppStore {
   device = $state<'cpu' | 'gpu'>('gpu');
   vramPercent = $state(80);
   ramPercent = $state(80);
+  vramWeight = $state(0.6);
+  latencyWeight = $state(0.4);
   planResult = $state<Record<string, unknown> | null>(null);
   chat = $state<ChatMessage[]>([]);
   chatInput = $state('');
@@ -119,8 +135,11 @@ class AppStore {
       if (next !== fingerprint) {
         fingerprint = next;
         if (data.model_name && !this.selectedModel) this.selectedModel = data.model_name;
-        if (data.last_plan) this.planResult = data.last_plan as Record<string, unknown>;
-        else if (data.role === 'idle') this.planResult = null;
+        if (data.role === 'master' && data.last_plan) {
+          this.planResult = data.last_plan as Record<string, unknown>;
+        } else {
+          this.planResult = null;
+        }
         const err = data.apply_error ?? null;
         const warn = data.apply_warning ?? null;
         if (err && err !== this.lastApplyError) pushToast('danger', err);
@@ -244,6 +263,8 @@ class AppStore {
     if (typeof ps.remember === 'boolean') this.remember = ps.remember;
     if (typeof ps.advanced_open === 'boolean') this.advancedOpen = ps.advanced_open;
     if (ps.device === 'cpu' || ps.device === 'gpu') this.device = ps.device;
+    if (typeof ps.vram_weight === 'number') this.vramWeight = ps.vram_weight;
+    if (typeof ps.latency_weight === 'number') this.latencyWeight = ps.latency_weight;
   }
 
   async selectModel(id: string) {
@@ -283,6 +304,8 @@ class AppStore {
     this.extraArgsText = '';
     this.advancedOpen = false;
     this.fieldErrors = {};
+    this.vramWeight = 0.6;
+    this.latencyWeight = 0.4;
     this.planResult = null;
   }
 
@@ -304,6 +327,10 @@ class AppStore {
     if (this.threads < 1) err.threads = 'Threads must be at least 1.';
     if (this.vramPercent < 10 || this.vramPercent > 100) err.vramPercent = 'GPU memory % must be 10–100.';
     if (this.ramPercent < 10 || this.ramPercent > 100) err.ramPercent = 'RAM % must be 10–100.';
+    if (this.vramWeight < 0 || this.vramWeight > 1) err.vramWeight = 'VRAM weight must be 0–1.';
+    if (this.latencyWeight < 0 || this.latencyWeight > 1) err.latencyWeight = 'Latency weight must be 0–1.';
+    if (this.vramWeight + this.latencyWeight <= 0)
+      err.placementWeights = 'VRAM and latency weights cannot both be zero.';
     this.fieldErrors = err;
     return Object.keys(err).length === 0;
   }
@@ -329,6 +356,8 @@ class AppStore {
       device: this.device,
       vram_percent: this.device === 'gpu' ? this.vramPercent : undefined,
       ram_percent: this.device === 'cpu' ? this.ramPercent : undefined,
+      vram_weight: this.vramWeight,
+      latency_weight: this.latencyWeight,
       chat_template: this.chatTemplate,
       chat_template_text: this.chatTemplateText || null,
       mmap_mlock: this.mmapMlock,
@@ -542,9 +571,59 @@ class AppStore {
     await this.post('/v1/leave');
   }
 
-  async downloadModel() {
-    await this.post('/v1/models/download', { source: this.modelSource });
+  async searchModels(): Promise<ModelSearchResponse | null> {
+    const query = this.modelSource.trim();
+    if (!query) return null;
+    this.busy = '/v1/models/search';
+    this.searching = true;
+    this.searchError = '';
+    this.searchResults = [];
+    try {
+      const r = await fetch('/v1/models/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query })
+      });
+      const text = await r.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      if (!r.ok) {
+        const msg =
+          typeof data === 'object' && data !== null && 'detail' in data
+            ? String((data as { detail: unknown }).detail)
+            : typeof data === 'string'
+              ? data
+              : text || `search ${r.status}`;
+        this.searchError = msg;
+        pushToast('danger', msg);
+        throw new Error(msg);
+      }
+      const body = data as ModelSearchResponse;
+      this.searchResults = body.results ?? [];
+      this.searchTotalVram = body.total_vram_bytes ?? null;
+      return body;
+    } catch (e) {
+      if (!this.searchError) {
+        const msg = String(e);
+        this.searchError = msg;
+        pushToast('danger', msg);
+      }
+      throw e;
+    } finally {
+      this.busy = '';
+      this.searching = false;
+    }
+  }
+
+  async downloadModel(source?: string) {
+    const src = (source ?? this.modelSource).trim();
+    if (!src) return;
     this.modelSource = '';
+    await this.post('/v1/models/download', { source: src });
   }
 
   async distributeModel() {
@@ -574,6 +653,9 @@ class AppStore {
     }
     const data = (await this.post('/v1/run', this.planPayload())) as Record<string, unknown>;
     const plan = (data.plan ?? {}) as Record<string, unknown>;
+    if (Object.keys(plan).length) {
+      this.planResult = plan;
+    }
     if (plan.fit_status === 'tight' || data.warning) {
       pushToast('warn', String(data.warning ?? plan.hint ?? 'tight fit'));
     }

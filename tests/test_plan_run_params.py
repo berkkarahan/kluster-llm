@@ -147,11 +147,33 @@ def test_run_tight_includes_warning(client):
         agent.native,
         "start_master",
         return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
+    ), patch.object(
+        agent.native,
+        "process_alive",
+        return_value=True,
+    ), patch(
+        "kllm.agent.ensure_rpc_peers_reachable",
     ):
         r = c.post("/v1/run", json=_payload())
     assert r.status_code == 200
     data = r.json()
     assert data.get("warning") or (data.get("plan") or {}).get("fit_status") == "tight"
+
+
+def test_run_rpc_preflight_blocks_unreachable(client):
+    c, agent, tmp = client
+    _model_file(tmp)
+    agent.STATE.members["w1"]["rpc_port"] = 1
+    with patch.object(
+        agent.native,
+        "plan_split",
+        return_value=_fake_plan(),
+    ), patch.object(agent.native, "start_master") as sm:
+        r = c.post("/v1/run", json=_payload())
+    assert r.status_code == 503
+    assert "unreachable" in r.text.lower()
+    sm.assert_not_called()
+    assert agent.STATE.process_pid is None
 
 
 def test_remember_round_trip(client):

@@ -2,6 +2,9 @@ use pyo3::prelude::*;
 use std::process::Command;
 use sysinfo::System;
 
+/// Fixed share of unified memory reported as GPU VRAM on Apple Silicon (not the planner headroom slider).
+pub const METAL_VRAM_FRACTION: f64 = 0.80;
+
 /// Backend hint for inference offload.
 ///
 /// Preference when probing: Metal (macOS) → CUDA → ROCm → Vulkan → CPU.
@@ -37,7 +40,7 @@ pub struct GpuDevice {
     pub index: u32,
     #[pyo3(get)]
     pub name: String,
-    /// Discrete VRAM in bytes. `None` for unified memory (Metal).
+    /// VRAM in bytes. On Apple Silicon this is ~80% of unified memory.
     #[pyo3(get)]
     pub vram_bytes: Option<u64>,
 }
@@ -121,13 +124,30 @@ fn sum_vram(devices: &[GpuDevice]) -> Option<u64> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_gpu_name() -> String {
+    Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Apple GPU".into())
+}
+
 fn enumerate_gpus() -> (Vec<GpuDevice>, BackendHint) {
     if cfg!(target_os = "macos") {
+        let mut sys = System::new();
+        sys.refresh_memory();
+        let total_ram = sys.total_memory();
+        let vram = (total_ram as f64 * METAL_VRAM_FRACTION) as u64;
         return (
             vec![GpuDevice {
                 index: 0,
-                name: "Apple GPU".into(),
-                vram_bytes: None,
+                name: macos_gpu_name(),
+                vram_bytes: Some(vram),
             }],
             BackendHint::Metal,
         );
@@ -337,6 +357,18 @@ mod tests {
         let snap = probe_capacity();
         assert!(snap.total_ram_bytes > 0);
         assert!(!snap.backend.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_reports_metal_vram_fraction() {
+        let snap = probe_capacity();
+        assert_eq!(snap.backend, "metal");
+        let expected = (snap.total_ram_bytes as f64 * METAL_VRAM_FRACTION) as u64;
+        assert_eq!(snap.vram_bytes, Some(expected));
+        let (devices, _) = list_gpus();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].vram_bytes, Some(expected));
     }
 
     #[test]

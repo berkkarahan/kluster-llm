@@ -65,6 +65,8 @@ def plan_split(
     tensor_split: list[float] | None = None,
     device: str = "gpu",
     context_auto: bool = False,
+    vram_weight: float = 0.6,
+    latency_weight: float = 0.4,
 ) -> dict[str, Any]:
     n = require_native()
     req: dict[str, Any] = {
@@ -74,6 +76,8 @@ def plan_split(
         "context_auto": context_auto,
         "headroom": headroom,
         "device": device,
+        "vram_weight": vram_weight,
+        "latency_weight": latency_weight,
     }
     if tensor_split is not None:
         req["tensor_split"] = tensor_split
@@ -108,6 +112,11 @@ def plan_split(
         "budget_bytes": plan.budget_bytes,
         "hint": plan.hint,
         "context_effective": plan.context_effective,
+        "node_alloc_bytes": list(plan.node_alloc_bytes),
+        "node_scores": list(plan.node_scores),
+        "node_latency_ms": list(plan.node_latency_ms),
+        "vram_alloc_bytes": plan.vram_alloc_bytes,
+        "ram_alloc_bytes": plan.ram_alloc_bytes,
     }
 
 

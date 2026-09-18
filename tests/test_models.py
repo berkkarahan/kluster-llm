@@ -187,3 +187,148 @@ def test_hf_token_clear(kllm_home):
     assert cleared == {"configured": False, "source": None}
     assert not hf_token.hf_token_path().exists()
     assert "secret" not in str(cleared)
+
+
+def test_parse_search_query_repo_and_search():
+    repo = models.parse_model_search_query("orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
+    assert repo["kind"] == "repo"
+    assert repo["repo_id"] == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+    assert repo["suffix"] == "Q4_K_M"
+
+    named = models.parse_model_search_query("Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
+    assert named["kind"] == "search"
+    assert named["search_term"] == "Qwen3.8-27B-Uncensored-GGUF"
+    assert named["suffix"] == "Q4_K_M"
+
+    all_quants = models.parse_model_search_query("Qwen3.8-27B-Uncensored-GGUF")
+    assert all_quants["kind"] == "search"
+    assert all_quants["suffix"] is None
+
+    url = models.parse_model_search_query(
+        "https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-GGUF/resolve/main/Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    )
+    assert url["kind"] == "url"
+    assert url["repo_id"] == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+    assert url["suffix"] == "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+
+
+def test_parse_search_query_empty():
+    with pytest.raises(ValueError, match="empty"):
+        models.parse_model_search_query("  ")
+
+
+def test_rank_hub_exact_repo_name_first():
+    ranked = models.rank_hub_repo_ids(
+        [
+            "someone/other-gguf",
+            "orcarouter/Qwen3.8-27B-Uncensored-GGUF",
+            "org/Qwen3.8-27B-Uncensored-GGUF-extra",
+        ],
+        "Qwen3.8-27B-Uncensored-GGUF",
+    )
+    assert ranked[0] == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+    assert ranked[1] == "someone/other-gguf"
+
+
+def test_vram_fit_and_sum():
+    assert models.vram_fit(16_800_000_000, 48_000_000_000) == "fits"
+    assert models.vram_fit(50_000_000_000, 48_000_000_000) == "overflow"
+    assert models.vram_fit(16_800_000_000, None) == "unknown"
+    assert models.vram_fit(0, 48_000_000_000) == "unknown"
+    assert models.sum_vram_bytes([{"vram_bytes": 24_000_000_000}, {"vram_bytes": 24_000_000_000}]) == 48_000_000_000
+    assert models.sum_vram_bytes([{"vram_bytes": None}, {"vram_bytes": 0}]) is None
+
+
+class _FakeSibling:
+    def __init__(self, rfilename: str, size: int | None):
+        self.rfilename = rfilename
+        self.size = size
+
+
+class _FakeInfo:
+    def __init__(self, siblings: list[_FakeSibling], *, gated: bool = False):
+        self.siblings = siblings
+        self.gated = gated
+
+
+ORCA_REPO = "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+ORCA_SIBLINGS = [
+    _FakeSibling("Qwen3.8-27B-Uncensored-Q4_K_M.gguf", 16_800_000_000),
+    _FakeSibling("Qwen3.8-27B-Uncensored-Q8_0.gguf", 30_000_000_000),
+    _FakeSibling("mmproj-Q4_K_M.gguf", 1_000),
+    _FakeSibling("Qwen3.8-27B-Uncensored-Q4_K_M-00001-of-00002.gguf", 8_000),
+]
+
+
+def _fake_orca_info(repo_id, **_kwargs):
+    if repo_id == ORCA_REPO:
+        return _FakeInfo(ORCA_SIBLINGS)
+    if repo_id == "gated/fails":
+        raise OSError("gated")
+    return _FakeInfo([_FakeSibling("other.Q5_K_M.gguf", 1_000_000)])
+
+
+def _fake_hub_hits(**_kwargs):
+    return [
+        type("M", (), {"id": "someone/other-gguf"})(),
+        type("M", (), {"id": ORCA_REPO})(),
+        type("M", (), {"id": "gated/fails"})(),
+    ]
+
+
+def test_search_quant_filter_skips_mmproj_and_ranks(monkeypatch):
+    monkeypatch.setattr(models, "list_models", _fake_hub_hits)
+    monkeypatch.setattr(models, "model_info", _fake_orca_info)
+    out = models.search_hub_ggufs(
+        "Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
+        total_vram_bytes=48_000_000_000,
+        token=False,
+    )
+    assert [row["repo_id"] for row in out["results"]] == [ORCA_REPO]
+    row = out["results"][0]
+    assert row["filename"] == "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    assert row["quant"] == "Q4_K_M"
+    assert row["size_bytes"] == 16_800_000_000
+    assert row["source"] == f"{ORCA_REPO}:Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    assert row["fit"] == "fits"
+    assert "mmproj" not in row["filename"]
+
+
+def test_search_without_quant_lists_all_candidate_ggufs(monkeypatch):
+    monkeypatch.setattr(models, "list_models", _fake_hub_hits)
+    monkeypatch.setattr(models, "model_info", _fake_orca_info)
+    out = models.search_hub_ggufs(
+        "Qwen3.8-27B-Uncensored-GGUF",
+        total_vram_bytes=20_000_000_000,
+        token=False,
+    )
+    names = [row["filename"] for row in out["results"] if row["repo_id"] == ORCA_REPO]
+    assert names == [
+        "Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+        "Qwen3.8-27B-Uncensored-Q8_0.gguf",
+    ]
+    by_name = {row["filename"]: row for row in out["results"] if row["repo_id"] == ORCA_REPO}
+    assert by_name["Qwen3.8-27B-Uncensored-Q4_K_M.gguf"]["fit"] == "fits"
+    assert by_name["Qwen3.8-27B-Uncensored-Q8_0.gguf"]["fit"] == "overflow"
+
+
+def test_search_direct_repo_skips_hub(monkeypatch):
+    def boom(**_kwargs):
+        raise AssertionError("list_models should not run for org/repo")
+
+    monkeypatch.setattr(models, "list_models", boom)
+    monkeypatch.setattr(models, "model_info", _fake_orca_info)
+    out = models.search_hub_ggufs(f"{ORCA_REPO}:Q4_K_M", token=False)
+    assert len(out["results"]) == 1
+    assert out["results"][0]["repo_id"] == ORCA_REPO
+
+
+def test_search_url_uses_content_length(monkeypatch):
+    monkeypatch.setattr(models, "_url_size_bytes", lambda url, headers=None: 12345)
+    out = models.search_hub_ggufs("https://example.test/tiny.Q4_K_M.gguf", token=False)
+    assert len(out["results"]) == 1
+    row = out["results"][0]
+    assert row["filename"] == "tiny.Q4_K_M.gguf"
+    assert row["size_bytes"] == 12345
+    assert row["source"] == "https://example.test/tiny.Q4_K_M.gguf"
+    assert row["quant"] == "Q4_K_M"

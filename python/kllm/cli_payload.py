@@ -14,6 +14,8 @@ def build_plan_run_payload(
     headroom: float | None = None,
     vram_percent: int | None = None,
     ram_percent: int | None = None,
+    vram_weight: float = 0.6,
+    latency_weight: float = 0.4,
     cache_type_k: str = "q8_0",
     cache_type_v: str = "q8_0",
     speculative: str = "auto",
@@ -68,4 +70,6 @@ def build_plan_run_payload(
         payload["vram_percent"] = vram_percent
     if ram_percent is not None:
         payload["ram_percent"] = ram_percent
+    payload["vram_weight"] = vram_weight
+    payload["latency_weight"] = latency_weight
     return payload

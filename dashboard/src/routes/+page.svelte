@@ -233,12 +233,13 @@
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">gpus</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">ram</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">vram</th>
+            <th class="font-medium py-1 border-b" style="border-color: var(--border)">latency</th>
           </tr>
         </thead>
         <tbody>
           {#if view === 'loading'}
             <tr>
-              <td colspan="7" class="py-6 mono" style="color: var(--muted)">Loading cluster…</td>
+              <td colspan="8" class="py-6 mono" style="color: var(--muted)">Loading cluster…</td>
             </tr>
           {:else if members.length}
             {#each members as m}
@@ -252,15 +253,18 @@
                 >
                 <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.total_ram_bytes)}</td>
                 <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.vram_bytes)}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">
+                  {m.latency_ms != null ? `${Number(m.latency_ms).toFixed(1)} ms` : '—'}
+                </td>
               </tr>
             {/each}
           {:else if idle}
             <tr>
-              <td colspan="7" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
+              <td colspan="8" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
             </tr>
           {:else}
             <tr>
-              <td colspan="7" class="py-6 mono" style="color: var(--muted)">
+              <td colspan="8" class="py-6 mono" style="color: var(--muted)">
                 {view === 'offline' ? 'Disconnected — keeping last cluster view.' : 'Waiting for members…'}
               </td>
             </tr>

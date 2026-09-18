@@ -65,7 +65,7 @@ kllm start --gpus 0,1
 kllm join --key <key> --gpus 0
 ```
 
-- **Default:** all discovered GPUs (summed VRAM for planning).
+- **Default:** all discovered GPUs (summed VRAM for planning). On Apple Silicon, reported GPU VRAM is **80% of unified memory** (fixed convention; independent of the VRAM budget slider).
 - **Interactive:** if multiple GPUs are present, `--gpus` is omitted, and stdin is a TTY, the CLI prompts for a comma-separated list (Enter = all).
 - **Dashboard:** Cluster and Plan & Run checkboxes share the same selection; Plan & Run also persists `gpu_ids` / percents via `PUT /v1/config`.
 - Selection sets `CUDA_VISIBLE_DEVICES` (CUDA) or `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (ROCm) when launching `llama-server` / `rpc-server`. Metal has a single logical device and needs no env remap.
@@ -111,8 +111,9 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--threads` | 8 | CPU threads for llama-server |
 | `--extra-arg` (repeatable) | — | Sanitized; cannot override `--host` / `--port` / `--rpc` |
 | `--remember` / `--no-remember` | remember on | Upserts `~/.kllm/model-settings.json` after successful plan/run |
+| `--vram-weight`, `--latency-weight` | 0.6 / 0.4 | Greedy placement score weights (VRAM capacity vs low latency); normalized by sum |
 
-No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement).
+No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement via scored greedy knapsack: VRAM sacks first, then RAM).
 
 ## Dashboard
 

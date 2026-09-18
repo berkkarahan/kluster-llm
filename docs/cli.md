@@ -13,6 +13,13 @@ uv run python scripts/install.py
 
 This creates `.venv` with **uv** (Python version from `.python-version`), installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
 
+llama.cpp is pinned in committed [`llama-release`](../llama-release) (same role as `.python-version`). Every node must run the same tag or RPC HELLO fails. Sync binaries only:
+
+```bash
+python scripts/setup-llama.py
+python scripts/setup-llama.py --check
+```
+
 Run the CLI without activating the venv: `uv run kllm …` or `uvx --from . kllm …` from the repo root.
 
 CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA_SERVER` / `KLLM_RPC_SERVER` if binaries live outside `vendor/`.

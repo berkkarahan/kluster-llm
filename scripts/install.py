@@ -7,6 +7,7 @@ Usage:
   uv run python scripts/install.py --skip-ui
   uv run python scripts/install.py --backend vulkan
   uv run python scripts/install.py --skip-wireguard --skip-llama
+  python scripts/setup-llama.py          # llama.cpp only, pinned in llama-release
 
 This is the one-shot installer. ``scripts/build.py`` remains a thinner
 CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
@@ -38,10 +39,13 @@ VENDOR_LLAMA = ROOT / "vendor" / "llama.cpp"
 BIN_DIR = ROOT / "vendor" / "bin"
 WORKER_WIN = ROOT / "worker-windows"
 WORKER_WIN_SRC = WORKER_WIN / "src"
+PIN_FILE = ROOT / "llama-release"
+STAMP_FILE = BIN_DIR / "llama-release.txt"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 GITHUB_HEADERS = {"User-Agent": "kllm-install", "Accept": "application/vnd.github+json"}
 # Upstream llama.cpp ≥2025 ships ggml-rpc-server; older trees used rpc-server.
 _RPC_UPSTREAM_NAMES = ("ggml-rpc-server", "rpc-server")
+_SHARED_LIB_PATTERNS = ("*.dll", "*.dylib", "*.so", "*.so.*")
 
 
 # ── shared helpers (also used by build.py) ───────────────────────────────────
@@ -140,20 +144,145 @@ def _warn(msg: str) -> None:
     print(f"WARNING: {msg}", file=sys.stderr, flush=True)
 
 
+def _ssl_contexts() -> list[ssl.SSLContext]:
+    ctxs = [ssl.create_default_context()]
+    try:
+        import certifi
+
+        ctxs.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:
+        pass
+    return ctxs
+
+
+def _curl_bytes(url: str) -> bytes:
+    curl = _which("curl")
+    if not curl:
+        raise RuntimeError("curl not found")
+    result = subprocess.run(
+        [
+            curl,
+            "-fsSL",
+            "-A",
+            GITHUB_HEADERS["User-Agent"],
+            "-H",
+            f"Accept: {GITHUB_HEADERS['Accept']}",
+            url,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return result.stdout
+
+
+def _curl_download(url: str, dest: Path) -> None:
+    curl = _which("curl")
+    if not curl:
+        raise RuntimeError("curl not found")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [curl, "-fsSL", "-A", GITHUB_HEADERS["User-Agent"], "-o", str(dest), url],
+        check=True,
+    )
+
+
 def _http_json(url: str) -> Any:
     req = urllib.request.Request(url, headers=GITHUB_HEADERS)
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    errors: list[BaseException] = []
+    for ctx in _ssl_contexts():
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            errors.append(exc)
+    try:
+        return json.loads(_curl_bytes(url).decode("utf-8"))
+    except Exception as exc:
+        errors.append(exc)
+    raise errors[-1]
 
 
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     print(f"  downloading {url}", flush=True)
     req = urllib.request.Request(url, headers=GITHUB_HEADERS)
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=600) as resp, dest.open("wb") as out:
-        shutil.copyfileobj(resp, out)
+    errors: list[BaseException] = []
+    for ctx in _ssl_contexts():
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=600) as resp, dest.open("wb") as out:
+                shutil.copyfileobj(resp, out)
+            return
+        except Exception as exc:
+            errors.append(exc)
+            if dest.exists():
+                dest.unlink()
+    try:
+        _curl_download(url, dest)
+        return
+    except Exception as exc:
+        errors.append(exc)
+    raise errors[-1]
+
+
+def normalize_llama_tag(raw: str) -> str:
+    tag = raw.strip()
+    if not tag or tag.startswith("#"):
+        raise SystemExit("error: empty llama.cpp release tag")
+    if re.fullmatch(r"\d+", tag):
+        tag = f"b{tag}"
+    return tag
+
+
+def read_pinned_release(override: str | None = None) -> str:
+    """Return the llama.cpp GitHub tag from llama-release (or --tag)."""
+    if override:
+        return normalize_llama_tag(override)
+    if not PIN_FILE.is_file():
+        raise SystemExit(
+            f"error: pin file {PIN_FILE} is missing. Add a llama.cpp tag (e.g. b11026)."
+        )
+    for line in PIN_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return normalize_llama_tag(line)
+    raise SystemExit(f"error: {PIN_FILE} has no llama.cpp tag")
+
+
+def write_install_stamp(*, tag: str, backend: str, asset: str) -> None:
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    STAMP_FILE.write_text(
+        f"tag={tag}\nbackend={backend}\nasset={asset}\n",
+        encoding="utf-8",
+    )
+
+
+def read_install_stamp() -> dict[str, str]:
+    if not STAMP_FILE.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for line in STAMP_FILE.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
+def stamp_matches(tag: str) -> bool:
+    return read_install_stamp().get("tag") == tag
+
+
+def llama_install_status(tag: str | None = None) -> dict[str, Any]:
+    pin = tag or read_pinned_release()
+    llama = _find_built_binary("llama-server")
+    rpc = _find_built_binary("rpc-server")
+    stamp = read_install_stamp()
+    return {
+        "pin": pin,
+        "stamp": stamp.get("tag"),
+        "llama_server": str(llama) if llama else None,
+        "rpc_server": str(rpc) if rpc else None,
+        "ok": bool(llama and rpc and stamp.get("tag") == pin),
+    }
 
 
 # ── toolchains ───────────────────────────────────────────────────────────────
@@ -499,23 +628,55 @@ def _cmake_backend_flags(backend: str) -> list[str]:
     return flags
 
 
-def clone_or_update_llama() -> None:
+def clone_or_update_llama(tag: str | None = None) -> None:
     ensure_git()
+    tag = tag or read_pinned_release()
     VENDOR_LLAMA.parent.mkdir(parents=True, exist_ok=True)
     if (VENDOR_LLAMA / ".git").is_dir():
-        print(f"Updating llama.cpp at {VENDOR_LLAMA}")
-        _run(["git", "-C", str(VENDOR_LLAMA), "pull", "--ff-only"], check=False)
+        print(f"Checking out llama.cpp {tag} at {VENDOR_LLAMA}")
+        _run(
+            [
+                "git",
+                "-C",
+                str(VENDOR_LLAMA),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                f"refs/tags/{tag}:refs/tags/{tag}",
+            ],
+            check=False,
+        )
+        result = _run(["git", "-C", str(VENDOR_LLAMA), "checkout", "--force", tag], check=False)
+        if result.returncode != 0:
+            _run(["git", "-C", str(VENDOR_LLAMA), "fetch", "--depth", "1", "origin", tag], check=False)
+            _run(["git", "-C", str(VENDOR_LLAMA), "checkout", "--force", "FETCH_HEAD"])
     elif VENDOR_LLAMA.is_dir() and any(VENDOR_LLAMA.iterdir()):
-        print(f"Using existing llama.cpp tree at {VENDOR_LLAMA}")
+        print(f"Using existing llama.cpp tree at {VENDOR_LLAMA} (expected tag {tag})")
     else:
-        print(f"Cloning llama.cpp → {VENDOR_LLAMA}")
-        _run(["git", "clone", "--depth", "1", "https://github.com/ggml-org/llama.cpp.git", str(VENDOR_LLAMA)])
+        print(f"Cloning llama.cpp {tag} → {VENDOR_LLAMA}")
+        result = _run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                tag,
+                "https://github.com/ggml-org/llama.cpp.git",
+                str(VENDOR_LLAMA),
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
 
 
-def build_llama_from_source(backend: str) -> bool:
+def build_llama_from_source(backend: str, tag: str | None = None) -> bool:
     if not ensure_cmake():
         return False
-    clone_or_update_llama()
+    tag = tag or read_pinned_release()
+    clone_or_update_llama(tag)
     build_dir = VENDOR_LLAMA / "build"
     flags = _cmake_backend_flags(backend)
     try:
@@ -606,6 +767,9 @@ def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, 
             s += 50
         elif backend == "vulkan" and "vulkan" in n:
             s += 50
+        elif backend == "vulkan" and "macos" in n:
+            # GitHub nightlies have no macos-vulkan pack; Metal pack still matches RPC proto.
+            s += 45
         elif backend == "metal" and "macos" in n:
             s += 50
         elif backend == "cpu" and ("cpu" in n or ("cuda" not in n and "vulkan" not in n and "rocm" not in n)):
@@ -629,6 +793,21 @@ def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, 
         if sc > 0:
             return asset
     return None
+
+
+def fetch_release_by_tag(tag: str) -> dict[str, Any] | None:
+    """Fetch one ggml-org/llama.cpp GitHub release by tag (e.g. b11026)."""
+    try:
+        rel = _http_json(f"{LLAMA_API}/tags/{tag}")
+    except Exception as exc:
+        _warn(f"GitHub release {tag} fetch failed ({exc})")
+        return None
+    if not isinstance(rel, dict):
+        return None
+    if not (rel.get("assets") or []):
+        _warn(f"GitHub release {tag} has no assets")
+        return None
+    return rel
 
 
 def fetch_latest_b_release() -> dict[str, Any] | None:
@@ -663,8 +842,9 @@ def fetch_latest_b_release() -> dict[str, Any] | None:
     return None
 
 
-def install_llama_prebuilt(backend: str) -> bool:
-    rel = fetch_latest_b_release()
+def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
+    tag = tag or read_pinned_release()
+    rel = fetch_release_by_tag(tag)
     if not rel:
         return False
     assets = rel.get("assets") or []
@@ -695,6 +875,7 @@ def install_llama_prebuilt(backend: str) -> bool:
         if not copied:
             _warn(f"archive {name} extracted but llama-server/rpc-server not found inside")
             return False
+    write_install_stamp(tag=tag, backend=backend, asset=name)
     print(f"Installed prebuilt llama.cpp from {rel.get('tag_name')} ({name})")
     return True
 
@@ -705,9 +886,24 @@ def _ensure_worker_src() -> Path:
 
 
 def _copy_dlls(from_dir: Path, to_dir: Path) -> None:
+    _copy_shared_libs(from_dir, to_dir)
+
+
+def _copy_shared_libs(from_dir: Path, to_dir: Path) -> None:
     to_dir.mkdir(parents=True, exist_ok=True)
-    for dll in from_dir.glob("*.dll"):
-        shutil.copy2(dll, to_dir / dll.name)
+    seen: set[str] = set()
+    for pattern in _SHARED_LIB_PATTERNS:
+        for lib in from_dir.glob(pattern):
+            if not lib.is_file() or lib.name in seen:
+                continue
+            seen.add(lib.name)
+            shutil.copy2(lib, to_dir / lib.name)
+
+
+def _mark_executable(path: Path) -> None:
+    if _is_windows() or not path.is_file():
+        return
+    path.chmod(path.stat().st_mode | 0o111)
 
 
 def _migrate_worker_root_dlls() -> None:
@@ -727,7 +923,7 @@ def _migrate_worker_root_dlls() -> None:
 
 
 def _copy_llama_binaries_from(root: Path) -> bool:
-    """Copy llama-server and rpc-server (and sibling DLLs) into vendor/bin (+ worker-windows)."""
+    """Copy llama-server and rpc-server (and sibling shared libs) into vendor/bin."""
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     names = ["llama-server", "rpc-server"]
     found_any = False
@@ -742,17 +938,16 @@ def _copy_llama_binaries_from(root: Path) -> bool:
         src = matches[0]
         dest = BIN_DIR / exe
         shutil.copy2(src, dest)
+        _mark_executable(dest)
         found_any = True
-        print(f"  → {dest}")
-        # Copy adjacent shared libs on Windows
-        if _is_windows():
-            for dll in src.parent.glob("*.dll"):
-                shutil.copy2(dll, BIN_DIR / dll.name)
+        print(f"  -> {dest}")
+        _copy_shared_libs(src.parent, BIN_DIR)
         if base == "rpc-server":
             WORKER_WIN.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, WORKER_WIN / exe)
-            if _is_windows():
-                _copy_dlls(src.parent, _ensure_worker_src())
+            worker_dest = WORKER_WIN / exe
+            shutil.copy2(src, worker_dest)
+            _mark_executable(worker_dest)
+            _copy_shared_libs(src.parent, _ensure_worker_src())
     # Also stage under vendor/llama.cpp/build/bin for resolve_llama_server paths
     staged = VENDOR_LLAMA / "build" / "bin"
     if found_any:
@@ -760,6 +955,8 @@ def _copy_llama_binaries_from(root: Path) -> bool:
         for p in BIN_DIR.iterdir():
             if p.is_file():
                 shutil.copy2(p, staged / p.name)
+                if p.suffix.lower() not in {".dll", ".dylib", ".txt"} and ".so" not in p.name:
+                    _mark_executable(staged / p.name)
     _migrate_worker_root_dlls()
     return found_any
 
@@ -772,37 +969,53 @@ def stage_built_binaries() -> None:
         if not src:
             continue
         staged = f"{name}.exe" if _is_windows() else name
-        shutil.copy2(src, BIN_DIR / staged)
-        print(f"  staged {BIN_DIR / staged}")
+        dest = BIN_DIR / staged
+        shutil.copy2(src, dest)
+        _mark_executable(dest)
+        print(f"  staged {dest}")
+        _copy_shared_libs(src.parent, BIN_DIR)
         if name == "rpc-server":
             WORKER_WIN.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, WORKER_WIN / staged)
-            if _is_windows():
-                _copy_dlls(src.parent, _ensure_worker_src())
+            worker_dest = WORKER_WIN / staged
+            shutil.copy2(src, worker_dest)
+            _mark_executable(worker_dest)
+            _copy_shared_libs(src.parent, _ensure_worker_src())
     _migrate_worker_root_dlls()
 
 
-def install_llama(backend: str, *, prefer_prebuilt: bool) -> None:
+def install_llama(
+    backend: str,
+    *,
+    prefer_prebuilt: bool,
+    force: bool = False,
+    tag: str | None = None,
+) -> None:
     backend = detect_backend(backend)
+    tag = tag or read_pinned_release()
     print(f"llama.cpp backend: {backend}")
+    print(f"llama.cpp pin:     {tag}")
 
     llama = _find_built_binary("llama-server")
     rpc = _find_built_binary("rpc-server")
-    if llama and rpc:
+    if llama and rpc and not force and stamp_matches(tag):
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
-        stage_built_binaries()
+        print(f"Already at pinned {tag}")
         return
+
+    if llama and rpc and not force:
+        current = read_install_stamp().get("tag") or "unknown"
+        print(f"Installed llama.cpp is {current}; upgrading to pin {tag}")
 
     ok = False
     if prefer_prebuilt:
-        ok = install_llama_prebuilt(backend)
+        ok = install_llama_prebuilt(backend, tag=tag)
         if not ok:
-            ok = build_llama_from_source(backend)
+            ok = build_llama_from_source(backend, tag=tag)
     else:
-        ok = build_llama_from_source(backend)
+        ok = build_llama_from_source(backend, tag=tag)
         if not ok:
-            ok = install_llama_prebuilt(backend)
+            ok = install_llama_prebuilt(backend, tag=tag)
 
     stage_built_binaries()
     llama = _find_built_binary("llama-server")
@@ -820,6 +1033,8 @@ def install_llama(backend: str, *, prefer_prebuilt: bool) -> None:
     else:
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
+    if llama and rpc and not stamp_matches(tag):
+        write_install_stamp(tag=tag, backend=backend, asset="source")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -843,12 +1058,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--prefer-prebuilt",
         action="store_true",
-        help="Prefer GitHub release binaries over compiling llama.cpp",
+        help="Prefer GitHub release binaries (default unless --from-source)",
     )
     p.add_argument(
         "--from-source",
         action="store_true",
-        help="Prefer compiling llama.cpp (default unless --prefer-prebuilt)",
+        help="Compile the pinned llama.cpp tag instead of using GitHub binaries",
+    )
+    p.add_argument(
+        "--tag",
+        default=None,
+        help="Override the llama.cpp tag in llama-release (e.g. b11026)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall llama.cpp even when vendor/bin/llama-release.txt matches the pin",
     )
     return p.parse_args(argv)
 
@@ -877,11 +1102,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.skip_llama:
         print("\n=== llama.cpp (llama-server + rpc-server) ===")
-        prefer_prebuilt = args.prefer_prebuilt or (args.from_source is False and _is_windows())
-        # Default: Windows prefers prebuilt (no MSVC assumed); others prefer source when cmake works.
-        if not args.prefer_prebuilt and not args.from_source:
-            prefer_prebuilt = _is_windows()
-        install_llama(args.backend, prefer_prebuilt=prefer_prebuilt)
+        prefer_prebuilt = not args.from_source
+        install_llama(
+            args.backend,
+            prefer_prebuilt=prefer_prebuilt,
+            force=args.force,
+            tag=args.tag,
+        )
 
     if not args.skip_wireguard:
         print("\n=== WireGuard ===")

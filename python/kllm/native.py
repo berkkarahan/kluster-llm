@@ -61,6 +61,25 @@ def list_gpus() -> dict[str, Any]:
     }
 
 
+def _fit_status_from_bytes(needed: int, budget: int) -> tuple[str, str]:
+    """Match the native planner when an older PlanResult lacks fit_status."""
+    if budget <= 0:
+        return "overflow", "cluster budget is zero; add workers or reduce context"
+    if needed > budget:
+        return (
+            "overflow",
+            f"need ~{needed // (1024 * 1024)} MB but cluster budget is "
+            f"~{budget // (1024 * 1024)} MB; reduce context or add capacity",
+        )
+    if needed > int(budget * 0.90):
+        return (
+            "tight",
+            f"usage ~{needed // (1024 * 1024)} MB is above 90% of "
+            f"~{budget // (1024 * 1024)} MB budget; run may be tight",
+        )
+    return "fits", ""
+
+
 def plan_split(
     nodes: list[dict[str, Any]],
     model_size_bytes: int,
@@ -109,30 +128,39 @@ def plan_split(
         }
         for nid, eff, fb in zip(node_ids, effective, fallbacks)
     ]
+    model_size = int(plan.model_size_bytes)
+    kv_estimate = int(plan.kv_estimate_bytes)
+    total_budget = int(plan.total_budget_bytes)
+    estimated = int(getattr(plan, "estimated_bytes", model_size + kv_estimate))
+    budget = int(getattr(plan, "budget_bytes", total_budget))
+    fit_status = getattr(plan, "fit_status", None)
+    hint = getattr(plan, "hint", None)
+    if not fit_status:
+        fit_status, hint = _fit_status_from_bytes(estimated, budget)
     return {
         "tensor_split": list(plan.tensor_split),
         "tensor_split_csv": plan.tensor_split_csv(),
         "budgets_bytes": list(plan.budgets_bytes),
         "node_ids": node_ids,
-        "total_budget_bytes": plan.total_budget_bytes,
-        "model_size_bytes": plan.model_size_bytes,
-        "kv_estimate_bytes": plan.kv_estimate_bytes,
+        "total_budget_bytes": total_budget,
+        "model_size_bytes": model_size,
+        "kv_estimate_bytes": kv_estimate,
         "estimated_layers": plan.estimated_layers,
         "ngl": plan.ngl,
         "split_mode": plan.split_mode,
         "device_requested": plan.device_requested,
         "device_effective": plan.device_effective,
         "node_devices": node_devices,
-        "fit_status": plan.fit_status,
-        "estimated_bytes": plan.estimated_bytes,
-        "budget_bytes": plan.budget_bytes,
-        "hint": plan.hint,
-        "context_effective": plan.context_effective,
-        "node_alloc_bytes": list(plan.node_alloc_bytes),
-        "node_scores": list(plan.node_scores),
-        "node_latency_ms": list(plan.node_latency_ms),
-        "vram_alloc_bytes": plan.vram_alloc_bytes,
-        "ram_alloc_bytes": plan.ram_alloc_bytes,
+        "fit_status": str(fit_status),
+        "estimated_bytes": estimated,
+        "budget_bytes": budget,
+        "hint": hint or "",
+        "context_effective": int(getattr(plan, "context_effective", context)),
+        "node_alloc_bytes": list(getattr(plan, "node_alloc_bytes", [])),
+        "node_scores": list(getattr(plan, "node_scores", [])),
+        "node_latency_ms": list(getattr(plan, "node_latency_ms", [])),
+        "vram_alloc_bytes": int(getattr(plan, "vram_alloc_bytes", 0)),
+        "ram_alloc_bytes": int(getattr(plan, "ram_alloc_bytes", 0)),
     }
 
 

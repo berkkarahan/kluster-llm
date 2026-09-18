@@ -33,6 +33,13 @@ def build_plan_run_payload(
     threads: int = 8,
     extra_args: list[str] | None = None,
     remember: bool = True,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    min_p: float | None = None,
+    presence_penalty: float | None = None,
+    repeat_penalty: float | None = None,
+    enable_thinking: bool | None = None,
 ) -> dict[str, Any]:
     chat_text = None
     if chat_template_file:
@@ -72,4 +79,18 @@ def build_plan_run_payload(
         payload["ram_percent"] = ram_percent
     payload["vram_weight"] = vram_weight
     payload["latency_weight"] = latency_weight
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if top_p is not None:
+        payload["top_p"] = top_p
+    if top_k is not None:
+        payload["top_k"] = top_k
+    if min_p is not None:
+        payload["min_p"] = min_p
+    if presence_penalty is not None:
+        payload["presence_penalty"] = presence_penalty
+    if repeat_penalty is not None:
+        payload["repeat_penalty"] = repeat_penalty
+    if enable_thinking is not None:
+        payload["enable_thinking"] = enable_thinking
     return payload

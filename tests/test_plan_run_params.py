@@ -193,6 +193,27 @@ def test_remember_round_trip(client):
     assert r4.json()["parameter_set"]["context"] == 4096
 
 
+def test_remember_inference_overrides(client):
+    c, agent, tmp = client
+    _model_file(tmp)
+    with patch.object(agent.native, "plan_split", return_value=_fake_plan()):
+        r = c.post(
+            "/v1/plan",
+            json=_payload(
+                remember=True,
+                temperature=0.35,
+                top_k=12,
+                enable_thinking=False,
+            ),
+        )
+    assert r.status_code == 200
+    ps = c.get("/v1/model-settings/toy.gguf").json()["parameter_set"]
+    assert ps["temperature"] == 0.35
+    assert ps["top_k"] == 12
+    assert ps["enable_thinking"] is False
+    assert ps.get("top_p") is None
+
+
 def test_cli_payload_mapping():
     from kllm.cli_payload import build_plan_run_payload
 

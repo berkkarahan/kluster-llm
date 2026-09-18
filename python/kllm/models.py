@@ -18,6 +18,7 @@ from huggingface_hub.utils import build_hf_headers
 
 from kllm.gguf_meta import read_context_length
 from kllm.hf_token import resolve_hf_token
+from kllm.model_defaults import resolve_model_defaults
 from kllm.state import models_dir
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -882,6 +883,13 @@ def list_local_models() -> list[dict]:
         }
         if max_context is not None:
             entry["max_context"] = max_context
+        try:
+            defaults = resolve_model_defaults(path)
+            public = defaults.to_public_dict()
+            if public.get("sampling") or public.get("chat_template_kwargs") or public.get("reasoning"):
+                entry["defaults"] = public
+        except Exception:
+            pass
         out.append(entry)
     return out
 

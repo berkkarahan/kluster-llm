@@ -525,6 +525,13 @@ def _run_settings_options(
     remember: bool,
     vram_weight: float,
     latency_weight: float,
+    temperature: Optional[float],
+    top_p: Optional[float],
+    top_k: Optional[int],
+    min_p: Optional[float],
+    presence_penalty: Optional[float],
+    repeat_penalty: Optional[float],
+    enable_thinking: Optional[bool],
 ) -> dict:
     headroom = _headroom_override(device, vram_percent, ram_percent)
     return build_plan_run_payload(
@@ -554,6 +561,13 @@ def _run_settings_options(
         remember=remember,
         vram_weight=vram_weight,
         latency_weight=latency_weight,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        min_p=min_p,
+        presence_penalty=presence_penalty,
+        repeat_penalty=repeat_penalty,
+        enable_thinking=enable_thinking,
     )
 
 
@@ -592,6 +606,29 @@ def plan_cmd(
     ctx_checkpoints: str = typer.Option("auto", "--ctx-checkpoints"),
     cache_ram: str = typer.Option("auto", "--cache-ram"),
     threads: int = typer.Option(8, "--threads"),
+    temperature: Optional[float] = typer.Option(
+        None, "--temperature", min=0.0, max=2.0, help="Sampling temperature (omit = model default)"
+    ),
+    top_p: Optional[float] = typer.Option(
+        None, "--top-p", min=0.0, max=1.0, help="Nucleus sampling (omit = model default)"
+    ),
+    top_k: Optional[int] = typer.Option(
+        None, "--top-k", min=0, help="Top-k sampling (omit = model default)"
+    ),
+    min_p: Optional[float] = typer.Option(
+        None, "--min-p", min=0.0, max=1.0, help="Min-p sampling (omit = model default)"
+    ),
+    presence_penalty: Optional[float] = typer.Option(
+        None, "--presence-penalty", min=-2.0, max=2.0, help="Presence penalty (omit = model default)"
+    ),
+    repeat_penalty: Optional[float] = typer.Option(
+        None, "--repeat-penalty", min=0.0, max=2.0, help="Repeat penalty (omit = model default)"
+    ),
+    enable_thinking: Optional[bool] = typer.Option(
+        None,
+        "--enable-thinking/--no-enable-thinking",
+        help="Force thinking on/off (omit = template default)",
+    ),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -623,6 +660,13 @@ def plan_cmd(
         remember,
         vram_weight,
         latency_weight,
+        temperature,
+        top_p,
+        top_k,
+        min_p,
+        presence_penalty,
+        repeat_penalty,
+        enable_thinking,
     )
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
@@ -685,6 +729,29 @@ def run(
     ctx_checkpoints: str = typer.Option("auto", "--ctx-checkpoints"),
     cache_ram: str = typer.Option("auto", "--cache-ram"),
     threads: int = typer.Option(8, "--threads"),
+    temperature: Optional[float] = typer.Option(
+        None, "--temperature", min=0.0, max=2.0, help="Sampling temperature (omit = model default)"
+    ),
+    top_p: Optional[float] = typer.Option(
+        None, "--top-p", min=0.0, max=1.0, help="Nucleus sampling (omit = model default)"
+    ),
+    top_k: Optional[int] = typer.Option(
+        None, "--top-k", min=0, help="Top-k sampling (omit = model default)"
+    ),
+    min_p: Optional[float] = typer.Option(
+        None, "--min-p", min=0.0, max=1.0, help="Min-p sampling (omit = model default)"
+    ),
+    presence_penalty: Optional[float] = typer.Option(
+        None, "--presence-penalty", min=-2.0, max=2.0, help="Presence penalty (omit = model default)"
+    ),
+    repeat_penalty: Optional[float] = typer.Option(
+        None, "--repeat-penalty", min=0.0, max=2.0, help="Repeat penalty (omit = model default)"
+    ),
+    enable_thinking: Optional[bool] = typer.Option(
+        None,
+        "--enable-thinking/--no-enable-thinking",
+        help="Force thinking on/off (omit = template default)",
+    ),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -716,6 +783,13 @@ def run(
         remember,
         vram_weight,
         latency_weight,
+        temperature,
+        top_p,
+        top_k,
+        min_p,
+        presence_penalty,
+        repeat_penalty,
+        enable_thinking,
     )
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)

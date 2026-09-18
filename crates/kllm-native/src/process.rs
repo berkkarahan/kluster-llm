@@ -99,6 +99,54 @@ fn opt_string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>>
     }
 }
 
+fn argv_has_flag(argv: &[String], extra: &[String], flag: &str) -> bool {
+    argv.iter().any(|a| a == flag) || extra.iter().any(|a| a == flag)
+}
+
+fn push_flag_value(argv: &mut Vec<String>, extra: &[String], flag: &str, value: String) {
+    if argv_has_flag(argv, extra, flag) {
+        return;
+    }
+    argv.push(flag.into());
+    argv.push(value);
+}
+
+fn push_flag_only(argv: &mut Vec<String>, extra: &[String], flag: &str) {
+    if argv_has_flag(argv, extra, flag) {
+        return;
+    }
+    argv.push(flag.into());
+}
+
+fn opt_f64_as_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(None),
+        None => Ok(None),
+        Some(v) => {
+            if let Ok(n) = v.extract::<f64>() {
+                return Ok(Some(n.to_string()));
+            }
+            if let Ok(n) = v.extract::<i64>() {
+                return Ok(Some(n.to_string()));
+            }
+            if let Ok(s) = v.extract::<String>() {
+                return Ok(Some(s));
+            }
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{key} must be float, int, or str"
+            )))
+        }
+    }
+}
+
+fn opt_bool(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<bool>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(None),
+        None => Ok(None),
+        Some(v) => Ok(Some(v.extract()?)),
+    }
+}
+
 fn push_auto_i32(argv: &mut Vec<String>, flag: &str, value: Option<String>, fallback: i32) {
     let n = match value.as_deref() {
         Some("auto") | None => fallback,
@@ -152,6 +200,15 @@ impl LaunchConfig {
             .unwrap_or(false);
         let draft_model = opt_string(dict, "draft_model")?;
         let extra_args = opt_string_list(dict, "extra_args")?;
+        let temperature = opt_f64_as_string(dict, "temperature")?;
+        let top_k = opt_f64_as_string(dict, "top_k")?;
+        let top_p = opt_f64_as_string(dict, "top_p")?;
+        let min_p = opt_f64_as_string(dict, "min_p")?;
+        let presence_penalty = opt_f64_as_string(dict, "presence_penalty")?;
+        let repeat_penalty = opt_f64_as_string(dict, "repeat_penalty")?;
+        let jinja = opt_bool(dict, "jinja")?.unwrap_or(false);
+        let chat_template_kwargs = opt_string(dict, "chat_template_kwargs")?;
+        let reasoning_format = opt_string(dict, "reasoning_format")?;
         let tensor_split: String = dict
             .get_item("tensor_split")?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("tensor_split"))?
@@ -231,6 +288,34 @@ impl LaunchConfig {
         if let Some(draft) = draft_model {
             argv.push("--model-draft".into());
             argv.push(draft);
+        }
+
+        if let Some(v) = temperature {
+            push_flag_value(&mut argv, &extra_args, "--temp", v);
+        }
+        if let Some(v) = top_k {
+            push_flag_value(&mut argv, &extra_args, "--top-k", v);
+        }
+        if let Some(v) = top_p {
+            push_flag_value(&mut argv, &extra_args, "--top-p", v);
+        }
+        if let Some(v) = min_p {
+            push_flag_value(&mut argv, &extra_args, "--min-p", v);
+        }
+        if let Some(v) = presence_penalty {
+            push_flag_value(&mut argv, &extra_args, "--presence-penalty", v);
+        }
+        if let Some(v) = repeat_penalty {
+            push_flag_value(&mut argv, &extra_args, "--repeat-penalty", v);
+        }
+        if jinja {
+            push_flag_only(&mut argv, &extra_args, "--jinja");
+        }
+        if let Some(v) = chat_template_kwargs {
+            push_flag_value(&mut argv, &extra_args, "--chat-template-kwargs", v);
+        }
+        if let Some(v) = reasoning_format {
+            push_flag_value(&mut argv, &extra_args, "--reasoning-format", v);
         }
 
         if !rpc_servers.is_empty() {

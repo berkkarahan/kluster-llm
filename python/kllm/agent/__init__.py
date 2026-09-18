@@ -753,7 +753,15 @@ async def chat_completions(
     request: Request,
     _: None = Depends(_require_api_token),
 ) -> Any:
-    return await gateway.proxy_chat_completions(STATE.infer_port, request)
+    model_path = None
+    if STATE.model_name:
+        try:
+            model_path = model_ops.resolve_local_model(STATE.model_name)
+        except FileNotFoundError:
+            model_path = None
+    return await gateway.proxy_chat_completions(
+        STATE.infer_port, request, model_path=model_path
+    )
 
 
 @app.post("/v1/messages")
@@ -761,7 +769,15 @@ async def anthropic_messages(
     request: Request,
     _: None = Depends(_require_api_token),
 ) -> Any:
-    return await gateway.proxy_anthropic_messages(STATE.infer_port, request)
+    model_path = None
+    if STATE.model_name:
+        try:
+            model_path = model_ops.resolve_local_model(STATE.model_name)
+        except FileNotFoundError:
+            model_path = None
+    return await gateway.proxy_anthropic_messages(
+        STATE.infer_port, request, model_path=model_path
+    )
 
 
 @app.get("/v1/api-token")

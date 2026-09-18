@@ -14,6 +14,7 @@ from kllm import models as model_ops
 from kllm import native
 from kllm.cluster_log import llama_server_log_path
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
+from kllm.model_defaults import merge_defaults_into_extra_args, overlay_user_inference, resolve_model_defaults
 from kllm.run_settings import RunBody, RunSettingsFields
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
 
@@ -245,6 +246,17 @@ def build_master_launch(
     if body.chat_template_text:
         chat_template_file = str(ensure_home() / f"chat-template-{body.model}.jinja")
         Path(chat_template_file).write_text(body.chat_template_text, encoding="utf-8")
+    defaults = overlay_user_inference(
+        resolve_model_defaults(model_path),
+        temperature=body.temperature,
+        top_p=body.top_p,
+        top_k=body.top_k,
+        min_p=body.min_p,
+        presence_penalty=body.presence_penalty,
+        repeat_penalty=body.repeat_penalty,
+        enable_thinking=body.enable_thinking,
+    )
+    merged_extra = merge_defaults_into_extra_args(list(extra_args), defaults)
     launch: dict[str, Any] = {
         "model": str(model_path),
         "tensor_split": plan_result["tensor_split_csv"],
@@ -263,9 +275,10 @@ def build_master_launch(
         "port": infer_port,
         "rpc_servers": rpc_servers,
         "repo_root": repo_root,
-        "extra_args": extra_args,
+        "extra_args": merged_extra,
         "mmproj_auto": body.vision and not body.mmproj,
     }
+    launch.update(defaults.to_launch_dict())
     if body.mmproj:
         launch["mmproj"] = body.mmproj
     if body.draft_model:

@@ -122,6 +122,9 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--load-mode` | `auto` | mmap / mlock mapping |
 | `--ctx-checkpoints`, `--cache-ram` | `auto` | Checkpoint / cache-RAM controls |
 | `--threads` | 8 | CPU threads for llama-server |
+| `--temperature` / `--top-p` / `--top-k` / `--min-p` | model default | Sampling overrides (omit = GGUF / Unsloth auto) |
+| `--presence-penalty` / `--repeat-penalty` | model default | Penalty overrides |
+| `--enable-thinking` / `--no-enable-thinking` | template default | Force thinking on/off for hybrid models |
 | `--extra-arg` (repeatable) | — | Sanitized; cannot override `--host` / `--port` / `--rpc` |
 | `--remember` / `--no-remember` | remember on | Upserts `~/.kllm/model-settings.json` after successful plan/run |
 | `--vram-weight`, `--latency-weight` | 0.6 / 0.4 | Greedy placement score weights (VRAM capacity vs low latency); normalized by sum |

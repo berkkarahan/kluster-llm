@@ -5,6 +5,7 @@
   GpuInfo,
   HfTokenSource,
   HfTokenStatus,
+  ModelDefaultsInfo,
   ModelInfo,
   ModelSearchHit,
   ModelSearchResponse,
@@ -98,6 +99,14 @@ class AppStore {
   cacheRam = $state<number | 'auto'>('auto');
   threads = $state(8);
   extraArgsText = $state('');
+  // Inference overrides — null = auto (GGUF / heuristic defaults)
+  temperature = $state<number | null>(null);
+  topP = $state<number | null>(null);
+  topK = $state<number | null>(null);
+  minP = $state<number | null>(null);
+  presencePenalty = $state<number | null>(null);
+  repeatPenalty = $state<number | null>(null);
+  enableThinking = $state<boolean | null>(null);
   remember = $state(true);
   advancedOpen = $state(false);
   fieldErrors = $state<Record<string, string>>({});
@@ -267,6 +276,23 @@ class AppStore {
     if (this.context < MIN_CONTEXT) this.context = MIN_CONTEXT;
   }
 
+
+  selectedModelDefaults(): ModelDefaultsInfo | null {
+    const m = this.models.find((x) => x.id === this.selectedModel);
+    return m?.defaults ?? null;
+  }
+
+  autoSamplingHint(key: string): string {
+    const v = this.selectedModelDefaults()?.sampling?.[key];
+    return v == null ? 'auto' : `auto ${v}`;
+  }
+
+  autoThinkingHint(): string {
+    const kw = this.selectedModelDefaults()?.chat_template_kwargs;
+    if (!kw || !('enable_thinking' in kw)) return 'auto';
+    return `auto ${kw.enable_thinking ? 'on' : 'off'}`;
+  }
+
   applyParameterSet(ps: Record<string, unknown>) {
     if (typeof ps.context === 'number') this.context = ps.context;
     if (typeof ps.context_auto === 'boolean') this.contextAuto = ps.context_auto;
@@ -297,6 +323,20 @@ class AppStore {
     if (ps.device === 'cpu' || ps.device === 'gpu') this.device = ps.device;
     if (typeof ps.vram_weight === 'number') this.vramWeight = ps.vram_weight;
     if (typeof ps.latency_weight === 'number') this.latencyWeight = ps.latency_weight;
+    if (typeof ps.temperature === 'number') this.temperature = ps.temperature;
+    else if (ps.temperature === null) this.temperature = null;
+    if (typeof ps.top_p === 'number') this.topP = ps.top_p;
+    else if (ps.top_p === null) this.topP = null;
+    if (typeof ps.top_k === 'number') this.topK = ps.top_k;
+    else if (ps.top_k === null) this.topK = null;
+    if (typeof ps.min_p === 'number') this.minP = ps.min_p;
+    else if (ps.min_p === null) this.minP = null;
+    if (typeof ps.presence_penalty === 'number') this.presencePenalty = ps.presence_penalty;
+    else if (ps.presence_penalty === null) this.presencePenalty = null;
+    if (typeof ps.repeat_penalty === 'number') this.repeatPenalty = ps.repeat_penalty;
+    else if (ps.repeat_penalty === null) this.repeatPenalty = null;
+    if (typeof ps.enable_thinking === 'boolean') this.enableThinking = ps.enable_thinking;
+    else if (ps.enable_thinking === null) this.enableThinking = null;
   }
 
   async selectModel(id: string) {
@@ -399,6 +439,13 @@ class AppStore {
       cache_ram: this.cacheRam,
       threads: this.threads,
       extra_args: extra,
+      temperature: this.temperature,
+      top_p: this.topP,
+      top_k: this.topK,
+      min_p: this.minP,
+      presence_penalty: this.presencePenalty,
+      repeat_penalty: this.repeatPenalty,
+      enable_thinking: this.enableThinking,
       remember: this.remember,
       advanced_open: this.advancedOpen
     };
@@ -870,7 +917,16 @@ class AppStore {
         body: JSON.stringify({
           model: this.status?.model_name || this.selectedModel || 'default',
           messages: this.chat.slice(0, -1),
-          stream: true
+          stream: true,
+          ...(this.temperature != null ? { temperature: this.temperature } : {}),
+          ...(this.topP != null ? { top_p: this.topP } : {}),
+          ...(this.topK != null ? { top_k: this.topK } : {}),
+          ...(this.minP != null ? { min_p: this.minP } : {}),
+          ...(this.presencePenalty != null ? { presence_penalty: this.presencePenalty } : {}),
+          ...(this.repeatPenalty != null ? { repeat_penalty: this.repeatPenalty } : {}),
+          ...(this.enableThinking != null
+            ? { chat_template_kwargs: { enable_thinking: this.enableThinking } }
+            : {})
         }),
         signal: this.abort.signal
       });

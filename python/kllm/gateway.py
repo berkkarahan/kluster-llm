@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.responses import Response
+
+from kllm.model_defaults import apply_defaults_to_chat_body, resolve_model_defaults
 
 
 def infer_base(port: int) -> str:
@@ -42,10 +45,25 @@ def _openai_tools_passthrough(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
-async def proxy_chat_completions(port: int, request: Request) -> Response:
+def _apply_model_defaults(
+    body: dict[str, Any], model_path: Path | str | None
+) -> dict[str, Any]:
+    if not model_path:
+        return body
+    defaults = resolve_model_defaults(model_path)
+    return apply_defaults_to_chat_body(body, defaults)
+
+
+async def proxy_chat_completions(
+    port: int,
+    request: Request,
+    *,
+    model_path: Path | str | None = None,
+) -> Response:
     await require_inference(port)
     body = await request.json()
     body = _openai_tools_passthrough(body)
+    body = _apply_model_defaults(body, model_path)
     stream = bool(body.get("stream"))
     url = f"{infer_base(port)}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -58,10 +76,16 @@ async def proxy_chat_completions(port: int, request: Request) -> Response:
 
     async with httpx.AsyncClient(timeout=None) as client:
         r = await client.post(url, json=body, headers=headers)
-        return Response(content=r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "application/json"))
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            media_type=r.headers.get("content-type", "application/json"),
+        )
 
 
-async def _stream_upstream(url: str, body: dict[str, Any], headers: dict[str, str]) -> AsyncIterator[bytes]:
+async def _stream_upstream(
+    url: str, body: dict[str, Any], headers: dict[str, str]
+) -> AsyncIterator[bytes]:
     async with httpx.AsyncClient(timeout=None) as client:
         async with client.stream("POST", url, json=body, headers=headers) as resp:
             async for chunk in resp.aiter_bytes():
@@ -187,10 +211,16 @@ def _openai_chunk_to_anthropic_sse(data: dict[str, Any], msg_id: str) -> list[st
     return events
 
 
-async def proxy_anthropic_messages(port: int, request: Request) -> Response:
+async def proxy_anthropic_messages(
+    port: int,
+    request: Request,
+    *,
+    model_path: Path | str | None = None,
+) -> Response:
     await require_inference(port)
     body = await request.json()
     oai = _anthropic_to_openai(body)
+    oai = _apply_model_defaults(oai, model_path)
     stream = bool(oai.get("stream"))
     url = f"{infer_base(port)}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}

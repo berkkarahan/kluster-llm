@@ -94,6 +94,16 @@ export type Status = {
 
 export type ClusterView = 'loading' | 'offline' | 'idle' | 'live';
 
+export type ModelDefaultsInfo = {
+  sampling?: Record<string, number>;
+  chat_template_kwargs?: Record<string, unknown>;
+  reasoning?: Record<string, unknown>;
+  sources?: Record<string, string>;
+  architecture?: string;
+  context_length?: number;
+  reasoning_format?: string;
+};
+
 export type ModelInfo = {
   id: string;
   filename?: string;
@@ -101,6 +111,8 @@ export type ModelInfo = {
   loaded?: boolean;
   /** GGUF `{arch}.context_length` when readable */
   max_context?: number;
+  /** GGUF + Unsloth/LM Studio resolved defaults */
+  defaults?: ModelDefaultsInfo;
 };
 
 export type ModelSearchFit = 'fits' | 'overflow' | 'unknown';

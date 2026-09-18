@@ -335,6 +335,134 @@
           />
         {/if}
 
+
+        <label class="mono text-[11px]" style="color: var(--muted)">Sampling (empty = auto)</label>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-temp">Temperature</label>
+            <input
+              id="inf-temp"
+              class="field mono w-full"
+              type="number"
+              min="0"
+              max="2"
+              step="0.05"
+              placeholder={appStore.autoSamplingHint('temperature')}
+              value={appStore.temperature ?? ''}
+              disabled={!!appStore.busy}
+              onchange={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                appStore.temperature = raw === '' ? null : Number(raw);
+              }}
+            />
+          </div>
+          <div>
+            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-top-p">Top P</label>
+            <input
+              id="inf-top-p"
+              class="field mono w-full"
+              type="number"
+              min="0"
+              max="1"
+              step="0.01"
+              placeholder={appStore.autoSamplingHint('top_p')}
+              value={appStore.topP ?? ''}
+              disabled={!!appStore.busy}
+              onchange={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                appStore.topP = raw === '' ? null : Number(raw);
+              }}
+            />
+          </div>
+          <div>
+            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-top-k">Top K</label>
+            <input
+              id="inf-top-k"
+              class="field mono w-full"
+              type="number"
+              min="0"
+              step="1"
+              placeholder={appStore.autoSamplingHint('top_k')}
+              value={appStore.topK ?? ''}
+              disabled={!!appStore.busy}
+              onchange={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                appStore.topK = raw === '' ? null : Math.max(0, Math.floor(Number(raw)));
+              }}
+            />
+          </div>
+          <div>
+            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-min-p">Min P</label>
+            <input
+              id="inf-min-p"
+              class="field mono w-full"
+              type="number"
+              min="0"
+              max="1"
+              step="0.01"
+              placeholder={appStore.autoSamplingHint('min_p')}
+              value={appStore.minP ?? ''}
+              disabled={!!appStore.busy}
+              onchange={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                appStore.minP = raw === '' ? null : Number(raw);
+              }}
+            />
+          </div>
+          <div>
+            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-pres">Presence penalty</label>
+            <input
+              id="inf-pres"
+              class="field mono w-full"
+              type="number"
+              min="-2"
+              max="2"
+              step="0.05"
+              placeholder={appStore.autoSamplingHint('presence_penalty')}
+              value={appStore.presencePenalty ?? ''}
+              disabled={!!appStore.busy}
+              onchange={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                appStore.presencePenalty = raw === '' ? null : Number(raw);
+              }}
+            />
+          </div>
+          <div>
+            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-rep">Repeat penalty</label>
+            <input
+              id="inf-rep"
+              class="field mono w-full"
+              type="number"
+              min="0"
+              max="2"
+              step="0.05"
+              placeholder={appStore.autoSamplingHint('repeat_penalty')}
+              value={appStore.repeatPenalty ?? ''}
+              disabled={!!appStore.busy}
+              onchange={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                appStore.repeatPenalty = raw === '' ? null : Number(raw);
+              }}
+            />
+          </div>
+        </div>
+
+        <label class="mono text-[11px]" style="color: var(--muted)" for="inf-think">Enable thinking</label>
+        <select
+          id="inf-think"
+          class="field mono"
+          disabled={!!appStore.busy}
+          value={appStore.enableThinking === null ? 'auto' : appStore.enableThinking ? 'on' : 'off'}
+          onchange={(e) => {
+            const v = (e.currentTarget as HTMLSelectElement).value;
+            appStore.enableThinking = v === 'auto' ? null : v === 'on';
+          }}
+        >
+          <option value="auto">{appStore.autoThinkingHint()}</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+
         <label class="mono text-[11px]" style="color: var(--muted)">Chat template</label>
         <input
           class="field mono"

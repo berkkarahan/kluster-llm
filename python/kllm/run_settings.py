@@ -43,6 +43,14 @@ class RunSettingsFields(BaseModel):
     cache_ram: AutoInt = "auto"
     threads: int = DEFAULT_THREADS
     extra_args: list[str] = Field(default_factory=list)
+    # Inference sampling / thinking — None means "auto" (GGUF + heuristic defaults).
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    repeat_penalty: float | None = Field(default=None, ge=0.0, le=2.0)
+    enable_thinking: bool | None = None
     remember: bool = True
     advanced_open: bool = False
     tensor_split: list[float] | None = None
@@ -98,6 +106,13 @@ class RunSettingsFields(BaseModel):
             "cache_ram": norm_auto_int(self.cache_ram),
             "threads": self.threads,
             "extra_args": list(self.extra_args),
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+            "min_p": self.min_p,
+            "presence_penalty": self.presence_penalty,
+            "repeat_penalty": self.repeat_penalty,
+            "enable_thinking": self.enable_thinking,
             "remember": self.remember,
             "advanced_open": self.advanced_open,
         }

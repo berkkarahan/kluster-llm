@@ -331,6 +331,44 @@
         </p>
       {/each}
     </div>
+    <div class="px-3 pt-2 flex flex-wrap gap-2 items-end" style="border-color: var(--border)">
+      <div class="flex flex-col gap-0.5">
+        <label class="mono text-[10px]" style="color: var(--muted)" for="chat-temp">Temp</label>
+        <input
+          id="chat-temp"
+          class="field mono"
+          style="width: 4.5rem"
+          type="number"
+          min="0"
+          max="2"
+          step="0.05"
+          placeholder={appStore.autoSamplingHint('temperature')}
+          value={appStore.temperature ?? ''}
+          disabled={!appStore.status?.inference_up || appStore.chatStreaming}
+          onchange={(e) => {
+            const raw = (e.currentTarget as HTMLInputElement).value.trim();
+            appStore.temperature = raw === '' ? null : Number(raw);
+          }}
+        />
+      </div>
+      <div class="flex flex-col gap-0.5">
+        <label class="mono text-[10px]" style="color: var(--muted)" for="chat-think">Thinking</label>
+        <select
+          id="chat-think"
+          class="field mono"
+          disabled={!appStore.status?.inference_up || appStore.chatStreaming}
+          value={appStore.enableThinking === null ? 'auto' : appStore.enableThinking ? 'on' : 'off'}
+          onchange={(e) => {
+            const v = (e.currentTarget as HTMLSelectElement).value;
+            appStore.enableThinking = v === 'auto' ? null : v === 'on';
+          }}
+        >
+          <option value="auto">{appStore.autoThinkingHint()}</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+    </div>
     <div class="p-3 border-t flex gap-2" style="border-color: var(--border)">
       <input
         class="field mono flex-1"

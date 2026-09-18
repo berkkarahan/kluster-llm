@@ -52,7 +52,7 @@ After install on **this** machine:
 | Host OS | Default `--backend` | Notes |
 |---------|---------------------|--------|
 | Windows | `vulkan` (auto) | Prefer `--prefer-prebuilt`. CUDA if `nvcc` / CUDA toolkit present → auto may pick `cuda`. |
-| macOS | `metal` | Prefer source build with Metal. |
+| macOS | `metal` (standalone) or **`vulkan`** (join a Vulkan master) | Standalone: `--backend metal`. **Cluster worker** on a Windows/Linux Vulkan master: `--backend vulkan` and `export KLLM_ACCEL_BACKEND=vulkan` so membership/planning report `vulkan` (MoltenVK), not Metal. |
 | Linux | `vulkan` or `cuda` if toolkit present | Source build preferred when cmake works. |
 
 ---

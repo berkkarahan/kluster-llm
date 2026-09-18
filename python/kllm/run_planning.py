@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from kllm import config as kllm_config
 from kllm import models as model_ops
 from kllm import native
+from kllm.cluster_log import llama_server_log_path
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.run_settings import RunBody, RunSettingsFields
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
@@ -250,7 +251,8 @@ def build_master_launch(
         "ngl": plan_result["ngl"],
         "context": ctx,
         "threads": body.threads,
-        "micro_batch": auto_launch_value(body.micro_batch),
+        # Native start_master extracts micro_batch as i32 (str "2" raises TypeError).
+        "micro_batch": int(auto_launch_value(body.micro_batch)),
         "parallel": auto_launch_i32(body.parallel_slots),
         "batch_size": auto_launch_i32(body.batch_size),
         "cache_type_k": body.cache_type_k,
@@ -274,4 +276,5 @@ def build_master_launch(
         launch["chat_template"] = chat_template
     if gpu_env:
         launch["env"] = gpu_env
+    launch["log_path"] = str(llama_server_log_path())
     return launch

@@ -179,3 +179,19 @@ def test_setup_llama_parse_args():
     args = mod.parse_args(["--check", "--backend", "vulkan"])
     assert args.check is True
     assert args.backend == "vulkan"
+
+
+def test_cached_llama_archive_prefers_platform_pack(install, monkeypatch, tmp_path):
+    home = tmp_path
+    models = home / ".kllm" / "models"
+    models.mkdir(parents=True)
+    (models / "llama-b11026-bin-macos-arm64.tar.gz").write_bytes(b"mac")
+    (models / "llama-b11026-bin-win-vulkan-x64.zip").write_bytes(b"win")
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    monkeypatch.setattr(install.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: home))
+    got = install._cached_llama_archive("b11026", "vulkan")
+    assert got is not None
+    assert got.name == "llama-b11026-bin-macos-arm64.tar.gz"

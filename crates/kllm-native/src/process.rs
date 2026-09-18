@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 use std::env;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -52,6 +53,8 @@ pub struct LaunchConfig {
     pub argv: Vec<String>,
     /// Extra environment variables (e.g. CUDA_VISIBLE_DEVICES).
     pub env: HashMap<String, String>,
+    /// When set, child stdout and stderr are appended to this file.
+    pub log_path: Option<PathBuf>,
 }
 
 fn extract_env(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, String>> {
@@ -66,6 +69,25 @@ fn opt_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
         Some(v) if v.is_none() => Ok(None),
         Some(v) => Ok(Some(v.extract()?)),
         None => Ok(None),
+    }
+}
+
+/// llama.cpp i32 flags: accept Python int or str ("2", "-1", "auto").
+fn opt_i32_arg(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(None),
+        None => Ok(None),
+        Some(v) => {
+            if let Ok(n) = v.extract::<i64>() {
+                return Ok(Some(n.to_string()));
+            }
+            if let Ok(s) = v.extract::<String>() {
+                return Ok(Some(s));
+            }
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{key} must be int or str"
+            )))
+        }
     }
 }
 
@@ -112,14 +134,14 @@ impl LaunchConfig {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(8);
-        let micro_batch = opt_string(dict, "micro_batch")?;
+        let micro_batch = opt_i32_arg(dict, "micro_batch")?;
         let cache_type_k = opt_string(dict, "cache_type_k")?.unwrap_or_else(|| "q8_0".into());
         let cache_type_v = opt_string(dict, "cache_type_v")?.unwrap_or_else(|| "q8_0".into());
-        let parallel = opt_string(dict, "parallel")?;
-        let batch_size = opt_string(dict, "batch_size")?;
+        let parallel = opt_i32_arg(dict, "parallel")?;
+        let batch_size = opt_i32_arg(dict, "batch_size")?;
         let load_mode = opt_string(dict, "load_mode")?;
-        let ctx_checkpoints = opt_string(dict, "ctx_checkpoints")?;
-        let cache_ram = opt_string(dict, "cache_ram")?;
+        let ctx_checkpoints = opt_i32_arg(dict, "ctx_checkpoints")?;
+        let cache_ram = opt_i32_arg(dict, "cache_ram")?;
         let chat_template = opt_string(dict, "chat_template")?;
         let chat_template_file = opt_string(dict, "chat_template_file")?;
         let mmproj = opt_string(dict, "mmproj")?;
@@ -149,6 +171,7 @@ impl LaunchConfig {
             .map(|v| v.extract())
             .transpose()?;
         let env = extract_env(dict)?;
+        let log_path = opt_string(dict, "log_path")?.map(PathBuf::from);
 
         let binary = resolve_llama_server(repo_root.as_deref()).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -221,6 +244,7 @@ impl LaunchConfig {
             binary: PathBuf::from(&binary),
             argv,
             env,
+            log_path,
         })
     }
 
@@ -245,6 +269,7 @@ impl LaunchConfig {
             .map(|v| v.extract())
             .transpose()?;
         let env = extract_env(dict)?;
+        let log_path = opt_string(dict, "log_path")?.map(PathBuf::from);
 
         let binary = resolve_rpc_server(repo_root.as_deref()).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -272,6 +297,7 @@ impl LaunchConfig {
             binary: PathBuf::from(&binary),
             argv,
             env,
+            log_path,
         })
     }
 }
@@ -383,6 +409,17 @@ fn worker_dll_path_for(binary: &Path) -> Option<PathBuf> {
     }
 }
 
+fn stdio_for_log(path: &Path) -> Result<(Stdio, Stdio), ProcessError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let cloned = file.try_clone()?;
+    Ok((Stdio::from(file), Stdio::from(cloned)))
+}
+
 pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
     if !cfg.binary.is_file() {
         return Err(ProcessError::Message(format!(
@@ -411,9 +448,16 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
         };
         cmd.env(path_key, merged);
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.stdin(Stdio::null());
+    match &cfg.log_path {
+        Some(path) => {
+            let (out, err) = stdio_for_log(path)?;
+            cmd.stdout(out).stderr(err);
+        }
+        None => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
 
     let child = cmd.spawn()?;
     let pid = child.id();
@@ -498,5 +542,14 @@ mod tests {
     fn candidate_roots_include_explicit() {
         let roots = candidate_roots(Some("/tmp/kllm-test-root"));
         assert_eq!(roots[0], PathBuf::from("/tmp/kllm-test-root"));
+    }
+
+    #[test]
+    fn stdio_for_log_creates_append_file() {
+        let dir = std::env::temp_dir().join(format!("kllm-log-{}", std::process::id()));
+        let path = dir.join("nested").join("child.log");
+        let _ = stdio_for_log(&path).expect("open log");
+        assert!(path.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

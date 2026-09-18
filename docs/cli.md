@@ -36,6 +36,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
+| `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard) |
 | `kllm model distribute <name>` | Master coordinates a LAN pull to workers; finished workers seed others (SHA-256 verified) |
 | `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`) |
@@ -46,6 +47,8 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 Control plane default port: **18765**. Worker RPC default: **50052** (LAN-only; do not expose on the public internet). Inference HTTP: **8080** (also proxied on the control port as OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`).
 
 `kllm status` prints the same member map the dashboard Home topology uses on that node (`node_id`, `host`, `role`, capacity). When a shrink replan cannot apply (overflow) or applied with a tight fit, `apply_error` / `apply_warning` are printed; a non-zero exit is not required because the cluster is still up. RPC port **50052** stays on the private bind / overlay and is never published as a public service.
+
+`kllm logs` dumps recent cluster log lines; `kllm logs -f` follows them. Workers relay agent, llama-server, and rpc-server output to the master (`~/.kllm/logs/cluster.jsonl`) so debugging is a single stream. On a worker the CLI proxies to the master and falls back to local files if the master is unreachable. Filter with `--node` and `--source agent|llama|rpc`.
 
 ### RPC bind and optional WireGuard
 

@@ -11,6 +11,7 @@ from kllm.membership import (
     HEARTBEAT_INTERVAL_S,
     LIVENESS_TIMEOUT_S,
     cluster_snapshot,
+    on_membership_grow,
     on_membership_shrink,
     sweep_liveness,
 )
@@ -548,6 +549,67 @@ def test_shrink_without_last_settings_is_membership_only(tmp_path, monkeypatch):
         on_membership_shrink(state)
     ep.assert_not_called()
     assert state.last_plan["node_ids"] == ["master1", "w1"]
+
+
+def test_grow_clears_stale_shrink_overflow(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
+    models = Path(tmp_path / "kllm-home" / "models")
+    models.mkdir(parents=True, exist_ok=True)
+    (models / "toy.gguf").write_bytes(b"x" * 1024)
+
+    state = ClusterState(
+        role="master",
+        node_id="master1",
+        join_key="k",
+        process_pid=None,
+        members={
+            "master1": {
+                "node_id": "master1",
+                "host": "10.0.0.1",
+                "role": "master",
+                "vram_bytes": 16 * 1024**3,
+                "backend": "vulkan",
+            },
+            "w1": {
+                "node_id": "w1",
+                "host": "10.0.0.2",
+                "role": "worker",
+                "vram_bytes": 38 * 1024**3,
+                "backend": "vulkan",
+            },
+        },
+        last_settings={"model": "toy.gguf", "context": 4096, "threads": 8},
+        apply_error="does not fit remaining cluster capacity: cluster budget too small: need ~46353 MB (model+KV), have ~16703 MB",
+    )
+    plan = _fake_plan(
+        node_ids=["w1", "master1"],
+        fit_status="fits",
+        budget_bytes=56_000_000_000,
+        estimated_bytes=46_000_000_000,
+    )
+    with patch("kllm.membership.execute_plan", return_value=plan):
+        on_membership_grow(state)
+    assert state.apply_error is None
+    assert state.last_plan["fit_status"] == "fits"
+    assert state.last_plan["node_ids"] == ["w1", "master1"]
+
+
+def test_register_clears_stale_apply_error(client):
+    c, agent = client
+    _start_master(c, agent)
+    agent.STATE.apply_error = "does not fit remaining cluster capacity: have ~16703 MB"
+    agent.STATE.last_settings = {"model": "toy.gguf", "context": 4096, "threads": 8}
+    plan = _fake_plan(
+        node_ids=[agent.STATE.node_id, "w1"],
+        fit_status="fits",
+        budget_bytes=56_000_000_000,
+    )
+    with patch("kllm.membership.execute_plan", return_value=plan):
+        r = _register_worker(c)
+    assert r.status_code == 200
+    assert agent.STATE.apply_error is None
+    body = r.json()
+    assert body.get("apply_error") is None
 
 
 def test_unregister_triggers_shrink(client):

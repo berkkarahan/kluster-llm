@@ -23,6 +23,7 @@ from kllm.auth import ensure_api_token, verify_api_token
 from kllm.hf_token import hf_token_status, save_hf_token
 from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
+from kllm import cluster_log
 from kllm.run_planning import (
     build_master_launch,
     ensure_master_alive_after_spawn,
@@ -79,6 +80,7 @@ ensure_api_token()
 
 _membership_lock = threading.Lock()
 _membership_thread_started = False
+_logs_thread_started = False
 
 
 def _persist_last_settings(body: PlanBody | RunBody) -> None:
@@ -283,8 +285,37 @@ def _start_membership_thread() -> None:
     threading.Thread(target=_membership_loop, name="kllm-membership", daemon=True).start()
 
 
+def _logs_loop() -> None:
+    cluster_log.HUB.prime_offsets()
+    if STATE.role == "master":
+        cluster_log.HUB.ensure_journal_loaded()
+    while True:
+        time.sleep(cluster_log.FLUSH_INTERVAL_S)
+        try:
+            master_base = None
+            if STATE.role == "worker" and STATE.master_host:
+                master_base = _master_control_base()
+            cluster_log.HUB.relay_tick(
+                node_id=STATE.node_id or "unknown",
+                role=STATE.role,
+                master_base=master_base,
+                join_key=STATE.join_key,
+            )
+        except Exception:
+            pass
+
+
+def _start_logs_thread() -> None:
+    global _logs_thread_started
+    if _logs_thread_started:
+        return
+    _logs_thread_started = True
+    threading.Thread(target=_logs_loop, name="kllm-logs", daemon=True).start()
+
+
 if "pytest" not in sys.modules:
     _start_membership_thread()
+    _start_logs_thread()
 
 
 def _require_key(x_kllm_key: str | None = Header(default=None)) -> None:
@@ -355,6 +386,17 @@ class RegisterBody(BaseModel):
     wg_public_key: str | None = None
     wg_listen_port: int = netsec.WG_LISTEN_PORT
     gpu_ids: list[int] | None = None
+
+
+class LogLineBody(BaseModel):
+    ts: float | None = None
+    source: str = "agent"
+    line: str
+
+
+class LogsIngestBody(BaseModel):
+    node_id: str
+    lines: list[LogLineBody] = Field(default_factory=list)
 
 
 def _probe_capacity_for_cluster() -> dict[str, Any]:
@@ -432,6 +474,8 @@ def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, st
     csv = ",".join(str(i) for i in gpu_ids)
     if backend == "cuda":
         return {"CUDA_VISIBLE_DEVICES": csv}
+    if backend == "vulkan":
+        return {"GGML_VK_VISIBLE_DEVICES": csv}
     if backend == "rocm":
         return {
             "HIP_VISIBLE_DEVICES": csv,
@@ -505,6 +549,66 @@ class PullBody(BaseModel):
     sha256: str
     size: int
     source: PullSource
+
+
+class LlamaSetupBody(BaseModel):
+    tag: str | None = None
+    backend: str = "auto"
+    force: bool = False
+
+
+@app.post("/v1/llama/setup")
+def llama_setup(
+    body: LlamaSetupBody | None = None,
+    x_kllm_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Extract the pinned llama.cpp pack from ~/.kllm/models into vendor/bin."""
+    if STATE.join_key and x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid join key")
+    payload = body or LlamaSetupBody()
+    try:
+        from kllm.llama_pack import install_cached_llama_pack
+
+        result = install_cached_llama_pack(
+            tag=payload.tag,
+            backend=payload.backend,
+            force=payload.force,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    relaunch: dict[str, Any] | None = None
+    if STATE.role == "worker" and result.get("ok"):
+        root = repo_root()
+        gpu_env = _gpu_visibility_env(
+            (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
+            STATE.gpu_ids,
+        )
+        if STATE.process_pid:
+            native.stop_process(STATE.process_pid, force=True)
+            runtime.clear_children()
+            STATE.process_pid = None
+            STATE.process_role = None
+        try:
+            launched = native.start_worker(
+                host=STATE.rpc_bind or "0.0.0.0",
+                port=STATE.rpc_port or DEFAULT_RPC_PORT,
+                repo_root=str(root) if root else None,
+                env=gpu_env or None,
+                log_path=str(cluster_log.rpc_server_log_path()),
+            )
+            STATE.process_pid = launched.get("pid")
+            STATE.process_role = "worker"
+            if launched.get("pid"):
+                runtime.register_child(int(launched["pid"]), "rpc-server")
+            STATE.save()
+            relaunch = launched
+        except Exception as exc:
+            relaunch = {"error": str(exc)}
+    result["relaunch"] = relaunch
+    return result
 
 
 @app.get("/health")
@@ -1083,6 +1187,15 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         except Exception as exc:
             raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
 
+    # Align llama.cpp with the committed llama-release pin when a pack is already
+    # in ~/.kllm/models (avoids GitHub SSL on some macOS venvs).
+    try:
+        from kllm.llama_pack import install_cached_llama_pack
+
+        install_cached_llama_pack(backend=str(backend), force=False)
+    except Exception:
+        pass
+
     # Start local rpc-server bound to the RPC address (LAN or WG), not 0.0.0.0 by default
     root = repo_root()
     gpu_env = _gpu_visibility_env(backend, STATE.gpu_ids)
@@ -1092,6 +1205,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
             port=body.rpc_port,
             repo_root=str(root) if root else None,
             env=gpu_env or None,
+            log_path=str(cluster_log.rpc_server_log_path()),
         )
         STATE.process_pid = launched["pid"]
         STATE.process_role = "worker"
@@ -1242,6 +1356,7 @@ def register(
 
     STATE.members[body.node_id] = member
     STATE.save()
+    membership_mod.on_membership_grow(STATE)
     response["members"] = len(STATE.members)
     response.update(membership_mod.snapshot_payload(STATE))
     return response
@@ -1322,6 +1437,135 @@ def heartbeat(
         "accepted": accepted,
         **membership_mod.snapshot_payload(STATE),
     }
+
+
+def _logs_snapshot(n: int, node: str | None, source: str | None) -> dict[str, Any]:
+    origin = "cluster" if STATE.role == "master" else "local"
+    return {
+        "lines": cluster_log.HUB.recent(n, node, source),
+        "source": origin,
+    }
+
+
+def _logs_sse(
+    n: int,
+    follow: bool,
+    node: str | None,
+    source: str | None,
+) -> StreamingResponse:
+    return StreamingResponse(
+        iterate_in_threadpool(cluster_log.HUB.iter_sse(n, follow, node, source)),
+        media_type="text/event-stream",
+    )
+
+
+def _try_proxy_master_logs(
+    n: int,
+    follow: bool,
+    node: str | None,
+    source: str | None,
+) -> dict[str, Any] | StreamingResponse | None:
+    import httpx as httpx_mod
+
+    params: dict[str, Any] = {"n": n, "follow": follow}
+    if node:
+        params["node"] = node
+    if source:
+        params["source"] = source
+    headers = {}
+    if STATE.join_key:
+        headers["X-Kllm-Key"] = STATE.join_key
+    url = f"{_master_control_base()}/v1/logs"
+    try:
+        if follow:
+            client = httpx_mod.Client(timeout=None)
+            try:
+                resp = client.send(
+                    client.build_request("GET", url, params=params, headers=headers),
+                    stream=True,
+                )
+            except Exception:
+                client.close()
+                return None
+            if resp.status_code != 200:
+                resp.close()
+                client.close()
+                return None
+
+            def _gen():
+                try:
+                    for chunk in resp.iter_bytes():
+                        yield chunk
+                finally:
+                    resp.close()
+                    client.close()
+
+            return StreamingResponse(
+                iterate_in_threadpool(_gen()),
+                media_type="text/event-stream",
+            )
+        with httpx_mod.Client(timeout=2.0) as client:
+            resp = client.get(url, params=params, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+@app.post("/v1/logs")
+def ingest_logs(
+    body: LogsIngestBody,
+    _: None = Depends(_require_key),
+) -> dict[str, Any]:
+    if STATE.role != "master":
+        raise HTTPException(403, "only the master accepts log ingest")
+    events = [
+        cluster_log.make_event(body.node_id, item.source, item.line, ts=item.ts)
+        for item in body.lines
+    ]
+    ingested = cluster_log.HUB.ingest(events, persist=True)
+    return {"ok": True, "ingested": ingested}
+
+
+@app.get("/v1/logs")
+def get_logs(
+    n: int = 200,
+    follow: bool = False,
+    node: str | None = None,
+    source: str | None = None,
+):
+    n = max(1, min(int(n), 5000))
+    if source and source not in cluster_log.VALID_SOURCES:
+        raise HTTPException(400, "source must be agent, llama, or rpc")
+    if STATE.role == "master":
+        cluster_log.HUB.ensure_journal_loaded()
+    if STATE.role == "worker" and STATE.master_host:
+        proxied = _try_proxy_master_logs(n, follow, node, source)
+        if proxied is not None:
+            return proxied
+        warning = "master unreachable; showing local logs"
+        if follow:
+            def _gen_local():
+                yield cluster_log.encode_sse(
+                    cluster_log.make_event("kllm", "agent", warning)
+                )
+                yield from cluster_log.HUB.iter_sse(n, True, node, source)
+
+            return StreamingResponse(
+                iterate_in_threadpool(_gen_local()),
+                media_type="text/event-stream",
+            )
+        snap = _logs_snapshot(n, node, source)
+        snap["warning"] = warning
+        snap["source"] = "local"
+        return snap
+    if follow:
+        return _logs_sse(n, True, node, source)
+    return _logs_snapshot(n, node, source)
 
 
 @app.get("/v1/models/blob")
@@ -1477,6 +1721,15 @@ def plan(body: PlanBody) -> dict[str, Any]:
     path = model_ops.resolve_local_model(body.model)
     STATE.last_plan = result
     STATE.model_name = path.name
+    if result.get("fit_status") == "overflow":
+        STATE.apply_error = result.get("hint") or "model and context exceed cluster budget (overflow)"
+        STATE.apply_warning = None
+    elif result.get("fit_status") == "tight":
+        STATE.apply_error = None
+        STATE.apply_warning = result.get("warning") or result.get("hint")
+    else:
+        STATE.apply_error = None
+        STATE.apply_warning = None
     _persist_last_settings(body)
     STATE.save()
     _maybe_remember(body)

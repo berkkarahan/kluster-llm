@@ -83,6 +83,8 @@ def test_build_master_launch_rpc_aligns_with_worker_order():
     assert launch["rpc_servers"] == ["10.0.0.2:50052", "10.0.0.3:50053"]
     assert launch["tensor_split"] == "0.2000,0.3000,0.5000"
     assert len(launch["tensor_split"].split(",")) == len(ordered_members(members))
+    assert launch["micro_batch"] == 2
+    assert isinstance(launch["micro_batch"], int)
 
 
 def test_ensure_rpc_peers_reachable_fails_closed_port():

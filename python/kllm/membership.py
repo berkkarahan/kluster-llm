@@ -129,6 +129,8 @@ def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, st
     csv = ",".join(str(i) for i in gpu_ids)
     if backend == "cuda":
         return {"CUDA_VISIBLE_DEVICES": csv}
+    if backend == "vulkan":
+        return {"GGML_VK_VISIBLE_DEVICES": csv}
     if backend == "rocm":
         return {
             "HIP_VISIBLE_DEVICES": csv,
@@ -202,6 +204,34 @@ def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, An
     state.model_name = path.name
     if launched.get("pid"):
         runtime.register_child(int(launched["pid"]), "llama-server")
+
+
+def on_membership_grow(state: ClusterState) -> None:
+    """Replan after a worker joins. Clears stale shrink overflow when the cluster fits again."""
+    if not state.last_settings:
+        if state.apply_error or state.apply_warning:
+            state.apply_error = None
+            state.apply_warning = None
+            state.save()
+        return
+    try:
+        body = _settings_body(state.last_settings)
+        plan = execute_plan(body, state.members)
+    except Exception:
+        state.save()
+        return
+    state.last_plan = plan
+    fit = plan.get("fit_status")
+    if fit == "overflow":
+        state.apply_error = _does_not_fit_message(plan, None)
+        state.apply_warning = None
+    elif fit == "tight":
+        state.apply_error = None
+        state.apply_warning = plan.get("warning") or plan.get("hint")
+    else:
+        state.apply_error = None
+        state.apply_warning = None
+    state.save()
 
 
 def on_membership_shrink(state: ClusterState) -> None:

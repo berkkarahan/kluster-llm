@@ -24,7 +24,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | Command | Description |
 |---------|-------------|
 | `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
-| `kllm join --key KEY [--master HOST] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery) |
+| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
@@ -53,7 +53,7 @@ kllm join --key <key> --overlay wireguard
 
 Requires system WireGuard (`wg` on PATH, plus `wg-quick` on Linux/macOS or WireGuard for Windows). PSK is derived from the join key; RPC moves to `10.66.87.0/24` while control-plane HTTP stays on the LAN. Dashboard Cluster panel exposes the same **RPC bind** and **Overlay** controls.
 
-Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN. Pass `--master` only when mDNS is unavailable.
+Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN (falling back to a helper Python when the agent interpreter cannot see mDNS). Pass `--master` only when discovery is unavailable.
 
 ## GPU selection (multi-GPU hosts)
 
@@ -79,7 +79,10 @@ device = "gpu"
 gpu_ids = [0, 1]      # optional; omitted = all local GPUs at Start/Join
 vram_percent = 80     # used when device = gpu (scales selected VRAM)
 ram_percent = 80      # used when device = cpu (scales total RAM)
+accel_backend = "vulkan"  # optional; Cluster Backend selector (metal|cuda|rocm|vulkan)
 ```
+
+Precedence for accelerator label on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Dashboard Cluster panel shows vendor pairs (Apple: Metal/Vulkan, NVIDIA: CUDA/Vulkan, AMD: ROCm/Vulkan) before Start/Join.
 
 Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`.
 

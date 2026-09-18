@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from kllm import config as kllm_config
 from kllm import discovery, gateway, models as model_ops, native, netsec, runtime
+from kllm.accel import allowed_accel_backends
 from kllm.auth import ensure_api_token, verify_api_token
 from kllm.hf_token import hf_token_status, save_hf_token
 from kllm import model_settings as model_settings_store
@@ -144,15 +145,55 @@ def _worker_local_leave() -> None:
     STATE.save()
 
 
+def _master_control_base() -> str:
+    """HTTP base for worker → master control-plane (may be localhost proxy)."""
+    if STATE.cp_proxy_port:
+        return f"http://127.0.0.1:{int(STATE.cp_proxy_port)}"
+    return f"http://{STATE.master_host}:{STATE.master_port}"
+
+
+def _ensure_master_control_route(master_host: str, master_port: int) -> list[str]:
+    """Use direct LAN when possible; otherwise start a localhost TCP proxy.
+
+    Returns netsec-style warnings for the caller to surface.
+    """
+    from kllm import cp_proxy
+
+    warnings: list[str] = []
+    try:
+        handle = cp_proxy.ensure_for_master(master_host, master_port)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if handle is None:
+        STATE.cp_proxy_port = None
+        STATE.cp_proxy_pid = None
+        return warnings
+    STATE.cp_proxy_port = handle.listen_port
+    STATE.cp_proxy_pid = handle.pid
+    warnings.append(
+        f"control-plane via 127.0.0.1:{handle.listen_port} "
+        f"(agent Python cannot reach {master_host}:{master_port} on LAN; "
+        f"helper={handle.helper})"
+    )
+    return warnings
+
+
 def _worker_post_heartbeat() -> None:
     if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
         return
     import httpx
 
+    # Re-ensure proxy if the helper died across agent restarts.
+    try:
+        _ensure_master_control_route(STATE.master_host, STATE.master_port)
+    except HTTPException:
+        membership_mod.mark_master_unreachable(STATE)
+        return
+
     try:
         with httpx.Client(timeout=5.0) as client:
             resp = client.post(
-                f"http://{STATE.master_host}:{STATE.master_port}/v1/heartbeat",
+                f"{_master_control_base()}/v1/heartbeat",
                 json=_heartbeat_payload(),
                 headers={"X-Kllm-Key": STATE.join_key},
             )
@@ -404,6 +445,33 @@ class ConfigBody(BaseModel):
     gpu_ids: list[int] | None = None
     vram_percent: int | None = Field(default=None, ge=10, le=100)
     ram_percent: int | None = Field(default=None, ge=10, le=100)
+    accel_backend: str | None = None
+
+
+def _list_gpus_payload() -> dict[str, Any]:
+    """Enumerate GPUs with effective + probed backend and UI allowed list."""
+    try:
+        listed = native.list_gpus()
+    except Exception as exc:
+        return {
+            "backend": "cpu",
+            "probed_backend": "cpu",
+            "allowed_backends": [],
+            "gpus": [],
+            "error": str(exc),
+        }
+    gpus = listed.get("gpus") or []
+    probed = str(listed.get("probed_backend") or listed.get("backend") or "cpu").strip().lower()
+    backend = str(listed.get("backend") or probed).strip().lower()
+    out: dict[str, Any] = {
+        "backend": backend,
+        "probed_backend": probed,
+        "allowed_backends": allowed_accel_backends(probed, gpus),
+        "gpus": gpus,
+    }
+    if listed.get("error"):
+        out["error"] = listed["error"]
+    return out
 
 
 class DownloadBody(BaseModel):
@@ -604,10 +672,7 @@ def get_config() -> dict[str, Any]:
 @app.get("/v1/gpus")
 def get_gpus() -> dict[str, Any]:
     """Enumerate local GPUs for pre-start selection."""
-    try:
-        return native.list_gpus()
-    except Exception as exc:
-        return {"backend": "cpu", "gpus": [], "error": str(exc)}
+    return _list_gpus_payload()
 
 
 @app.put("/v1/config")
@@ -621,7 +686,22 @@ def put_config(body: ConfigBody) -> dict[str, Any]:
             payload["vram_percent"] = body.vram_percent
         if body.ram_percent is not None:
             payload["ram_percent"] = body.ram_percent
+        if "accel_backend" in body.model_fields_set:
+            choice = body.accel_backend
+            if choice is not None:
+                choice = str(choice).strip().lower()
+                gpus_info = _list_gpus_payload()
+                allowed = gpus_info.get("allowed_backends") or []
+                if choice not in allowed:
+                    raise HTTPException(
+                        400,
+                        f"accel_backend {choice!r} not allowed on this host "
+                        f"(allowed: {allowed or ['(none)']})",
+                    )
+            payload["accel_backend"] = choice
         return kllm_config.save_config(payload)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -641,6 +721,8 @@ def status() -> dict[str, Any]:
         "node_id": STATE.node_id,
         "join_key": STATE.join_key if STATE.role == "master" else None,
         "master_host": STATE.master_host,
+        "master_port": STATE.master_port,
+        "cp_proxy_port": STATE.cp_proxy_port,
         "members": STATE.members,
         "process_pid": STATE.process_pid,
         "process_role": STATE.process_role,
@@ -658,6 +740,7 @@ def status() -> dict[str, Any]:
         "vram_percent": cfg.get("vram_percent"),
         "ram_percent": cfg.get("ram_percent"),
         "config_gpu_ids": cfg.get("gpu_ids"),
+        "accel_backend": cfg.get("accel_backend"),
         "gpu_ids": STATE.gpu_ids,
         "rpc_bind": STATE.rpc_bind,
         "overlay": STATE.overlay,
@@ -672,6 +755,11 @@ def status() -> dict[str, Any]:
 def _reset_netsec_state() -> None:
     if STATE.overlay == netsec.OVERLAY_WIREGUARD:
         netsec.tear_down_wireguard()
+    from kllm import cp_proxy
+
+    cp_proxy.stop_current()
+    STATE.cp_proxy_port = None
+    STATE.cp_proxy_pid = None
     STATE.rpc_bind = None
     STATE.overlay = netsec.OVERLAY_NONE
     STATE.wg_address = None
@@ -889,6 +977,10 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
     if fw.get("warning"):
         STATE.netsec_warnings.append(str(fw["warning"]))
 
+    # Prefer direct LAN; if this interpreter cannot open LAN sockets (macOS TCC /
+    # Zscaler), relay control-plane HTTP via a helper-python localhost proxy.
+    STATE.netsec_warnings.extend(_ensure_master_control_route(master_host, master_port))
+
     wg_pub: str | None = None
     if overlay == netsec.OVERLAY_WIREGUARD:
         try:
@@ -913,18 +1005,32 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
     }
     import httpx
 
-    url = f"http://{master_host}:{master_port}/v1/register"
+    if STATE.cp_proxy_port:
+        base = f"http://127.0.0.1:{int(STATE.cp_proxy_port)}"
+    else:
+        base = f"http://{master_host}:{master_port}"
+    url = f"{base}/v1/register"
     try:
         with httpx.Client(timeout=15.0) as client:
             resp = client.post(url, json=payload, headers={"X-Kllm-Key": body.key})
     except httpx.TimeoutException as exc:
+        from kllm import cp_proxy
+
+        cp_proxy.stop_current()
+        STATE.cp_proxy_port = None
+        STATE.cp_proxy_pid = None
         raise HTTPException(
             504,
             f"master at {master_host}:{master_port} did not respond in time; "
-            f"ensure `kllm start --key …` is running on the Mac and try "
+            f"ensure `kllm start --key …` is running on the master and try "
             f"`curl http://{master_host}:{master_port}/health` from this machine",
         ) from exc
     except httpx.RequestError as exc:
+        from kllm import cp_proxy
+
+        cp_proxy.stop_current()
+        STATE.cp_proxy_port = None
+        STATE.cp_proxy_pid = None
         raise HTTPException(
             502,
             f"cannot reach master at {master_host}:{master_port}: {exc}",
@@ -998,6 +1104,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         "overlay_status": STATE.overlay_status,
         "netsec_warnings": STATE.netsec_warnings,
         "gpu_ids": STATE.gpu_ids,
+        "cp_proxy_port": STATE.cp_proxy_port,
     }
 
 
@@ -1027,9 +1134,10 @@ def leave() -> dict[str, Any]:
         import httpx
 
         try:
+            _ensure_master_control_route(STATE.master_host, STATE.master_port)
             with httpx.Client(timeout=10.0) as client:
                 client.post(
-                    f"http://{STATE.master_host}:{STATE.master_port}/v1/unregister",
+                    f"{_master_control_base()}/v1/unregister",
                     json={"node_id": STATE.node_id},
                     headers={"X-Kllm-Key": STATE.join_key},
                 )

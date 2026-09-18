@@ -1,3 +1,5 @@
+export type AccelBackend = 'metal' | 'cuda' | 'rocm' | 'vulkan';
+
 export type GpuInfo = {
   index: number;
   name: string;
@@ -73,6 +75,7 @@ export type Status = {
   vram_percent?: number;
   ram_percent?: number;
   config_gpu_ids?: number[] | null;
+  accel_backend?: AccelBackend | null;
   gpu_ids?: number[] | null;
   rpc_bind?: string | null;
   overlay?: 'none' | 'wireguard' | string;

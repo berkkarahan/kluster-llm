@@ -445,7 +445,7 @@ def test_join_honors_rpc_bind_hint_from_master(client):
                 "overlay": "none",
             },
         )
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     assert captured["host"] == "192.168.68.63"
     assert r.json()["rpc_bind"] == "192.168.68.63"
     assert any("corrected" in w for w in (r.json().get("netsec_warnings") or []))

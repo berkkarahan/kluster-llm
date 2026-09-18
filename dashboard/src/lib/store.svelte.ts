@@ -1,4 +1,5 @@
-import type {
+  import type {
+  AccelBackend,
   ChatMessage,
   ClusterView,
   GpuInfo,
@@ -11,6 +12,17 @@ import type {
 } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { pushToast } from './toast';
+
+const ACCEL_LABELS: Record<AccelBackend, string> = {
+  metal: 'Metal',
+  cuda: 'CUDA',
+  rocm: 'ROCm',
+  vulkan: 'Vulkan'
+};
+
+function isAccelBackend(v: unknown): v is AccelBackend {
+  return v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan';
+}
 
 let fingerprint = '';
 
@@ -47,6 +59,9 @@ class AppStore {
   overlay = $state<'none' | 'wireguard'>('none');
   gpus = $state<GpuInfo[]>([]);
   gpuBackend = $state('cpu');
+  probedBackend = $state('cpu');
+  allowedBackends = $state<AccelBackend[]>([]);
+  accelBackend = $state<AccelBackend | null>(null);
   selectedGpuIds = $state<number[]>([]);
   modelSource = $state('');
   searchResults = $state<ModelSearchHit[]>([]);
@@ -138,6 +153,8 @@ class AppStore {
         if (data.rpc_bind) this.rpcBindInput = data.rpc_bind;
         if (data.overlay === 'none' || data.overlay === 'wireguard') this.overlay = data.overlay;
       }
+      if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
+      else if (data.accel_backend === null) this.accelBackend = null;
       const next = fp(data);
       if (next !== fingerprint) {
         fingerprint = next;
@@ -393,6 +410,10 @@ class AppStore {
       } else if (data.gpu_ids === null || data.gpu_ids === undefined) {
         this.configGpuIds = null;
       }
+      if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
+      else if (data.accel_backend === null || data.accel_backend === undefined) {
+        this.accelBackend = null;
+      }
       this.hydrateGpuSelection();
     } catch {
       /* ignore */
@@ -420,14 +441,34 @@ class AppStore {
     this.selectionHydrated = true;
   }
 
+  private applyGpusPayload(data: Record<string, unknown>) {
+    this.gpuBackend = typeof data.backend === 'string' ? data.backend : 'cpu';
+    this.probedBackend =
+      typeof data.probed_backend === 'string' ? data.probed_backend : this.gpuBackend;
+    const allowed = Array.isArray(data.allowed_backends)
+      ? (data.allowed_backends as unknown[]).filter(isAccelBackend)
+      : [];
+    this.allowedBackends = allowed;
+    const list = (data.gpus ?? []) as GpuInfo[];
+    this.gpus = list;
+    // Prefer saved preference; else effective backend if allowed; else first allowed / probe.
+    if (this.accelBackend && allowed.includes(this.accelBackend)) {
+      /* keep */
+    } else if (isAccelBackend(this.gpuBackend) && allowed.includes(this.gpuBackend)) {
+      this.accelBackend = this.gpuBackend;
+    } else if (allowed.length > 0) {
+      this.accelBackend = allowed[0];
+    } else {
+      this.accelBackend = null;
+    }
+  }
+
   async loadGpus() {
     try {
       const r = await fetch('/v1/gpus');
       if (!r.ok) return;
       const data = await r.json();
-      this.gpuBackend = data.backend ?? 'cpu';
-      const list = (data.gpus ?? []) as GpuInfo[];
-      this.gpus = list;
+      this.applyGpusPayload(data);
       if (!this.gpusLoaded) {
         this.gpusLoaded = true;
         this.hydrateGpuSelection();
@@ -446,11 +487,16 @@ class AppStore {
     }
   }
 
+  accelBackendLabel(backend: AccelBackend): string {
+    return ACCEL_LABELS[backend] ?? backend;
+  }
+
   async saveConfig(partial?: {
     device?: 'cpu' | 'gpu';
     gpu_ids?: number[] | null;
     vram_percent?: number;
     ram_percent?: number;
+    accel_backend?: AccelBackend | null;
   }) {
     const device = partial?.device ?? this.device;
     this.device = device;
@@ -463,6 +509,12 @@ class AppStore {
       const ids = partial?.gpu_ids !== undefined ? partial.gpu_ids : this.selectedGpuIds;
       body.gpu_ids = ids && ids.length > 0 ? ids : null;
       this.configGpuIds = (body.gpu_ids as number[] | null) ?? null;
+    }
+    if (partial && 'accel_backend' in partial) {
+      body.accel_backend = partial.accel_backend ?? null;
+      this.accelBackend = partial.accel_backend ?? null;
+    } else if (this.accelBackend) {
+      body.accel_backend = this.accelBackend;
     }
     this.busy = '/v1/config';
     try {
@@ -480,11 +532,14 @@ class AppStore {
         const data = text ? JSON.parse(text) : {};
         if (typeof data.vram_percent === 'number') this.vramPercent = data.vram_percent;
         if (typeof data.ram_percent === 'number') this.ramPercent = data.ram_percent;
+        if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
+        else if (data.accel_backend === null) this.accelBackend = null;
       } catch {
         /* ignore */
       }
       pushToast('ok', 'config saved');
       await this.refresh();
+      await this.loadGpus();
     } finally {
       this.busy = '';
     }
@@ -497,6 +552,10 @@ class AppStore {
     } else {
       await this.saveConfig({ device, ram_percent: this.ramPercent });
     }
+  }
+
+  async setAccelBackend(backend: AccelBackend) {
+    await this.saveConfig({ accel_backend: backend });
   }
 
   async setVramPercent(value: number) {

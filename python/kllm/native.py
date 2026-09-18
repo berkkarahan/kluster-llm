@@ -42,12 +42,14 @@ def probe_capacity() -> dict[str, Any]:
 
 
 def list_gpus() -> dict[str, Any]:
-    """Return ``{backend, gpus: [{index, name, vram_bytes}, ...]}``."""
+    """Return ``{backend, probed_backend, gpus: [{index, name, vram_bytes}, ...]}``."""
     if _NATIVE is None or not hasattr(_NATIVE, "list_gpus"):
-        return {"backend": "cpu", "gpus": []}
+        return {"backend": "cpu", "probed_backend": "cpu", "gpus": []}
     devices, backend = _NATIVE.list_gpus()
+    probed = str(backend).strip().lower() if backend else "cpu"
     return {
-        "backend": effective_accel_backend(backend),
+        "probed_backend": probed,
+        "backend": effective_accel_backend(probed),
         "gpus": [
             {
                 "index": int(d.index),

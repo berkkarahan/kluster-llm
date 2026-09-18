@@ -71,6 +71,7 @@ kllm join --key '<join-key-from-master>'
 
 # Master
 kllm model distribute model.Q4_K_M.gguf
+# LAN pull tree: finished workers seed others
 kllm run --model model.Q4_K_M.gguf
 kllm ui
 # optional: coding harness against the cluster API

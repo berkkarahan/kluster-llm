@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import secrets
 import sys
@@ -12,7 +11,8 @@ from typing import Any, Literal, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -495,6 +495,18 @@ class DeleteBody(BaseModel):
     name: str
 
 
+class PullSource(BaseModel):
+    host: str
+    port: int
+
+
+class PullBody(BaseModel):
+    filename: str
+    sha256: str
+    size: int
+    source: PullSource
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "role": STATE.role, "node_id": STATE.node_id, "pid": os.getpid()}
@@ -587,6 +599,8 @@ def distribute_model(body: DistributeBody) -> dict[str, Any]:
             workers,
             STATE.join_key,
             default_port=STATE.control_port,
+            master_host=_master_lan_host(),
+            master_port=STATE.control_port,
         )
     except model_ops.DistributeInProgressError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1310,55 +1324,86 @@ def heartbeat(
     }
 
 
-@app.put("/v1/models/receive")
-async def receive_model(
+@app.get("/v1/models/blob")
+def get_model_blob(
     request: Request,
     x_kllm_key: str | None = Header(default=None),
     x_kllm_filename: str = Header(...),
-    x_kllm_sha256: str = Header(...),
-    x_kllm_size: int = Header(...),
-) -> dict[str, Any]:
-    # Workers receive from master — authenticate with the cluster key
+):
+    """Seed endpoint: Range-capable GGUF bytes (join-key auth)."""
     if STATE.join_key and x_kllm_key != STATE.join_key:
         raise HTTPException(401, "invalid join key")
     filename = Path(x_kllm_filename).name
     dest = models_dir() / filename
-    expected = (x_kllm_sha256 or "").lower()
-    tmp: Path | None = None
+    if not dest.is_file():
+        raise HTTPException(404, f"model not found: {filename}")
+    file_size = dest.stat().st_size
     try:
-        tmp = model_ops.begin_receive(filename, x_kllm_size)
+        start, end, partial = model_ops.parse_bytes_range(
+            request.headers.get("range"), file_size
+        )
+    except model_ops.RangeUnsatisfiable:
+        raise HTTPException(
+            416,
+            "range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start),
+        "X-Kllm-Filename": filename,
+    }
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end - 1}/{file_size}"
+        status = 206
+    else:
+        status = 200
+    return StreamingResponse(
+        iterate_in_threadpool(model_ops.iter_file_range(dest, start, end)),
+        status_code=status,
+        media_type="application/octet-stream",
+        headers=headers,
+    )
+
+
+@app.post("/v1/models/pull")
+def pull_model(
+    body: PullBody,
+    x_kllm_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Worker: pull a GGUF from one assigned seed via Range GETs."""
+    if STATE.join_key and x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid join key")
+    filename = Path(body.filename).name
+    dest = models_dir() / filename
+    expected = (body.sha256 or "").lower()
+    if dest.is_file():
+        meta = model_ops.local_model_meta(dest)
+        if (
+            int(meta.get("size_bytes") or 0) == body.size
+            and (meta.get("sha256") or "").lower() == expected
+        ):
+            return {
+                "ok": True,
+                "skipped": True,
+                "path": str(dest),
+                "sha256": expected,
+            }
+    try:
+        return model_ops.pull_from_seed(
+            filename=filename,
+            size=body.size,
+            digest=expected,
+            source_host=body.source.host,
+            source_port=body.source.port,
+            join_key=x_kllm_key or "",
+        )
     except model_ops.ReceiveInProgressError as exc:
         raise HTTPException(409, str(exc)) from exc
-    size = 0
-    hasher = hashlib.sha256()
-    throttle = model_ops._Throttle()
-    try:
-        with tmp.open("wb") as f:
-            async for chunk in request.stream():
-                if not chunk:
-                    continue
-                f.write(chunk)
-                hasher.update(chunk)
-                size += len(chunk)
-                model_ops.finish_receive_chunk(
-                    filename=filename,
-                    nbytes=size,
-                    total=x_kllm_size,
-                    throttle=throttle,
-                )
-        if size != x_kllm_size:
-            model_ops.abort_receive(tmp)
-            raise HTTPException(400, f"size mismatch: got {size} expected {x_kllm_size}")
-        digest = hasher.hexdigest()
-        if digest != expected:
-            model_ops.abort_receive(tmp)
-            raise HTTPException(400, "sha256 mismatch")
-        return model_ops.complete_receive(tmp, dest, digest=digest, size=size)
-    except HTTPException:
-        raise
-    except Exception:
-        model_ops.abort_receive(tmp)
-        raise
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/v1/models/file")

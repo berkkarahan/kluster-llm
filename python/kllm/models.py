@@ -4,11 +4,13 @@ import hashlib
 import re
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from huggingface_hub import hf_hub_url, list_models, list_repo_files, model_info
@@ -43,6 +45,11 @@ _RECEIVE_PROGRESS: dict[str, Any] | None = None
 
 _PROGRESS_MIN_INTERVAL = 0.1
 _TRANSFER_CHUNK = 1024 * 1024
+_BLOB_CHUNK = 8 * 1024 * 1024
+_PIECE_SIZE = 8 * 1024 * 1024
+_PULL_CONNECTIONS = 4
+_PULL_MAX_ATTEMPTS = 3
+_PULL_POLL_INTERVAL = 0.25
 
 SEARCH_HUB_LIMIT = 20
 SEARCH_REPO_CAP = 8
@@ -59,6 +66,10 @@ class DistributeInProgressError(RuntimeError):
 
 class ReceiveInProgressError(RuntimeError):
     """Raised when a second receive is requested while one is active."""
+
+
+class RangeUnsatisfiable(ValueError):
+    """HTTP Range cannot be satisfied for this file size."""
 
 
 def sha256_file(path: Path, chunk: int = _TRANSFER_CHUNK) -> str:
@@ -252,7 +263,7 @@ def _set_distribute_workers(workers: list[dict[str, Any]]) -> None:
         snap = _DISTRIBUTE_PROGRESS
         if snap is None:
             return
-        snap["phase"] = "pushing"
+        snap["phase"] = "pulling"
         snap["workers"] = workers
         snap["pct"] = _mean_worker_pct(workers)
 
@@ -506,6 +517,14 @@ def vram_fit(size_bytes: int | None, total_vram_bytes: int | None) -> str:
     return "fits" if size_bytes <= total_vram_bytes else "overflow"
 
 
+def _hf_show_file_info(query: str) -> str | None:
+    values = parse_qs(query, keep_blank_values=False).get("show_file_info") or []
+    if not values:
+        return None
+    name = unquote(values[0]).strip()
+    return name or None
+
+
 def _parse_hf_url(url: str) -> tuple[str | None, str | None]:
     parsed = urlparse(url)
     parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
@@ -515,13 +534,13 @@ def _parse_hf_url(url: str) -> tuple[str | None, str | None]:
         return None, None
     repo_id = f"{parts[0]}/{parts[1]}"
     rest = parts[2:]
-    if not rest:
-        return repo_id, None
-    if rest[0] in {"blob", "resolve", "raw"}:
+    filename = None
+    if rest and rest[0] in {"blob", "resolve", "raw"}:
         file_parts = rest[2:] if len(rest) > 2 else []
         filename = "/".join(file_parts) if file_parts else None
-        return repo_id, filename
-    return repo_id, None
+    if not filename:
+        filename = _hf_show_file_info(parsed.query)
+    return repo_id, filename
 
 
 def _quant_label(filename: str, suffix: str | None) -> str | None:
@@ -791,7 +810,20 @@ def download_model(
         token = resolve_hf_token()
 
         if source.startswith("http://") or source.startswith("https://"):
-            headers = _hub_headers(token) if _is_hf_host(source) else {}
+            if _is_hf_host(source):
+                repo_id, filename = _parse_hf_url(source)
+                if repo_id and filename:
+                    url = hf_hub_url(repo_id, filename)
+                    name = dest_name or Path(filename).name
+                    return _stream_to_models(
+                        url,
+                        name,
+                        headers=_hub_headers(token),
+                        on_progress=on_progress,
+                    )
+                headers = _hub_headers(token)
+            else:
+                headers = {}
             return _stream_to_models(
                 source, dest_name, headers=headers, on_progress=on_progress
             )
@@ -890,6 +922,119 @@ def ensure_sha256(
     return digest
 
 
+def piece_count(size: int, piece_size: int = _PIECE_SIZE) -> int:
+    if size <= 0:
+        return 0
+    return (size + piece_size - 1) // piece_size
+
+
+def piece_span(index: int, size: int, piece_size: int = _PIECE_SIZE) -> tuple[int, int]:
+    start = index * piece_size
+    end = min(start + piece_size, size)
+    return start, end
+
+
+def partial_path_for(dest: Path) -> Path:
+    return dest.with_suffix(dest.suffix + ".partial")
+
+
+def bitmap_path_for_partial(tmp: Path) -> Path:
+    return tmp.with_name(tmp.name + ".bitmap")
+
+
+def empty_piece_bitmap(n_pieces: int) -> bytearray:
+    return bytearray((n_pieces + 7) // 8)
+
+
+def load_piece_bitmap(path: Path, n_pieces: int) -> bytearray:
+    expected = (n_pieces + 7) // 8
+    if n_pieces <= 0:
+        return bytearray()
+    if not path.is_file():
+        return empty_piece_bitmap(n_pieces)
+    data = path.read_bytes()
+    if len(data) != expected:
+        return empty_piece_bitmap(n_pieces)
+    return bytearray(data)
+
+
+def save_piece_bitmap(path: Path, bitmap: bytearray) -> None:
+    path.write_bytes(bytes(bitmap))
+
+
+def piece_bit_get(bitmap: bytearray, index: int) -> bool:
+    return bool(bitmap[index // 8] & (1 << (index % 8)))
+
+
+def piece_bit_set(bitmap: bytearray, index: int) -> None:
+    bitmap[index // 8] |= 1 << (index % 8)
+
+
+def missing_piece_indices(bitmap: bytearray, n_pieces: int) -> list[int]:
+    return [i for i in range(n_pieces) if not piece_bit_get(bitmap, i)]
+
+
+def completed_piece_bytes(
+    bitmap: bytearray, size: int, piece_size: int = _PIECE_SIZE
+) -> int:
+    total = 0
+    for i in range(piece_count(size, piece_size)):
+        if piece_bit_get(bitmap, i):
+            start, end = piece_span(i, size, piece_size)
+            total += end - start
+    return total
+
+
+def parse_bytes_range(header: str | None, file_size: int) -> tuple[int, int, bool]:
+    """Return (start, end_exclusive, is_partial)."""
+    if file_size < 0:
+        raise RangeUnsatisfiable("negative file size")
+    if not header or not header.strip():
+        return 0, file_size, False
+    raw = header.strip()
+    if not raw.lower().startswith("bytes="):
+        raise ValueError(f"unsupported range unit: {header}")
+    spec = raw.split("=", 1)[1].strip()
+    if "," in spec:
+        raise ValueError("multiple ranges are not supported")
+    start_s, sep, end_s = spec.partition("-")
+    if not sep:
+        raise ValueError(f"invalid range: {header}")
+    if start_s == "":
+        if not end_s:
+            raise ValueError(f"invalid range: {header}")
+        suffix = int(end_s)
+        if suffix <= 0:
+            raise RangeUnsatisfiable(header)
+        start = max(0, file_size - suffix)
+        return start, file_size, True
+    start = int(start_s)
+    end = int(end_s) + 1 if end_s else file_size
+    if start < 0 or start >= file_size or end <= start:
+        raise RangeUnsatisfiable(header)
+    return start, min(end, file_size), True
+
+
+def iter_file_range(
+    path: Path,
+    start: int,
+    end: int,
+    chunk: int = _BLOB_CHUNK,
+) -> Iterator[bytes]:
+    """Yield [start, end) from path in large blocks."""
+    if end < start:
+        return
+    remaining = end - start
+    with path.open("rb") as f:
+        f.seek(start)
+        while remaining > 0:
+            block = f.read(min(chunk, remaining))
+            if not block:
+                break
+            remaining -= len(block)
+            yield block
+
+
 def probe_model_on_worker(
     host: str,
     port: int,
@@ -910,103 +1055,231 @@ def probe_model_on_worker(
         return resp.json()
 
 
-def _file_chunk_iter(
-    path: Path,
-    *,
-    on_bytes: Callable[[int], None] | None = None,
-    chunk: int = _TRANSFER_CHUNK,
-) -> Iterator[bytes]:
-    with path.open("rb") as f:
-        while True:
-            block = f.read(chunk)
-            if not block:
-                break
-            if on_bytes is not None:
-                on_bytes(len(block))
-            yield block
+def _preallocate_partial(tmp: Path, size: int) -> None:
+    if not tmp.exists():
+        tmp.touch()
+    with tmp.open("r+b") as f:
+        f.truncate(size)
 
 
-def push_model_to_worker(
+def _blob_url(host: str, port: int) -> str:
+    return f"http://{host}:{port}/v1/models/blob"
+
+
+def request_worker_pull(
     host: str,
     port: int,
     join_key: str,
-    model_path: Path,
     *,
-    digest: str | None = None,
-    worker_index: int | None = None,
+    filename: str,
+    digest: str,
+    size: int,
+    source_host: str,
+    source_port: int,
     timeout: float = 3600.0,
-) -> dict:
-    """Push GGUF to a worker. When worker_index is set, updates distribute progress."""
-    size = model_path.stat().st_size
-    if digest is None:
-        digest = ensure_sha256(model_path)
+) -> dict[str, Any]:
+    """Tell a worker to Range-GET the GGUF from one seed."""
+    url = f"http://{host}:{port}/v1/models/pull"
+    headers = {"X-Kllm-Key": join_key}
+    body = {
+        "filename": Path(filename).name,
+        "sha256": digest,
+        "size": size,
+        "source": {"host": source_host, "port": int(source_port)},
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=body, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
 
-    if worker_index is not None:
+
+def _poll_worker_receive(host: str, port: int, worker_index: int, size: int) -> None:
+    try:
+        with httpx.Client(timeout=0.4) as client:
+            st = client.get(f"http://{host}:{port}/v1/status").json()
+        recv = st.get("receive") or {}
+        nbytes = int(recv.get("bytes") or 0)
         _update_worker_progress(
-            worker_index, phase="probing", nbytes=0, total=size, force=True
+            worker_index, phase="pulling", nbytes=nbytes, total=size
         )
-        try:
-            meta = probe_model_on_worker(host, port, join_key, model_path.name)
-        except Exception:
-            meta = {"exists": False}
-        if (
-            meta.get("exists")
-            and int(meta.get("size_bytes") or 0) == size
-            and (meta.get("sha256") or "").lower() == digest.lower()
-        ):
-            _update_worker_progress(
-                worker_index, phase="skipped", nbytes=size, total=size, force=True
-            )
-            return {
-                "ok": True,
-                "skipped": True,
-                "path": meta.get("path"),
-                "sha256": digest,
-            }
+    except Exception:
+        return
 
-    if worker_index is not None:
-        _update_worker_progress(
-            worker_index, phase="sending", nbytes=0, total=size, force=True
-        )
 
-    url = f"http://{host}:{port}/v1/models/receive"
+def _download_one_piece(
+    *,
+    client: httpx.Client,
+    tmp: Path,
+    filename: str,
+    join_key: str,
+    source_host: str,
+    source_port: int,
+    index: int,
+    size: int,
+    piece_size: int,
+    on_bytes: Callable[[int], None] | None = None,
+) -> None:
+    start, end = piece_span(index, size, piece_size)
+    want = end - start
     headers = {
         "X-Kllm-Key": join_key,
-        "X-Kllm-Filename": model_path.name,
-        "X-Kllm-Sha256": digest,
-        "X-Kllm-Size": str(size),
-        "Content-Type": "application/octet-stream",
+        "X-Kllm-Filename": filename,
+        "Range": f"bytes={start}-{end - 1}",
     }
-    sent = 0
-    throttle = _Throttle()
+    with client.stream("GET", _blob_url(source_host, source_port), headers=headers) as resp:
+        if resp.status_code == 416:
+            raise RangeUnsatisfiable(f"piece {index} unsatisfiable")
+        resp.raise_for_status()
+        if resp.status_code != 206:
+            raise ValueError(
+                f"seed did not return 206 for Range (status {resp.status_code})"
+            )
+        got = 0
+        with tmp.open("r+b") as f:
+            f.seek(start)
+            for chunk in resp.iter_bytes(chunk_size=_BLOB_CHUNK):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                got += len(chunk)
+                if on_bytes is not None:
+                    on_bytes(len(chunk))
+            f.flush()
+        if got != want:
+            raise IOError(f"piece {index}: got {got} bytes expected {want}")
 
-    def on_bytes(n: int) -> None:
-        nonlocal sent
-        sent += n
-        if worker_index is not None:
-            _update_worker_progress(
-                worker_index,
-                phase="sending",
-                nbytes=sent,
+
+def pull_from_seed(
+    filename: str,
+    size: int,
+    digest: str,
+    source_host: str,
+    source_port: int,
+    join_key: str,
+    *,
+    connections: int = _PULL_CONNECTIONS,
+    piece_size: int = _PIECE_SIZE,
+    timeout: float = 3600.0,
+) -> dict[str, Any]:
+    """Pull a GGUF from one seed with parallel Range GETs and bitmap resume."""
+    dest = models_dir() / Path(filename).name
+    expected = (digest or "").lower()
+    tmp = begin_receive(filename, size, resume=True, piece_size=piece_size)
+    bitmap_path = bitmap_path_for_partial(tmp)
+    try:
+        _preallocate_partial(tmp, size)
+        n_pieces = piece_count(size, piece_size)
+        bitmap = load_piece_bitmap(bitmap_path, n_pieces)
+        missing = missing_piece_indices(bitmap, n_pieces)
+        throttle = _Throttle()
+        progress_lock = threading.Lock()
+        completed = completed_piece_bytes(bitmap, size, piece_size)
+        inflight = 0
+
+        def report(*, force: bool = False) -> None:
+            finish_receive_chunk(
+                filename=dest.name,
+                nbytes=completed + inflight,
                 total=size,
                 throttle=throttle,
-                force=sent >= size,
+                force=force,
             )
 
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.put(
-            url,
-            content=_file_chunk_iter(model_path, on_bytes=on_bytes),
-            headers=headers,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        report(force=True)
 
-    if worker_index is not None:
-        _update_worker_progress(
-            worker_index, phase="done", nbytes=size, total=size, force=True
-        )
-    return data
+        if missing:
+            work: Queue[int] = Queue()
+            for idx in missing:
+                work.put(idx)
+            errors: list[BaseException] = []
+            n_threads = max(1, min(connections, len(missing)))
+
+            def worker() -> None:
+                nonlocal inflight, completed
+                with httpx.Client(timeout=timeout) as client:
+                    while True:
+                        try:
+                            index = work.get_nowait()
+                        except Empty:
+                            return
+                        piece_got = 0
+
+                        def on_bytes(n: int) -> None:
+                            nonlocal inflight, piece_got
+                            with progress_lock:
+                                inflight += n
+                                piece_got += n
+                                report()
+
+                        try:
+                            _download_one_piece(
+                                client=client,
+                                tmp=tmp,
+                                filename=dest.name,
+                                join_key=join_key,
+                                source_host=source_host,
+                                source_port=source_port,
+                                index=index,
+                                size=size,
+                                piece_size=piece_size,
+                                on_bytes=on_bytes,
+                            )
+                            with progress_lock:
+                                inflight -= piece_got
+                                piece_bit_set(bitmap, index)
+                                save_piece_bitmap(bitmap_path, bitmap)
+                                completed = completed_piece_bytes(
+                                    bitmap, size, piece_size
+                                )
+                                report(force=True)
+                        except BaseException as exc:
+                            with progress_lock:
+                                inflight = max(0, inflight - piece_got)
+                            errors.append(exc)
+                            return
+
+            threads = [
+                threading.Thread(target=worker, daemon=True) for _ in range(n_threads)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            if errors:
+                raise errors[0]
+
+        got = sha256_file(tmp)
+        if got != expected:
+            abort_receive(tmp)
+            raise ValueError("sha256 mismatch")
+        return complete_receive(tmp, dest, digest=got, size=size)
+    except ReceiveInProgressError:
+        raise
+    except Exception:
+        if _RECEIVE_LOCK.locked() and get_receive_progress() is not None:
+            abort_receive(tmp, keep_partial=True)
+        raise
+
+
+def _probe_skip(
+    host: str,
+    port: int,
+    join_key: str,
+    filename: str,
+    size: int,
+    digest: str,
+) -> dict[str, Any] | None:
+    try:
+        meta = probe_model_on_worker(host, port, join_key, filename)
+    except Exception:
+        return None
+    if (
+        meta.get("exists")
+        and int(meta.get("size_bytes") or 0) == size
+        and (meta.get("sha256") or "").lower() == digest.lower()
+    ):
+        return meta
+    return None
 
 
 def distribute_to_workers(
@@ -1015,8 +1288,10 @@ def distribute_to_workers(
     join_key: str,
     *,
     default_port: int = 18765,
+    master_host: str | None = None,
+    master_port: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Hash once, then push to all workers in parallel with live progress."""
+    """Hash once, then tree-pull: one downloader per seed, finished workers seed others."""
     if not _DISTRIBUTE_LOCK.acquire(blocking=False):
         raise DistributeInProgressError("a distribute is already in progress")
     worker_list = [
@@ -1028,6 +1303,7 @@ def distribute_to_workers(
         for w in workers
         if (w.get("lan_host") or w.get("host"))
     ]
+    seed_port = int(master_port if master_port is not None else default_port)
     try:
         size = model_path.stat().st_size
         _init_distribute_progress(model_path.name, size)
@@ -1052,38 +1328,132 @@ def distribute_to_workers(
             return []
 
         results: list[dict[str, Any] | None] = [None] * len(worker_list)
+        pending: deque[int] = deque()
+        free_seeds: deque[tuple[str, int]] = deque()
+        if master_host:
+            free_seeds.append((master_host, seed_port))
 
-        def _one(idx: int, w: dict[str, Any]) -> dict[str, Any]:
-            host = w["host"]
-            try:
-                result = push_model_to_worker(
-                    host=host,
-                    port=w["port"],
-                    join_key=join_key,
-                    model_path=model_path,
-                    digest=digest,
-                    worker_index=idx,
-                )
-                return {"host": host, "node_id": w.get("node_id"), "ok": True, "result": result}
-            except Exception as exc:
+        for idx, w in enumerate(worker_list):
+            meta = _probe_skip(
+                w["host"], w["port"], join_key, model_path.name, size, digest
+            )
+            if meta is not None:
                 _update_worker_progress(
-                    idx, phase="error", error=str(exc), force=True
+                    idx, phase="skipped", nbytes=size, total=size, force=True
                 )
-                return {
-                    "host": host,
+                results[idx] = {
+                    "host": w["host"],
                     "node_id": w.get("node_id"),
-                    "ok": False,
-                    "error": str(exc),
+                    "ok": True,
+                    "result": {
+                        "ok": True,
+                        "skipped": True,
+                        "path": meta.get("path"),
+                        "sha256": digest,
+                    },
                 }
+                free_seeds.append((w["host"], w["port"]))
+            else:
+                pending.append(idx)
 
-        max_workers = min(8, max(1, len(worker_list)))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(_one, idx, w): idx for idx, w in enumerate(worker_list)
-            }
-            for fut in as_completed(futures):
-                idx = futures[fut]
-                results[idx] = fut.result()
+        if pending and not free_seeds:
+            raise ValueError("master_host is required to seed a distribute")
+
+        attempts = {idx: 0 for idx in pending}
+        in_flight: dict[Any, tuple[int, tuple[str, int], dict[str, Any]]] = {}
+        poll_targets: dict[int, tuple[str, int]] = {}
+        poll_lock = threading.Lock()
+        stop_poll = threading.Event()
+
+        def poll_loop() -> None:
+            while not stop_poll.wait(_PULL_POLL_INTERVAL):
+                with poll_lock:
+                    targets = list(poll_targets.items())
+                for pidx, (phost, pport) in targets:
+                    _poll_worker_receive(phost, pport, pidx, size)
+
+        poller = threading.Thread(target=poll_loop, daemon=True)
+        poller.start()
+        try:
+            max_workers = max(1, len(worker_list))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                while pending or in_flight:
+                    while free_seeds and pending:
+                        seed = free_seeds.popleft()
+                        idx = pending.popleft()
+                        w = worker_list[idx]
+                        attempts[idx] = attempts.get(idx, 0) + 1
+                        _update_worker_progress(
+                            idx, phase="pulling", nbytes=0, total=size, force=True
+                        )
+                        with poll_lock:
+                            poll_targets[idx] = (w["host"], w["port"])
+                        fut = pool.submit(
+                            request_worker_pull,
+                            w["host"],
+                            w["port"],
+                            join_key,
+                            filename=model_path.name,
+                            digest=digest,
+                            size=size,
+                            source_host=seed[0],
+                            source_port=seed[1],
+                        )
+                        in_flight[fut] = (idx, seed, w)
+                    if not in_flight:
+                        while pending:
+                            idx = pending.popleft()
+                            err = "no seed available"
+                            _update_worker_progress(
+                                idx, phase="error", error=err, force=True
+                            )
+                            results[idx] = {
+                                "host": worker_list[idx]["host"],
+                                "node_id": worker_list[idx].get("node_id"),
+                                "ok": False,
+                                "error": err,
+                            }
+                        break
+                    done, _ = wait(
+                        tuple(in_flight.keys()), return_when=FIRST_COMPLETED
+                    )
+                    for fut in done:
+                        idx, seed, w = in_flight.pop(fut)
+                        with poll_lock:
+                            poll_targets.pop(idx, None)
+                        try:
+                            data = fut.result()
+                        except Exception as exc:
+                            if attempts.get(idx, 0) < _PULL_MAX_ATTEMPTS:
+                                pending.append(idx)
+                            else:
+                                _update_worker_progress(
+                                    idx, phase="error", error=str(exc), force=True
+                                )
+                                results[idx] = {
+                                    "host": w["host"],
+                                    "node_id": w.get("node_id"),
+                                    "ok": False,
+                                    "error": str(exc),
+                                }
+                            free_seeds.append(seed)
+                            continue
+                        _update_worker_progress(
+                            idx, phase="done", nbytes=size, total=size, force=True
+                        )
+                        results[idx] = {
+                            "host": w["host"],
+                            "node_id": w.get("node_id"),
+                            "ok": True,
+                            "result": data,
+                            "source": {"host": seed[0], "port": seed[1]},
+                        }
+                        # Prefer the new copy as the next seed (binary tree).
+                        free_seeds.append((w["host"], w["port"]))
+                        free_seeds.append(seed)
+        finally:
+            stop_poll.set()
+            poller.join(timeout=2.0)
 
         return [r for r in results if r is not None]
     finally:
@@ -1091,14 +1461,25 @@ def distribute_to_workers(
         _DISTRIBUTE_LOCK.release()
 
 
-def begin_receive(filename: str, total: int) -> Path:
+def begin_receive(
+    filename: str,
+    total: int,
+    *,
+    resume: bool = False,
+    piece_size: int = _PIECE_SIZE,
+) -> Path:
     """Acquire receive lock and prepare a .partial destination path."""
     if not _RECEIVE_LOCK.acquire(blocking=False):
         raise ReceiveInProgressError("a receive is already in progress")
     dest = models_dir() / Path(filename).name
     models_dir().mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".partial")
-    _set_receive_progress(dest.name, 0, total, phase="receiving")
+    nbytes = 0
+    if resume:
+        n_pieces = piece_count(total, piece_size)
+        bitmap = load_piece_bitmap(bitmap_path_for_partial(tmp), n_pieces)
+        nbytes = completed_piece_bytes(bitmap, total, piece_size)
+    _set_receive_progress(dest.name, nbytes, total, phase="receiving")
     return tmp
 
 
@@ -1108,8 +1489,9 @@ def finish_receive_chunk(
     nbytes: int,
     total: int,
     throttle: _Throttle | None = None,
+    force: bool = False,
 ) -> None:
-    if throttle is not None and not throttle.allow(force=nbytes >= total):
+    if throttle is not None and not throttle.allow(force=force or nbytes >= total):
         return
     _set_receive_progress(filename, nbytes, total, phase="receiving")
 
@@ -1123,6 +1505,7 @@ def complete_receive(
 ) -> dict[str, Any]:
     _set_receive_progress(dest.name, size, size, phase="verifying")
     tmp.replace(dest)
+    bitmap_path_for_partial(tmp).unlink(missing_ok=True)
     write_sha256_sidecar(dest, digest)
     _clear_receive_progress()
     if _RECEIVE_LOCK.locked():
@@ -1130,10 +1513,14 @@ def complete_receive(
     return {"ok": True, "path": str(dest), "sha256": digest}
 
 
-def abort_receive(tmp: Path | None = None) -> None:
-    if tmp is not None:
+def abort_receive(tmp: Path | None = None, *, keep_partial: bool = False) -> None:
+    if tmp is not None and not keep_partial:
         try:
             tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            bitmap_path_for_partial(tmp).unlink(missing_ok=True)
         except OSError:
             pass
     _clear_receive_progress()

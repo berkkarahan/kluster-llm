@@ -728,7 +728,7 @@ def model_distribute(
     name: str = typer.Argument(..., help="Local model name or path"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
-    """Push a local model file to all joined workers."""
+    """Copy a local model to joined workers (LAN pull tree)."""
     result: dict = {"done": False, "status_code": 0, "data": None, "text": ""}
 
     def _post() -> None:

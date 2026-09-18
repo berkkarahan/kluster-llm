@@ -216,6 +216,35 @@ def test_parse_search_query_repo_and_search():
     assert url["suffix"] == "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
 
 
+UNSLOTH_REPO = "unsloth/Qwen3.5-122B-A10B-GGUF"
+UNSLOTH_FILE = "Qwen3.5-122B-A10B-UD-IQ3_S.gguf"
+UNSLOTH_SHOW_FILE_INFO = (
+    f"https://huggingface.co/{UNSLOTH_REPO}?show_file_info={UNSLOTH_FILE}"
+)
+
+
+def test_parse_search_query_show_file_info():
+    parsed = models.parse_model_search_query(UNSLOTH_SHOW_FILE_INFO)
+    assert parsed["kind"] == "url"
+    assert parsed["repo_id"] == UNSLOTH_REPO
+    assert parsed["suffix"] == UNSLOTH_FILE
+
+    encoded = models.parse_model_search_query(
+        f"https://huggingface.co/{UNSLOTH_REPO}?show_file_info=gguf%2F{UNSLOTH_FILE}"
+    )
+    assert encoded["suffix"] == f"gguf/{UNSLOTH_FILE}"
+
+    repo_only = models.parse_model_search_query(f"https://huggingface.co/{UNSLOTH_REPO}")
+    assert repo_only["repo_id"] == UNSLOTH_REPO
+    assert repo_only["suffix"] is None
+
+    resolve_wins = models.parse_model_search_query(
+        f"https://huggingface.co/{UNSLOTH_REPO}/resolve/main/other.Q8_0.gguf"
+        f"?show_file_info={UNSLOTH_FILE}"
+    )
+    assert resolve_wins["suffix"] == "other.Q8_0.gguf"
+
+
 def test_parse_search_query_empty():
     with pytest.raises(ValueError, match="empty"):
         models.parse_model_search_query("  ")
@@ -338,6 +367,52 @@ def test_search_url_uses_content_length(monkeypatch):
     assert row["quant"] == "Q4_K_M"
 
 
+def test_search_show_file_info_url_picks_exact_gguf(monkeypatch):
+    def boom(**_kwargs):
+        raise AssertionError("list_models should not run for Hub file URLs")
+
+    def fake_info(repo_id, **_kwargs):
+        if repo_id != UNSLOTH_REPO:
+            raise AssertionError(f"unexpected repo {repo_id}")
+        return _FakeInfo(
+            [
+                _FakeSibling(UNSLOTH_FILE, 48_000_000_000),
+                _FakeSibling("Qwen3.5-122B-A10B-Q8_0.gguf", 130_000_000_000),
+                _FakeSibling("mmproj-Q4_K_M.gguf", 1_000),
+            ]
+        )
+
+    monkeypatch.setattr(models, "list_models", boom)
+    monkeypatch.setattr(models, "model_info", fake_info)
+    out = models.search_hub_ggufs(UNSLOTH_SHOW_FILE_INFO, token=False)
+    assert len(out["results"]) == 1
+    row = out["results"][0]
+    assert row["repo_id"] == UNSLOTH_REPO
+    assert row["filename"] == UNSLOTH_FILE
+    assert row["source"] == f"{UNSLOTH_REPO}:{UNSLOTH_FILE}"
+    assert row["size_bytes"] == 48_000_000_000
+    assert row["quant"] == "IQ3_S"
+
+
+def test_download_show_file_info_url_uses_hf_hub_url(kllm_home, monkeypatch):
+    streamed: list[str] = []
+    payload = b"gguf-show-file-info"
+
+    def fake_hub_url(repo_id, filename):
+        return f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+
+    def fake_stream(method, url, **_kwargs):
+        streamed.append(url)
+        return _FakeResp(payload)
+
+    monkeypatch.setattr(models, "hf_hub_url", fake_hub_url)
+    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    path = models.download_model(UNSLOTH_SHOW_FILE_INFO)
+    assert path.name == UNSLOTH_FILE
+    assert path.read_bytes() == payload
+    assert streamed == [f"https://huggingface.co/{UNSLOTH_REPO}/resolve/main/{UNSLOTH_FILE}"]
+
+
 def test_download_writes_sha256_sidecar(kllm_home, monkeypatch):
     payload = b"gguf-sidecar-bytes"
 
@@ -365,15 +440,9 @@ def test_distribute_skip_when_worker_matches(kllm_home, monkeypatch):
     payload = b"hello-distribute"
     path.write_bytes(payload)
     digest = models.ensure_sha256(path)
-    seen_progress: list[dict] = []
-
-    def capture():
-        snap = models.get_distribute_progress()
-        if snap:
-            seen_progress.append(snap)
+    pull_calls: list[object] = []
 
     def fake_probe(*_a, **_k):
-        capture()
         return {
             "exists": True,
             "filename": path.name,
@@ -382,38 +451,14 @@ def test_distribute_skip_when_worker_matches(kllm_home, monkeypatch):
             "path": str(path),
         }
 
-    put_calls: list[object] = []
+    def fake_pull(*_a, **_k):
+        pull_calls.append(1)
+        raise AssertionError("pull should be skipped")
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def get(self, *a, **k):
-            class R:
-                status_code = 200
-
-                def raise_for_status(self):
-                    return None
-
-                def json(self):
-                    return fake_probe()
-
-            return R()
-
-        def put(self, *a, **k):
-            put_calls.append(1)
-            raise AssertionError("PUT should be skipped")
-
-    monkeypatch.setattr(models.httpx, "Client", FakeClient)
+    monkeypatch.setattr(models, "probe_model_on_worker", fake_probe)
+    monkeypatch.setattr(models, "request_worker_pull", fake_pull)
     workers = [{"node_id": "w1", "host": "10.0.0.2", "role": "worker", "control_port": 18765}]
 
-    # Drive progress updates by wrapping ensure path
     results = models.distribute_to_workers(path, workers, "secret")
     assert results == [
         {
@@ -428,25 +473,121 @@ def test_distribute_skip_when_worker_matches(kllm_home, monkeypatch):
             },
         }
     ]
-    assert put_calls == []
+    assert pull_calls == []
     assert models.get_distribute_progress() is None
 
 
-def test_distribute_updates_progress_during_push(kllm_home, monkeypatch):
+def test_distribute_updates_progress_during_pull(kllm_home, monkeypatch):
     path = kllm_home / "models" / "push.gguf"
-    payload = b"x" * (2 * 1024 * 1024 + 100)
+    payload = b"x" * 100
     path.write_bytes(payload)
     snapshots: list[dict] = []
 
-    class FakeResp:
-        status_code = 200
+    def fake_probe(*_a, **_k):
+        return {"exists": False, "filename": path.name}
 
-        def raise_for_status(self):
-            return None
+    def fake_pull(*_a, **_k):
+        snap = models.get_distribute_progress()
+        if snap:
+            snapshots.append(snap)
+        return {"ok": True, "path": "/remote/push.gguf", "sha256": "deadbeef"}
 
-        def json(self):
-            return {"ok": True, "path": "/remote/push.gguf", "sha256": "deadbeef"}
+    monkeypatch.setattr(models, "probe_model_on_worker", fake_probe)
+    monkeypatch.setattr(models, "request_worker_pull", fake_pull)
+    workers = [
+        {"node_id": "a", "lan_host": "192.168.1.2", "role": "worker", "control_port": 18765},
+        {"node_id": "b", "host": "192.168.1.3", "role": "worker", "control_port": 18765},
+    ]
+    results = models.distribute_to_workers(
+        path,
+        workers,
+        "key",
+        master_host="192.168.1.1",
+        master_port=18765,
+    )
+    assert len(results) == 2
+    assert all(r["ok"] for r in results)
+    assert any(
+        (s.get("workers") or [{}])[0].get("phase") == "pulling" for s in snapshots
+    )
+    assert models.get_distribute_progress() is None
 
+
+def test_distribute_tree_second_worker_pulls_from_first(kllm_home, monkeypatch):
+    path = kllm_home / "models" / "tree.gguf"
+    payload = b"tree-payload"
+    path.write_bytes(payload)
+    pulls: list[tuple[str, str, int]] = []
+
+    def fake_probe(*_a, **_k):
+        return {"exists": False}
+
+    def fake_pull(host, port, join_key, **kwargs):
+        pulls.append((host, kwargs["source_host"], int(kwargs["source_port"])))
+        return {"ok": True, "path": f"/{host}", "sha256": kwargs["digest"]}
+
+    monkeypatch.setattr(models, "probe_model_on_worker", fake_probe)
+    monkeypatch.setattr(models, "request_worker_pull", fake_pull)
+    workers = [
+        {"node_id": "a", "lan_host": "192.168.1.2", "role": "worker", "control_port": 18765},
+        {"node_id": "b", "lan_host": "192.168.1.3", "role": "worker", "control_port": 18765},
+    ]
+    results = models.distribute_to_workers(
+        path,
+        workers,
+        "key",
+        master_host="192.168.1.1",
+        master_port=18765,
+    )
+    assert all(r["ok"] for r in results)
+    assert pulls[0] == ("192.168.1.2", "192.168.1.1", 18765)
+    assert pulls[1] == ("192.168.1.3", "192.168.1.2", 18765)
+    assert results[1]["source"] == {"host": "192.168.1.2", "port": 18765}
+
+
+def test_parse_bytes_range_and_unsatisfiable():
+    assert models.parse_bytes_range(None, 10) == (0, 10, False)
+    assert models.parse_bytes_range("bytes=2-5", 10) == (2, 6, True)
+    assert models.parse_bytes_range("bytes=8-", 10) == (8, 10, True)
+    assert models.parse_bytes_range("bytes=-3", 10) == (7, 10, True)
+    with pytest.raises(models.RangeUnsatisfiable):
+        models.parse_bytes_range("bytes=10-12", 10)
+    with pytest.raises(ValueError, match="multiple"):
+        models.parse_bytes_range("bytes=0-1,2-3", 10)
+
+
+def test_iter_file_range_slice(kllm_home):
+    path = kllm_home / "models" / "slice.gguf"
+    path.write_bytes(b"abcdefghij")
+    assert b"".join(models.iter_file_range(path, 2, 6, chunk=3)) == b"cdef"
+
+
+def _range_bounds(header: str) -> tuple[int, int]:
+    spec = header.split("=", 1)[1]
+    start_s, _, end_s = spec.partition("-")
+    return int(start_s), int(end_s) + 1
+
+
+class _FakeStreamResp:
+    def __init__(self, data: bytes, status_code: int = 206):
+        self._data = data
+        self.status_code = status_code
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"http {self.status_code}")
+
+    def iter_bytes(self, chunk_size=8192):
+        yield self._data
+
+
+def _fake_seed_client(payload: bytes, ranges: list[str]):
     class FakeClient:
         def __init__(self, *a, **k):
             pass
@@ -457,41 +598,105 @@ def test_distribute_updates_progress_during_push(kllm_home, monkeypatch):
         def __exit__(self, *exc):
             return False
 
-        def get(self, *a, **k):
-            class R:
-                status_code = 404
+        def stream(self, method, url, headers=None):
+            rh = (headers or {}).get("Range") or ""
+            ranges.append(rh)
+            start, end = _range_bounds(rh)
+            return _FakeStreamResp(payload[start:end])
 
-                def raise_for_status(self):
-                    raise AssertionError("unexpected")
+    return FakeClient
 
-                def json(self):
-                    return {}
 
-            return R()
+def test_pull_from_seed_assembles_parallel_ranges(kllm_home, monkeypatch):
+    payload = b"0123456789abcdef"  # 16 bytes, 4 pieces of 4
+    digest = __import__("hashlib").sha256(payload).hexdigest()
+    ranges: list[str] = []
+    monkeypatch.setattr(models.httpx, "Client", _fake_seed_client(payload, ranges))
 
-        def put(self, url, content=None, headers=None):
-            # Consume iterator so progress callbacks fire
-            n = 0
-            for chunk in content:
-                n += len(chunk)
-                snap = models.get_distribute_progress()
-                if snap:
-                    snapshots.append(snap)
-            assert n == len(payload)
-            return FakeResp()
-
-    monkeypatch.setattr(models.httpx, "Client", FakeClient)
-    workers = [
-        {"node_id": "a", "lan_host": "192.168.1.2", "role": "worker", "control_port": 18765},
-        {"node_id": "b", "host": "192.168.1.3", "role": "worker", "control_port": 18765},
-    ]
-    results = models.distribute_to_workers(path, workers, "key")
-    assert len(results) == 2
-    assert all(r["ok"] for r in results)
-    assert any(
-        (s.get("workers") or [{}])[0].get("phase") == "sending" for s in snapshots
+    out = models.pull_from_seed(
+        "assembled.gguf",
+        len(payload),
+        digest,
+        "10.0.0.1",
+        18765,
+        "secret",
+        connections=4,
+        piece_size=4,
     )
-    assert models.get_distribute_progress() is None
+    dest = kllm_home / "models" / "assembled.gguf"
+    assert dest.read_bytes() == payload
+    assert out["sha256"] == digest
+    assert models.read_sha256_sidecar(dest) == digest
+    assert models.get_receive_progress() is None
+    assert len(ranges) == 4
+    assert not (kllm_home / "models" / "assembled.gguf.partial").exists()
+    assert not (kllm_home / "models" / "assembled.gguf.partial.bitmap").exists()
+
+
+def test_pull_from_seed_resumes_missing_pieces(kllm_home, monkeypatch):
+    payload = b"ABCDEFGHIJKLMNOPQRSTUVWX"  # 24 bytes, 3 pieces of 8
+    digest = __import__("hashlib").sha256(payload).hexdigest()
+    dest = kllm_home / "models" / "resume.gguf"
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    tmp.write_bytes(b"\x00" * len(payload))
+    with tmp.open("r+b") as f:
+        f.seek(8)
+        f.write(payload[8:16])
+    bitmap = models.empty_piece_bitmap(3)
+    models.piece_bit_set(bitmap, 1)
+    models.save_piece_bitmap(models.bitmap_path_for_partial(tmp), bitmap)
+
+    ranges: list[str] = []
+    monkeypatch.setattr(models.httpx, "Client", _fake_seed_client(payload, ranges))
+
+    models.pull_from_seed(
+        "resume.gguf",
+        len(payload),
+        digest,
+        "10.0.0.1",
+        18765,
+        "secret",
+        connections=2,
+        piece_size=8,
+    )
+    assert dest.read_bytes() == payload
+    requested = {_range_bounds(r) for r in ranges}
+    assert requested == {(0, 8), (16, 24)}
+
+
+def test_pull_from_seed_keeps_partial_on_drop(kllm_home, monkeypatch):
+    payload = b"keep-partial-bytes!!"  # 20 bytes
+    digest = __import__("hashlib").sha256(payload).hexdigest()
+
+    class BoomClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def stream(self, *a, **k):
+            raise ConnectionError("seed dropped")
+
+    monkeypatch.setattr(models.httpx, "Client", BoomClient)
+    with pytest.raises(ConnectionError, match="seed dropped"):
+        models.pull_from_seed(
+            "keep.gguf",
+            len(payload),
+            digest,
+            "10.0.0.1",
+            18765,
+            "secret",
+            connections=1,
+            piece_size=10,
+        )
+    tmp = kllm_home / "models" / "keep.gguf.partial"
+    assert tmp.exists()
+    assert models.get_receive_progress() is None
+    assert not models._RECEIVE_LOCK.locked()
 
 
 def test_receive_progress_and_sidecar(kllm_home):

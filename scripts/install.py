@@ -37,6 +37,7 @@ DASHBOARD = ROOT / "dashboard"
 VENDOR_LLAMA = ROOT / "vendor" / "llama.cpp"
 BIN_DIR = ROOT / "vendor" / "bin"
 WORKER_WIN = ROOT / "worker-windows"
+WORKER_WIN_SRC = WORKER_WIN / "src"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 GITHUB_HEADERS = {"User-Agent": "kllm-install", "Accept": "application/vnd.github+json"}
 # Upstream llama.cpp ≥2025 ships ggml-rpc-server; older trees used rpc-server.
@@ -698,6 +699,33 @@ def install_llama_prebuilt(backend: str) -> bool:
     return True
 
 
+def _ensure_worker_src() -> Path:
+    WORKER_WIN_SRC.mkdir(parents=True, exist_ok=True)
+    return WORKER_WIN_SRC
+
+
+def _copy_dlls(from_dir: Path, to_dir: Path) -> None:
+    to_dir.mkdir(parents=True, exist_ok=True)
+    for dll in from_dir.glob("*.dll"):
+        shutil.copy2(dll, to_dir / dll.name)
+
+
+def _migrate_worker_root_dlls() -> None:
+    """Move legacy worker-windows/*.dll into worker-windows/src/."""
+    if not WORKER_WIN.is_dir():
+        return
+    dlls = list(WORKER_WIN.glob("*.dll"))
+    if not dlls:
+        return
+    dest = _ensure_worker_src()
+    for dll in dlls:
+        target = dest / dll.name
+        if target.exists():
+            dll.unlink()
+        else:
+            shutil.move(str(dll), str(target))
+
+
 def _copy_llama_binaries_from(root: Path) -> bool:
     """Copy llama-server and rpc-server (and sibling DLLs) into vendor/bin (+ worker-windows)."""
     BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -724,8 +752,7 @@ def _copy_llama_binaries_from(root: Path) -> bool:
             WORKER_WIN.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, WORKER_WIN / exe)
             if _is_windows():
-                for dll in src.parent.glob("*.dll"):
-                    shutil.copy2(dll, WORKER_WIN / dll.name)
+                _copy_dlls(src.parent, _ensure_worker_src())
     # Also stage under vendor/llama.cpp/build/bin for resolve_llama_server paths
     staged = VENDOR_LLAMA / "build" / "bin"
     if found_any:
@@ -733,6 +760,7 @@ def _copy_llama_binaries_from(root: Path) -> bool:
         for p in BIN_DIR.iterdir():
             if p.is_file():
                 shutil.copy2(p, staged / p.name)
+    _migrate_worker_root_dlls()
     return found_any
 
 
@@ -749,6 +777,9 @@ def stage_built_binaries() -> None:
         if name == "rpc-server":
             WORKER_WIN.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, WORKER_WIN / staged)
+            if _is_windows():
+                _copy_dlls(src.parent, _ensure_worker_src())
+    _migrate_worker_root_dlls()
 
 
 def install_llama(backend: str, *, prefer_prebuilt: bool) -> None:

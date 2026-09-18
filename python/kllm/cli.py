@@ -260,7 +260,16 @@ def join(
     master: Optional[str] = typer.Option(
         None, "--master", help="Master host (skip key-based mDNS discovery)"
     ),
-    port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
+    master_port: int = typer.Option(
+        DEFAULT_CONTROL_PORT,
+        "--master-port",
+        help="Master control-plane port (not the local agent port)",
+    ),
+    port: int = typer.Option(
+        DEFAULT_CONTROL_PORT,
+        "--port",
+        help="Local kllm-agent port",
+    ),
     rpc_port: int = typer.Option(50052, "--rpc-port"),
     rpc_bind: Optional[str] = typer.Option(
         None, "--rpc-bind", help="RPC bind host (default: private LAN IP, not 0.0.0.0)"
@@ -279,7 +288,7 @@ def join(
 
     payload: dict = {
         "key": key,
-        "master_port": port,
+        "master_port": master_port,
         "rpc_port": rpc_port,
         "rpc_bind": rpc_bind,
         "overlay": overlay,

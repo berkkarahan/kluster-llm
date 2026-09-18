@@ -188,7 +188,29 @@ ping -S 192.168.10.1 192.168.10.2
 New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
 ```
 Then restart/join again. After the rule exists, non-elevated starts reuse it without prompting.
-### "No route to host"
+### "No route to host" / join fails but `curl` works (macOS + Zscaler)
+
+**Cause:** The uv-managed Python running `kllm-agent` cannot open LAN sockets (`errno 65`: Local Network TCC and/or Zscaler), while `curl` / Homebrew Python can. The same restriction also hides mDNS, so Join-by-key with an empty Master host used to 404 even when the master was advertising.
+
+**Solution:** Join automatically (1) browses mDNS under a helper interpreter when the agent Python sees no masters, then (2) starts a localhost control-plane TCP proxy for register/heartbeat. Status shows `cp_proxy_port` and a `netsec_warnings` line. RPC still uses your real LAN `--rpc-bind`. Dashboard Join with only the join key should work; fill **Master host** only if discovery still fails.
+
+```bash
+uv run kllm join --key '<key>'
+# if discovery still fails:
+uv run kllm join --key '<key>' --master <windows-lan-ip>
+# optional override:
+export KLLM_CP_PROXY_PYTHON=/opt/homebrew/bin/python3
+```
+
+Also grant **System Settings → Privacy & Security → Local Network** to Python/Cursor when prompted. Use `--master-port` for the remote control port — `--port` is only the **local** agent.
+
+### Cluster members show mismatched backends (Metal vs Vulkan)
+
+**Cause:** Each node reports its accelerator via probe, optional `accel_backend` in `~/.kllm/config.toml`, or `KLLM_ACCEL_BACKEND`. Mixed Metal/Vulkan (or CUDA/Vulkan) labels are intentional when you pick **Backend** on the Cluster panel before Start/Join.
+
+**Solution:** Set the same Backend on every node (dashboard selector or `accel_backend = "vulkan"` / `export KLLM_ACCEL_BACKEND=vulkan`), then Stop/Start or Leave/Join.
+
+### "No route to host" (wrong subnet)
 
 **Cause:** IPs not in same subnet or interface disabled.
 

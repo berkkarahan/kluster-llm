@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import site
 import socket
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
@@ -52,7 +57,7 @@ class _MasterListener(ServiceListener):
         self.add_service(zc, type_, name)
 
 
-def browse_masters(timeout: float = 2.0, key: str | None = None) -> list[DiscoveredMaster]:
+def _browse_inprocess(timeout: float = 2.0, key: str | None = None) -> list[DiscoveredMaster]:
     zc = Zeroconf()
     listener = _MasterListener()
     browser = ServiceBrowser(zc, SERVICE_TYPE, listener)
@@ -64,6 +69,139 @@ def browse_masters(timeout: float = 2.0, key: str | None = None) -> list[Discove
         want = join_key_id(key)
         found = [m for m in found if m.key_id == want]
     return found
+
+
+def _package_import_paths() -> list[str]:
+    """Paths so a helper interpreter can import ``kllm`` + venv ``zeroconf``."""
+    import kllm
+
+    paths: list[str] = [str(Path(kllm.__file__).resolve().parent.parent)]
+    try:
+        paths.extend(site.getsitepackages())
+    except Exception:
+        pass
+    user_site = getattr(site, "USER_SITE", None)
+    if user_site:
+        paths.append(user_site)
+    # Dedupe while preserving order
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _mdns_helper_candidates() -> list[str]:
+    """Prefer Homebrew / newer Pythons; Apple ``/usr/bin/python3`` is often 3.9."""
+    from kllm import cp_proxy
+
+    me = Path(sys.executable).resolve()
+    preferred: list[str] = []
+    rest: list[str] = []
+    for raw in cp_proxy._helper_candidates():
+        try:
+            if Path(raw).resolve() == me:
+                continue
+        except OSError:
+            continue
+        if "homebrew" in raw or "/usr/local/bin" in raw:
+            preferred.append(raw)
+        else:
+            rest.append(raw)
+    return preferred + rest
+
+
+def _browse_via_helper(timeout: float, key: str | None) -> list[DiscoveredMaster] | None:
+    """Run in-process browse under a LAN-capable helper Python.
+
+    Returns ``None`` if no helper could execute the browse (caller keeps empty
+    in-process result). Returns a list (possibly empty) when a helper ran.
+    """
+    paths = _package_import_paths()
+    key_arg = key if key is not None else ""
+    script = (
+        "import json,sys\n"
+        f"sys.path[:0]={paths!r}\n"
+        "from kllm.discovery import _browse_inprocess\n"
+        "key=sys.argv[1] or None\n"
+        "timeout=float(sys.argv[2])\n"
+        "found=_browse_inprocess(timeout, key)\n"
+        "print(json.dumps(["
+        '{"name":m.name,"host":m.host,"port":m.port,"key_id":m.key_id} '
+        "for m in found]))\n"
+    )
+    for py in _mdns_helper_candidates():
+        try:
+            ver = subprocess.run(
+                [py, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if ver.returncode != 0:
+                continue
+            major_s, _, minor_s = ver.stdout.strip().partition(".")
+            if int(major_s) < 3 or (int(major_s) == 3 and int(minor_s) < 10):
+                continue
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
+        try:
+            proc = subprocess.run(
+                [py, "-c", script, key_arg, str(timeout)],
+                capture_output=True,
+                text=True,
+                timeout=timeout + 8.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        line = (proc.stdout or "").strip().splitlines()
+        if not line:
+            continue
+        try:
+            raw = json.loads(line[-1])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw, list):
+            continue
+        out: list[DiscoveredMaster] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            host = item.get("host")
+            if not isinstance(host, str) or not host:
+                continue
+            out.append(
+                DiscoveredMaster(
+                    name=str(item.get("name") or host),
+                    host=host,
+                    port=int(item.get("port") or DEFAULT_CONTROL_PORT),
+                    key_id=item.get("key_id") if isinstance(item.get("key_id"), str) else None,
+                )
+            )
+        return out
+    return None
+
+
+def browse_masters(timeout: float = 2.0, key: str | None = None) -> list[DiscoveredMaster]:
+    """Discover masters on the LAN via mDNS.
+
+    When this interpreter cannot see mDNS (macOS Local Network / Zscaler on
+    uv-managed Python), fall back to the same helper-Python pattern used by
+    ``cp_proxy`` so Join-by-key still works without ``master_host``.
+    """
+    found = _browse_inprocess(timeout, key)
+    if found:
+        return found
+    helper = _browse_via_helper(timeout, key)
+    if helper is not None:
+        return helper
+    return []
 
 
 class MasterAdvertiser:

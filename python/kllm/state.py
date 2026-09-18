@@ -97,6 +97,11 @@ class ClusterState:
     join_key: str | None = None
     master_host: str | None = None
     master_port: int = DEFAULT_CONTROL_PORT
+    # Localhost control-plane proxy when agent Python cannot open LAN sockets
+    # (macOS Local Network / Zscaler). HTTP goes to 127.0.0.1:cp_proxy_port;
+    # master_host stays the real LAN IP for display / rpc toward=.
+    cp_proxy_port: int | None = None
+    cp_proxy_pid: int | None = None
     control_port: int = DEFAULT_CONTROL_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     infer_port: int = DEFAULT_INFER_PORT

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from kllm.accel import SELECTABLE_ACCEL_BACKENDS
 from kllm.state import config_path, ensure_home
 
 Device = Literal["cpu", "gpu"]
@@ -23,6 +24,20 @@ def _normalize_device(value: Any) -> Device:
     if s not in VALID_DEVICES:
         raise ValueError(f"device must be 'cpu' or 'gpu', got {value!r}")
     return s  # type: ignore[return-value]
+
+
+def _normalize_accel_backend(value: Any) -> str | None:
+    """None / empty = auto (use probe). Otherwise metal|cuda|rocm|vulkan."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s or s in ("auto", "default"):
+        return None
+    if s not in SELECTABLE_ACCEL_BACKENDS:
+        raise ValueError(
+            f"accel_backend must be one of {sorted(SELECTABLE_ACCEL_BACKENDS)} or null, got {value!r}"
+        )
+    return s
 
 
 def _normalize_percent(value: Any, *, field: str) -> int:
@@ -67,6 +82,7 @@ def default_config() -> dict[str, Any]:
         "gpu_ids": None,
         "vram_percent": DEFAULT_VRAM_PERCENT,
         "ram_percent": DEFAULT_RAM_PERCENT,
+        "accel_backend": None,
     }
 
 
@@ -80,6 +96,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         cfg["vram_percent"] = _normalize_percent(raw["vram_percent"], field="vram_percent")
     if "ram_percent" in raw:
         cfg["ram_percent"] = _normalize_percent(raw["ram_percent"], field="ram_percent")
+    if "accel_backend" in raw:
+        cfg["accel_backend"] = _normalize_accel_backend(raw["accel_backend"])
     return cfg
 
 
@@ -98,6 +116,9 @@ def _write_toml(cfg: dict[str, Any]) -> str:
     gpu_ids = cfg.get("gpu_ids")
     if gpu_ids is not None:
         lines.append(f"gpu_ids = {_toml_gpu_ids(gpu_ids)}")
+    accel = cfg.get("accel_backend")
+    if accel is not None:
+        lines.append(f'accel_backend = "{accel}"')
     return "\n".join(lines) + "\n"
 
 
@@ -124,7 +145,7 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
     # Merge with existing so partial updates (e.g. device-only) keep percents / gpu_ids.
     current = load_config()
     merged = {**current}
-    for key in ("device", "vram_percent", "ram_percent", "gpu_ids"):
+    for key in ("device", "vram_percent", "ram_percent", "gpu_ids", "accel_backend"):
         if key in cfg:
             merged[key] = cfg[key]
     out = _normalize_config(merged)
@@ -139,6 +160,10 @@ def get_device() -> Device:
 
 def get_gpu_ids() -> list[int] | None:
     return load_config().get("gpu_ids")
+
+
+def get_accel_backend() -> str | None:
+    return _normalize_accel_backend(load_config().get("accel_backend"))
 
 
 def resolve_device(override: str | None = None) -> Device:

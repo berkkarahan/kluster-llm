@@ -25,9 +25,31 @@ def test_default_config(kllm_home):
         "gpu_ids": None,
         "vram_percent": 80,
         "ram_percent": 80,
+        "accel_backend": None,
     }
     assert config.resolve_memory_fraction("gpu") == 0.80
     assert config.resolve_memory_fraction("cpu") == 0.80
+
+
+def test_save_and_load_accel_backend(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"accel_backend": "vulkan"})
+    assert out["accel_backend"] == "vulkan"
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert 'accel_backend = "vulkan"' in text
+    assert config.load_config()["accel_backend"] == "vulkan"
+    config.save_config({"accel_backend": None})
+    assert config.get_accel_backend() is None
+    text2 = (home / "config.toml").read_text(encoding="utf-8")
+    assert "accel_backend" not in text2
+
+
+def test_invalid_accel_backend_rejected(kllm_home):
+    _, config = kllm_home
+    with pytest.raises(ValueError):
+        config.save_config({"accel_backend": "tpu"})
+    with pytest.raises(ValueError):
+        config.save_config({"accel_backend": "cpu"})
 
 
 def test_save_and_load_full_config(kllm_home):

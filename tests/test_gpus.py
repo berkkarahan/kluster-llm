@@ -54,7 +54,45 @@ def test_get_gpus(client, monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert data["backend"] == "cuda"
+    assert data["probed_backend"] == "cuda"
+    from kllm.accel import allowed_accel_backends
+
+    assert data["allowed_backends"] == allowed_accel_backends(
+        data["probed_backend"], data["gpus"]
+    )
     assert len(data["gpus"]) == 2
+
+
+def test_put_config_accel_backend(client, monkeypatch):
+    c, agent = client
+
+    def fake_list():
+        return {
+            "backend": "metal",
+            "probed_backend": "metal",
+            "gpus": [{"index": 0, "name": "Apple M5", "vram_bytes": 40 * 1024**3}],
+        }
+
+    monkeypatch.setattr(agent.native, "list_gpus", fake_list)
+    monkeypatch.setattr(
+        agent,
+        "allowed_accel_backends",
+        lambda probed, gpus=None, platform=None: ["metal", "vulkan"],
+    )
+    r = c.put("/v1/config", json={"device": "gpu", "accel_backend": "vulkan"})
+    assert r.status_code == 200
+    assert r.json()["accel_backend"] == "vulkan"
+
+    r = c.get("/v1/status")
+    assert r.status_code == 200
+    assert r.json()["accel_backend"] == "vulkan"
+
+    r = c.put("/v1/config", json={"device": "gpu", "accel_backend": "cuda"})
+    assert r.status_code == 400
+
+    r = c.put("/v1/config", json={"device": "gpu", "accel_backend": None})
+    assert r.status_code == 200
+    assert r.json()["accel_backend"] is None
 
 
 def test_start_defaults_all_gpus(client, monkeypatch):

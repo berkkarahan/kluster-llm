@@ -37,7 +37,7 @@
         <input
           class="field mono"
           bind:value={appStore.masterHostInput}
-          placeholder={idle ? 'e.g. 192.168.68.66 if mDNS fails' : '—'}
+          placeholder={idle ? 'master LAN IP if mDNS fails' : '—'}
           readonly={networkLocked}
           disabled={view === 'loading' || view === 'offline'}
         />
@@ -71,6 +71,24 @@
         <option value="cpu">CPU</option>
       </select>
       {#if appStore.device === 'gpu'}
+        {#if appStore.allowedBackends.length > 0}
+          <label class="mono text-[11px] mt-1" style="color: var(--muted)">Backend</label>
+          <select
+            class="field mono"
+            value={appStore.accelBackend ?? appStore.allowedBackends[0]}
+            disabled={!idle || !!appStore.busy}
+            onchange={(e) => {
+              const v = (e.currentTarget as HTMLSelectElement).value;
+              if (v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan') {
+                void appStore.setAccelBackend(v);
+              }
+            }}
+          >
+            {#each appStore.allowedBackends as b}
+              <option value={b}>{appStore.accelBackendLabel(b)}</option>
+            {/each}
+          </select>
+        {/if}
         {#if appStore.gpus.length > 0}
           <label class="mono text-[11px] mt-1" style="color: var(--muted)">
             GPUs ({appStore.gpuBackend})

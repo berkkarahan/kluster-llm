@@ -138,7 +138,8 @@ fn macos_gpu_name() -> String {
 }
 
 fn enumerate_gpus() -> (Vec<GpuDevice>, BackendHint) {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         let mut sys = System::new();
         sys.refresh_memory();
         let total_ram = sys.total_memory();

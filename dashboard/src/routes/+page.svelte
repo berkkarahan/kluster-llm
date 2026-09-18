@@ -33,6 +33,14 @@
           readonly={networkLocked}
           disabled={view === 'loading' || view === 'offline'}
         />
+        <label class="mono text-[11px]" style="color: var(--muted)">Master host (optional)</label>
+        <input
+          class="field mono"
+          bind:value={appStore.masterHostInput}
+          placeholder={idle ? 'e.g. 192.168.68.66 if mDNS fails' : '—'}
+          readonly={networkLocked}
+          disabled={view === 'loading' || view === 'offline'}
+        />
       {:else}
         <p class="mono text-[11px]" style="color: var(--muted)">Joined as worker</p>
       {/if}

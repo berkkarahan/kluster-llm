@@ -316,6 +316,20 @@ class RegisterBody(BaseModel):
     gpu_ids: list[int] | None = None
 
 
+def _probe_capacity_for_cluster() -> dict[str, Any]:
+    """Probe host capacity; map missing native runtime to a clear HTTP error."""
+    try:
+        return native.probe_capacity()
+    except RuntimeError as exc:
+        raise HTTPException(
+            503,
+            f"{exc} On this machine run: python scripts/install.py "
+            "(macOS cluster worker with a Vulkan master: "
+            "uv run python scripts/install.py --backend vulkan; "
+            "set KLLM_ACCEL_BACKEND=vulkan)",
+        ) from exc
+
+
 def _resolve_gpu_selection(gpu_ids: list[int] | None) -> dict[str, Any]:
     """Validate optional gpu_ids against list_gpus(); default = all indices.
 
@@ -737,7 +751,7 @@ def start_master(body: StartBody) -> dict[str, Any]:
     gpu_sel = _resolve_gpu_selection(gpu_ids)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
-    cap = native.probe_capacity()
+    cap = _probe_capacity_for_cluster()
     # Prefer selected VRAM sum when discrete GPUs were chosen
     vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
     backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
@@ -811,6 +825,15 @@ def stop() -> dict[str, Any]:
 
 @app.post("/v1/join")
 def join_cluster(body: JoinBody) -> dict[str, Any]:
+    try:
+        return _join_cluster(body)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"join failed: {exc}") from exc
+
+
+def _join_cluster(body: JoinBody) -> dict[str, Any]:
     if STATE.role == "master":
         raise HTTPException(409, "node is master; stop first")
     try:
@@ -846,7 +869,12 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
     gpu_sel = _resolve_gpu_selection(gpu_ids)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
-    cap = native.probe_capacity()
+    try:
+        cap = _probe_capacity_for_cluster()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"probe_capacity failed: {exc}") from exc
     vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
     backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
     lan_host = netsec.pick_rpc_bind_host(body.rpc_bind, toward=master_host)
@@ -886,19 +914,32 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
     import httpx
 
     url = f"http://{master_host}:{master_port}/v1/register"
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(url, json=payload, headers={"X-Kllm-Key": body.key})
-        if resp.status_code == 401:
-            raise HTTPException(401, "invalid join key")
-        if resp.status_code >= 400:
-            try:
-                payload = resp.json()
-                detail = payload.get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise HTTPException(resp.status_code, detail)
-        resp.raise_for_status()
-        reg = resp.json()
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(url, json=payload, headers={"X-Kllm-Key": body.key})
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            504,
+            f"master at {master_host}:{master_port} did not respond in time; "
+            f"ensure `kllm start --key …` is running on the Mac and try "
+            f"`curl http://{master_host}:{master_port}/health` from this machine",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            502,
+            f"cannot reach master at {master_host}:{master_port}: {exc}",
+        ) from exc
+    if resp.status_code == 401:
+        raise HTTPException(401, "invalid join key")
+    if resp.status_code >= 400:
+        try:
+            err_payload = resp.json()
+            detail = err_payload.get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise HTTPException(resp.status_code, detail)
+    resp.raise_for_status()
+    reg = resp.json()
 
     _apply_cluster_snapshot(reg)
 

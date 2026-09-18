@@ -86,6 +86,13 @@ def pick_rpc_bind_host(preferred: str | None = None, *, toward: str | None = Non
     if toward_ip:
         return toward_ip
 
+    # Without a peer hint, prefer the default-route interface (UDP egress trick).
+    # Lexicographic sort among private IPs often picks VMware/Hyper-V switches
+    # (e.g. 192.168.235.1) ahead of the Wi‑Fi/Ethernet LAN the cluster uses.
+    route_ip = local_ip_toward("8.8.8.8")
+    if route_ip and is_usable_lan_peer(route_ip):
+        return route_ip
+
     candidates = _list_ipv4_addresses()
     ranked = sorted(candidates, key=_rank_bind_candidate)
     if ranked:

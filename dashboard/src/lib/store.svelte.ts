@@ -42,6 +42,7 @@ class AppStore {
   apiToken = $state('');
   busy = $state('');
   joinKeyInput = $state('');
+  masterHostInput = $state('');
   rpcBindInput = $state('');
   overlay = $state<'none' | 'wireguard'>('none');
   gpus = $state<GpuInfo[]>([]);
@@ -133,6 +134,7 @@ class AppStore {
       const live = data.role === 'master' || data.role === 'worker';
       if (live) {
         if (data.join_key) this.joinKeyInput = data.join_key;
+        if (data.master_host) this.masterHostInput = data.master_host;
         if (data.rpc_bind) this.rpcBindInput = data.rpc_bind;
         if (data.overlay === 'none' || data.overlay === 'wireguard') this.overlay = data.overlay;
       }
@@ -560,6 +562,7 @@ class AppStore {
   }
 
   async joinCluster() {
+    const masterHost = this.masterHostInput.trim();
     const body: Record<string, unknown> = {
       key: this.joinKeyInput,
       master_port: 18765,
@@ -567,6 +570,7 @@ class AppStore {
       rpc_bind: this.rpcBindInput || null,
       overlay: this.overlay
     };
+    if (masterHost) body.master_host = masterHost;
     if (this.gpus.length > 0) {
       body.gpu_ids =
         this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.gpus.map((g) => g.index);

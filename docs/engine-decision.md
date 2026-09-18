@@ -36,7 +36,7 @@ Supported cells to ship and test:
 
 | | Metal | CUDA | ROCm | Vulkan | CPU |
 |--|-------|------|------|--------|-----|
-| **macOS** | yes | — | — | — | yes |
+| **macOS** | yes | — | — | yes (MoltenVK; use for **Vulkan master** clusters) | yes |
 | **Linux** | — | yes | yes | yes (fallback) | yes |
 | **Windows** | — | yes | not required | yes (AMD default; NVIDIA fallback) | yes |
 

@@ -107,6 +107,18 @@ export CXX=/opt/homebrew/opt/llvm/bin/clang++
 - Use the same `--overlay` on master and workers.
 - Control plane stays on LAN — only RPC moves to the overlay. Verify with `kllm status` (`wg_address`, `overlay_status`).
 
+### macOS worker on a Vulkan master (Windows/Linux)
+
+**Cause:** Default macOS install uses **Metal** (`hw` probe + `install.py --backend auto`). A Vulkan master cluster expects workers to run **Vulkan** `rpc-server` binaries and to register `backend=vulkan` for layer split / distribute planning. Metal workers in a Vulkan-first cluster mis-report capacity and backend.
+
+**Solution:**
+```bash
+uv run python scripts/install.py --backend vulkan
+export KLLM_ACCEL_BACKEND=vulkan   # add to shell profile for kllm-agent
+uv run kllm join --key '<key>' --master <windows-lan-ip>
+```
+Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Requires Vulkan SDK / MoltenVK for the source build (see llama.cpp docs).
+
 ### "rpc-server.exe not found"
 
 **Cause:** Worker setup not completed.

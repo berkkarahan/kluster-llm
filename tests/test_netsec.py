@@ -36,6 +36,7 @@ def test_pick_rpc_bind_host_default_not_wildcard(monkeypatch):
     from kllm import netsec
 
     monkeypatch.setattr(netsec, "_list_ipv4_addresses", lambda: ["127.0.0.1", "192.168.10.5", "8.8.8.8"])
+    monkeypatch.setattr(netsec, "local_ip_toward", lambda remote: None)
     assert netsec.pick_rpc_bind_host(None) == "192.168.10.5"
 
 
@@ -47,6 +48,7 @@ def test_pick_rpc_bind_host_prefers_rfc1918_over_cgnat(monkeypatch):
         "_list_ipv4_addresses",
         lambda: ["100.64.0.1", "192.168.68.66"],
     )
+    monkeypatch.setattr(netsec, "local_ip_toward", lambda remote: None)
     assert netsec.pick_rpc_bind_host(None) == "192.168.68.66"
 
 
@@ -80,6 +82,24 @@ def test_pick_rpc_bind_host_toward_beats_lexicographic_private(monkeypatch):
     )
     monkeypatch.setattr(netsec, "local_ip_toward", lambda remote: "192.168.68.63")
     assert netsec.pick_rpc_bind_host(None, toward="192.168.68.62") == "192.168.68.63"
+
+
+def test_pick_rpc_bind_host_default_route_beats_vmware_lex_order(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_addresses",
+        lambda: ["192.168.235.1", "192.168.68.63"],
+    )
+
+    def fake_toward(remote: str) -> str | None:
+        if remote == "8.8.8.8":
+            return "192.168.68.63"
+        return None
+
+    monkeypatch.setattr(netsec, "local_ip_toward", fake_toward)
+    assert netsec.pick_rpc_bind_host(None) == "192.168.68.63"
 
 
 def test_is_usable_lan_peer():
@@ -288,6 +308,26 @@ def test_start_wireguard_fails_without_tooling(client):
         r = c.post("/v1/start", json={"key": "k", "overlay": "wireguard"})
     assert r.status_code == 400
     assert "WireGuard" in r.text
+
+
+def test_join_missing_native_returns_503(client):
+    c, agent, netsec_mod = client
+
+    with (
+        patch.object(agent.native, "probe_capacity", side_effect=RuntimeError("kllm._native extension is not built")),
+        patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.68.66"),
+    ):
+        r = c.post(
+            "/v1/join",
+            json={
+                "key": "secret",
+                "master_host": "192.168.68.63",
+                "master_port": 18765,
+                "overlay": "none",
+            },
+        )
+    assert r.status_code == 503
+    assert "install.py" in r.text
 
 
 def test_join_binds_private_host_not_wildcard(client):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from kllm.accel import effective_accel_backend
+
 _NATIVE = None
 _IMPORT_ERROR: Exception | None = None
 
@@ -34,7 +36,7 @@ def probe_capacity() -> dict[str, Any]:
         "total_ram_bytes": snap.total_ram_bytes,
         "available_ram_bytes": snap.available_ram_bytes,
         "vram_bytes": snap.vram_bytes,
-        "backend": snap.backend,
+        "backend": effective_accel_backend(snap.backend),
         "hostname": snap.hostname,
     }
 
@@ -45,7 +47,7 @@ def list_gpus() -> dict[str, Any]:
         return {"backend": "cpu", "gpus": []}
     devices, backend = _NATIVE.list_gpus()
     return {
-        "backend": backend,
+        "backend": effective_accel_backend(backend),
         "gpus": [
             {
                 "index": int(d.index),

@@ -844,6 +844,10 @@ def fetch_latest_b_release() -> dict[str, Any] | None:
 
 def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
     tag = tag or read_pinned_release()
+    local = _cached_llama_archive(tag, backend)
+    if local is not None:
+        return _install_llama_archive(local, tag=tag, backend=backend)
+
     rel = fetch_release_by_tag(tag)
     if not rel:
         return False
@@ -862,6 +866,33 @@ def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
     with tempfile.TemporaryDirectory() as td:
         archive = Path(td) / name
         _download(url, archive)
+        return _install_llama_archive(archive, tag=tag, backend=backend, asset_name=name)
+
+
+def _cached_llama_archive(tag: str, backend: str) -> Path | None:
+    root = Path.home() / ".kllm" / "models"
+    if not root.is_dir():
+        return None
+    files = [p for p in root.glob(f"llama-{tag}-bin-*") if p.is_file()]
+    if not files:
+        return None
+    assets = [{"name": p.name, "browser_download_url": str(p)} for p in files]
+    picked = pick_release_asset(assets, backend) or pick_release_asset(assets, "cpu")
+    if not picked:
+        return files[0]
+    return Path(picked["browser_download_url"])
+
+
+def _install_llama_archive(
+    archive: Path,
+    *,
+    tag: str,
+    backend: str,
+    asset_name: str | None = None,
+) -> bool:
+    name = asset_name or archive.name
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as td:
         extract_dir = Path(td) / "out"
         extract_dir.mkdir()
         if name.endswith(".zip"):
@@ -870,13 +901,12 @@ def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
         else:
             with tarfile.open(archive, "r:*") as tf:
                 tf.extractall(extract_dir)
-
         copied = _copy_llama_binaries_from(extract_dir)
         if not copied:
             _warn(f"archive {name} extracted but llama-server/rpc-server not found inside")
             return False
     write_install_stamp(tag=tag, backend=backend, asset=name)
-    print(f"Installed prebuilt llama.cpp from {rel.get('tag_name')} ({name})")
+    print(f"Installed llama.cpp {tag} from {name}")
     return True
 
 

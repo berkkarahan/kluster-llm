@@ -168,6 +168,13 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
     if kwargs.get("env") is None:
         kwargs.pop("env", None)
+    # Installed pyd extracts micro_batch as i32; Python used to pass str "2".
+    mb = kwargs.get("micro_batch")
+    if isinstance(mb, str) and mb not in ("auto", ""):
+        try:
+            kwargs["micro_batch"] = int(mb)
+        except ValueError:
+            pass
     result = n.start_master(kwargs)
     return {
         "pid": result.pid,

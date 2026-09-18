@@ -27,6 +27,12 @@ def models_dir() -> Path:
     return d
 
 
+def logs_dir() -> Path:
+    d = home_dir() / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def state_path() -> Path:
     return home_dir() / "cluster.json"
 

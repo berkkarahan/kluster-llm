@@ -326,10 +326,11 @@ Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Disabled
 **Solution:**
 ```bash
 # Check layer placement (look for "→ CPU" in logs)
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
+kllm logs -f --source llama
 
-# Increase GPU layers (-ngl)
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 -ngl 40
+# Put more layers on GPU (cluster already up via kllm start / kllm join)
+kllm run --model model.gguf --device gpu --vram-percent 90
+# Or force a layer count: kllm run --model model.gguf --extra-arg "-ngl 40"
 
 # Use smaller model or smaller quantization
 ```
@@ -486,8 +487,12 @@ sudo networksetup -setstaticnetworksetup thunderbolt2 192.168.10.1 255.255.255.0
 ### Enable verbose logging
 
 ```bash
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
+# On the master (or any joined node — workers proxy to the master)
+kllm logs -f
+kllm logs -n 200 --source rpc
 ```
+
+Logs are stored under `~/.kllm/logs/` (`agent.log`, `llama-server.log`, `rpc-server.log`, and `cluster.jsonl` on the master).
 
 ### Check system logs
 
@@ -528,7 +533,7 @@ iperf3 -c 192.168.10.1 -t 10
 
 If issues persist:
 
-1. **Check logs**: Enable verbose logging and review output
+1. **Check logs**: Run `kllm logs -f` on the master (or any joined node) and review output
 2. **Verify prerequisites**: Ensure all hardware and software requirements are met
 3. **Test components separately**: Run worker and coordinator independently
 4. **Check documentation**: Review [docs/layer-split-calculator.md](layer-split-calculator.md) and [docs/memory-constraints.md](memory-constraints.md)

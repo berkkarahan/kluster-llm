@@ -2,7 +2,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use thiserror::Error;
 
+use crate::hw::METAL_VRAM_FRACTION;
+
 const DEFAULT_HEADROOM: f64 = 0.80;
+const DEFAULT_VRAM_WEIGHT: f64 = 0.6;
+const DEFAULT_LATENCY_WEIGHT: f64 = 0.4;
 /// When estimated need exceeds this fraction of budget (but not budget), status is `tight`.
 pub const TIGHT_RATIO: f64 = 0.90;
 /// Rough bytes-per-token for q8_0 KV estimate (K+V), conservative.
@@ -29,15 +33,19 @@ pub struct NodeCapacity {
     pub vram_bytes: Option<u64>,
     #[pyo3(get)]
     pub backend: String,
-    /// If true, unified memory (e.g. Apple Silicon) — VRAM unknown uses RAM budget.
+    /// If true, unified memory (e.g. Apple Silicon).
     #[pyo3(get)]
     pub unified_memory: bool,
+    #[pyo3(get)]
+    pub latency_ms: Option<f64>,
+    #[pyo3(get)]
+    pub is_master: bool,
 }
 
 #[pymethods]
 impl NodeCapacity {
     #[new]
-    #[pyo3(signature = (node_id, total_ram_bytes, available_ram_bytes, vram_bytes=None, backend="unknown".to_string(), unified_memory=false))]
+    #[pyo3(signature = (node_id, total_ram_bytes, available_ram_bytes, vram_bytes=None, backend="unknown".to_string(), unified_memory=false, latency_ms=None, is_master=false))]
     fn new(
         node_id: String,
         total_ram_bytes: u64,
@@ -45,6 +53,8 @@ impl NodeCapacity {
         vram_bytes: Option<u64>,
         backend: String,
         unified_memory: bool,
+        latency_ms: Option<f64>,
+        is_master: bool,
     ) -> Self {
         Self {
             node_id,
@@ -53,6 +63,8 @@ impl NodeCapacity {
             vram_bytes,
             backend,
             unified_memory,
+            latency_ms,
+            is_master,
         }
     }
 }
@@ -67,6 +79,8 @@ pub struct PlanRequest {
     pub tensor_split_override: Option<Vec<f64>>,
     /// Preferred device: "cpu" | "gpu" (default gpu).
     pub device: String,
+    pub vram_weight: f64,
+    pub latency_weight: f64,
 }
 
 impl PlanRequest {
@@ -101,6 +115,16 @@ impl PlanRequest {
                 "device must be 'cpu' or 'gpu'",
             ));
         }
+        let vram_weight: f64 = dict
+            .get_item("vram_weight")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(DEFAULT_VRAM_WEIGHT);
+        let latency_weight: f64 = dict
+            .get_item("latency_weight")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(DEFAULT_LATENCY_WEIGHT);
 
         let nodes_obj = dict
             .get_item("nodes")?
@@ -134,6 +158,27 @@ impl PlanRequest {
                     .map(|v| v.extract::<bool>())
                     .transpose()?
                     .unwrap_or(false);
+            let latency_ms: Option<f64> = d
+                .get_item("latency_ms")?
+                .map(|v| {
+                    if v.is_none() {
+                        Ok(None)
+                    } else {
+                        v.extract().map(Some)
+                    }
+                })
+                .transpose()?
+                .flatten();
+            let is_master = d
+                .get_item("is_master")?
+                .map(|v| v.extract::<bool>())
+                .transpose()?
+                .unwrap_or(false)
+                || d.get_item("role")?
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .map(|r| r == "master")
+                    .unwrap_or(false);
             nodes.push(NodeCapacity {
                 node_id: d
                     .get_item("node_id")?
@@ -151,6 +196,8 @@ impl PlanRequest {
                 vram_bytes: vram,
                 backend,
                 unified_memory: unified,
+                latency_ms,
+                is_master,
             });
         }
 
@@ -167,6 +214,8 @@ impl PlanRequest {
             headroom,
             tensor_split_override,
             device,
+            vram_weight,
+            latency_weight,
         })
     }
 }
@@ -212,6 +261,16 @@ pub struct PlanResult {
     pub hint: String,
     #[pyo3(get)]
     pub context_effective: u32,
+    #[pyo3(get)]
+    pub node_alloc_bytes: Vec<u64>,
+    #[pyo3(get)]
+    pub node_scores: Vec<f64>,
+    #[pyo3(get)]
+    pub node_latency_ms: Vec<f64>,
+    #[pyo3(get)]
+    pub vram_alloc_bytes: u64,
+    #[pyo3(get)]
+    pub ram_alloc_bytes: u64,
 }
 
 #[pymethods]
@@ -237,32 +296,57 @@ impl PlanResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SackTier {
+    Vram,
+    Ram,
+}
+
 #[derive(Clone, Debug)]
-pub(crate) struct NodeDeviceBudget {
-    budget: u64,
-    effective: String,
-    fallback: bool,
+struct Sack {
+    node_idx: usize,
+    tier: SackTier,
+    capacity: u64,
+    latency_ms: f64,
 }
 
 fn ram_budget(node: &NodeCapacity, headroom: f64) -> u64 {
     (node.total_ram_bytes as f64 * headroom) as u64
 }
 
+fn master_ram_fallback_budget(node: &NodeCapacity, headroom: f64) -> u64 {
+    let cap = node.available_ram_bytes.min(node.total_ram_bytes);
+    (cap as f64 * headroom) as u64
+}
+
+pub fn effective_vram_bytes(node: &NodeCapacity) -> u64 {
+    if let Some(v) = node.vram_bytes {
+        if v > 0 {
+            return v;
+        }
+    }
+    if node.unified_memory || node.backend == "metal" {
+        return (node.total_ram_bytes as f64 * METAL_VRAM_FRACTION) as u64;
+    }
+    0
+}
+
 fn gpu_usable(node: &NodeCapacity) -> bool {
     if node.unified_memory || node.backend == "metal" {
         return true;
     }
-    matches!(node.vram_bytes, Some(v) if v > 0)
+    effective_vram_bytes(node) > 0
 }
 
 fn gpu_budget(node: &NodeCapacity, headroom: f64) -> u64 {
-    let ram = ram_budget(node, headroom);
-    if node.unified_memory || node.backend == "metal" {
-        return ram;
-    }
-    let vram = ((node.vram_bytes.unwrap_or(0) as f64) * headroom) as u64;
-    let spill = (node.available_ram_bytes.max(1) as f64 * (1.0 - headroom)).min(ram as f64) as u64 / 4;
-    vram.saturating_add(spill)
+    ((effective_vram_bytes(node) as f64) * headroom) as u64
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NodeDeviceBudget {
+    budget: u64,
+    effective: String,
+    fallback: bool,
 }
 
 /// Budget a node for the preferred device, falling back when GPU is unavailable.
@@ -278,7 +362,6 @@ pub(crate) fn node_budget_for_device(
             fallback: false,
         });
     }
-    // preferred == gpu
     if gpu_usable(node) {
         Ok(NodeDeviceBudget {
             budget: gpu_budget(node, headroom),
@@ -292,6 +375,161 @@ pub(crate) fn node_budget_for_device(
             fallback: true,
         })
     }
+}
+
+fn normalize_weights(vram_weight: f64, latency_weight: f64) -> Result<(f64, f64), PlanError> {
+    if vram_weight < 0.0 || latency_weight < 0.0 {
+        return Err(PlanError::Message(
+            "vram_weight and latency_weight must be >= 0".into(),
+        ));
+    }
+    let sum = vram_weight + latency_weight;
+    if sum <= f64::EPSILON {
+        return Err(PlanError::Message(
+            "vram_weight and latency_weight cannot both be zero".into(),
+        ));
+    }
+    Ok((vram_weight / sum, latency_weight / sum))
+}
+
+fn node_latency(node: &NodeCapacity) -> f64 {
+    node.latency_ms.unwrap_or(0.0).max(0.0)
+}
+
+fn score_sack(
+    sack: &Sack,
+    max_cap_in_tier: u64,
+    max_lat: f64,
+    wv: f64,
+    wl: f64,
+) -> f64 {
+    let cap_score = if max_cap_in_tier > 0 {
+        sack.capacity as f64 / max_cap_in_tier as f64
+    } else {
+        0.0
+    };
+    let lat_score = if max_lat <= f64::EPSILON {
+        1.0
+    } else {
+        (1.0 - sack.latency_ms / max_lat).clamp(0.0, 1.0)
+    };
+    wv * cap_score + wl * lat_score
+}
+
+fn build_sacks(nodes: &[NodeCapacity], headroom: f64, preferred: &str) -> Vec<Sack> {
+    let mut sacks = Vec::new();
+    if preferred == "cpu" {
+        for (i, n) in nodes.iter().enumerate() {
+            sacks.push(Sack {
+                node_idx: i,
+                tier: SackTier::Ram,
+                capacity: ram_budget(n, headroom),
+                latency_ms: node_latency(n),
+            });
+        }
+        return sacks;
+    }
+
+    for (i, n) in nodes.iter().enumerate() {
+        if gpu_usable(n) {
+            sacks.push(Sack {
+                node_idx: i,
+                tier: SackTier::Vram,
+                capacity: gpu_budget(n, headroom),
+                latency_ms: node_latency(n),
+            });
+        } else {
+            sacks.push(Sack {
+                node_idx: i,
+                tier: SackTier::Ram,
+                capacity: ram_budget(n, headroom),
+                latency_ms: node_latency(n),
+            });
+        }
+        if n.is_master && !n.unified_memory && n.backend != "metal" && gpu_usable(n) {
+            sacks.push(Sack {
+                node_idx: i,
+                tier: SackTier::Ram,
+                capacity: master_ram_fallback_budget(n, headroom),
+                latency_ms: node_latency(n),
+            });
+        }
+    }
+    sacks
+}
+
+fn greedy_fill(
+    sacks: &[Sack],
+    needed: u64,
+    wv: f64,
+    wl: f64,
+) -> (Vec<u64>, Vec<u64>, u64, u64, Vec<f64>) {
+    let n_nodes = sacks
+        .iter()
+        .map(|s| s.node_idx)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    let mut device_alloc = vec![0u64; n_nodes];
+    let mut ram_alloc = vec![0u64; n_nodes];
+    let mut remaining = needed;
+
+    let max_lat = sacks
+        .iter()
+        .map(|s| s.latency_ms)
+        .fold(0.0_f64, f64::max);
+
+    let mut scores_by_sack: Vec<f64> = vec![0.0; sacks.len()];
+
+    for tier in [SackTier::Vram, SackTier::Ram] {
+        if remaining == 0 {
+            break;
+        }
+        let tier_sacks: Vec<usize> = sacks
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.tier == tier && s.capacity > 0)
+            .map(|(i, _)| i)
+            .collect();
+        if tier_sacks.is_empty() {
+            continue;
+        }
+        let max_cap = tier_sacks
+            .iter()
+            .map(|&i| sacks[i].capacity)
+            .max()
+            .unwrap_or(0);
+        let mut order: Vec<(usize, f64)> = tier_sacks
+            .iter()
+            .map(|&i| {
+                let sc = score_sack(&sacks[i], max_cap, max_lat, wv, wl);
+                scores_by_sack[i] = sc;
+                (i, sc)
+            })
+            .collect();
+        order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (idx, _) in order {
+            if remaining == 0 {
+                break;
+            }
+            let sack = &sacks[idx];
+            let take = sack.capacity.min(remaining);
+            if take == 0 {
+                continue;
+            }
+            if sack.tier == SackTier::Vram {
+                device_alloc[sack.node_idx] = device_alloc[sack.node_idx].saturating_add(take);
+            } else {
+                ram_alloc[sack.node_idx] = ram_alloc[sack.node_idx].saturating_add(take);
+            }
+            remaining = remaining.saturating_sub(take);
+        }
+    }
+
+    let vram_total: u64 = device_alloc.iter().sum();
+    let ram_total: u64 = ram_alloc.iter().sum();
+    (device_alloc, ram_alloc, vram_total, ram_total, scores_by_sack)
 }
 
 fn estimate_layers(model_size_bytes: u64) -> u32 {
@@ -382,6 +620,10 @@ fn auto_context_candidates(max_ctx: u32) -> Vec<u32> {
     out
 }
 
+fn total_sack_capacity(sacks: &[Sack]) -> u64 {
+    sacks.iter().map(|s| s.capacity).sum()
+}
+
 pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
     if req.nodes.is_empty() {
         return Err(PlanError::Message("at least one node is required".into()));
@@ -393,22 +635,28 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
     if preferred != "cpu" && preferred != "gpu" {
         return Err(PlanError::Message("device must be 'cpu' or 'gpu'".into()));
     }
+    let (wv, wl) = normalize_weights(req.vram_weight, req.latency_weight)?;
 
     let layers = estimate_layers(req.model_size_bytes);
     let kv = estimate_kv(req.model_size_bytes, req.context, layers);
     let needed = req.model_size_bytes.saturating_add(kv);
 
-    let mut budgets = Vec::with_capacity(req.nodes.len());
+    let sacks = build_sacks(&req.nodes, req.headroom, &preferred);
+    let total_budget = total_sack_capacity(&sacks);
+    let (fit_status, hint) = classify_fit(needed, total_budget);
+
     let mut node_effective = Vec::with_capacity(req.nodes.len());
     let mut node_fallbacks = Vec::with_capacity(req.nodes.len());
+    let mut budgets = Vec::with_capacity(req.nodes.len());
     for n in &req.nodes {
         let nb = node_budget_for_device(n, req.headroom, &preferred)?;
-        budgets.push(nb.budget);
         node_effective.push(nb.effective);
         node_fallbacks.push(nb.fallback);
+        budgets.push(nb.budget);
     }
-    let total_budget: u64 = budgets.iter().sum();
-    let (fit_status, hint) = classify_fit(needed, total_budget);
+
+    let (device_alloc, ram_alloc, vram_alloc_total, ram_alloc_total, _sack_scores) =
+        greedy_fill(&sacks, needed, wv, wl);
 
     let tensor_split = if let Some(ref override_split) = req.tensor_split_override {
         if override_split.len() != req.nodes.len() {
@@ -426,19 +674,80 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
         }
         override_split.clone()
     } else {
-        budgets
+        let node_totals: Vec<u64> = device_alloc
             .iter()
-            .map(|b| *b as f64 / total_budget as f64)
-            .collect()
+            .zip(ram_alloc.iter())
+            .map(|(d, r)| d.saturating_add(*r))
+            .collect();
+        let total: u64 = node_totals.iter().sum();
+        if total == 0 {
+            vec![0.0; req.nodes.len()]
+        } else {
+            node_totals
+                .iter()
+                .map(|a| *a as f64 / total as f64)
+                .collect()
+        }
     };
 
-    let any_gpu = node_effective.iter().any(|d| d == "gpu");
+    let any_gpu = node_effective.iter().any(|d| d == "gpu") && vram_alloc_total > 0;
     let device_effective = if preferred == "cpu" || !any_gpu {
         "cpu"
     } else {
         "gpu"
     };
-    let ngl = if device_effective == "cpu" { 0 } else { layers };
+    let ngl = if device_effective == "cpu" {
+        0
+    } else if needed == 0 {
+        0
+    } else {
+        ((layers as u64)
+            .saturating_mul(vram_alloc_total)
+            .min((layers as u64).saturating_mul(needed))
+            / needed) as u32
+    };
+
+    let cluster_max_cap = sacks.iter().map(|s| s.capacity).max().unwrap_or(0);
+    let max_lat = req
+        .nodes
+        .iter()
+        .map(node_latency)
+        .fold(0.0_f64, f64::max);
+    let node_scores: Vec<f64> = req
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let node_cap = sacks
+                .iter()
+                .filter(|s| s.node_idx == i)
+                .map(|s| s.capacity)
+                .max()
+                .unwrap_or(0);
+            if node_cap == 0 || cluster_max_cap == 0 {
+                return 0.0;
+            }
+            score_sack(
+                &Sack {
+                    node_idx: i,
+                    tier: SackTier::Vram,
+                    capacity: node_cap,
+                    latency_ms: node_latency(n),
+                },
+                cluster_max_cap,
+                max_lat,
+                wv,
+                wl,
+            )
+        })
+        .collect();
+
+    let node_latency_ms: Vec<f64> = req.nodes.iter().map(node_latency).collect();
+    let node_alloc_bytes: Vec<u64> = device_alloc
+        .iter()
+        .zip(ram_alloc.iter())
+        .map(|(d, r)| d.saturating_add(*r))
+        .collect();
 
     Ok(PlanResult {
         tensor_split,
@@ -459,6 +768,11 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
         budget_bytes: total_budget,
         hint,
         context_effective: req.context,
+        node_alloc_bytes,
+        node_scores,
+        node_latency_ms,
+        vram_alloc_bytes: vram_alloc_total,
+        ram_alloc_bytes: ram_alloc_total,
     })
 }
 
@@ -501,6 +815,17 @@ mod tests {
     use super::*;
 
     fn node(id: &str, ram_gb: u64, vram_gb: Option<u64>, metal: bool) -> NodeCapacity {
+        node_with_latency(id, ram_gb, vram_gb, metal, None, false)
+    }
+
+    fn node_with_latency(
+        id: &str,
+        ram_gb: u64,
+        vram_gb: Option<u64>,
+        metal: bool,
+        latency_ms: Option<f64>,
+        is_master: bool,
+    ) -> NodeCapacity {
         let ram = ram_gb * 1024 * 1024 * 1024;
         NodeCapacity {
             node_id: id.into(),
@@ -509,6 +834,8 @@ mod tests {
             vram_bytes: vram_gb.map(|g| g * 1024 * 1024 * 1024),
             backend: if metal { "metal".into() } else { "vulkan".into() },
             unified_memory: metal,
+            latency_ms,
+            is_master,
         }
     }
 
@@ -525,15 +852,28 @@ mod tests {
             headroom: 0.80,
             tensor_split_override: None,
             device: device.into(),
+            vram_weight: DEFAULT_VRAM_WEIGHT,
+            latency_weight: DEFAULT_LATENCY_WEIGHT,
         }
     }
 
     #[test]
-    fn proportional_split_mac_and_worker() {
+    fn knapsack_prefers_vram_before_ram() {
+        let mut w = node("worker", 64, Some(8), false);
+        w.backend = "cpu".into();
+        w.unified_memory = false;
+        w.vram_bytes = None;
+        let plan = plan_split(&req(vec![w], 2 * 1024 * 1024 * 1024, "gpu")).unwrap();
+        assert_eq!(plan.device_effective, "cpu");
+        assert_eq!(plan.ngl, 0);
+    }
+
+    #[test]
+    fn knapsack_mac_and_worker_split() {
         let plan = plan_split(&req(
             vec![
-                node("master", 24, None, true),
-                node("worker", 32, Some(12), false),
+                node_with_latency("master", 24, None, true, Some(0.0), true),
+                node_with_latency("worker", 32, Some(12), false, Some(5.0), false),
             ],
             5 * 1024 * 1024 * 1024,
             "gpu",
@@ -543,9 +883,46 @@ mod tests {
         assert_eq!(plan.tensor_split.len(), 2);
         let sum: f64 = plan.tensor_split.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
-        assert!(plan.tensor_split[0] > plan.tensor_split[1]);
         assert_eq!(plan.device_effective, "gpu");
         assert!(plan.ngl > 0);
+        assert!(plan.vram_alloc_bytes > 0);
+    }
+
+    #[test]
+    fn ram_only_alloc_produces_nonzero_split() {
+        let mut a = node("a", 32, None, false);
+        a.backend = "cpu".into();
+        a.vram_bytes = None;
+        let mut b = node("b", 16, None, false);
+        b.backend = "cpu".into();
+        b.vram_bytes = None;
+        let plan = plan_split(&req(vec![a, b], 4 * 1024 * 1024 * 1024, "gpu")).unwrap();
+        let sum: f64 = plan.tensor_split.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        assert!(plan.tensor_split[0] > plan.tensor_split[1]);
+        assert!(plan.ram_alloc_bytes > 0);
+    }
+
+    #[test]
+    fn node_scores_reflect_relative_capacity() {
+        let plan = plan_split(&req(
+            vec![
+                node_with_latency("big", 32, Some(16), false, Some(0.0), false),
+                node_with_latency("small", 32, Some(4), false, Some(0.0), false),
+            ],
+            2 * 1024 * 1024 * 1024,
+            "gpu",
+        ))
+        .unwrap();
+        assert!(plan.node_scores[0] > plan.node_scores[1]);
+    }
+
+    #[test]
+    fn metal_legacy_vram_budget() {
+        let n = node("m", 24, None, true);
+        let vram = effective_vram_bytes(&n);
+        assert_eq!(vram, (24u64 * 1024 * 1024 * 1024 * 80) / 100);
+        assert_eq!(gpu_budget(&n, 0.80), (vram as f64 * 0.80) as u64);
     }
 
     #[test]
@@ -575,7 +952,6 @@ mod tests {
         assert_eq!(plan.device_effective, "cpu");
         assert_eq!(plan.ngl, 0);
         assert_eq!(plan.node_fallbacks, vec![false]);
-        // RAM headroom 32*0.8 GiB
         assert_eq!(
             plan.budgets_bytes[0],
             (32u64 * 1024 * 1024 * 1024) * 80 / 100
@@ -592,10 +968,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.device_effective, "gpu");
         let vram = 10u64 * 1024 * 1024 * 1024;
-        let ram = 32u64 * 1024 * 1024 * 1024;
-        let headroom = 0.80;
-        let spill = ((ram / 2) as f64 * (1.0 - headroom)).min((ram as f64) * headroom) as u64 / 4;
-        let expected = ((vram as f64) * headroom) as u64 + spill;
+        let expected = ((vram as f64) * 0.80) as u64;
         assert_eq!(plan.budgets_bytes[0], expected);
     }
 
@@ -630,5 +1003,28 @@ mod tests {
         let plan = plan_split_auto_context(&r).unwrap();
         assert!(plan.context_effective >= 512);
         assert!(plan.fit_status == "fits" || plan.fit_status == "tight");
+    }
+
+    #[test]
+    fn latency_prefers_lower_rtt_when_vram_equal() {
+        let vram = Some(8u64 * 1024 * 1024 * 1024);
+        let plan = plan_split(&req(
+            vec![
+                node_with_latency("fast", 32, vram, false, Some(1.0), false),
+                node_with_latency("slow", 32, vram, false, Some(50.0), false),
+            ],
+            4 * 1024 * 1024 * 1024,
+            "gpu",
+        ))
+        .unwrap();
+        assert!(plan.tensor_split[0] >= plan.tensor_split[1]);
+    }
+
+    #[test]
+    fn weight_normalization() {
+        let (a, b) = normalize_weights(0.6, 0.4).unwrap();
+        assert!((a - 0.6).abs() < 1e-9);
+        assert!((b - 0.4).abs() < 1e-9);
+        assert!(normalize_weights(0.0, 0.0).is_err());
     }
 }

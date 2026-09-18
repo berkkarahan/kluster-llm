@@ -73,6 +73,24 @@ export type ModelInfo = {
   max_context?: number;
 };
 
+export type ModelSearchFit = 'fits' | 'overflow' | 'unknown';
+
+export type ModelSearchHit = {
+  repo_id: string;
+  filename: string;
+  quant: string | null;
+  size_bytes: number;
+  gated: boolean;
+  source: string;
+  fit: ModelSearchFit;
+};
+
+export type ModelSearchResponse = {
+  query: string;
+  total_vram_bytes: number | null;
+  results: ModelSearchHit[];
+};
+
 export const MIN_CONTEXT = 512;
 export const CONTEXT_STEP = 512;
 /** Fallback slider max when model metadata is unavailable */

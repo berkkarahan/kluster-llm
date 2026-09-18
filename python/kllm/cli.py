@@ -433,6 +433,8 @@ def _run_settings_options(
     threads: int,
     extra_arg: list[str],
     remember: bool,
+    vram_weight: float,
+    latency_weight: float,
 ) -> dict:
     headroom = _headroom_override(device, vram_percent, ram_percent)
     return build_plan_run_payload(
@@ -460,6 +462,8 @@ def _run_settings_options(
         threads=threads,
         extra_args=extra_arg,
         remember=remember,
+        vram_weight=vram_weight,
+        latency_weight=latency_weight,
     )
 
 
@@ -476,6 +480,12 @@ def plan_cmd(
     ),
     ram_percent: Optional[int] = typer.Option(
         None, "--ram-percent", min=10, max=100, help="Override RAM budget %% for this call (CPU)"
+    ),
+    vram_weight: float = typer.Option(
+        0.6, "--vram-weight", min=0.0, max=1.0, help="Placement score weight for VRAM capacity"
+    ),
+    latency_weight: float = typer.Option(
+        0.4, "--latency-weight", min=0.0, max=1.0, help="Placement score weight for low latency"
     ),
     cache_type_k: str = typer.Option("q8_0", "--cache-type-k"),
     cache_type_v: str = typer.Option("q8_0", "--cache-type-v"),
@@ -521,6 +531,8 @@ def plan_cmd(
         threads,
         extra_arg,
         remember,
+        vram_weight,
+        latency_weight,
     )
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
@@ -536,6 +548,13 @@ def plan_cmd(
         f"[bold]placement[/bold] device {data.get('device_requested')}→{data.get('device_effective')} "
         f"split={data.get('tensor_split')}"
     )
+    node_ids = data.get("node_ids") or []
+    for i, nid in enumerate(node_ids):
+        console.print(
+            f"  {nid}: alloc={data.get('node_alloc_bytes', [None] * len(node_ids))[i]} "
+            f"score={data.get('node_scores', [None] * len(node_ids))[i]} "
+            f"latency_ms={data.get('node_latency_ms', [None] * len(node_ids))[i]}"
+        )
     if data.get("warning"):
         console.print(f"[yellow]{data['warning']}[/yellow]")
     console.print(data)
@@ -554,6 +573,12 @@ def run(
     ),
     ram_percent: Optional[int] = typer.Option(
         None, "--ram-percent", min=10, max=100, help="Override RAM budget %% for this call (CPU)"
+    ),
+    vram_weight: float = typer.Option(
+        0.6, "--vram-weight", min=0.0, max=1.0, help="Placement score weight for VRAM capacity"
+    ),
+    latency_weight: float = typer.Option(
+        0.4, "--latency-weight", min=0.0, max=1.0, help="Placement score weight for low latency"
     ),
     cache_type_k: str = typer.Option("q8_0", "--cache-type-k"),
     cache_type_v: str = typer.Option("q8_0", "--cache-type-v"),
@@ -599,6 +624,8 @@ def run(
         threads,
         extra_arg,
         remember,
+        vram_weight,
+        latency_weight,
     )
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)

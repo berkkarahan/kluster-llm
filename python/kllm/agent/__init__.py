@@ -23,8 +23,12 @@ from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
 from kllm.run_planning import (
     build_master_launch,
+    ensure_master_alive_after_spawn,
+    ensure_rpc_peers_reachable,
     execute_plan,
+    member_rpc_host,
     merge_and_sanitize_extra,
+    rpc_server_endpoints,
     validate_vision_for_run,
 )
 from kllm.run_settings import PlanBody, RunBody
@@ -49,6 +53,7 @@ async def _plan_run_validation_handler(request: Request, exc: RequestValidationE
 
 _advertiser: discovery.MasterAdvertiser | None = None
 STATE = ClusterState.load()
+membership_mod.reconcile_last_plan(STATE)
 if not STATE.node_id:
     STATE.node_id = secrets.token_hex(4)
     STATE.save()
@@ -172,9 +177,49 @@ def _worker_post_heartbeat() -> None:
     STATE.save()
 
 
+_LATENCY_EMA_ALPHA = 0.3
+
+
+def _probe_worker_latencies() -> None:
+    """Master: measure control-plane RTT to workers (EMA). Does not clobber on failure."""
+    if STATE.role != "master":
+        return
+    master_id = STATE.node_id
+    if master_id in STATE.members:
+        STATE.members[master_id]["latency_ms"] = 0.0
+    import httpx
+
+    for nid, member in list(STATE.members.items()):
+        if nid == master_id or (member or {}).get("role") == "master":
+            continue
+        raw = member or {}
+        if not raw.get("host") and not raw.get("lan_host"):
+            continue
+        host = member_rpc_host(raw)
+        port = int(raw.get("control_port") or DEFAULT_CONTROL_PORT)
+        url = f"http://{host}:{port}/health"
+        try:
+            start = time.perf_counter()
+            with httpx.Client(timeout=1.0) as client:
+                resp = client.get(url)
+            if resp.status_code != 200:
+                continue
+            sample_ms = (time.perf_counter() - start) * 1000.0
+        except Exception:
+            continue
+        prev = raw.get("latency_ms")
+        if prev is None:
+            smoothed = sample_ms
+        else:
+            smoothed = _LATENCY_EMA_ALPHA * sample_ms + (1.0 - _LATENCY_EMA_ALPHA) * float(prev)
+        STATE.members[nid]["latency_ms"] = smoothed
+
+
 def _tick_membership() -> None:
     if STATE.role == "master":
         _sync_master_liveness(shrink=True)
+        _probe_worker_latencies()
+        STATE.save()
     elif STATE.role == "worker":
         _worker_post_heartbeat()
 
@@ -351,6 +396,10 @@ class DownloadBody(BaseModel):
     name: str | None = None
 
 
+class SearchBody(BaseModel):
+    query: str
+
+
 class HfTokenBody(BaseModel):
     token: str
 
@@ -400,6 +449,31 @@ def list_models() -> dict[str, Any]:
                 if m["id"] == STATE.model_name:
                     m["loaded"] = True
     return {"object": "list", "data": data, "loaded": STATE.model_name}
+
+
+def _search_total_vram_bytes() -> int | None:
+    """Live cluster: sum member VRAM. Idle: sum local GPUs. Else unknown."""
+    members = STATE.members or {}
+    if members:
+        return model_ops.sum_vram_bytes(members.values())
+    try:
+        listed = native.list_gpus()
+    except Exception:
+        return None
+    return model_ops.sum_vram_bytes(listed.get("gpus") or [])
+
+
+@app.post("/v1/models/search")
+def search_models(body: SearchBody) -> dict[str, Any]:
+    query = (body.query or "").strip()
+    if not query:
+        raise HTTPException(400, "query is required")
+    try:
+        return model_ops.search_hub_ggufs(
+            query, total_vram_bytes=_search_total_vram_bytes()
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/v1/models/download")
@@ -546,6 +620,7 @@ def put_config(body: ConfigBody) -> dict[str, Any]:
 @app.get("/v1/status")
 def status() -> dict[str, Any]:
     _sync_master_liveness(shrink=True)
+    membership_mod.reconcile_last_plan(STATE)
     capacity = None
     try:
         capacity = native.probe_capacity()
@@ -560,7 +635,7 @@ def status() -> dict[str, Any]:
         "members": STATE.members,
         "process_pid": STATE.process_pid,
         "process_role": STATE.process_role,
-        "last_plan": STATE.last_plan,
+        "last_plan": membership_mod.public_last_plan(STATE),
         "model_name": STATE.model_name,
         "download": model_ops.get_download_progress(),
         "capacity": capacity,
@@ -683,6 +758,7 @@ def start_master(body: StartBody) -> dict[str, Any]:
         "backend": backend,
         "gpu_ids": STATE.gpu_ids,
         "last_seen": time.time(),
+        "latency_ms": 0.0,
     }
 
     if overlay == netsec.OVERLAY_WIREGUARD:
@@ -1146,11 +1222,8 @@ def run(body: RunBody) -> dict[str, Any]:
             plan_result.get("hint") or "model and context exceed cluster budget (overflow)",
         )
     path = model_ops.resolve_local_model(body.model)
-    rpc_servers = []
-    for m in STATE.members.values():
-        if m.get("role") == "worker":
-            host = m.get("host") or m.get("lan_host") or "127.0.0.1"
-            rpc_servers.append(f"{host}:{m.get('rpc_port', DEFAULT_RPC_PORT)}")
+    rpc_servers = rpc_server_endpoints(STATE.members)
+    ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
     if STATE.process_pid:
         native.stop_process(STATE.process_pid, force=True)
@@ -1170,9 +1243,19 @@ def run(body: RunBody) -> dict[str, Any]:
         gpu_env=gpu_env,
         extra_args=extra,
     )
+    launched: dict[str, Any] | None = None
     try:
         launched = native.start_master(**launch_cfg)
+        ensure_master_alive_after_spawn(launched.get("pid"))
+    except HTTPException:
+        if launched and launched.get("pid"):
+            native.stop_process(int(launched["pid"]), force=True)
+            runtime.clear_children()
+        raise
     except Exception as exc:
+        if launched and launched.get("pid"):
+            native.stop_process(int(launched["pid"]), force=True)
+            runtime.clear_children()
         raise HTTPException(500, str(exc)) from exc
     STATE.process_pid = launched["pid"]
     STATE.process_role = "master"

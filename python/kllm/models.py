@@ -6,10 +6,10 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
-from huggingface_hub import hf_hub_url, list_repo_files
+from huggingface_hub import hf_hub_url, list_models, list_repo_files, model_info
 from huggingface_hub.utils import build_hf_headers
 
 from kllm.gguf_meta import read_context_length
@@ -31,6 +31,10 @@ _QUANT_TOKEN_RE = re.compile(
 
 _DOWNLOAD_LOCK = threading.Lock()
 _DOWNLOAD_PROGRESS: dict[str, Any] | None = None
+
+SEARCH_HUB_LIMIT = 20
+SEARCH_REPO_CAP = 8
+SEARCH_FILE_CAP = 40
 
 
 class DownloadInProgressError(RuntimeError):
@@ -185,6 +189,298 @@ def resolve_hf_filename(repo_id: str, suffix: str, *, token: str | None = None) 
         return suffix
     files = list_repo_files(repo_id, token=token if token else False)
     return select_gguf_for_quant(files, suffix, repo_id=repo_id)
+
+
+def parse_model_search_query(query: str) -> dict[str, Any]:
+    """Split a Models search box into url / repo / Hub-search parts."""
+    raw = query.strip()
+    if not raw:
+        raise ValueError("query is empty")
+    if raw.startswith("http://") or raw.startswith("https://"):
+        repo_id, filename = (None, None)
+        if _is_hf_host(raw):
+            repo_id, filename = _parse_hf_url(raw)
+        return {
+            "raw": raw,
+            "kind": "url",
+            "url": raw,
+            "repo_id": repo_id,
+            "search_term": None,
+            "suffix": filename,
+        }
+    suffix = None
+    left = raw
+    if ":" in raw:
+        left, suffix = raw.split(":", 1)
+        left = left.strip()
+        suffix = suffix.strip() or None
+    if not left:
+        raise ValueError("query is empty")
+    if "/" in left:
+        return {
+            "raw": raw,
+            "kind": "repo",
+            "url": None,
+            "repo_id": left,
+            "search_term": None,
+            "suffix": suffix,
+        }
+    return {
+        "raw": raw,
+        "kind": "search",
+        "url": None,
+        "repo_id": None,
+        "search_term": left,
+        "suffix": suffix,
+    }
+
+
+def rank_hub_repo_ids(repo_ids: list[str], search_term: str) -> list[str]:
+    """Exact repo-name matches first (case-insensitive), preserving relative order."""
+    needle = search_term.strip().lower()
+    exact: list[str] = []
+    rest: list[str] = []
+    seen: set[str] = set()
+    for repo_id in repo_ids:
+        if not repo_id or repo_id in seen:
+            continue
+        seen.add(repo_id)
+        name = repo_id.rsplit("/", 1)[-1]
+        if name.lower() == needle:
+            exact.append(repo_id)
+        else:
+            rest.append(repo_id)
+    return exact + rest
+
+
+def sum_vram_bytes(entries: Any) -> int | None:
+    """Sum ``vram_bytes`` over mappings. ``None`` when no positive value is known."""
+    total = 0
+    known = False
+    if entries is None:
+        return None
+    for entry in entries:
+        if isinstance(entry, dict):
+            raw = entry.get("vram_bytes")
+        else:
+            raw = getattr(entry, "vram_bytes", None)
+        if raw is None:
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            total += n
+            known = True
+    return total if known else None
+
+
+def vram_fit(size_bytes: int | None, total_vram_bytes: int | None) -> str:
+    """Weights-vs-total-VRAM heuristic: fits / overflow / unknown."""
+    if total_vram_bytes is None or total_vram_bytes <= 0:
+        return "unknown"
+    if size_bytes is None or size_bytes <= 0:
+        return "unknown"
+    return "fits" if size_bytes <= total_vram_bytes else "overflow"
+
+
+def _parse_hf_url(url: str) -> tuple[str | None, str | None]:
+    parsed = urlparse(url)
+    parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
+    if parts and parts[0] in {"models", "model"}:
+        parts = parts[1:]
+    if len(parts) < 2:
+        return None, None
+    repo_id = f"{parts[0]}/{parts[1]}"
+    rest = parts[2:]
+    if not rest:
+        return repo_id, None
+    if rest[0] in {"blob", "resolve", "raw"}:
+        file_parts = rest[2:] if len(rest) > 2 else []
+        filename = "/".join(file_parts) if file_parts else None
+        return repo_id, filename
+    return repo_id, None
+
+
+def _quant_label(filename: str, suffix: str | None) -> str | None:
+    tokens = quant_tokens_in_name(filename)
+    if suffix and looks_like_quant_tag(suffix):
+        target = normalize_quant(suffix)
+        for token in tokens:
+            if normalize_quant(token) == target:
+                return token
+    return tokens[-1] if tokens else None
+
+
+def _files_for_suffix(files: list[str], suffix: str | None) -> list[str]:
+    if not suffix:
+        return _candidate_ggufs(files)
+    if is_exact_hf_filename(suffix):
+        if suffix in files:
+            return [suffix]
+        base = Path(suffix).name.lower()
+        matches = [rel for rel in files if Path(rel).name.lower() == base]
+        return matches or [suffix]
+    return match_gguf_for_quant(files, suffix)
+
+
+def _sibling_size(sibling: Any) -> int:
+    raw = getattr(sibling, "size", None)
+    if raw is None and isinstance(sibling, dict):
+        raw = sibling.get("size")
+    try:
+        return int(raw) if raw else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _hit_row(
+    repo_id: str,
+    filename: str,
+    *,
+    size_bytes: int,
+    gated: bool,
+    suffix: str | None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    rel = filename
+    return {
+        "repo_id": repo_id,
+        "filename": Path(rel).name,
+        "quant": _quant_label(rel, suffix),
+        "size_bytes": size_bytes,
+        "gated": gated,
+        "source": source or f"{repo_id}:{rel}",
+    }
+
+
+def _inspect_repo_ggufs(
+    repo_id: str,
+    *,
+    suffix: str | None,
+    token: str | None,
+) -> list[dict[str, Any]]:
+    try:
+        info = model_info(repo_id, files_metadata=True, token=token if token else False)
+    except Exception:
+        return []
+    gated = bool(getattr(info, "gated", False))
+    siblings = list(getattr(info, "siblings", None) or [])
+    files: list[str] = []
+    sizes: dict[str, int] = {}
+    for sibling in siblings:
+        rel = getattr(sibling, "rfilename", None)
+        if not rel and isinstance(sibling, dict):
+            rel = sibling.get("rfilename")
+        if not rel:
+            continue
+        files.append(rel)
+        sizes[rel] = _sibling_size(sibling)
+    rows: list[dict[str, Any]] = []
+    for rel in _files_for_suffix(files, suffix):
+        rows.append(
+            _hit_row(
+                repo_id,
+                rel,
+                size_bytes=sizes.get(rel, 0),
+                gated=gated,
+                suffix=suffix,
+            )
+        )
+    return rows
+
+
+def _url_size_bytes(url: str, *, headers: dict[str, str] | None = None) -> int | None:
+    try:
+        with httpx.Client(follow_redirects=True, timeout=15.0) as client:
+            resp = client.head(url, headers=headers or {})
+            length = _content_length(resp.headers)
+            return length if length > 0 else None
+    except Exception:
+        return None
+
+
+def _synthetic_url_hit(url: str, *, token: str | None, parsed: dict[str, Any]) -> dict[str, Any]:
+    headers = _hub_headers(token) if _is_hf_host(url) else {}
+    size = _url_size_bytes(url, headers=headers) or 0
+    repo_id = parsed.get("repo_id") or urlparse(url).netloc
+    suffix = parsed.get("suffix")
+    filename = Path(suffix).name if suffix else (Path(urlparse(url).path).name or "model.gguf")
+    source = f"{parsed['repo_id']}:{suffix}" if parsed.get("repo_id") and suffix else url
+    return _hit_row(
+        str(repo_id),
+        suffix or filename,
+        size_bytes=size,
+        gated=False,
+        suffix=suffix,
+        source=source,
+    )
+
+
+def _hub_search_repo_ids(search_term: str, *, token: str | None) -> list[str]:
+    hits = list(
+        list_models(
+            search=search_term,
+            filter="gguf",
+            limit=SEARCH_HUB_LIMIT,
+            token=token if token else False,
+        )
+    )
+    ids: list[str] = []
+    for hit in hits:
+        repo_id = getattr(hit, "id", None)
+        if not repo_id and isinstance(hit, dict):
+            repo_id = hit.get("id")
+        if repo_id:
+            ids.append(str(repo_id))
+    return rank_hub_repo_ids(ids, search_term)
+
+
+def search_hub_ggufs(
+    query: str,
+    *,
+    total_vram_bytes: int | None = None,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Resolve a search box query to GGUF hits with size and VRAM fit."""
+    parsed = parse_model_search_query(query)
+    if token is None:
+        token = resolve_hf_token()
+    results: list[dict[str, Any]] = []
+    kind = parsed["kind"]
+    if kind == "url":
+        if parsed.get("repo_id") and not parsed.get("suffix"):
+            results = _inspect_repo_ggufs(parsed["repo_id"], suffix=None, token=token)
+        elif parsed.get("repo_id") and parsed.get("suffix"):
+            results = _inspect_repo_ggufs(
+                parsed["repo_id"], suffix=parsed.get("suffix"), token=token
+            )
+            if not results:
+                results = [_synthetic_url_hit(parsed["url"], token=token, parsed=parsed)]
+        else:
+            results = [_synthetic_url_hit(parsed["url"], token=token, parsed=parsed)]
+    elif kind == "repo":
+        results = _inspect_repo_ggufs(
+            parsed["repo_id"], suffix=parsed.get("suffix"), token=token
+        )
+    else:
+        repo_ids = _hub_search_repo_ids(parsed["search_term"], token=token)
+        for repo_id in repo_ids[:SEARCH_REPO_CAP]:
+            rows = _inspect_repo_ggufs(
+                repo_id, suffix=parsed.get("suffix"), token=token
+            )
+            results.extend(rows)
+            if len(results) >= SEARCH_FILE_CAP:
+                break
+        results = results[:SEARCH_FILE_CAP]
+    for row in results:
+        row["fit"] = vram_fit(row.get("size_bytes"), total_vram_bytes)
+    return {
+        "query": parsed["raw"],
+        "total_vram_bytes": total_vram_bytes,
+        "results": results,
+    }
 
 
 def _is_hf_host(url: str) -> bool:

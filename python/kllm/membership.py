@@ -10,9 +10,15 @@ from fastapi import HTTPException
 from kllm import models as model_ops
 from kllm import native, runtime
 from kllm.extra_args import sanitize_extra_args
-from kllm.run_planning import build_master_launch, execute_plan
+from kllm.run_planning import (
+    build_master_launch,
+    ensure_rpc_peers_reachable,
+    execute_plan,
+    ordered_members,
+    rpc_server_endpoints,
+)
 from kllm.run_settings import RunBody
-from kllm.state import DEFAULT_RPC_PORT, ClusterState, repo_root
+from kllm.state import ClusterState, repo_root
 
 HEARTBEAT_INTERVAL_S = 2
 LIVENESS_TIMEOUT_S = 20
@@ -27,6 +33,7 @@ _SNAPSHOT_OPTIONAL = (
     "rpc_port",
     "lan_host",
     "last_seen",
+    "latency_ms",
 )
 
 _UNREACHABLE_WARNING = "master heartbeat unreachable"
@@ -53,11 +60,42 @@ def cluster_snapshot(members: dict[str, Any] | None) -> dict[str, dict[str, Any]
     return out
 
 
+def last_plan_matches_members(state: ClusterState) -> bool:
+    """True when last_plan node_ids exactly match current cluster members."""
+    plan = state.last_plan
+    if not plan:
+        return False
+    if state.role != "master" or not state.members:
+        return False
+    member_ids = set(state.members.keys())
+    plan_ids = {str(n) for n in (plan.get("node_ids") or []) if n}
+    return bool(member_ids) and plan_ids == member_ids
+
+
+def public_last_plan(state: ClusterState) -> dict[str, Any] | None:
+    """Plan snapshot safe to expose on status / worker mirror (no stale multi-node plans)."""
+    if not last_plan_matches_members(state):
+        return None
+    return state.last_plan
+
+
+def reconcile_last_plan(state: ClusterState, *, persist: bool = True) -> bool:
+    """Drop persisted last_plan when role or membership no longer matches. Returns True if cleared."""
+    if state.last_plan is None:
+        return False
+    if last_plan_matches_members(state):
+        return False
+    state.last_plan = None
+    if persist:
+        state.save()
+    return True
+
+
 def snapshot_payload(state: ClusterState) -> dict[str, Any]:
     """Fields shared by register/heartbeat success bodies (plus register's member count)."""
     return {
         "cluster_members": cluster_snapshot(state.members),
-        "last_plan": state.last_plan,
+        "last_plan": public_last_plan(state),
         "apply_error": state.apply_error,
         "apply_warning": state.apply_warning,
     }
@@ -137,11 +175,8 @@ def _stop_inference(state: ClusterState) -> None:
 
 def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, Any]) -> None:
     path = model_ops.resolve_local_model(body.model)
-    rpc_servers = []
-    for m in state.members.values():
-        if m.get("role") == "worker":
-            host = m.get("host") or m.get("lan_host") or "127.0.0.1"
-            rpc_servers.append(f"{host}:{m.get('rpc_port', DEFAULT_RPC_PORT)}")
+    rpc_servers = rpc_server_endpoints(state.members)
+    ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
     if state.process_pid:
         native.stop_process(state.process_pid, force=True)
@@ -190,7 +225,9 @@ def on_membership_shrink(state: ClusterState) -> None:
         plan = dict(state.last_plan or {})
         plan["fit_status"] = "overflow"
         plan["hint"] = plan_error
-        plan["node_ids"] = [m.get("node_id") for m in state.members.values() if m.get("node_id")]
+        plan["node_ids"] = [
+            m.get("node_id") for m in ordered_members(state.members) if m.get("node_id")
+        ]
 
     if plan is not None:
         state.last_plan = plan

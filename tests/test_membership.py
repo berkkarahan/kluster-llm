@@ -165,6 +165,21 @@ def test_master_only_members_and_stop_clears_apply(client):
     assert data["apply_error"] is None
     assert data["apply_warning"] is None
     assert data["join_key"] is None
+    assert data["last_plan"] is None
+
+
+def test_idle_status_clears_stale_last_plan(client):
+    c, agent = client
+    agent.STATE.role = "idle"
+    agent.STATE.members = {}
+    agent.STATE.last_plan = {"node_ids": [agent.STATE.node_id, "phantom"], "tensor_split": [0.6, 0.4]}
+    agent.STATE.save()
+    r = c.get("/v1/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["role"] == "idle"
+    assert data["last_plan"] is None
+    assert agent.STATE.last_plan is None
 
 
 def test_register_keeps_member_count_adds_cluster_members(client):

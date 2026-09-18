@@ -380,3 +380,87 @@ def test_status_download_during_mocked_download(client, monkeypatch):
     r = c.get("/v1/status")
     assert r.status_code == 200
     assert r.json()["download"] is None
+
+
+ORCA_REPO = "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+
+
+class _SearchSibling:
+    def __init__(self, rfilename: str, size: int):
+        self.rfilename = rfilename
+        self.size = size
+
+
+class _SearchInfo:
+    gated = False
+
+    def __init__(self, siblings: list[_SearchSibling]):
+        self.siblings = siblings
+
+
+def _patch_hub_search(monkeypatch):
+    def fake_list_models(**_kwargs):
+        return [
+            type("M", (), {"id": "someone/other-gguf"})(),
+            type("M", (), {"id": ORCA_REPO})(),
+        ]
+
+    def fake_model_info(repo_id, **_kwargs):
+        if repo_id == ORCA_REPO:
+            return _SearchInfo(
+                [
+                    _SearchSibling("Qwen3.8-27B-Uncensored-Q4_K_M.gguf", 16_800_000_000),
+                    _SearchSibling("Qwen3.8-27B-Uncensored-Q8_0.gguf", 30_000_000_000),
+                    _SearchSibling("mmproj-Q4_K_M.gguf", 1000),
+                ]
+            )
+        raise OSError("skip")
+
+    monkeypatch.setattr("kllm.models.list_models", fake_list_models)
+    monkeypatch.setattr("kllm.models.model_info", fake_model_info)
+
+
+def test_models_search_empty_query_400(client):
+    c, _, _ = client
+    r = c.post("/v1/models/search", json={"query": "  "})
+    assert r.status_code == 400
+    assert "query" in r.json()["detail"]
+
+
+def test_models_search_hub_error_400(client, monkeypatch):
+    c, _, _ = client
+
+    def boom(**_kwargs):
+        raise RuntimeError("hub down")
+
+    monkeypatch.setattr("kllm.models.list_models", boom)
+    r = c.post("/v1/models/search", json={"query": "Qwen3.8-27B-Uncensored-GGUF"})
+    assert r.status_code == 400
+    assert "hub down" in r.json()["detail"]
+
+
+def test_models_search_qwen_quant_fit(client, monkeypatch):
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    agent.STATE.members = {
+        "n1": {"vram_bytes": 24_000_000_000},
+        "n2": {"vram_bytes": 24_000_000_000},
+    }
+    _patch_hub_search(monkeypatch)
+    r = c.post(
+        "/v1/models/search",
+        json={"query": "Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["query"] == "Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"
+    assert body["total_vram_bytes"] == 48_000_000_000
+    assert len(body["results"]) == 1
+    row = body["results"][0]
+    assert row["repo_id"] == ORCA_REPO
+    assert row["filename"] == "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    assert row["quant"] == "Q4_K_M"
+    assert row["size_bytes"] == 16_800_000_000
+    assert row["source"] == f"{ORCA_REPO}:Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    assert row["fit"] == "fits"
+    assert row["gated"] is False

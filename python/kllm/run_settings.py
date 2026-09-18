@@ -33,6 +33,8 @@ class RunSettingsFields(BaseModel):
     headroom: float | None = Field(default=None, ge=0.1, le=1.0)
     vram_percent: int | None = Field(default=None, ge=10, le=100)
     ram_percent: int | None = Field(default=None, ge=10, le=100)
+    vram_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    latency_weight: float = Field(default=0.4, ge=0.0, le=1.0)
     gpu_ids: list[int] | None = None
     chat_template: str = "default"
     chat_template_text: str | None = None
@@ -60,6 +62,8 @@ class RunSettingsFields(BaseModel):
             )
         if self.vram_percent is not None and self.ram_percent is not None:
             raise ValueError("pass only one of vram_percent or ram_percent")
+        if self.vram_weight + self.latency_weight <= 0:
+            raise ValueError("vram_weight and latency_weight cannot both be zero")
         return self
 
     def normalized_auto_fields(self) -> dict[str, Any]:
@@ -84,6 +88,8 @@ class RunSettingsFields(BaseModel):
             "headroom": self.headroom,
             "vram_percent": self.vram_percent,
             "ram_percent": self.ram_percent,
+            "vram_weight": float(self.vram_weight),
+            "latency_weight": float(self.latency_weight),
             "gpu_ids": self.gpu_ids,
             "chat_template": self.chat_template,
             "chat_template_text": self.chat_template_text,

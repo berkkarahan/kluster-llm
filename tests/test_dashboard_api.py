@@ -382,6 +382,124 @@ def test_status_download_during_mocked_download(client, monkeypatch):
     assert r.json()["download"] is None
 
 
+def test_status_distribute_and_receive_fields(client):
+    c, agent, _ = client
+    from kllm import models as model_ops
+
+    r = c.get("/v1/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("distribute") is None
+    assert body.get("receive") is None
+
+    model_ops._init_distribute_progress("toy.gguf", 100)
+    model_ops._set_distribute_workers(
+        [
+            {
+                "node_id": "w1",
+                "host": "10.0.0.2",
+                "phase": "sending",
+                "bytes": 50,
+                "total": 100,
+                "pct": 50,
+                "error": None,
+            }
+        ]
+    )
+    try:
+        r = c.get("/v1/status")
+        dist = r.json()["distribute"]
+        assert dist["filename"] == "toy.gguf"
+        assert dist["pct"] == 50
+        assert len(dist["workers"]) == 1
+        assert dist["workers"][0]["host"] == "10.0.0.2"
+    finally:
+        model_ops._clear_distribute_progress()
+
+    model_ops._set_receive_progress("toy.gguf", 25, 100, phase="receiving")
+    try:
+        r = c.get("/v1/status")
+        recv = r.json()["receive"]
+        assert recv["filename"] == "toy.gguf"
+        assert recv["pct"] == 25
+        assert recv["phase"] == "receiving"
+    finally:
+        model_ops._clear_receive_progress()
+
+
+def test_receive_endpoint_progress_and_meta(client):
+    c, agent, _ = client
+    import hashlib
+
+    from kllm import models as model_ops
+    from kllm.state import models_dir
+
+    agent.STATE.role = "worker"
+    agent.STATE.join_key = "secret"
+    agent.STATE.save()
+
+    payload = b"worker-receive-bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    # Mid-receive status via begin_receive + finish chunk, then complete via API path
+    progress_seen = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+
+    def run_receive():
+        try:
+            tmp = model_ops.begin_receive("got.gguf", len(payload))
+            progress_seen.set()
+            assert release.wait(timeout=5)
+            with tmp.open("wb") as f:
+                f.write(payload)
+            dest = models_dir() / "got.gguf"
+            model_ops.complete_receive(tmp, dest, digest=digest, size=len(payload))
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=run_receive)
+    t.start()
+    try:
+        assert progress_seen.wait(timeout=5)
+        r = c.get("/v1/status")
+        assert r.json()["receive"] is not None
+        assert r.json()["receive"]["filename"] == "got.gguf"
+    finally:
+        release.set()
+        t.join(timeout=5)
+    assert errors == []
+
+    r = c.get(
+        "/v1/models/file",
+        headers={"X-Kllm-Key": "secret", "X-Kllm-Filename": "got.gguf"},
+    )
+    assert r.status_code == 200
+    meta = r.json()
+    assert meta["exists"] is True
+    assert meta["size_bytes"] == len(payload)
+    assert meta["sha256"] == digest
+
+    # Full PUT receive path
+    payload2 = b"second-receive"
+    digest2 = hashlib.sha256(payload2).hexdigest()
+    r = c.put(
+        "/v1/models/receive",
+        content=payload2,
+        headers={
+            "X-Kllm-Key": "secret",
+            "X-Kllm-Filename": "got2.gguf",
+            "X-Kllm-Sha256": digest2,
+            "X-Kllm-Size": str(len(payload2)),
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["sha256"] == digest2
+    assert (models_dir() / "got2.gguf").read_bytes() == payload2
+    assert model_ops.get_receive_progress() is None
+
+
 ORCA_REPO = "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
 
 

@@ -67,6 +67,12 @@ def plan_split(
     context_auto: bool = False,
     vram_weight: float = 0.6,
     latency_weight: float = 0.4,
+    cache_type_k: str = "q8_0",
+    cache_type_v: str = "q8_0",
+    parallel_slots: int = 1,
+    mmproj_size_bytes: int = 0,
+    draft_model_size_bytes: int = 0,
+    vision: bool = False,
 ) -> dict[str, Any]:
     n = require_native()
     req: dict[str, Any] = {
@@ -78,6 +84,12 @@ def plan_split(
         "device": device,
         "vram_weight": vram_weight,
         "latency_weight": latency_weight,
+        "cache_type_k": cache_type_k,
+        "cache_type_v": cache_type_v,
+        "parallel_slots": max(1, int(parallel_slots)),
+        "mmproj_size_bytes": int(mmproj_size_bytes),
+        "draft_model_size_bytes": int(draft_model_size_bytes),
+        "vision": bool(vision),
     }
     if tensor_split is not None:
         req["tensor_split"] = tensor_split

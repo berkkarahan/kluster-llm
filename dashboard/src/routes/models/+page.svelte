@@ -1,6 +1,12 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
-  import type { DownloadProgress, ModelSearchFit, ModelSearchHit } from '$lib/types';
+  import type {
+    DistributeProgress,
+    DownloadProgress,
+    ModelSearchFit,
+    ModelSearchHit,
+    ReceiveProgress,
+  } from '$lib/types';
 
   let modalOpen = $state(false);
 
@@ -13,10 +19,28 @@
     return (n / 1e9).toFixed(1);
   }
 
-  function downloadLabel(d: DownloadProgress) {
+  function downloadLabel(d: DownloadProgress | ReceiveProgress) {
     const pct = Math.round(d.pct);
     if (d.total == null) return `${pct}% · ${fmtGb(d.bytes)} GB`;
     return `${pct}% · ${fmtGb(d.bytes)} / ${fmtGb(d.total)} GB`;
+  }
+
+  function transferLabel(d: DistributeProgress) {
+    const pct = Math.round(d.pct);
+    const phase = d.phase ?? 'pushing';
+    if (phase === 'hashing' && d.total != null && d.bytes != null) {
+      return `hashing ${pct}% · ${fmtGb(d.bytes)} / ${fmtGb(d.total)} GB`;
+    }
+    return `distribute ${pct}%`;
+  }
+
+  function workerLabel(w: DistributeProgress['workers'][number]) {
+    const pct = Math.round(w.pct);
+    const host = w.host || w.node_id || 'worker';
+    if (w.phase === 'skipped') return `${host} · skipped`;
+    if (w.phase === 'error') return `${host} · error${w.error ? `: ${w.error}` : ''}`;
+    if (w.total == null) return `${host} · ${w.phase} ${pct}%`;
+    return `${host} · ${w.phase} ${pct}% · ${fmtGb(w.bytes)} / ${fmtGb(w.total)} GB`;
   }
 
   function fitChip(fit: ModelSearchFit) {
@@ -32,6 +56,8 @@
   }
 
   const dl = $derived(appStore.status?.download ?? null);
+  const dist = $derived(appStore.status?.distribute ?? null);
+  const recv = $derived(appStore.status?.receive ?? null);
 
   $effect(() => {
     if (!modalOpen) return;
@@ -98,6 +124,62 @@
       </div>
     {:else if appStore.busy === '/v1/models/download'}
       <div class="mono text-[11px]" style="color: var(--muted)">starting…</div>
+    {/if}
+
+    {#if dist}
+      <div class="flex flex-col gap-2 mt-1">
+        <div class="mono text-[11px]" style="color: var(--muted)">
+          {transferLabel(dist)}{#if dist.filename}<span> · {dist.filename}</span>{/if}
+        </div>
+        {#if dist.phase === 'hashing'}
+          <div
+            class="progress"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(dist.pct)}
+            aria-label="Model hashing"
+          >
+            <span style:width={`${Math.min(100, Math.max(0, dist.pct))}%`}></span>
+          </div>
+        {/if}
+        {#each dist.workers as w (w.host + (w.node_id ?? ''))}
+          <div class="flex flex-col gap-1">
+            <div
+              class="progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(w.pct)}
+              aria-label={`Distribute to ${w.host}`}
+            >
+              <span style:width={`${Math.min(100, Math.max(0, w.pct))}%`}></span>
+            </div>
+            <div class="mono text-[11px]" style="color: var(--muted)">{workerLabel(w)}</div>
+          </div>
+        {/each}
+      </div>
+    {:else if appStore.busy === '/v1/models/distribute'}
+      <div class="mono text-[11px]" style="color: var(--muted)">distributing…</div>
+    {/if}
+
+    {#if recv}
+      <div class="flex flex-col gap-1 mt-1">
+        <div
+          class="progress"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(recv.pct)}
+          aria-label="Model receive"
+        >
+          <span style:width={`${Math.min(100, Math.max(0, recv.pct))}%`}></span>
+        </div>
+        <div class="mono text-[11px]" style="color: var(--muted)">
+          receive {downloadLabel(recv)}{#if recv.filename}<span> · {recv.filename}</span>{/if}
+          {#if recv.phase}<span> · {recv.phase}</span>{/if}
+        </div>
+      </div>
     {/if}
 
     <label class="mono text-[11px] mt-2 flex items-center gap-2" style="color: var(--muted)" for="hf-token">

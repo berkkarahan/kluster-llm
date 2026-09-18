@@ -17,8 +17,12 @@ def kllm_home(tmp_path, monkeypatch):
     home.mkdir()
     (home / "models").mkdir()
     models._reset_download_state()
+    models._reset_distribute_state()
+    models._reset_receive_state()
     yield home
     models._reset_download_state()
+    models._reset_distribute_state()
+    models._reset_receive_state()
 
 
 def test_normalize_quant_strips_separators_and_gguf():
@@ -332,3 +336,189 @@ def test_search_url_uses_content_length(monkeypatch):
     assert row["size_bytes"] == 12345
     assert row["source"] == "https://example.test/tiny.Q4_K_M.gguf"
     assert row["quant"] == "Q4_K_M"
+
+
+def test_download_writes_sha256_sidecar(kllm_home, monkeypatch):
+    payload = b"gguf-sidecar-bytes"
+
+    def fake_stream(*_args, **_kwargs):
+        return _FakeResp(payload)
+
+    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    path = models.download_model("https://example.test/sidecar.gguf")
+    assert models.read_sha256_sidecar(path) == models.sha256_file(path)
+
+
+def test_distribute_in_progress_rejected(kllm_home):
+    path = kllm_home / "models" / "toy.gguf"
+    path.write_bytes(b"abc")
+    assert models._DISTRIBUTE_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(models.DistributeInProgressError):
+            models.distribute_to_workers(path, [], "key")
+    finally:
+        models._DISTRIBUTE_LOCK.release()
+
+
+def test_distribute_skip_when_worker_matches(kllm_home, monkeypatch):
+    path = kllm_home / "models" / "toy.gguf"
+    payload = b"hello-distribute"
+    path.write_bytes(payload)
+    digest = models.ensure_sha256(path)
+    seen_progress: list[dict] = []
+
+    def capture():
+        snap = models.get_distribute_progress()
+        if snap:
+            seen_progress.append(snap)
+
+    def fake_probe(*_a, **_k):
+        capture()
+        return {
+            "exists": True,
+            "filename": path.name,
+            "size_bytes": len(payload),
+            "sha256": digest,
+            "path": str(path),
+        }
+
+    put_calls: list[object] = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, *a, **k):
+            class R:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return fake_probe()
+
+            return R()
+
+        def put(self, *a, **k):
+            put_calls.append(1)
+            raise AssertionError("PUT should be skipped")
+
+    monkeypatch.setattr(models.httpx, "Client", FakeClient)
+    workers = [{"node_id": "w1", "host": "10.0.0.2", "role": "worker", "control_port": 18765}]
+
+    # Drive progress updates by wrapping ensure path
+    results = models.distribute_to_workers(path, workers, "secret")
+    assert results == [
+        {
+            "host": "10.0.0.2",
+            "node_id": "w1",
+            "ok": True,
+            "result": {
+                "ok": True,
+                "skipped": True,
+                "path": str(path),
+                "sha256": digest,
+            },
+        }
+    ]
+    assert put_calls == []
+    assert models.get_distribute_progress() is None
+
+
+def test_distribute_updates_progress_during_push(kllm_home, monkeypatch):
+    path = kllm_home / "models" / "push.gguf"
+    payload = b"x" * (2 * 1024 * 1024 + 100)
+    path.write_bytes(payload)
+    snapshots: list[dict] = []
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "path": "/remote/push.gguf", "sha256": "deadbeef"}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, *a, **k):
+            class R:
+                status_code = 404
+
+                def raise_for_status(self):
+                    raise AssertionError("unexpected")
+
+                def json(self):
+                    return {}
+
+            return R()
+
+        def put(self, url, content=None, headers=None):
+            # Consume iterator so progress callbacks fire
+            n = 0
+            for chunk in content:
+                n += len(chunk)
+                snap = models.get_distribute_progress()
+                if snap:
+                    snapshots.append(snap)
+            assert n == len(payload)
+            return FakeResp()
+
+    monkeypatch.setattr(models.httpx, "Client", FakeClient)
+    workers = [
+        {"node_id": "a", "lan_host": "192.168.1.2", "role": "worker", "control_port": 18765},
+        {"node_id": "b", "host": "192.168.1.3", "role": "worker", "control_port": 18765},
+    ]
+    results = models.distribute_to_workers(path, workers, "key")
+    assert len(results) == 2
+    assert all(r["ok"] for r in results)
+    assert any(
+        (s.get("workers") or [{}])[0].get("phase") == "sending" for s in snapshots
+    )
+    assert models.get_distribute_progress() is None
+
+
+def test_receive_progress_and_sidecar(kllm_home):
+    payload = b"receive-me-please"
+    digest = __import__("hashlib").sha256(payload).hexdigest()
+    tmp = models.begin_receive("recv.gguf", len(payload))
+    assert models.get_receive_progress()["pct"] == 0
+    throttle = models._Throttle(interval=0)
+    with tmp.open("wb") as f:
+        f.write(payload)
+    models.finish_receive_chunk(
+        filename="recv.gguf", nbytes=len(payload), total=len(payload), throttle=throttle
+    )
+    assert models.get_receive_progress()["pct"] == 100
+    dest = kllm_home / "models" / "recv.gguf"
+    out = models.complete_receive(tmp, dest, digest=digest, size=len(payload))
+    assert out["ok"] is True
+    assert dest.read_bytes() == payload
+    assert models.read_sha256_sidecar(dest) == digest
+    assert models.get_receive_progress() is None
+
+
+def test_receive_in_progress_rejected(kllm_home):
+    models.begin_receive("a.gguf", 10)
+    try:
+        with pytest.raises(models.ReceiveInProgressError):
+            models.begin_receive("b.gguf", 10)
+    finally:
+        models.abort_receive()
+

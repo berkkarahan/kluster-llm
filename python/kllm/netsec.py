@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -44,14 +45,46 @@ _RPC_SERVER_REL_PATHS = (
 )
 
 
-def pick_rpc_bind_host(preferred: str | None = None) -> str:
+def local_ip_toward(remote: str) -> str | None:
+    """Return the local IPv4 used to reach ``remote`` (UDP connect trick)."""
+    remote = (remote or "").strip()
+    if not remote or remote in ("0.0.0.0", "127.0.0.1"):
+        return None
+    try:
+        # Strip brackets / optional port from host:port forms.
+        host = remote
+        if host.startswith("[") and "]" in host:
+            host = host[1 : host.index("]")]
+        elif host.count(":") == 1:
+            host = host.rsplit(":", 1)[0]
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((host, 1))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and ip != "127.0.0.1":
+            return ip
+    except Exception:
+        return None
+    return None
+
+
+def pick_rpc_bind_host(preferred: str | None = None, *, toward: str | None = None) -> str:
     """Resolve the address rpc-server should bind / advertise.
 
-    Explicit preferred wins (including ``0.0.0.0`` for debug). Otherwise pick the
-    best non-loopback IPv4, preferring RFC1918/link-local-cluster addresses.
+    Explicit preferred wins (including ``0.0.0.0`` for debug). When ``toward`` is
+    set (typically the master host on join), prefer the local IP that routes to
+    that peer — avoids advertising Hyper-V / VPN / virtual NIC addresses that
+    the master cannot reach. Otherwise pick the best non-loopback IPv4,
+    preferring RFC1918/lab ranges.
     """
     if preferred is not None and str(preferred).strip() != "":
         return str(preferred).strip()
+
+    toward_ip = local_ip_toward(toward) if toward else None
+    if toward_ip:
+        return toward_ip
 
     candidates = _list_ipv4_addresses()
     ranked = sorted(candidates, key=_rank_bind_candidate)
@@ -65,6 +98,21 @@ def pick_rpc_bind_host(preferred: str | None = None) -> str:
     if ip and ip != "127.0.0.1":
         return ip
     return "127.0.0.1"
+
+
+def is_usable_lan_peer(ip: str | None) -> bool:
+    """True if ``ip`` is a non-loopback unicast IPv4 suitable for RPC dial."""
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(str(ip).strip())
+    except ValueError:
+        return False
+    if addr.version != 4:
+        return False
+    if addr.is_loopback or addr.is_unspecified or addr.is_multicast or addr.is_link_local:
+        return False
+    return True
 
 
 def _rank_bind_candidate(ip: str) -> tuple[int, str]:
@@ -81,6 +129,8 @@ def _rank_bind_candidate(ip: str) -> tuple[int, str]:
         # Prefer common lab / Thunderbolt ranges slightly.
         if ip.startswith("192.168.10.") or ip.startswith("10.66.87."):
             return (0, ip)
+        # Lexicographic tie-break is unstable across Hyper-V/VPN adapters; keep
+        # private peers equal and let ``toward`` / peer-IP hints decide on join.
         return (1, ip)
     return (50, ip)
 

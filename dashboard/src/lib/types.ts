@@ -24,6 +24,29 @@ export type DownloadProgress = {
   pct: number;
 };
 
+export type ReceiveProgress = DownloadProgress & {
+  phase?: string;
+};
+
+export type DistributeWorkerProgress = {
+  node_id?: string | null;
+  host: string;
+  phase: string;
+  bytes: number;
+  total: number | null;
+  pct: number;
+  error?: string | null;
+};
+
+export type DistributeProgress = {
+  filename: string;
+  phase?: string;
+  bytes?: number;
+  total?: number | null;
+  pct: number;
+  workers: DistributeWorkerProgress[];
+};
+
 export type HfTokenSource = 'file' | 'env' | null;
 
 export type HfTokenStatus = {
@@ -60,6 +83,10 @@ export type Status = {
   apply_warning?: string | null;
   /** Live GGUF download; null/absent when idle. */
   download?: DownloadProgress | null;
+  /** Live multi-worker distribute on master; null/absent when idle. */
+  distribute?: DistributeProgress | null;
+  /** Live receive on worker; null/absent when idle. */
+  receive?: ReceiveProgress | null;
 };
 
 export type ClusterView = 'loading' | 'offline' | 'idle' | 'live';

@@ -9,8 +9,11 @@ const DEFAULT_VRAM_WEIGHT: f64 = 0.6;
 const DEFAULT_LATENCY_WEIGHT: f64 = 0.4;
 /// When estimated need exceeds this fraction of budget (but not budget), status is `tight`.
 pub const TIGHT_RATIO: f64 = 0.90;
-/// Rough bytes-per-token for q8_0 KV estimate (K+V), conservative.
-const KV_BYTES_PER_TOKEN_PER_LAYER: f64 = 256.0;
+/// Base KV bytes/token/layer for a single byte-width of K or V.
+/// With q8_0+q8_0 (1+1): 128*2 = 256 — matches the historical constant.
+const KV_BASE_BYTES_PER_TOKEN_PER_LAYER: f64 = 128.0;
+/// Fixed overhead when vision is on but mmproj size is unknown.
+const VISION_OVERHEAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_AUTO_CONTEXT: u32 = 131_072;
 const AUTO_CONTEXT_STEP: u32 = 512;
 
@@ -81,6 +84,15 @@ pub struct PlanRequest {
     pub device: String,
     pub vram_weight: f64,
     pub latency_weight: f64,
+    /// KV cache dtype for keys (default q8_0).
+    pub cache_type_k: String,
+    /// KV cache dtype for values (default q8_0).
+    pub cache_type_v: String,
+    /// Parallel slots; multiplies KV. Default 1 (treat "auto" as 1 for estimate).
+    pub parallel_slots: u32,
+    pub mmproj_size_bytes: u64,
+    pub draft_model_size_bytes: u64,
+    pub vision: bool,
 }
 
 impl PlanRequest {
@@ -125,6 +137,37 @@ impl PlanRequest {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(DEFAULT_LATENCY_WEIGHT);
+        let cache_type_k: String = dict
+            .get_item("cache_type_k")?
+            .map(|v| v.extract::<String>())
+            .transpose()?
+            .unwrap_or_else(|| "q8_0".into());
+        let cache_type_v: String = dict
+            .get_item("cache_type_v")?
+            .map(|v| v.extract::<String>())
+            .transpose()?
+            .unwrap_or_else(|| "q8_0".into());
+        let parallel_slots: u32 = dict
+            .get_item("parallel_slots")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(1)
+            .max(1);
+        let mmproj_size_bytes: u64 = dict
+            .get_item("mmproj_size_bytes")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0);
+        let draft_model_size_bytes: u64 = dict
+            .get_item("draft_model_size_bytes")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0);
+        let vision: bool = dict
+            .get_item("vision")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(false);
 
         let nodes_obj = dict
             .get_item("nodes")?
@@ -216,6 +259,12 @@ impl PlanRequest {
             device,
             vram_weight,
             latency_weight,
+            cache_type_k,
+            cache_type_v,
+            parallel_slots,
+            mmproj_size_bytes,
+            draft_model_size_bytes,
+            vision,
         })
     }
 }
@@ -543,9 +592,42 @@ fn estimate_layers(model_size_bytes: u64) -> u32 {
     }
 }
 
-fn estimate_kv(model_size_bytes: u64, context: u32, layers: u32) -> u64 {
-    let _ = model_size_bytes;
-    ((context as f64) * (layers as f64) * KV_BYTES_PER_TOKEN_PER_LAYER) as u64
+/// Approximate element width in bytes for a KV cache dtype.
+fn kv_dtype_bytes(dtype: &str) -> f64 {
+    match dtype.to_ascii_lowercase().as_str() {
+        "f32" => 4.0,
+        "f16" | "bf16" => 2.0,
+        "q8_0" => 1.0,
+        "q5_0" | "q5_1" => 0.625,
+        "q4_0" | "q4_1" | "iq4_nl" => 0.5,
+        _ => 1.0, // unknown → treat like q8_0
+    }
+}
+
+fn estimate_kv(
+    context: u32,
+    layers: u32,
+    cache_type_k: &str,
+    cache_type_v: &str,
+    parallel_slots: u32,
+) -> u64 {
+    let width = kv_dtype_bytes(cache_type_k) + kv_dtype_bytes(cache_type_v);
+    let slots = parallel_slots.max(1) as f64;
+    ((context as f64)
+        * (layers as f64)
+        * KV_BASE_BYTES_PER_TOKEN_PER_LAYER
+        * width
+        * slots) as u64
+}
+
+fn estimate_needed(req: &PlanRequest, kv: u64) -> u64 {
+    let mut needed = req.model_size_bytes.saturating_add(kv);
+    needed = needed.saturating_add(req.mmproj_size_bytes);
+    needed = needed.saturating_add(req.draft_model_size_bytes);
+    if req.vision && req.mmproj_size_bytes == 0 {
+        needed = needed.saturating_add(VISION_OVERHEAD_BYTES);
+    }
+    needed
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -638,8 +720,14 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
     let (wv, wl) = normalize_weights(req.vram_weight, req.latency_weight)?;
 
     let layers = estimate_layers(req.model_size_bytes);
-    let kv = estimate_kv(req.model_size_bytes, req.context, layers);
-    let needed = req.model_size_bytes.saturating_add(kv);
+    let kv = estimate_kv(
+        req.context,
+        layers,
+        &req.cache_type_k,
+        &req.cache_type_v,
+        req.parallel_slots,
+    );
+    let needed = estimate_needed(req, kv);
 
     let sacks = build_sacks(&req.nodes, req.headroom, &preferred);
     let total_budget = total_sack_capacity(&sacks);
@@ -854,7 +942,64 @@ mod tests {
             device: device.into(),
             vram_weight: DEFAULT_VRAM_WEIGHT,
             latency_weight: DEFAULT_LATENCY_WEIGHT,
+            cache_type_k: "q8_0".into(),
+            cache_type_v: "q8_0".into(),
+            parallel_slots: 1,
+            mmproj_size_bytes: 0,
+            draft_model_size_bytes: 0,
+            vision: false,
         }
+    }
+
+    #[test]
+    fn kv_q8_matches_legacy_256() {
+        let layers = 32u32;
+        let ctx = 4096u32;
+        let kv = estimate_kv(ctx, layers, "q8_0", "q8_0", 1);
+        assert_eq!(kv, (ctx as u64) * (layers as u64) * 256);
+    }
+
+    #[test]
+    fn kv_f16_is_double_q8() {
+        let q8 = estimate_kv(4096, 32, "q8_0", "q8_0", 1);
+        let f16 = estimate_kv(4096, 32, "f16", "f16", 1);
+        assert_eq!(f16, q8 * 2);
+    }
+
+    #[test]
+    fn kv_scales_with_parallel_slots() {
+        let one = estimate_kv(2048, 48, "q8_0", "q8_0", 1);
+        let two = estimate_kv(2048, 48, "q8_0", "q8_0", 2);
+        assert_eq!(two, one * 2);
+    }
+
+    #[test]
+    fn estimate_includes_mmproj_and_draft() {
+        let mut r = req(vec![node("m", 64, None, true)], 1024 * 1024 * 1024, "gpu");
+        r.mmproj_size_bytes = 100 * 1024 * 1024;
+        r.draft_model_size_bytes = 200 * 1024 * 1024;
+        let plan = plan_split(&r).unwrap();
+        let layers = estimate_layers(r.model_size_bytes);
+        let kv = estimate_kv(r.context, layers, "q8_0", "q8_0", 1);
+        let expected = r
+            .model_size_bytes
+            .saturating_add(kv)
+            .saturating_add(r.mmproj_size_bytes)
+            .saturating_add(r.draft_model_size_bytes);
+        assert_eq!(plan.estimated_bytes, expected);
+    }
+
+    #[test]
+    fn vision_without_mmproj_adds_overhead() {
+        let mut r = req(vec![node("m", 64, None, true)], 512 * 1024 * 1024, "gpu");
+        r.vision = true;
+        let plan = plan_split(&r).unwrap();
+        let base = {
+            let mut b = r.clone();
+            b.vision = false;
+            plan_split(&b).unwrap().estimated_bytes
+        };
+        assert_eq!(plan.estimated_bytes, base + VISION_OVERHEAD_BYTES);
     }
 
     #[test]

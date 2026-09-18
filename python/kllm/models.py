@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -32,6 +34,16 @@ _QUANT_TOKEN_RE = re.compile(
 _DOWNLOAD_LOCK = threading.Lock()
 _DOWNLOAD_PROGRESS: dict[str, Any] | None = None
 
+_DISTRIBUTE_LOCK = threading.Lock()
+_DISTRIBUTE_PROGRESS: dict[str, Any] | None = None
+_DISTRIBUTE_PROGRESS_LOCK = threading.Lock()
+
+_RECEIVE_LOCK = threading.Lock()
+_RECEIVE_PROGRESS: dict[str, Any] | None = None
+
+_PROGRESS_MIN_INTERVAL = 0.1
+_TRANSFER_CHUNK = 1024 * 1024
+
 SEARCH_HUB_LIMIT = 20
 SEARCH_REPO_CAP = 8
 SEARCH_FILE_CAP = 40
@@ -41,7 +53,15 @@ class DownloadInProgressError(RuntimeError):
     """Raised when a second download is requested while one is active."""
 
 
-def sha256_file(path: Path, chunk: int = 1024 * 1024) -> str:
+class DistributeInProgressError(RuntimeError):
+    """Raised when a second distribute is requested while one is active."""
+
+
+class ReceiveInProgressError(RuntimeError):
+    """Raised when a second receive is requested while one is active."""
+
+
+def sha256_file(path: Path, chunk: int = _TRANSFER_CHUNK) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
         while True:
@@ -52,13 +72,83 @@ def sha256_file(path: Path, chunk: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def sha256_sidecar_path(model_path: Path) -> Path:
+    return model_path.with_name(model_path.name + ".sha256")
+
+
+def write_sha256_sidecar(model_path: Path, digest: str) -> None:
+    sha256_sidecar_path(model_path).write_text(digest.strip() + "\n", encoding="utf-8")
+
+
+def read_sha256_sidecar(model_path: Path) -> str | None:
+    side = sha256_sidecar_path(model_path)
+    if not side.is_file():
+        return None
+    try:
+        text = side.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if len(text) != 64 or any(c not in "0123456789abcdef" for c in text.lower()):
+        return None
+    return text.lower()
+
+
+def local_model_meta(model_path: Path) -> dict[str, Any]:
+    """Size + sidecar digest for skip-if-identical probes (does not hash)."""
+    st = model_path.stat()
+    return {
+        "exists": True,
+        "filename": model_path.name,
+        "size_bytes": st.st_size,
+        "sha256": read_sha256_sidecar(model_path),
+    }
+
+
 def _safe_name(name: str) -> str:
     return re.sub(r"[^\w.\-]+", "_", name)[:180]
+
+
+def _pct(nbytes: int, total: int | None) -> int:
+    if not total:
+        return 0
+    return min(100, int(nbytes * 100 / total))
+
+
+class _Throttle:
+    """Rate-limit progress snapshots (~4–10 Hz) unless forced."""
+
+    def __init__(self, interval: float = _PROGRESS_MIN_INTERVAL) -> None:
+        self.interval = interval
+        self._last = 0.0
+
+    def allow(self, *, force: bool = False) -> bool:
+        now = time.monotonic()
+        if force or (now - self._last) >= self.interval:
+            self._last = now
+            return True
+        return False
 
 
 def get_download_progress() -> dict[str, Any] | None:
     """In-memory snapshot, or None when idle. Not persisted."""
     snap = _DOWNLOAD_PROGRESS
+    return dict(snap) if snap is not None else None
+
+
+def get_distribute_progress() -> dict[str, Any] | None:
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        snap = _DISTRIBUTE_PROGRESS
+        if snap is None:
+            return None
+        out = dict(snap)
+        workers = snap.get("workers")
+        if isinstance(workers, list):
+            out["workers"] = [dict(w) for w in workers]
+        return out
+
+
+def get_receive_progress() -> dict[str, Any] | None:
+    snap = _RECEIVE_PROGRESS
     return dict(snap) if snap is not None else None
 
 
@@ -72,6 +162,27 @@ def _reset_download_state() -> None:
             pass
 
 
+def _reset_distribute_state() -> None:
+    global _DISTRIBUTE_PROGRESS
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        _DISTRIBUTE_PROGRESS = None
+    if _DISTRIBUTE_LOCK.locked():
+        try:
+            _DISTRIBUTE_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+def _reset_receive_state() -> None:
+    global _RECEIVE_PROGRESS
+    _RECEIVE_PROGRESS = None
+    if _RECEIVE_LOCK.locked():
+        try:
+            _RECEIVE_LOCK.release()
+        except RuntimeError:
+            pass
+
+
 def _set_progress(
     filename: str,
     nbytes: int,
@@ -79,11 +190,121 @@ def _set_progress(
     on_progress: ProgressCallback | None = None,
 ) -> None:
     global _DOWNLOAD_PROGRESS
-    pct = min(100, int(nbytes * 100 / total)) if total else 0
-    snap = {"filename": filename, "bytes": nbytes, "total": total, "pct": pct}
+    snap = {
+        "filename": filename,
+        "bytes": nbytes,
+        "total": total,
+        "pct": _pct(nbytes, total),
+    }
     _DOWNLOAD_PROGRESS = snap
     if on_progress is not None:
         on_progress(dict(snap))
+
+
+def _set_receive_progress(
+    filename: str,
+    nbytes: int,
+    total: int | None,
+    *,
+    phase: str = "receiving",
+) -> None:
+    global _RECEIVE_PROGRESS
+    _RECEIVE_PROGRESS = {
+        "filename": filename,
+        "bytes": nbytes,
+        "total": total,
+        "pct": _pct(nbytes, total),
+        "phase": phase,
+    }
+
+
+def _clear_receive_progress() -> None:
+    global _RECEIVE_PROGRESS
+    _RECEIVE_PROGRESS = None
+
+
+def _init_distribute_progress(filename: str, total: int) -> None:
+    global _DISTRIBUTE_PROGRESS
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        _DISTRIBUTE_PROGRESS = {
+            "filename": filename,
+            "phase": "hashing",
+            "bytes": 0,
+            "total": total,
+            "pct": 0,
+            "workers": [],
+        }
+
+
+def _update_distribute_hash(nbytes: int, total: int) -> None:
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        snap = _DISTRIBUTE_PROGRESS
+        if snap is None:
+            return
+        snap["phase"] = "hashing"
+        snap["bytes"] = nbytes
+        snap["total"] = total
+        snap["pct"] = _pct(nbytes, total)
+
+
+def _set_distribute_workers(workers: list[dict[str, Any]]) -> None:
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        snap = _DISTRIBUTE_PROGRESS
+        if snap is None:
+            return
+        snap["phase"] = "pushing"
+        snap["workers"] = workers
+        snap["pct"] = _mean_worker_pct(workers)
+
+
+def _update_worker_progress(
+    index: int,
+    *,
+    phase: str | None = None,
+    nbytes: int | None = None,
+    total: int | None = None,
+    error: str | None = None,
+    force: bool = False,
+    throttle: _Throttle | None = None,
+) -> None:
+    if throttle is not None and not throttle.allow(force=force or phase in ("done", "skipped", "error")):
+        return
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        snap = _DISTRIBUTE_PROGRESS
+        if snap is None:
+            return
+        workers = snap.get("workers")
+        if not isinstance(workers, list) or index < 0 or index >= len(workers):
+            return
+        row = workers[index]
+        if phase is not None:
+            row["phase"] = phase
+        if total is not None:
+            row["total"] = total
+        if nbytes is not None:
+            row["bytes"] = nbytes
+            row["pct"] = _pct(nbytes, row.get("total"))
+        if phase in ("done", "skipped"):
+            row["pct"] = 100
+            if row.get("total"):
+                row["bytes"] = row["total"]
+        if error is not None:
+            row["error"] = error
+        if phase == "error":
+            row["pct"] = row.get("pct") or 0
+        snap["pct"] = _mean_worker_pct(workers)
+
+
+def _mean_worker_pct(workers: list[dict[str, Any]]) -> int:
+    if not workers:
+        return 0
+    return int(sum(int(w.get("pct") or 0) for w in workers) / len(workers))
+
+
+def _clear_distribute_progress() -> None:
+    global _DISTRIBUTE_PROGRESS
+    with _DISTRIBUTE_PROGRESS_LOCK:
+        _DISTRIBUTE_PROGRESS = None
 
 
 def normalize_quant(value: str) -> str:
@@ -527,6 +748,7 @@ def _stream_to_models(
     target = models_dir() / filename
     part = target.with_name(target.name + ".part")
     nbytes = 0
+    hasher = hashlib.sha256()
     try:
         with httpx.stream(
             "GET", url, headers=headers or {}, follow_redirects=True, timeout=None
@@ -540,9 +762,11 @@ def _stream_to_models(
                     if not chunk:
                         continue
                     f.write(chunk)
+                    hasher.update(chunk)
                     nbytes += len(chunk)
                     _set_progress(filename, nbytes, total, on_progress)
         part.replace(target)
+        write_sha256_sidecar(target, hasher.hexdigest())
     except Exception:
         try:
             part.unlink()
@@ -630,27 +854,294 @@ def list_local_models() -> list[dict]:
     return out
 
 
+def ensure_sha256(
+    model_path: Path,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> str:
+    """Return digest from sidecar or hash the file (optionally with progress)."""
+    cached = read_sha256_sidecar(model_path)
+    if cached:
+        if on_progress is not None:
+            total = model_path.stat().st_size
+            on_progress(total, total)
+        return cached
+    total = model_path.stat().st_size
+    hasher = hashlib.sha256()
+    nbytes = 0
+    throttle = _Throttle()
+    if on_progress is not None:
+        on_progress(0, total)
+    with model_path.open("rb") as f:
+        while True:
+            block = f.read(_TRANSFER_CHUNK)
+            if not block:
+                break
+            hasher.update(block)
+            nbytes += len(block)
+            if on_progress is not None and throttle.allow(
+                force=nbytes >= total
+            ):
+                on_progress(nbytes, total)
+    digest = hasher.hexdigest()
+    write_sha256_sidecar(model_path, digest)
+    if on_progress is not None:
+        on_progress(total, total)
+    return digest
+
+
+def probe_model_on_worker(
+    host: str,
+    port: int,
+    join_key: str,
+    filename: str,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    url = f"http://{host}:{port}/v1/models/file"
+    headers = {
+        "X-Kllm-Key": join_key,
+        "X-Kllm-Filename": Path(filename).name,
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.get(url, headers=headers)
+        if resp.status_code == 404:
+            return {"exists": False, "filename": Path(filename).name}
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _file_chunk_iter(
+    path: Path,
+    *,
+    on_bytes: Callable[[int], None] | None = None,
+    chunk: int = _TRANSFER_CHUNK,
+) -> Iterator[bytes]:
+    with path.open("rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            if on_bytes is not None:
+                on_bytes(len(block))
+            yield block
+
+
 def push_model_to_worker(
     host: str,
     port: int,
     join_key: str,
     model_path: Path,
+    *,
+    digest: str | None = None,
+    worker_index: int | None = None,
     timeout: float = 3600.0,
 ) -> dict:
-    digest = sha256_file(model_path)
+    """Push GGUF to a worker. When worker_index is set, updates distribute progress."""
+    size = model_path.stat().st_size
+    if digest is None:
+        digest = ensure_sha256(model_path)
+
+    if worker_index is not None:
+        _update_worker_progress(
+            worker_index, phase="probing", nbytes=0, total=size, force=True
+        )
+        try:
+            meta = probe_model_on_worker(host, port, join_key, model_path.name)
+        except Exception:
+            meta = {"exists": False}
+        if (
+            meta.get("exists")
+            and int(meta.get("size_bytes") or 0) == size
+            and (meta.get("sha256") or "").lower() == digest.lower()
+        ):
+            _update_worker_progress(
+                worker_index, phase="skipped", nbytes=size, total=size, force=True
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "path": meta.get("path"),
+                "sha256": digest,
+            }
+
+    if worker_index is not None:
+        _update_worker_progress(
+            worker_index, phase="sending", nbytes=0, total=size, force=True
+        )
+
     url = f"http://{host}:{port}/v1/models/receive"
     headers = {
         "X-Kllm-Key": join_key,
         "X-Kllm-Filename": model_path.name,
         "X-Kllm-Sha256": digest,
-        "X-Kllm-Size": str(model_path.stat().st_size),
+        "X-Kllm-Size": str(size),
         "Content-Type": "application/octet-stream",
     }
-    with model_path.open("rb") as f:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.put(url, content=f, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
+    sent = 0
+    throttle = _Throttle()
+
+    def on_bytes(n: int) -> None:
+        nonlocal sent
+        sent += n
+        if worker_index is not None:
+            _update_worker_progress(
+                worker_index,
+                phase="sending",
+                nbytes=sent,
+                total=size,
+                throttle=throttle,
+                force=sent >= size,
+            )
+
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.put(
+            url,
+            content=_file_chunk_iter(model_path, on_bytes=on_bytes),
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    if worker_index is not None:
+        _update_worker_progress(
+            worker_index, phase="done", nbytes=size, total=size, force=True
+        )
+    return data
+
+
+def distribute_to_workers(
+    model_path: Path,
+    workers: Iterable[dict[str, Any]],
+    join_key: str,
+    *,
+    default_port: int = 18765,
+) -> list[dict[str, Any]]:
+    """Hash once, then push to all workers in parallel with live progress."""
+    if not _DISTRIBUTE_LOCK.acquire(blocking=False):
+        raise DistributeInProgressError("a distribute is already in progress")
+    worker_list = [
+        {
+            "node_id": w.get("node_id"),
+            "host": w.get("lan_host") or w.get("host"),
+            "port": int(w.get("control_port") or default_port),
+        }
+        for w in workers
+        if (w.get("lan_host") or w.get("host"))
+    ]
+    try:
+        size = model_path.stat().st_size
+        _init_distribute_progress(model_path.name, size)
+        digest = ensure_sha256(
+            model_path,
+            on_progress=lambda nbytes, total: _update_distribute_hash(nbytes, total),
+        )
+        progress_rows = [
+            {
+                "node_id": w.get("node_id"),
+                "host": w["host"],
+                "phase": "probing",
+                "bytes": 0,
+                "total": size,
+                "pct": 0,
+                "error": None,
+            }
+            for w in worker_list
+        ]
+        _set_distribute_workers(progress_rows)
+        if not worker_list:
+            return []
+
+        results: list[dict[str, Any] | None] = [None] * len(worker_list)
+
+        def _one(idx: int, w: dict[str, Any]) -> dict[str, Any]:
+            host = w["host"]
+            try:
+                result = push_model_to_worker(
+                    host=host,
+                    port=w["port"],
+                    join_key=join_key,
+                    model_path=model_path,
+                    digest=digest,
+                    worker_index=idx,
+                )
+                return {"host": host, "node_id": w.get("node_id"), "ok": True, "result": result}
+            except Exception as exc:
+                _update_worker_progress(
+                    idx, phase="error", error=str(exc), force=True
+                )
+                return {
+                    "host": host,
+                    "node_id": w.get("node_id"),
+                    "ok": False,
+                    "error": str(exc),
+                }
+
+        max_workers = min(8, max(1, len(worker_list)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_one, idx, w): idx for idx, w in enumerate(worker_list)
+            }
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                results[idx] = fut.result()
+
+        return [r for r in results if r is not None]
+    finally:
+        _clear_distribute_progress()
+        _DISTRIBUTE_LOCK.release()
+
+
+def begin_receive(filename: str, total: int) -> Path:
+    """Acquire receive lock and prepare a .partial destination path."""
+    if not _RECEIVE_LOCK.acquire(blocking=False):
+        raise ReceiveInProgressError("a receive is already in progress")
+    dest = models_dir() / Path(filename).name
+    models_dir().mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".partial")
+    _set_receive_progress(dest.name, 0, total, phase="receiving")
+    return tmp
+
+
+def finish_receive_chunk(
+    *,
+    filename: str,
+    nbytes: int,
+    total: int,
+    throttle: _Throttle | None = None,
+) -> None:
+    if throttle is not None and not throttle.allow(force=nbytes >= total):
+        return
+    _set_receive_progress(filename, nbytes, total, phase="receiving")
+
+
+def complete_receive(
+    tmp: Path,
+    dest: Path,
+    *,
+    digest: str,
+    size: int,
+) -> dict[str, Any]:
+    _set_receive_progress(dest.name, size, size, phase="verifying")
+    tmp.replace(dest)
+    write_sha256_sidecar(dest, digest)
+    _clear_receive_progress()
+    if _RECEIVE_LOCK.locked():
+        _RECEIVE_LOCK.release()
+    return {"ok": True, "path": str(dest), "sha256": digest}
+
+
+def abort_receive(tmp: Path | None = None) -> None:
+    if tmp is not None:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _clear_receive_progress()
+    if _RECEIVE_LOCK.locked():
+        try:
+            _RECEIVE_LOCK.release()
+        except RuntimeError:
+            pass
 
 
 def delete_local_model(name: str) -> Path:
@@ -664,6 +1155,11 @@ def delete_local_model(name: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"model not found: {name}")
     path.unlink()
+    side = sha256_sidecar_path(path)
+    try:
+        side.unlink(missing_ok=True)
+    except OSError:
+        pass
     return path
 
 

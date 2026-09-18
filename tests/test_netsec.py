@@ -39,6 +39,30 @@ def test_pick_rpc_bind_host_default_not_wildcard(monkeypatch):
     assert netsec.pick_rpc_bind_host(None) == "192.168.10.5"
 
 
+def test_pick_rpc_bind_host_toward_beats_lexicographic_private(monkeypatch):
+    from kllm import netsec
+
+    # 192.168.235.1 sorts before 192.168.68.63 as strings — the old bug.
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_addresses",
+        lambda: ["192.168.235.1", "192.168.68.63"],
+    )
+    monkeypatch.setattr(netsec, "local_ip_toward", lambda remote: "192.168.68.63")
+    assert netsec.pick_rpc_bind_host(None, toward="192.168.68.62") == "192.168.68.63"
+
+
+def test_is_usable_lan_peer():
+    from kllm.netsec import is_usable_lan_peer
+
+    assert is_usable_lan_peer("192.168.68.63")
+    assert not is_usable_lan_peer("127.0.0.1")
+    assert not is_usable_lan_peer("0.0.0.0")
+    assert not is_usable_lan_peer("169.254.1.1")
+    assert not is_usable_lan_peer("testclient")
+    assert not is_usable_lan_peer(None)
+
+
 def test_derive_wg_psk_stable():
     from kllm.netsec import derive_wg_psk
 
@@ -244,6 +268,10 @@ def test_join_binds_private_host_not_wildcard(client):
         captured.update(kwargs)
         return {"pid": 4242}
 
+    def fake_pick(preferred, toward=None):
+        captured["toward"] = toward
+        return "192.168.10.2"
+
     class FakeResp:
         status_code = 200
 
@@ -267,7 +295,7 @@ def test_join_binds_private_host_not_wildcard(client):
             return FakeResp()
 
     with (
-        patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.10.2"),
+        patch.object(netsec_mod, "pick_rpc_bind_host", side_effect=fake_pick),
         patch.object(netsec_mod, "ensure_rpc_firewall", return_value={"ok": True, "applied": True, "warning": None}),
         patch.object(agent.native, "probe_capacity", return_value={
             "total_ram_bytes": 8,
@@ -289,9 +317,68 @@ def test_join_binds_private_host_not_wildcard(client):
             },
         )
     assert r.status_code == 200
+    assert captured["toward"] == "192.168.10.1"
     assert captured["host"] == "192.168.10.2"
     assert captured["host"] != "0.0.0.0"
     assert r.json()["rpc_bind"] == "192.168.10.2"
+
+
+def test_join_honors_rpc_bind_hint_from_master(client):
+    c, agent, netsec_mod = client
+    captured = {}
+
+    def fake_start_worker(**kwargs):
+        captured.update(kwargs)
+        return {"pid": 4242}
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "members": 2, "rpc_bind_hint": "192.168.68.63"}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            return FakeResp()
+
+    with (
+        patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.235.1"),
+        patch.object(netsec_mod, "ensure_rpc_firewall", return_value={"ok": True, "applied": True, "warning": None}),
+        patch.object(agent.native, "probe_capacity", return_value={
+            "total_ram_bytes": 8,
+            "available_ram_bytes": 4,
+            "vram_bytes": 1,
+            "backend": "vulkan",
+        }),
+        patch.object(agent.native, "start_worker", side_effect=fake_start_worker),
+        patch("httpx.Client", FakeClient),
+    ):
+        r = c.post(
+            "/v1/join",
+            json={
+                "key": "secret",
+                "master_host": "192.168.68.62",
+                "master_port": 18765,
+                "rpc_port": 50052,
+                "overlay": "none",
+            },
+        )
+    assert r.status_code == 200
+    assert captured["host"] == "192.168.68.63"
+    assert r.json()["rpc_bind"] == "192.168.68.63"
+    assert any("corrected" in w for w in (r.json().get("netsec_warnings") or []))
 
 
 def test_register_assigns_wg_when_overlay_on(client):

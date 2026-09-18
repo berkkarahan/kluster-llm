@@ -83,6 +83,9 @@ class AppStore {
   vramWeight = $state(0.6);
   latencyWeight = $state(0.4);
   planResult = $state<Record<string, unknown> | null>(null);
+  estimating = $state(false);
+  private estimateTimer: ReturnType<typeof setTimeout> | null = null;
+  private estimateSeq = 0;
   chat = $state<ChatMessage[]>([]);
   chatInput = $state('');
   chatStreaming = $state(false);
@@ -115,6 +118,8 @@ class AppStore {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.estimateTimer = null;
   }
 
   async refresh() {
@@ -273,6 +278,7 @@ class AppStore {
       const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
       if (!r.ok) {
         this.clampContextToModel();
+        this.scheduleEstimate();
         return;
       }
       const data = await r.json();
@@ -281,6 +287,7 @@ class AppStore {
     } catch {
       this.clampContextToModel();
     }
+    this.scheduleEstimate();
   }
 
   resetRunSettings() {
@@ -642,6 +649,67 @@ class AppStore {
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings()) return;
     this.planResult = (await this.post('/v1/plan', this.planPayload())) as Record<string, unknown>;
+  }
+
+  /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
+  scheduleEstimate(delayMs = 300) {
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.estimateTimer = setTimeout(() => {
+      this.estimateTimer = null;
+      void this.refreshEstimate();
+    }, delayMs);
+  }
+
+  async refreshEstimate() {
+    if (this.planRunBlockedReason()) return;
+    if (!this.selectedModel) return;
+    if (!this.validateRunSettings()) return;
+    if (this.busy) return;
+    const seq = ++this.estimateSeq;
+    this.estimating = true;
+    try {
+      const r = await fetch('/v1/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.planPayload())
+      });
+      const text = await r.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      if (seq !== this.estimateSeq) return;
+      if (!r.ok) return;
+      this.planResult = data as Record<string, unknown>;
+    } catch {
+      /* ignore transient estimate errors */
+    } finally {
+      if (seq === this.estimateSeq) this.estimating = false;
+    }
+  }
+
+  setAutoInt(field: 'parallelSlots' | 'batchSize' | 'microBatch' | 'checkpoints' | 'cacheRam', mode: 'auto' | 'edit') {
+    const defaults: Record<typeof field, number> = {
+      parallelSlots: 2,
+      batchSize: 512,
+      microBatch: 2,
+      checkpoints: 0,
+      cacheRam: 0
+    };
+    if (mode === 'auto') {
+      this[field] = 'auto';
+    } else if (this[field] === 'auto') {
+      this[field] = defaults[field];
+    }
+    if (field === 'parallelSlots') this.scheduleEstimate();
+  }
+
+  setSpeculativeMode(mode: 'auto' | 'edit') {
+    this.speculative = mode === 'auto' ? 'auto' : 'draft';
+    if (mode === 'auto') this.draftModel = '';
+    this.scheduleEstimate();
   }
 
   async run() {

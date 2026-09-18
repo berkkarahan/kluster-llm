@@ -16,8 +16,8 @@ This creates `.venv` with **uv** (Python version from `.python-version`), instal
 llama.cpp is pinned in committed [`llama-release`](../llama-release) (same role as `.python-version`). Every node must run the same tag or RPC HELLO fails. Sync binaries only:
 
 ```bash
-python scripts/setup-llama.py
-python scripts/setup-llama.py --check
+python scripts/install.py --llama-only
+python scripts/install.py --check
 ```
 
 Run the CLI without activating the venv: `uv run kllm …` or `uvx --from . kllm …` from the repo root.

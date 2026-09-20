@@ -83,7 +83,7 @@ def test_build_master_launch_rpc_aligns_with_worker_order():
     assert launch["rpc_servers"] == ["10.0.0.2:50052", "10.0.0.3:50053"]
     assert launch["tensor_split"] == "0.2000,0.3000,0.5000"
     assert len(launch["tensor_split"].split(",")) == len(ordered_members(members))
-    assert launch["micro_batch"] == 2
+    assert launch["micro_batch"] == 128
     assert isinstance(launch["micro_batch"], int)
 
 
@@ -94,20 +94,17 @@ def test_ensure_rpc_peers_reachable_fails_closed_port():
     assert "unreachable" in str(ei.value.detail).lower()
 
 
-def test_ensure_rpc_peers_reachable_ok_when_listening():
-    import socket
-
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    port = srv.getsockname()[1]
-    try:
-        # create_connection succeeds as soon as the backlog accepts the SYN;
-        # no accept thread required.
-        ensure_rpc_peers_reachable([f"127.0.0.1:{port}"], timeout_s=1.0)
-    finally:
-        srv.close()
+def test_ensure_rpc_peers_reachable_uses_control_plane(monkeypatch):
+    from kllm import http_clients
+    import httpx
+    calls = []
+    def handle(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"process_pid": 42, "process_role": "worker"})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(http_clients, "control_client", lambda: client)
+        ensure_rpc_peers_reachable(["127.0.0.1:50052"])
+    assert calls == ["http://127.0.0.1:18765/v1/status"]
 
 
 def test_run_settings_rejects_zero_weights():

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { DeviceAllocation } from '$lib/types';
   import AutoEditField from '$lib/components/AutoEditField.svelte';
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
   import HardwareSettings from '$lib/components/HardwareSettings.svelte';
@@ -519,15 +520,36 @@
           Placement: {String(appStore.planResult.device_requested)} → {String(appStore.planResult.device_effective)}
         </p>
       {/if}
+      {#if appStore.planResult.estimate_confidence}
+        <p class="mono text-[11px]" style="color: var(--muted)">Estimate: {String(appStore.planResult.estimate_confidence)}</p>
+        <p class="mono text-[11px]">Master CPU: {String(appStore.planResult.cpu_layers ?? 0)} layers, {formatGb(Number(appStore.planResult.cpu_alloc_bytes ?? 0), 1)}</p>
+        {#if appStore.planResult.resolved_launch_settings}
+          {@const resolved = appStore.planResult.resolved_launch_settings as Record<string, unknown>}
+          <p class="mono text-[11px]">Resolved: {String(resolved.parallel_slots)} slot(s), batch {String(resolved.batch_size)}, micro-batch {String(resolved.micro_batch)}, Flash Attention {String(resolved.flash_attention)}</p>
+        {/if}
+      {/if}
+      {#if Array.isArray(appStore.planResult.device_allocations)}
+        <table class="w-full text-left mono text-[11px] mt-2">
+          <thead><tr><th>device</th><th>layers (zero-based)</th><th>memory</th></tr></thead>
+          <tbody>
+            {#each appStore.planResult.device_allocations as raw}
+              {@const allocation = raw as DeviceAllocation}
+              <tr><td>{allocation.node_id}: {allocation.device} ({allocation.backend})</td>
+                <td>{allocation.layer_start}–{allocation.layer_end - 1}{allocation.output_layer ? ' · includes output' : ''}</td>
+                <td>{formatGb(allocation.estimated_bytes, 1)} / {formatGb(allocation.budget_bytes, 1)}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
       {#if Array.isArray(appStore.planResult.node_ids)}
         <table class="w-full text-left border-collapse mono text-[11px] mt-2">
           <thead>
             <tr style="color: var(--muted)">
               <th class="font-medium py-1 border-b" style="border-color: var(--border)">node</th>
-              <th class="font-medium py-1 border-b" style="border-color: var(--border)">split</th>
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">share</th>
               <th class="font-medium py-1 border-b" style="border-color: var(--border)">alloc</th>
               <th class="font-medium py-1 border-b" style="border-color: var(--border)">score</th>
-              <th class="font-medium py-1 border-b" style="border-color: var(--border)">latency</th>
+              <th class="font-medium py-1 border-b" style="border-color: var(--border)">control RTT</th>
             </tr>
           </thead>
           <tbody>
@@ -535,7 +557,7 @@
               <tr>
                 <td class="py-1 border-b" style="border-color: var(--border)">{String(nid)}</td>
                 <td class="py-1 border-b" style="border-color: var(--border)">
-                  {Number((appStore.planResult.tensor_split as number[])?.[i] ?? 0).toFixed(3)}
+                  {(100 * Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0) / Math.max(1, Number(appStore.planResult.estimated_bytes ?? 1))).toFixed(1)}%
                 </td>
                 <td class="py-1 border-b" style="border-color: var(--border)">
                   {formatGb(Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0), 1)}

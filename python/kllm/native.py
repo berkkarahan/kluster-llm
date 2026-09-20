@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from kllm.accel import effective_accel_backend
+from kllm.accel import effective_accel_backend, requested_backend, binary_capabilities
+from pathlib import Path
+import time
+import sys
 
 _NATIVE = None
 _IMPORT_ERROR: Exception | None = None
@@ -32,11 +35,14 @@ def require_native():
 def probe_capacity() -> dict[str, Any]:
     n = require_native()
     snap = n.probe_capacity()
+    devices = list_gpus()
     return {
+        **devices,
+        "unified_memory": snap.backend == "metal",
         "total_ram_bytes": snap.total_ram_bytes,
         "available_ram_bytes": snap.available_ram_bytes,
         "vram_bytes": snap.vram_bytes,
-        "backend": effective_accel_backend(snap.backend),
+        "backend": devices["backend"],
         "hostname": snap.hostname,
     }
 
@@ -46,19 +52,31 @@ def list_gpus() -> dict[str, Any]:
     if _NATIVE is None or not hasattr(_NATIVE, "list_gpus"):
         return {"backend": "cpu", "probed_backend": "cpu", "gpus": []}
     devices, backend = _NATIVE.list_gpus()
-    probed = str(backend).strip().lower() if backend else "cpu"
-    return {
-        "probed_backend": probed,
-        "backend": effective_accel_backend(probed),
-        "gpus": [
-            {
-                "index": int(d.index),
-                "name": str(d.name),
-                "vram_bytes": d.vram_bytes,
-            }
-            for d in devices
-        ],
-    }
+    probed = str(backend or "cpu").lower()
+    requested = requested_backend()
+    try:
+        from kllm.state import repo_root
+        binary = resolve_llama_server(str(repo_root()) if repo_root() else None)
+        if not binary:
+            raise RuntimeError("llama-server is not installed")
+        capabilities = binary_capabilities(binary, Path(binary).stat().st_mtime_ns, int(time.monotonic() // 30))
+        installed = capabilities["devices"]
+        supported = list(dict.fromkeys(d["backend"] for d in installed))
+        preferred = "metal" if sys.platform == "darwin" else ("cuda" if "cuda" in supported else "rocm" if sys.platform.startswith("linux") and "rocm" in supported else "vulkan")
+        actual = requested if requested in supported else preferred if preferred in supported else next(iter(supported), "cpu")
+        selected = [d for d in installed if d["backend"] == actual]
+        selected = [dict(d, index=i) for i, d in enumerate(selected)]
+        return {"backend": actual, "actual_backend": actual, "requested_backend": requested,
+                "probed_backend": probed, "gpus": selected, "devices": selected,
+                "unified_memory": probed == "metal", "binary_version": capabilities["binary_version"],
+                "allowed_backends": supported,
+                "backend_warning": f"requested {requested} is not installed; using {actual}" if requested and requested != actual else None}
+    except Exception as exc:
+        # Hardware probes alone do not establish installed llama.cpp capabilities.
+        return {"backend": "cpu", "actual_backend": "unknown", "requested_backend": requested,
+                "probed_backend": probed, "gpus": [], "devices": [],
+                "unified_memory": probed == "metal", "binary_version": None,
+                "allowed_backends": [], "error": str(exc)}
 
 
 def _fit_status_from_bytes(needed: int, budget: int) -> tuple[str, str]:
@@ -96,7 +114,28 @@ def plan_split(
     mmproj_size_bytes: int = 0,
     draft_model_size_bytes: int = 0,
     vision: bool = False,
+    model_layout: dict | None = None,
+    launch_settings: dict | None = None,
 ) -> dict[str, Any]:
+    if launch_settings is not None:
+        from kllm.placement import plan_devices
+        settings = dict(launch_settings, auxiliary_bytes=int(mmproj_size_bytes) + int(draft_model_size_bytes) + (512 * 1024**2 if vision and not mmproj_size_bytes else 0))
+        def compute(ctx):
+            return plan_devices(nodes, model_size_bytes, model_layout, settings, context=ctx,
+                                headroom=headroom, device=device, vram_weight=vram_weight, latency_weight=latency_weight)
+        if context_auto:
+            maximum = min(131072, int((model_layout or {}).get("metadata", {}).get(f"{(model_layout or {}).get('architecture')}.context_length", 131072)))
+            low, high = 1, maximum // 512
+            result = compute(512)
+            while low <= high:
+                mid = (low + high) // 2
+                candidate = compute(mid * 512)
+                if candidate["fit_status"] != "overflow":
+                    result, low = candidate, mid + 1
+                else:
+                    high = mid - 1
+            return result
+        return compute(context)
     n = require_native()
     req: dict[str, Any] = {
         "nodes": nodes,
@@ -186,6 +225,14 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    if "devices" not in kwargs:
+        from kllm import config
+        selected = config.get_gpu_ids()
+        inventory = list_gpus().get("devices", [])
+        kwargs["devices"] = [d["device"] for d in inventory if selected is None or d["index"] in selected]
+    # Explicit device names preserve the probed order; visibility masks renumber them.
+    if kwargs.get("devices"):
+        kwargs.pop("env", None)
     if kwargs.get("env") is None:
         kwargs.pop("env", None)
     result = n.start_worker(kwargs)

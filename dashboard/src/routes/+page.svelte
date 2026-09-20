@@ -1,5 +1,7 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
+  import HardwareSettings from '$lib/components/HardwareSettings.svelte';
+  import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
 
   function fmtBytes(n?: number | null) {
     if (n == null) return '—';
@@ -57,137 +59,12 @@
         <option value="none">Off (LAN bind)</option>
         <option value="wireguard">WireGuard</option>
       </select>
-      <label class="mono text-[11px] mt-1" style="color: var(--muted)">Device</label>
-      <select
-        class="field mono"
-        value={appStore.device}
-        disabled={!!appStore.busy}
-        onchange={(e) => {
-          const v = (e.currentTarget as HTMLSelectElement).value;
-          if (v === 'cpu' || v === 'gpu') void appStore.setDevice(v);
-        }}
-      >
-        <option value="gpu">GPU</option>
-        <option value="cpu">CPU</option>
-      </select>
-      {#if appStore.device === 'gpu'}
-        {#if appStore.allowedBackends.length > 0}
-          <label class="mono text-[11px] mt-1" style="color: var(--muted)">Backend</label>
-          <select
-            class="field mono"
-            value={appStore.accelBackend ?? appStore.allowedBackends[0]}
-            disabled={!idle || !!appStore.busy}
-            onchange={(e) => {
-              const v = (e.currentTarget as HTMLSelectElement).value;
-              if (v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan') {
-                void appStore.setAccelBackend(v);
-              }
-            }}
-          >
-            {#each appStore.allowedBackends as b}
-              <option value={b}>{appStore.accelBackendLabel(b)}</option>
-            {/each}
-          </select>
-        {/if}
-        {#if appStore.gpus.length > 0}
-          <label class="mono text-[11px] mt-1" style="color: var(--muted)">
-            GPUs ({appStore.gpuBackend})
-          </label>
-          <div class="flex flex-col gap-1">
-            {#each appStore.gpus as g}
-              <label class="mono text-[11px] flex items-start gap-2 cursor-pointer" style="color: var(--fg)">
-                <input
-                  type="checkbox"
-                  class="mt-0.5"
-                  checked={appStore.selectedGpuIds.includes(g.index)}
-                  disabled={appStore.gpus.length === 1 || !!appStore.busy}
-                  onchange={() => {
-                    appStore.toggleGpu(g.index);
-                    void appStore.persistGpuSelection();
-                  }}
-                />
-                <span>
-                  [{g.index}] {g.name}
-                  <span style="color: var(--muted)"> {fmtBytes(g.vram_bytes)}</span>
-                </span>
-              </label>
-            {/each}
-          </div>
-        {/if}
-        <label class="mono text-[11px] mt-1" style="color: var(--muted)" for="home-vram-pct">
-          VRAM budget (%)
-        </label>
-        <div class="flex items-center gap-2">
-          <input
-            id="home-vram-pct"
-            class="flex-1"
-            type="range"
-            min="10"
-            max="100"
-            step="1"
-            value={appStore.vramPercent}
-            disabled={!!appStore.busy}
-            oninput={(e) => {
-              appStore.vramPercent = Number((e.currentTarget as HTMLInputElement).value);
-            }}
-            onchange={(e) => {
-              const v = Number((e.currentTarget as HTMLInputElement).value);
-              void appStore.setVramPercent(v);
-            }}
-          />
-          <input
-            class="field mono"
-            style="width: 4.5rem"
-            type="number"
-            min="10"
-            max="100"
-            step="1"
-            value={appStore.vramPercent}
-            disabled={!!appStore.busy}
-            onchange={(e) => {
-              const v = Number((e.currentTarget as HTMLInputElement).value);
-              void appStore.setVramPercent(v);
-            }}
-          />
+      <div class="mt-2 pt-2 border-t flex flex-col gap-2" style="border-color: var(--border)">
+        <div class="mono text-[11px] uppercase tracking-wider" style="color: var(--muted)">
+          System settings
         </div>
-      {:else if appStore.device === 'cpu'}
-        <label class="mono text-[11px] mt-1" style="color: var(--muted)" for="home-ram-pct">
-          RAM budget (%)
-        </label>
-        <div class="flex items-center gap-2">
-          <input
-            id="home-ram-pct"
-            class="flex-1"
-            type="range"
-            min="10"
-            max="100"
-            step="1"
-            value={appStore.ramPercent}
-            disabled={!!appStore.busy}
-            oninput={(e) => {
-              appStore.ramPercent = Number((e.currentTarget as HTMLInputElement).value);
-            }}
-            onchange={(e) => {
-              const v = Number((e.currentTarget as HTMLInputElement).value);
-              void appStore.setRamPercent(v);
-            }}
-          />
-          <input
-            class="field mono"
-            style="width: 4.5rem"
-            type="number"
-            min="10"
-            max="100"
-            step="1"
-            value={appStore.ramPercent}
-            disabled={!!appStore.busy}
-            onchange={(e) => {
-              const v = Number((e.currentTarget as HTMLInputElement).value);
-              void appStore.setRamPercent(v);
-            }}
-          />
-        </div>
-      {/if}
+        <HardwareSettings lockBackend={!idle} />
+      </div>
       <div class="grid grid-cols-2 gap-2 mt-1">
         <button class="btn btn-accent" disabled={startJoinDisabled} onclick={() => appStore.startMaster()}
           >Start</button
@@ -204,6 +81,7 @@
           >Leave</button
         >
       </div>
+      <LoadProgressPanel />
       {#if appStore.status?.join_key}
         <p class="mono text-[11px] mt-2 break-all" style="color: var(--muted)">
           key <span style="color: var(--accent)">{appStore.status.join_key}</span>

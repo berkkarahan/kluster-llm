@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { appStore } from '$lib/store.svelte';
+  import DownloadPanel from '$lib/components/DownloadPanel.svelte';
+  import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
+  import { formatGb } from '$lib/format-transfer';
   import type {
     DistributeProgress,
     DownloadProgress,
@@ -10,26 +14,17 @@
 
   let modalOpen = $state(false);
 
-  function fmtBytes(n?: number | null) {
-    if (n == null) return '—';
-    return `${(n / 1e9).toFixed(2)} GB`;
-  }
-
-  function fmtGb(n: number) {
-    return (n / 1e9).toFixed(1);
-  }
-
   function downloadLabel(d: DownloadProgress | ReceiveProgress) {
     const pct = Math.round(d.pct);
-    if (d.total == null) return `${pct}% · ${fmtGb(d.bytes)} GB`;
-    return `${pct}% · ${fmtGb(d.bytes)} / ${fmtGb(d.total)} GB`;
+    if (d.total == null) return `${pct}% · ${formatGb(d.bytes)}`;
+    return `${pct}% · ${formatGb(d.bytes)} / ${formatGb(d.total)}`;
   }
 
   function transferLabel(d: DistributeProgress) {
     const pct = Math.round(d.pct);
     const phase = d.phase ?? 'pulling';
     if (phase === 'hashing' && d.total != null && d.bytes != null) {
-      return `hashing ${pct}% · ${fmtGb(d.bytes)} / ${fmtGb(d.total)} GB`;
+      return `hashing ${pct}% · ${formatGb(d.bytes)} / ${formatGb(d.total)}`;
     }
     return `distribute ${pct}%`;
   }
@@ -40,22 +35,21 @@
     if (w.phase === 'skipped') return `${host} · skipped`;
     if (w.phase === 'error') return `${host} · error${w.error ? `: ${w.error}` : ''}`;
     if (w.total == null) return `${host} · ${w.phase} ${pct}%`;
-    return `${host} · ${w.phase} ${pct}% · ${fmtGb(w.bytes)} / ${fmtGb(w.total)} GB`;
+    return `${host} · ${w.phase} ${pct}% · ${formatGb(w.bytes)} / ${formatGb(w.total)}`;
   }
 
   function fitChip(fit: ModelSearchFit) {
     if (fit === 'fits') return 'chip-ok';
-    if (fit === 'overflow') return 'chip-warn';
+    if (fit === 'overflow') return 'chip-danger';
     return 'chip-muted';
   }
 
   function fitLabel(row: ModelSearchHit) {
-    const size = row.size_bytes ? fmtGb(row.size_bytes) : '—';
-    const vram = appStore.searchTotalVram != null ? fmtGb(appStore.searchTotalVram) : '—';
-    return `${size} / ${vram} GB`;
+    const size = row.size_bytes ? formatGb(row.size_bytes, 1) : '—';
+    const vram = appStore.searchTotalVram != null ? formatGb(appStore.searchTotalVram, 1) : '—';
+    return `${size} / ${vram}`;
   }
 
-  const dl = $derived(appStore.status?.download ?? null);
   const dist = $derived(appStore.status?.distribute ?? null);
   const recv = $derived(appStore.status?.receive ?? null);
   const isMaster = $derived(appStore.status?.role === 'master');
@@ -83,10 +77,30 @@
     modalOpen = false;
     await appStore.downloadModel(source);
   }
+
+  /** Select model and jump to Plan & Run — Unsloth "load this model" path. */
+  async function useModel(id: string) {
+    await appStore.selectModel(id);
+    await goto('/run');
+  }
 </script>
 
 <div class="max-w-4xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-3" style="color: var(--muted)">Models</h1>
+  <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">Models</h1>
+  <p class="mono text-[11px] mb-3" style="color: var(--muted)">
+    Search Hugging Face GGUFs, download without blocking the UI, then Load into VRAM/RAM from Plan &amp; Run.
+  </p>
+
+  <div class="flex flex-col gap-3 mb-4">
+    {#if appStore.downloadJob && appStore.downloadJob.state !== 'idle'}
+      <div class="panel p-3" style="border-color: var(--border)">
+        <DownloadPanel />
+      </div>
+    {:else}
+      <DownloadPanel />
+    {/if}
+    <LoadProgressPanel />
+  </div>
 
   <div class="panel p-3 mb-4 flex flex-col gap-2" style="border-color: var(--border)">
     <label class="mono text-[11px]" style="color: var(--muted)" for="model-source">Search</label>
@@ -107,25 +121,6 @@
         >Search</button
       >
     </form>
-    {#if dl}
-      <div class="flex flex-col gap-1">
-        <div
-          class="progress"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(dl.pct)}
-          aria-label="Model download"
-        >
-          <span style:width={`${Math.min(100, Math.max(0, dl.pct))}%`}></span>
-        </div>
-        <div class="mono text-[11px]" style="color: var(--muted)">
-          {downloadLabel(dl)}{#if dl.filename}<span> · {dl.filename}</span>{/if}
-        </div>
-      </div>
-    {:else if appStore.busy === '/v1/models/download'}
-      <div class="mono text-[11px]" style="color: var(--muted)">starting…</div>
-    {/if}
 
     {#if dist}
       <div class="flex flex-col gap-2 mt-1">
@@ -225,18 +220,25 @@
       </thead>
       <tbody>
         {#each appStore.models as m}
-          <tr class="mono">
+          <tr class="mono" class:bg-selected={appStore.selectedModel === m.id}>
             <td class="px-3 py-2 border-b" style="border-color: var(--border)">{m.id}</td>
-            <td class="px-3 py-2 border-b" style="border-color: var(--border)">{fmtBytes(m.size_bytes)}</td>
+            <td class="px-3 py-2 border-b" style="border-color: var(--border)">{formatGb(m.size_bytes ?? null)}</td>
             <td class="px-3 py-2 border-b" style="border-color: var(--border)">
               {#if m.loaded}
-                <span class="chip chip-ok">loaded</span>
+                <span class="chip chip-ok">Ready</span>
+              {:else if appStore.loadProgress?.model === m.id && (appStore.loadProgress.phase === 'starting' || appStore.loadProgress.phase === 'loading')}
+                <span class="chip chip-warn">Loading…</span>
               {:else}
                 <span class="chip chip-muted">local</span>
               {/if}
             </td>
             <td class="px-3 py-2 border-b text-right" style="border-color: var(--border)">
               <div class="inline-flex gap-2">
+                <button
+                  class="btn btn-accent"
+                  disabled={!!appStore.busy}
+                  onclick={() => void useModel(m.id)}>Load</button
+                >
                 {#if isMaster}
                   <button
                     class="btn"
@@ -316,11 +318,13 @@
                     {/if}
                   </td>
                   <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)"
-                    >{fmtBytes(row.size_bytes)}</td
+                    >{formatGb(row.size_bytes)}</td
                   >
                   <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
                     <div class="flex flex-col gap-1 items-start">
-                      <span class="chip {fitChip(row.fit)}">{row.fit}</span>
+                      <span class="chip {fitChip(row.fit)}"
+                        >{row.fit === 'overflow' ? 'OOM risk' : row.fit}</span
+                      >
                       <span class="text-[11px]" style="color: var(--muted)">{fitLabel(row)}</span>
                     </div>
                   </td>

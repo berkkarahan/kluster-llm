@@ -157,6 +157,21 @@ textarea {
   transition: width 120ms linear;
 }
 
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* Dark-theme range: Windows default track/thumb is nearly invisible on --surface */
 input[type='range'] {
   -webkit-appearance: none;

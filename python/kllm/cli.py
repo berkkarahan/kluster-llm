@@ -874,7 +874,37 @@ def model_download(
             console.print(f"[green]Downloaded[/green] {path}")
             return
         data = r.json()
-    console.print(f"[green]Downloaded[/green] {data.get('path')}")
+    if not data.get("accepted"):
+        console.print(f"[red]Download rejected: {data}[/red]")
+        raise typer.Exit(1)
+    last_line = ""
+    while True:
+        with _client(port) as c:
+            try:
+                st = c.get("/v1/models/download-progress", timeout=2.0).json()
+            except Exception:
+                time.sleep(0.5)
+                continue
+        state = st.get("state") or "idle"
+        if state == "complete":
+            console.print(f"[green]Downloaded[/green] {st.get('filename', source)}")
+            return
+        if state in ("error", "cancelled"):
+            console.print(f"[red]Download {state}[/red] {st.get('error', '')}")
+            raise typer.Exit(1)
+        pct = int(st.get("pct") or 0)
+        total = st.get("total")
+        line = f"downloading {pct}%" + (f" · {int(st.get('bytes') or 0) / 1e9:.2f}/{total / 1e9:.2f} GB" if total else "")
+        rate = st.get("rate_bps")
+        eta = st.get("eta_seconds")
+        if rate:
+            line += f" · {int(rate) / 1e6:.1f} MB/s"
+        if eta:
+            line += f" · ~{int(eta)}s left"
+        if line != last_line:
+            console.print(f"[dim]{line}[/dim]")
+            last_line = line
+        time.sleep(0.4)
 
 
 @model_app.command("distribute")

@@ -5,6 +5,7 @@ import secrets
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -17,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kllm import config as kllm_config
-from kllm import discovery, gateway, models as model_ops, native, netsec, runtime
+from kllm import discovery, gateway, load_progress, models as model_ops, native, netsec, runtime
 from kllm.accel import allowed_accel_backends
 from kllm.auth import ensure_api_token, verify_api_token
 from kllm.hf_token import hf_token_status, save_hf_token
@@ -675,15 +676,71 @@ def search_models(body: SearchBody) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
+_DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kllm-download")
+
+
+def _download_job_runner(source: str, name: str | None) -> None:
+    """Run the download off the request path; publish terminal progress.
+
+    ``download_model`` clears its live snapshot on return, so the runner
+    publishes the terminal state itself — pollers see complete/error for as
+    long as the snapshot lives (cleared by the next start).
+    """
+    try:
+        path = model_ops.download_model(source, dest_name=name)
+    except model_ops.DownloadCancelledError:
+        return  # cancel already published phase=cancelled
+    except Exception as exc:
+        snap = model_ops.get_download_progress()
+        filename = (snap or {}).get("filename") or (name or Path(source).name)
+        try:
+            model_ops.set_download_terminal(filename, None, "error", str(exc))
+        except Exception:
+            pass
+        return
+    total = path.stat().st_size
+    try:
+        model_ops.set_download_terminal(path.name, total, "complete")
+    except OSError:
+        pass
+
+
 @app.post("/v1/models/download")
 def download_model(body: DownloadBody) -> dict[str, Any]:
+    if model_ops.get_download_progress() is not None:
+        raise HTTPException(409, "a download is already in progress")
     try:
-        path = model_ops.download_model(body.source, dest_name=body.name)
-    except model_ops.DownloadInProgressError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        # Validate the source up front (resolves HF filename / quant) so a bad
+        # ref fails fast with 400 instead of surfacing mid-transfer.
+        if ":" in body.source and not body.source.startswith(("http://", "https://")):
+            repo_id, suffix = body.source.split(":", 1)
+            model_ops.resolve_hf_filename(repo_id, suffix, token=model_ops.resolve_hf_token())
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, "path": str(path), "name": path.name}
+    _DOWNLOAD_EXECUTOR.submit(_download_job_runner, body.source, body.name)
+    return {"ok": True, "accepted": True, "source": body.source}
+
+
+@app.get("/v1/models/download-progress")
+def download_progress() -> dict[str, Any]:
+    snap = model_ops.download_job_snapshot()
+    if snap is None:
+        return {"state": "idle"}
+    return snap
+
+
+@app.post("/v1/models/download/cancel")
+def cancel_download() -> dict[str, Any]:
+    cancelled = model_ops.cancel_download()
+    if not cancelled:
+        raise HTTPException(409, "no download in progress")
+    return {"ok": True}
+
+
+@app.get("/v1/load-progress")
+def load_progress_endpoint() -> dict[str, Any]:
+    """Active inference load state for the UI (phase machine + RSS fraction)."""
+    return load_progress.sample(STATE.infer_port)
 
 
 @app.post("/v1/models/distribute")
@@ -1031,6 +1088,7 @@ def stop() -> dict[str, Any]:
         STATE.process_pid = None
         STATE.process_role = None
         runtime.clear_children()
+        load_progress.end()
     if STATE.role == "master":
         if _advertiser:
             _advertiser.stop()
@@ -1722,6 +1780,31 @@ def get_model_settings(model: str) -> dict[str, Any]:
     }
 
 
+class ModelSettingsBody(BaseModel):
+    parameter_set: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.put("/v1/model-settings/{model}")
+def put_model_settings(model: str, body: ModelSettingsBody) -> dict[str, Any]:
+    """Persist per-model run settings (context, KV dtype, speculative, ...).
+
+    Validated against ``RunSettingsFields`` so a malformed set is rejected
+    with field-level errors instead of poisoning the store. The stored set is
+    applied by the dashboard on model selection and merged into plan/run
+    payloads — no cluster reload is required for it to take effect.
+    """
+    from kllm.run_settings import RunSettingsFields
+
+    params = dict(body.parameter_set)
+    params["model"] = model
+    try:
+        validated = RunSettingsFields.model_validate(params)
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+    stored = validated.model_dump(exclude={"model", "tensor_split"})
+    return model_settings_store.upsert_model_settings(model, stored)
+
+
 def _guard_context(body: PlanBody | RunBody) -> None:
     if not body.context_auto and body.context < 512:
         raise HTTPException(400, detail={"context": "context must be >= 512 when context_auto is false"})
@@ -1772,6 +1855,7 @@ def run(body: RunBody) -> dict[str, Any]:
     if STATE.process_pid:
         native.stop_process(STATE.process_pid, force=True)
         runtime.clear_children()
+        load_progress.end()
     gpu_env = _gpu_visibility_env(
         (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
         STATE.gpu_ids,
@@ -1801,7 +1885,7 @@ def run(body: RunBody) -> dict[str, Any]:
             native.stop_process(int(launched["pid"]), force=True)
             runtime.clear_children()
         raise HTTPException(500, str(exc)) from exc
-    STATE.process_pid = launched["pid"]
+    STATE.process_pid = launched.get("pid")
     STATE.process_role = "master"
     STATE.model_name = path.name
     STATE.last_plan = plan_result
@@ -1810,6 +1894,10 @@ def run(body: RunBody) -> dict[str, Any]:
     _persist_last_settings(body)
     if launched.get("pid"):
         runtime.register_child(int(launched["pid"]), "llama-server")
+        try:
+            load_progress.begin(path.name, int(launched["pid"]), path.stat().st_size)
+        except OSError:
+            pass
     STATE.save()
     _maybe_remember(body)
     out: dict[str, Any] = {"plan": plan_result, "launch": launched}

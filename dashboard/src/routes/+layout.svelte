@@ -47,8 +47,15 @@
         <span class="chip chip-danger">offline</span>
       {/if}
       <span class="chip chip-muted mono">{appStore.status?.role ?? (appStore.statusSeen ? '…' : 'loading')}</span>
-      {#if appStore.status?.download}
+      {#if appStore.downloadJob?.state === 'running'}
+        <span class="chip chip-ok">dl {Math.round(appStore.downloadJob.pct ?? 0)}%</span>
+      {:else if appStore.status?.download}
         <span class="chip chip-ok">dl {Math.round(appStore.status.download.pct)}%</span>
+      {/if}
+      {#if appStore.loadProgress && (appStore.loadProgress.phase === 'starting' || appStore.loadProgress.phase === 'loading')}
+        <span class="chip chip-warn">load {Math.round(appStore.loadProgress.fraction * 100)}%</span>
+      {:else if appStore.loadProgress?.phase === 'ready'}
+        <span class="chip chip-ok">load ✓</span>
       {/if}
       {#if appStore.status?.distribute}
         <span class="chip chip-ok">xfer {Math.round(appStore.status.distribute.pct)}%</span>

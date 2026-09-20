@@ -1,18 +1,21 @@
-  import type {
-  AccelBackend,
-  ChatMessage,
-  ClusterView,
-  GpuInfo,
-  HfTokenSource,
-  HfTokenStatus,
-  ModelDefaultsInfo,
-  ModelInfo,
-  ModelSearchHit,
-  ModelSearchResponse,
-  Status
-} from './types';
+import type {
+    AccelBackend,
+    ChatMessage,
+    ClusterView,
+    DownloadJob,
+    GpuInfo,
+    HfTokenSource,
+    HfTokenStatus,
+    LoadProgress,
+    ModelDefaultsInfo,
+    ModelInfo,
+    ModelSearchHit,
+    ModelSearchResponse,
+    Status
+  } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { pushToast } from './toast';
+import { PollLoop } from './poll-loop';
 
 const ACCEL_LABELS: Record<AccelBackend, string> = {
   metal: 'Metal',
@@ -99,13 +102,13 @@ class AppStore {
   cacheRam = $state<number | 'auto'>('auto');
   threads = $state(8);
   extraArgsText = $state('');
-  // Inference overrides — null = auto (GGUF / heuristic defaults)
-  temperature = $state<number | null>(null);
-  topP = $state<number | null>(null);
-  topK = $state<number | null>(null);
-  minP = $state<number | null>(null);
-  presencePenalty = $state<number | null>(null);
-  repeatPenalty = $state<number | null>(null);
+  // Inference overrides — seeded from GGUF / Unsloth-style defaults (always numeric in UI)
+  temperature = $state<number>(0.7);
+  topP = $state<number>(0.95);
+  topK = $state<number>(40);
+  minP = $state<number>(0.05);
+  presencePenalty = $state<number>(0);
+  repeatPenalty = $state<number>(1.1);
   enableThinking = $state<boolean | null>(null);
   remember = $state(true);
   advancedOpen = $state(false);
@@ -115,10 +118,59 @@ class AppStore {
   ramPercent = $state(80);
   vramWeight = $state(0.6);
   latencyWeight = $state(0.4);
+  /** Snapshot of planPayload() after last select/save/reset — drives dirty Save accent. */
+  private settingsBaseline = $state('');
   planResult = $state<Record<string, unknown> | null>(null);
   estimating = $state(false);
   private estimateTimer: ReturnType<typeof setTimeout> | null = null;
   private estimateSeq = 0;
+  /** Live inference load state from /v1/load-progress (null when idle). */
+  loadProgress = $state<LoadProgress | null>(null);
+  /** Live HF download job from /v1/models/download-progress (null when idle). */
+  downloadJob = $state<DownloadJob | null>(null);
+  private loadLoop = new PollLoop(
+    async () => {
+      const r = await fetch('/v1/load-progress');
+      if (!r.ok) return null;
+      return (await r.json()) as LoadProgress;
+    },
+    1000,
+    5000,
+    (d) => {
+      const p = d as LoadProgress | null;
+      this.loadProgress = p && typeof p === 'object' && 'phase' in p ? p : null;
+    },
+    (d) => {
+      const p = (d as LoadProgress | null)?.phase ?? null;
+      return p === 'starting' || p === 'loading' ? 'fast' : 'slow';
+    }
+  );
+  private downloadLoop = new PollLoop(
+    async () => {
+      const r = await fetch('/v1/models/download-progress');
+      if (!r.ok) return null;
+      return (await r.json()) as DownloadJob;
+    },
+    800,
+    4000,
+    (d) => {
+      const job = d as DownloadJob | null;
+      const prev = this.downloadJob;
+      this.downloadJob = job && typeof job === 'object' && 'state' in job ? job : null;
+      // Auto-select the freshly downloaded GGUF (Unsloth: click → download → ready to load).
+      if (
+        this.downloadJob?.state === 'complete' &&
+        prev?.state === 'running' &&
+        this.downloadJob.filename
+      ) {
+        const name = this.downloadJob.filename;
+        void this.loadModels().then(() => {
+          if (this.models.some((m) => m.id === name)) void this.selectModel(name);
+        });
+      }
+    },
+    (d) => ((d as DownloadJob | null)?.state === 'running' ? 'fast' : 'slow')
+  );
   chat = $state<ChatMessage[]>([]);
   chatInput = $state('');
   chatStreaming = $state(false);
@@ -146,6 +198,8 @@ class AppStore {
     void this.loadConfig();
     void this.loadGpus();
     this.timer = setInterval(() => void this.refresh(), 1000);
+    this.loadLoop.start();
+    this.downloadLoop.start();
   }
 
   stop() {
@@ -153,6 +207,8 @@ class AppStore {
     this.timer = null;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
+    this.loadLoop.stop();
+    this.downloadLoop.stop();
   }
 
   async refresh() {
@@ -282,15 +338,48 @@ class AppStore {
     return m?.defaults ?? null;
   }
 
-  autoSamplingHint(key: string): string {
+  /** Fallback sampling defaults when GGUF metadata has no entry (Unsloth-style seeds). */
+  static readonly SAMPLING_FALLBACKS: Record<string, number> = {
+    temperature: 0.7,
+    top_p: 0.95,
+    top_k: 40,
+    min_p: 0.05,
+    presence_penalty: 0,
+    repeat_penalty: 1.1
+  };
+
+  samplingDefault(key: string): number {
     const v = this.selectedModelDefaults()?.sampling?.[key];
-    return v == null ? 'auto' : `auto ${v}`;
+    if (typeof v === 'number') return v;
+    return AppStore.SAMPLING_FALLBACKS[key] ?? 0;
+  }
+
+  autoSamplingHint(key: string): string {
+    return `auto ${this.samplingDefault(key)}`;
   }
 
   autoThinkingHint(): string {
     const kw = this.selectedModelDefaults()?.chat_template_kwargs;
     if (!kw || !('enable_thinking' in kw)) return 'auto';
     return `auto ${kw.enable_thinking ? 'on' : 'off'}`;
+  }
+
+  /** True when Plan & Run fields differ from the last saved / loaded baseline. */
+  settingsDirty(): boolean {
+    if (!this.selectedModel) return false;
+    return this.settingsFingerprint() !== this.settingsBaseline;
+  }
+
+  private settingsFingerprint(): string {
+    // Exclude remember / advanced_open — UI chrome, not run parameters.
+    const body = this.planPayload();
+    delete body.remember;
+    delete body.advanced_open;
+    return JSON.stringify(body);
+  }
+
+  markSettingsClean() {
+    this.settingsBaseline = this.settingsFingerprint();
   }
 
   applyParameterSet(ps: Record<string, unknown>) {
@@ -324,17 +413,17 @@ class AppStore {
     if (typeof ps.vram_weight === 'number') this.vramWeight = ps.vram_weight;
     if (typeof ps.latency_weight === 'number') this.latencyWeight = ps.latency_weight;
     if (typeof ps.temperature === 'number') this.temperature = ps.temperature;
-    else if (ps.temperature === null) this.temperature = null;
+    else this.temperature = this.samplingDefault('temperature');
     if (typeof ps.top_p === 'number') this.topP = ps.top_p;
-    else if (ps.top_p === null) this.topP = null;
+    else this.topP = this.samplingDefault('top_p');
     if (typeof ps.top_k === 'number') this.topK = ps.top_k;
-    else if (ps.top_k === null) this.topK = null;
+    else this.topK = this.samplingDefault('top_k');
     if (typeof ps.min_p === 'number') this.minP = ps.min_p;
-    else if (ps.min_p === null) this.minP = null;
+    else this.minP = this.samplingDefault('min_p');
     if (typeof ps.presence_penalty === 'number') this.presencePenalty = ps.presence_penalty;
-    else if (ps.presence_penalty === null) this.presencePenalty = null;
+    else this.presencePenalty = this.samplingDefault('presence_penalty');
     if (typeof ps.repeat_penalty === 'number') this.repeatPenalty = ps.repeat_penalty;
-    else if (ps.repeat_penalty === null) this.repeatPenalty = null;
+    else this.repeatPenalty = this.samplingDefault('repeat_penalty');
     if (typeof ps.enable_thinking === 'boolean') this.enableThinking = ps.enable_thinking;
     else if (ps.enable_thinking === null) this.enableThinking = null;
   }
@@ -345,16 +434,64 @@ class AppStore {
       const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
       if (!r.ok) {
         this.clampContextToModel();
+        this.seedSamplingDefaults();
+        this.markSettingsClean();
         this.scheduleEstimate();
         return;
       }
       const data = await r.json();
       if (data.parameter_set) this.applyParameterSet(data.parameter_set);
-      else this.clampContextToModel();
+      else {
+        this.clampContextToModel();
+        this.seedSamplingDefaults();
+      }
     } catch {
       this.clampContextToModel();
+      this.seedSamplingDefaults();
     }
+    this.markSettingsClean();
     this.scheduleEstimate();
+  }
+
+  /** Apply GGUF / fallback sampling seeds into the slider-backed fields. */
+  seedSamplingDefaults() {
+    this.temperature = this.samplingDefault('temperature');
+    this.topP = this.samplingDefault('top_p');
+    this.topK = this.samplingDefault('top_k');
+    this.minP = this.samplingDefault('min_p');
+    this.presencePenalty = this.samplingDefault('presence_penalty');
+    this.repeatPenalty = this.samplingDefault('repeat_penalty');
+  }
+
+  /** Persist the current run settings for this model (PUT /v1/model-settings). */
+  async saveModelSettings() {
+    if (!this.selectedModel) return;
+    if (!this.validateRunSettings()) {
+      pushToast('danger', 'Fix validation errors before saving');
+      return;
+    }
+    const body = this.planPayload();
+    delete body.remember;
+    delete body.advanced_open;
+    this.busy = '/v1/model-settings';
+    try {
+      const r = await fetch(`/v1/model-settings/${encodeURIComponent(this.selectedModel)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parameter_set: body })
+      });
+      const text = await r.text();
+      if (!r.ok) {
+        pushToast('danger', apiErrorMessage(JSON.parse(text), text, r.status, 'save settings'));
+        return;
+      }
+      pushToast('ok', `settings saved for ${this.selectedModel}`);
+      this.markSettingsClean();
+    } catch (e) {
+      pushToast('danger', String(e));
+    } finally {
+      this.busy = '';
+    }
   }
 
   resetRunSettings() {
@@ -376,11 +513,14 @@ class AppStore {
     this.cacheRam = 'auto';
     this.threads = 8;
     this.extraArgsText = '';
+    this.seedSamplingDefaults();
+    this.enableThinking = null;
     this.advancedOpen = false;
     this.fieldErrors = {};
     this.vramWeight = 0.6;
     this.latencyWeight = 0.4;
     this.planResult = null;
+    this.markSettingsClean();
   }
 
   planRunBlockedReason(): string | null {
@@ -746,6 +886,25 @@ class AppStore {
     await this.post('/v1/models/download', { source: src });
   }
 
+  /** Cancel the in-flight HF download (POST /v1/models/download/cancel). */
+  async cancelDownload() {
+    if (!this.downloadJob || this.downloadJob.state !== 'running') return;
+    this.busy = '/v1/models/download/cancel';
+    try {
+      const r = await fetch('/v1/models/download/cancel', { method: 'POST' });
+      const text = await r.text();
+      if (!r.ok) {
+        pushToast('danger', text || `cancel ${r.status}`);
+        return;
+      }
+      this.downloadJob = { state: 'cancelled', filename: this.downloadJob.filename };
+    } catch (e) {
+      pushToast('danger', String(e));
+    } finally {
+      this.busy = '';
+    }
+  }
+
   async distributeModel(name?: string) {
     const model = (name ?? this.selectedModel).trim();
     if (!model) return;
@@ -918,12 +1077,12 @@ class AppStore {
           model: this.status?.model_name || this.selectedModel || 'default',
           messages: this.chat.slice(0, -1),
           stream: true,
-          ...(this.temperature != null ? { temperature: this.temperature } : {}),
-          ...(this.topP != null ? { top_p: this.topP } : {}),
-          ...(this.topK != null ? { top_k: this.topK } : {}),
-          ...(this.minP != null ? { min_p: this.minP } : {}),
-          ...(this.presencePenalty != null ? { presence_penalty: this.presencePenalty } : {}),
-          ...(this.repeatPenalty != null ? { repeat_penalty: this.repeatPenalty } : {}),
+          temperature: this.temperature,
+          top_p: this.topP,
+          top_k: this.topK,
+          min_p: this.minP,
+          presence_penalty: this.presencePenalty,
+          repeat_penalty: this.repeatPenalty,
           ...(this.enableThinking != null
             ? { chat_template_kwargs: { enable_thinking: this.enableThinking } }
             : {})

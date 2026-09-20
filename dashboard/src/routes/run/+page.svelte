@@ -1,18 +1,12 @@
 <script lang="ts">
   import AutoEditField from '$lib/components/AutoEditField.svelte';
+  import DownloadPanel from '$lib/components/DownloadPanel.svelte';
+  import HardwareSettings from '$lib/components/HardwareSettings.svelte';
+  import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
+  import SliderField from '$lib/components/SliderField.svelte';
   import { appStore } from '$lib/store.svelte';
+  import { formatGb } from '$lib/format-transfer';
   import { CONTEXT_STEP, KV_CACHE_TYPES, MIN_CONTEXT } from '$lib/types';
-
-  function fmtBytes(n?: number | null) {
-    if (n == null) return '—';
-    return `${(n / 1e9).toFixed(1)} GB`;
-  }
-
-  function onGpuToggle(index: number) {
-    appStore.toggleGpu(index);
-    void appStore.persistGpuSelection();
-    appStore.scheduleEstimate();
-  }
 
   function bumpEstimate() {
     appStore.scheduleEstimate();
@@ -25,6 +19,12 @@
   const maxContext = $derived(appStore.selectedModelMaxContext());
   const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
   const estimateLabel = $derived(appStore.device === 'cpu' ? 'Estimated memory' : 'Estimated VRAM');
+  const settingsDirty = $derived(appStore.settingsDirty());
+  const maxThreads = $derived(
+    typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+      ? Math.max(16, navigator.hardwareConcurrency * 2)
+      : 64
+  );
 
   const parallelMode = $derived(appStore.parallelSlots === 'auto' ? 'auto' : 'edit');
   const batchMode = $derived(appStore.batchSize === 'auto' ? 'auto' : 'edit');
@@ -35,10 +35,14 @@
 </script>
 
 <div class="max-w-2xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">RUN SETTINGS</h1>
+  <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">
+    SYSTEM SETTINGS
+  </h1>
   <p class="mono text-[11px] mb-3" style="color: var(--muted)">
     Model: {appStore.selectedModel || '—'}
   </p>
+
+  <DownloadPanel />
 
   {#if appStore.status?.apply_error}
     <p class="mono text-[11px] mb-3" style="color: var(--danger, #c44)">{appStore.status.apply_error}</p>
@@ -55,8 +59,8 @@
     {#if !blocked && appStore.planResult?.estimated_bytes != null}
       <div class="mono text-[11px] p-2 rounded" style="background: var(--bg); border: 1px solid var(--border)">
         {estimateLabel}:
-        {fmtBytes(Number(appStore.planResult.estimated_bytes))}
-        / budget {fmtBytes(Number(appStore.planResult.budget_bytes))}
+        {formatGb(Number(appStore.planResult.estimated_bytes), 1)}
+        / budget {formatGb(Number(appStore.planResult.budget_bytes), 1)}
         {#if fitStatus}
           · <span style="color: var(--accent)">{fitStatus}</span>
         {/if}
@@ -66,8 +70,9 @@
       </div>
     {/if}
 
-    <label class="mono text-[11px]" style="color: var(--muted)">Model</label>
+    <label class="mono text-[11px]" style="color: var(--muted)" for="run-model">Model</label>
     <select
+      id="run-model"
       class="field mono"
       value={appStore.selectedModel}
       onchange={(e) => {
@@ -94,41 +99,20 @@
         Auto
       </label>
     </div>
-    <div class="flex items-center gap-2">
-      <input
-        id="run-context"
-        class="flex-1"
-        type="range"
-        min={MIN_CONTEXT}
-        max={maxContext}
-        step={CONTEXT_STEP}
-        value={appStore.context}
-        disabled={contextDisabled}
-        oninput={(e) => {
-          appStore.context = Number((e.currentTarget as HTMLInputElement).value);
-          bumpEstimate();
-        }}
-      />
-      <input
-        class="field mono"
-        style="width: 5.5rem"
-        type="number"
-        min={MIN_CONTEXT}
-        max={maxContext}
-        step={CONTEXT_STEP}
-        value={appStore.context}
-        disabled={contextDisabled}
-        onchange={(e) => {
-          const raw = Number((e.currentTarget as HTMLInputElement).value);
-          const stepped = Math.round(raw / CONTEXT_STEP) * CONTEXT_STEP;
-          appStore.context = Math.min(maxContext, Math.max(MIN_CONTEXT, stepped || MIN_CONTEXT));
-          bumpEstimate();
-        }}
-      />
-    </div>
-    <p class="mono text-[10px]" style="color: var(--muted)">
-      Max {maxContext.toLocaleString()} (model)
-    </p>
+    <SliderField
+      id="run-context"
+      label=""
+      value={appStore.context}
+      min={MIN_CONTEXT}
+      max={maxContext}
+      step={CONTEXT_STEP}
+      disabled={contextDisabled}
+      hint={`Max ${maxContext.toLocaleString()} (model)`}
+      onChange={(v) => {
+        appStore.context = v;
+        bumpEstimate();
+      }}
+    />
     {#if appStore.fieldErrors.context}
       <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.context}</p>
     {/if}
@@ -159,87 +143,51 @@
       </select>
     </div>
 
-    <label class="mono text-[11px]" style="color: var(--muted)">Device</label>
-    <select
-      class="field mono"
-      value={appStore.device}
-      disabled={!!appStore.busy}
-      onchange={(e) => {
-        const v = (e.currentTarget as HTMLSelectElement).value;
-        if (v === 'cpu' || v === 'gpu') {
-          void appStore.setDevice(v).then(() => bumpEstimate());
-        }
-      }}
-    >
-      <option value="gpu">GPU (default)</option>
-      <option value="cpu">CPU</option>
-    </select>
+    <div class="pt-1 border-t flex flex-col gap-2" style="border-color: var(--border)">
+      <div class="mono text-[11px] uppercase tracking-wider" style="color: var(--muted)">
+        Hardware
+      </div>
+      <HardwareSettings
+        lockBackend={appStore.status?.role === 'master' || appStore.status?.role === 'worker'}
+        onChanged={bumpEstimate}
+      />
+    </div>
 
     {#if appStore.device === 'gpu'}
-      {#if appStore.gpus.length > 0}
-        <label class="mono text-[11px]" style="color: var(--muted)">GPUs ({appStore.gpuBackend})</label>
-        <div class="flex flex-col gap-1">
-          {#each appStore.gpus as g}
-            <label class="mono text-[11px] flex items-start gap-2 cursor-pointer" style="color: var(--fg)">
-              <input
-                type="checkbox"
-                class="mt-0.5"
-                checked={appStore.selectedGpuIds.includes(g.index)}
-                disabled={appStore.gpus.length === 1 || !!appStore.busy}
-                onchange={() => onGpuToggle(g.index)}
-              />
-              <span>[{g.index}] {g.name} <span style="color: var(--muted)">{fmtBytes(g.vram_bytes)}</span></span>
-            </label>
-          {/each}
-        </div>
-      {/if}
-      <label class="mono text-[11px]" style="color: var(--muted)">GPU memory (%)</label>
-      <input
-        class="field mono"
-        type="number"
-        min="10"
-        max="100"
-        bind:value={appStore.vramPercent}
-        disabled={!!appStore.busy}
-        onchange={() => void appStore.setVramPercent(appStore.vramPercent).then(() => bumpEstimate())}
-      />
-      <label class="mono text-[11px]" style="color: var(--muted)">Placement weights (VRAM / latency)</label>
-      <div class="flex gap-2">
-        <input
-          class="field mono flex-1"
-          type="number"
-          min="0"
-          max="1"
-          step="0.05"
-          bind:value={appStore.vramWeight}
+      <div class="mono text-[11px]" style="color: var(--muted)">Placement weights (VRAM / latency)</div>
+      <div class="flex flex-col gap-2">
+        <SliderField
+          id="run-vram-weight"
+          label="VRAM weight"
+          value={appStore.vramWeight}
+          min={0}
+          max={1}
+          step={0.05}
+          numberWidth="4.5rem"
           disabled={!!appStore.busy}
-          onchange={bumpEstimate}
+          onChange={(v) => {
+            appStore.vramWeight = v;
+            bumpEstimate();
+          }}
         />
-        <input
-          class="field mono flex-1"
-          type="number"
-          min="0"
-          max="1"
-          step="0.05"
-          bind:value={appStore.latencyWeight}
+        <SliderField
+          id="run-latency-weight"
+          label="Latency weight"
+          value={appStore.latencyWeight}
+          min={0}
+          max={1}
+          step={0.05}
+          numberWidth="4.5rem"
           disabled={!!appStore.busy}
-          onchange={bumpEstimate}
+          onChange={(v) => {
+            appStore.latencyWeight = v;
+            bumpEstimate();
+          }}
         />
       </div>
       {#if appStore.fieldErrors.placementWeights}
         <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.placementWeights}</p>
       {/if}
-    {:else}
-      <label class="mono text-[11px]" style="color: var(--muted)">CPU memory (%)</label>
-      <input
-        class="field mono"
-        type="number"
-        min="10"
-        max="100"
-        bind:value={appStore.ramPercent}
-        disabled={!!appStore.busy}
-        onchange={() => void appStore.setRamPercent(appStore.ramPercent).then(() => bumpEstimate())}
-      />
     {/if}
 
     <details bind:open={appStore.advancedOpen}>
@@ -266,14 +214,17 @@
           disabled={!!appStore.busy}
           onModeChange={(m) => appStore.setAutoInt('parallelSlots', m)}
         >
-          <input
-            class="field mono w-full"
-            type="number"
-            min="1"
+          <SliderField
+            id="run-parallel"
+            label=""
             value={typeof appStore.parallelSlots === 'number' ? appStore.parallelSlots : 2}
+            min={1}
+            max={32}
+            step={1}
+            numberWidth="4.5rem"
             disabled={!!appStore.busy}
-            onchange={(e) => {
-              appStore.parallelSlots = Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 1);
+            onChange={(v) => {
+              appStore.parallelSlots = v;
               bumpEstimate();
             }}
           />
@@ -285,14 +236,17 @@
           disabled={!!appStore.busy}
           onModeChange={(m) => appStore.setAutoInt('batchSize', m)}
         >
-          <input
-            class="field mono w-full"
-            type="number"
-            min="1"
+          <SliderField
+            id="run-batch"
+            label=""
             value={typeof appStore.batchSize === 'number' ? appStore.batchSize : 512}
+            min={1}
+            max={4096}
+            step={1}
+            numberWidth="5rem"
             disabled={!!appStore.busy}
-            onchange={(e) => {
-              appStore.batchSize = Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 1);
+            onChange={(v) => {
+              appStore.batchSize = v;
             }}
           />
         </AutoEditField>
@@ -303,14 +257,17 @@
           disabled={!!appStore.busy}
           onModeChange={(m) => appStore.setAutoInt('microBatch', m)}
         >
-          <input
-            class="field mono w-full"
-            type="number"
-            min="1"
+          <SliderField
+            id="run-ubatch"
+            label=""
             value={typeof appStore.microBatch === 'number' ? appStore.microBatch : 2}
+            min={1}
+            max={512}
+            step={1}
+            numberWidth="4.5rem"
             disabled={!!appStore.busy}
-            onchange={(e) => {
-              appStore.microBatch = Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 1);
+            onChange={(v) => {
+              appStore.microBatch = v;
             }}
           />
         </AutoEditField>
@@ -335,116 +292,69 @@
           />
         {/if}
 
-
-        <label class="mono text-[11px]" style="color: var(--muted)">Sampling (empty = auto)</label>
-        <div class="grid grid-cols-2 gap-2">
-          <div>
-            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-temp">Temperature</label>
-            <input
-              id="inf-temp"
-              class="field mono w-full"
-              type="number"
-              min="0"
-              max="2"
-              step="0.05"
-              placeholder={appStore.autoSamplingHint('temperature')}
-              value={appStore.temperature ?? ''}
-              disabled={!!appStore.busy}
-              onchange={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                appStore.temperature = raw === '' ? null : Number(raw);
-              }}
-            />
-          </div>
-          <div>
-            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-top-p">Top P</label>
-            <input
-              id="inf-top-p"
-              class="field mono w-full"
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              placeholder={appStore.autoSamplingHint('top_p')}
-              value={appStore.topP ?? ''}
-              disabled={!!appStore.busy}
-              onchange={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                appStore.topP = raw === '' ? null : Number(raw);
-              }}
-            />
-          </div>
-          <div>
-            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-top-k">Top K</label>
-            <input
-              id="inf-top-k"
-              class="field mono w-full"
-              type="number"
-              min="0"
-              step="1"
-              placeholder={appStore.autoSamplingHint('top_k')}
-              value={appStore.topK ?? ''}
-              disabled={!!appStore.busy}
-              onchange={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                appStore.topK = raw === '' ? null : Math.max(0, Math.floor(Number(raw)));
-              }}
-            />
-          </div>
-          <div>
-            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-min-p">Min P</label>
-            <input
-              id="inf-min-p"
-              class="field mono w-full"
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              placeholder={appStore.autoSamplingHint('min_p')}
-              value={appStore.minP ?? ''}
-              disabled={!!appStore.busy}
-              onchange={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                appStore.minP = raw === '' ? null : Number(raw);
-              }}
-            />
-          </div>
-          <div>
-            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-pres">Presence penalty</label>
-            <input
-              id="inf-pres"
-              class="field mono w-full"
-              type="number"
-              min="-2"
-              max="2"
-              step="0.05"
-              placeholder={appStore.autoSamplingHint('presence_penalty')}
-              value={appStore.presencePenalty ?? ''}
-              disabled={!!appStore.busy}
-              onchange={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                appStore.presencePenalty = raw === '' ? null : Number(raw);
-              }}
-            />
-          </div>
-          <div>
-            <label class="mono text-[10px]" style="color: var(--muted)" for="inf-rep">Repeat penalty</label>
-            <input
-              id="inf-rep"
-              class="field mono w-full"
-              type="number"
-              min="0"
-              max="2"
-              step="0.05"
-              placeholder={appStore.autoSamplingHint('repeat_penalty')}
-              value={appStore.repeatPenalty ?? ''}
-              disabled={!!appStore.busy}
-              onchange={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                appStore.repeatPenalty = raw === '' ? null : Number(raw);
-              }}
-            />
-          </div>
+        <div class="mono text-[11px]" style="color: var(--muted)">Sampling</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <SliderField
+            id="inf-temp"
+            label="Temperature"
+            value={appStore.temperature}
+            min={0}
+            max={2}
+            step={0.05}
+            disabled={!!appStore.busy}
+            onChange={(v) => (appStore.temperature = v)}
+          />
+          <SliderField
+            id="inf-top-p"
+            label="Top P"
+            value={appStore.topP}
+            min={0}
+            max={1}
+            step={0.01}
+            disabled={!!appStore.busy}
+            onChange={(v) => (appStore.topP = v)}
+          />
+          <SliderField
+            id="inf-top-k"
+            label="Top K"
+            value={appStore.topK}
+            min={0}
+            max={200}
+            step={1}
+            numberWidth="4.5rem"
+            disabled={!!appStore.busy}
+            onChange={(v) => (appStore.topK = v)}
+          />
+          <SliderField
+            id="inf-min-p"
+            label="Min P"
+            value={appStore.minP}
+            min={0}
+            max={1}
+            step={0.01}
+            disabled={!!appStore.busy}
+            onChange={(v) => (appStore.minP = v)}
+          />
+          <SliderField
+            id="inf-pres"
+            label="Presence penalty"
+            value={appStore.presencePenalty}
+            min={-2}
+            max={2}
+            step={0.05}
+            disabled={!!appStore.busy}
+            onChange={(v) => (appStore.presencePenalty = v)}
+          />
+          <SliderField
+            id="inf-rep"
+            label="Repeat penalty"
+            value={appStore.repeatPenalty}
+            min={0}
+            max={2}
+            step={0.05}
+            disabled={!!appStore.busy}
+            onChange={(v) => (appStore.repeatPenalty = v)}
+          />
         </div>
 
         <label class="mono text-[11px]" style="color: var(--muted)" for="inf-think">Enable thinking</label>
@@ -494,14 +404,17 @@
           disabled={!!appStore.busy}
           onModeChange={(m) => appStore.setAutoInt('checkpoints', m)}
         >
-          <input
-            class="field mono w-full"
-            type="number"
-            min="0"
+          <SliderField
+            id="run-ckpt"
+            label=""
             value={typeof appStore.checkpoints === 'number' ? appStore.checkpoints : 0}
+            min={0}
+            max={64}
+            step={1}
+            numberWidth="4.5rem"
             disabled={!!appStore.busy}
-            onchange={(e) => {
-              appStore.checkpoints = Math.max(0, Number((e.currentTarget as HTMLInputElement).value) || 0);
+            onChange={(v) => {
+              appStore.checkpoints = v;
             }}
           />
         </AutoEditField>
@@ -512,25 +425,33 @@
           disabled={!!appStore.busy}
           onModeChange={(m) => appStore.setAutoInt('cacheRam', m)}
         >
-          <input
-            class="field mono w-full"
-            type="number"
-            min="0"
+          <SliderField
+            id="run-cache-ram"
+            label=""
             value={typeof appStore.cacheRam === 'number' ? appStore.cacheRam : 0}
+            min={0}
+            max={65536}
+            step={256}
+            numberWidth="5.5rem"
             disabled={!!appStore.busy}
-            onchange={(e) => {
-              appStore.cacheRam = Math.max(0, Number((e.currentTarget as HTMLInputElement).value) || 0);
+            onChange={(v) => {
+              appStore.cacheRam = v;
             }}
           />
         </AutoEditField>
 
-        <label class="mono text-[11px]" style="color: var(--muted)">Threads</label>
-        <input
-          class="field mono"
-          type="number"
-          min="1"
-          bind:value={appStore.threads}
+        <SliderField
+          id="run-threads"
+          label="Threads"
+          value={appStore.threads}
+          min={1}
+          max={maxThreads}
+          step={1}
+          numberWidth="4.5rem"
           disabled={!!appStore.busy}
+          onChange={(v) => {
+            appStore.threads = v;
+          }}
         />
         {#if appStore.fieldErrors.threads}
           <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.threads}</p>
@@ -554,6 +475,8 @@
       Automatic placement — layer split and RPC distribution are computed by kllm (no manual tensor split).
     </p>
 
+    <LoadProgressPanel />
+
     <div class="flex gap-2 flex-wrap">
       <button
         class="btn"
@@ -562,6 +485,12 @@
           appStore.resetRunSettings();
           bumpEstimate();
         }}>Reset</button
+      >
+      <button
+        class="btn"
+        class:btn-accent={settingsDirty}
+        disabled={!appStore.selectedModel || !!appStore.busy}
+        onclick={() => appStore.saveModelSettings()}>Save settings</button
       >
       <button
         class="btn"
@@ -609,7 +538,7 @@
                   {Number((appStore.planResult.tensor_split as number[])?.[i] ?? 0).toFixed(3)}
                 </td>
                 <td class="py-1 border-b" style="border-color: var(--border)">
-                  {fmtBytes(Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0))}
+                  {formatGb(Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0), 1)}
                 </td>
                 <td class="py-1 border-b" style="border-color: var(--border)">
                   {Number((appStore.planResult.node_scores as number[])?.[i] ?? 0).toFixed(3)}

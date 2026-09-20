@@ -17,6 +17,7 @@ export type Member = {
   control_port?: number;
   rpc_port?: number;
   gpu_ids?: number[] | null;
+  latency_ms?: number | null;
 };
 
 export type DownloadProgress = {
@@ -24,6 +25,40 @@ export type DownloadProgress = {
   bytes: number;
   total: number | null;
   pct: number;
+};
+
+/** Live download job view from /v1/models/download-progress. */
+export type DownloadJob = {
+  state: 'idle' | 'running' | 'complete' | 'error' | 'cancelled';
+  filename?: string;
+  bytes?: number;
+  total?: number | null;
+  pct?: number;
+  phase?: string;
+  rate_bps?: number | null;
+  eta_seconds?: number | null;
+  error?: string | null;
+};
+
+/** Live inference load view from /v1/load-progress. */
+export type LoadProgress = {
+  phase: 'starting' | 'loading' | 'ready' | 'error' | null;
+  model: string | null;
+  bytes_loaded: number;
+  bytes_total: number;
+  fraction: number;
+  rate_bps?: number | null;
+  eta_seconds?: number | null;
+  error?: string;
+};
+
+/** Per-model run settings as stored by PUT /v1/model-settings/{model}. */
+export type ParameterSet = Record<string, unknown>;
+
+export type ModelSettingsDoc = {
+  model: string;
+  parameter_set: ParameterSet;
+  updated_at: string | null;
 };
 
 export type ReceiveProgress = DownloadProgress & {

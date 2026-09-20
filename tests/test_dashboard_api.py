@@ -27,7 +27,8 @@ def client(tmp_path, monkeypatch):
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
     token = auth_mod.ensure_api_token()
-    return TestClient(agent_mod.app), agent_mod, token
+    with TestClient(agent_mod.app) as client:
+        yield client, agent_mod, token
 
 
 def test_list_models_empty(client):
@@ -319,7 +320,8 @@ def test_hf_token_put_save_and_clear(client, monkeypatch):
     assert r.json() == {"configured": True, "source": "file"}
     path = Path(os.environ["KLLM_HOME"]) / "hf_token"
     assert path.read_text(encoding="utf-8").strip() == "hf_saved"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     r = c.put("/v1/hf-token", json={"token": ""})
     assert r.status_code == 200

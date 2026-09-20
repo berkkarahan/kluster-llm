@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import os
+import asyncio
+from contextlib import asynccontextmanager
+import httpx
+from kllm import http_clients, rpc_cache
 import secrets
 import sys
 import threading
@@ -46,7 +50,39 @@ from kllm.state import (
     repo_root,
 )
 
-app = FastAPI(title="kllm-agent", version="0.1.0")
+_background_stop = threading.Event()
+
+async def _sample_diagnostics():
+    from kllm._dbg_a1ff77 import gpu_snapshot, llama_props, write
+    while True:
+        def sample():
+            write("hardware", "background", "device snapshot",
+                  {"gpu": gpu_snapshot(STATE.process_pid), "llama_props": llama_props(STATE.infer_port)})
+        await asyncio.to_thread(sample)
+        await asyncio.sleep(10)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    http_clients.control_client()
+    _background_stop.clear()
+    if "pytest" not in sys.modules:
+        _start_membership_thread()
+        _start_logs_thread()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5), trust_env=False) as client:
+        app.state.inference_client = client
+        sampler = asyncio.create_task(_sample_diagnostics()) if os.getenv("KLLM_DEBUG_HARDWARE", "").lower() in ("1", "true", "yes") else None
+        try:
+            yield
+        finally:
+            _background_stop.set()
+            if sampler:
+                sampler.cancel()
+                await asyncio.gather(sampler, return_exceptions=True)
+            http_clients.close()
+
+
+app = FastAPI(title="kllm-agent", version="0.1.0", lifespan=lifespan)
 
 
 @app.exception_handler(RequestValidationError)
@@ -114,6 +150,7 @@ def _heartbeat_payload() -> dict[str, Any]:
         "available_ram_bytes": mem.get("available_ram_bytes") or 0,
         "vram_bytes": mem.get("vram_bytes"),
         "backend": mem.get("backend") or "unknown",
+        **{key: mem.get(key) for key in ("actual_backend", "requested_backend", "devices", "unified_memory", "binary_version", "reclaimable_ram_bytes") if mem.get(key) is not None},
         "lan_host": mem.get("lan_host"),
         "wg_public_key": STATE.wg_public_key,
         "gpu_ids": STATE.gpu_ids,
@@ -194,12 +231,9 @@ def _worker_post_heartbeat() -> None:
         return
 
     try:
-        with httpx.Client(timeout=5.0) as client:
-            resp = client.post(
-                f"{_master_control_base()}/v1/heartbeat",
-                json=_heartbeat_payload(),
-                headers={"X-Kllm-Key": STATE.join_key},
-            )
+        resp = http_clients.control_client().post(
+            f"{_master_control_base()}/v1/heartbeat", json=_heartbeat_payload(),
+            headers={"X-Kllm-Key": STATE.join_key}, timeout=5.0)
     except Exception:
         membership_mod.mark_master_unreachable(STATE)
         return
@@ -244,9 +278,9 @@ def _probe_worker_latencies() -> None:
         port = int(raw.get("control_port") or DEFAULT_CONTROL_PORT)
         url = f"http://{host}:{port}/health"
         try:
+            client = http_clients.control_client()
             start = time.perf_counter()
-            with httpx.Client(timeout=1.0) as client:
-                resp = client.get(url)
+            resp = client.get(url, timeout=1.0)
             if resp.status_code != 200:
                 continue
             sample_ms = (time.perf_counter() - start) * 1000.0
@@ -261,6 +295,7 @@ def _probe_worker_latencies() -> None:
 
 
 def _tick_membership() -> None:
+    _refresh_local_capacity()
     if STATE.role == "master":
         _sync_master_liveness(shrink=True)
         _probe_worker_latencies()
@@ -270,8 +305,7 @@ def _tick_membership() -> None:
 
 
 def _membership_loop() -> None:
-    while True:
-        time.sleep(membership_mod.HEARTBEAT_INTERVAL_S)
+    while not _background_stop.wait(membership_mod.HEARTBEAT_INTERVAL_S):
         try:
             _tick_membership()
         except Exception:
@@ -290,8 +324,7 @@ def _logs_loop() -> None:
     cluster_log.HUB.prime_offsets()
     if STATE.role == "master":
         cluster_log.HUB.ensure_journal_loaded()
-    while True:
-        time.sleep(cluster_log.FLUSH_INTERVAL_S)
+    while not _background_stop.wait(cluster_log.FLUSH_INTERVAL_S):
         try:
             master_base = None
             if STATE.role == "worker" and STATE.master_host:
@@ -314,9 +347,24 @@ def _start_logs_thread() -> None:
     threading.Thread(target=_logs_loop, name="kllm-logs", daemon=True).start()
 
 
-if "pytest" not in sys.modules:
-    _start_membership_thread()
-    _start_logs_thread()
+def _refresh_local_capacity() -> None:
+    member = STATE.members.get(STATE.node_id)
+    if member is None:
+        return
+    try:
+        cap = native.probe_capacity()
+        selected = _resolve_gpu_selection(STATE.gpu_ids)
+        member.update({k: cap[k] for k in ("total_ram_bytes", "available_ram_bytes", "requested_backend", "unified_memory", "binary_version") if k in cap})
+        member.update(backend=selected["backend"], actual_backend=selected["backend"], devices=selected["gpus"])
+        # RSS is measured from our own tracked child, never inferred from total RAM usage.
+        member["reclaimable_ram_bytes"] = 0
+        if STATE.process_pid:
+            import psutil
+            process = psutil.Process(STATE.process_pid)
+            if process.name().lower() in ("llama-server", "llama-server.exe", "rpc-server", "rpc-server.exe"):
+                member["reclaimable_ram_bytes"] = process.memory_info().rss
+    except Exception:
+        pass
 
 
 def _require_key(x_kllm_key: str | None = Header(default=None)) -> None:
@@ -383,6 +431,12 @@ class RegisterBody(BaseModel):
     available_ram_bytes: int = 0
     vram_bytes: int | None = None
     backend: str = "unknown"
+    actual_backend: str | None = None
+    requested_backend: str | None = None
+    devices: list[dict[str, Any]] = Field(default_factory=list)
+    unified_memory: bool = False
+    binary_version: str | None = None
+    reclaimable_ram_bytes: int = 0
     lan_host: str | None = None
     wg_public_key: str | None = None
     wg_listen_port: int = netsec.WG_LISTEN_PORT
@@ -408,9 +462,7 @@ def _probe_capacity_for_cluster() -> dict[str, Any]:
         raise HTTPException(
             503,
             f"{exc} On this machine run: python scripts/install.py "
-            "(macOS cluster worker with a Vulkan master: "
-            "uv run python scripts/install.py --backend vulkan; "
-            "set KLLM_ACCEL_BACKEND=vulkan)",
+            "(macOS Apple Silicon: --backend metal)",
         ) from exc
 
 
@@ -470,19 +522,32 @@ def _resolve_gpu_selection(gpu_ids: list[int] | None) -> dict[str, Any]:
 
 def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, str]:
     """Env vars so the engine only sees the selected physical GPUs."""
-    if not gpu_ids:
-        return {}
-    csv = ",".join(str(i) for i in gpu_ids)
-    if backend == "cuda":
-        return {"CUDA_VISIBLE_DEVICES": csv}
-    if backend == "vulkan":
-        return {"GGML_VK_VISIBLE_DEVICES": csv}
-    if backend == "rocm":
-        return {
-            "HIP_VISIBLE_DEVICES": csv,
-            "ROCR_VISIBLE_DEVICES": csv,
-        }
-    return {}
+    env: dict[str, str] = {}
+    if gpu_ids:
+        csv = ",".join(str(i) for i in gpu_ids)
+        if backend == "cuda":
+            env = {"CUDA_VISIBLE_DEVICES": csv}
+        elif backend == "vulkan":
+            env = {"GGML_VK_VISIBLE_DEVICES": csv}
+        elif backend == "rocm":
+            env = {
+                "HIP_VISIBLE_DEVICES": csv,
+                "ROCR_VISIBLE_DEVICES": csv,
+            }
+    if os.getenv("KLLM_DEBUG_HARDWARE", "").lower() in ("1", "true", "yes"):
+        try:
+            from kllm._dbg_a1ff77 import write as _dbg_write
+
+            _dbg_write(
+                "H1",
+                "agent/__init__.py:_gpu_visibility_env",
+                "gpu visibility env",
+                {"backend": backend, "gpu_ids": gpu_ids, "env": env},
+            )
+        except Exception:
+            pass
+
+    return env
 
 
 class ConfigBody(BaseModel):
@@ -511,7 +576,12 @@ def _list_gpus_payload() -> dict[str, Any]:
     out: dict[str, Any] = {
         "backend": backend,
         "probed_backend": probed,
-        "allowed_backends": allowed_accel_backends(probed, gpus),
+        "allowed_backends": listed.get("allowed_backends", allowed_accel_backends(probed, gpus)),
+        "requested_backend": listed.get("requested_backend"),
+        "actual_backend": listed.get("actual_backend", backend),
+        "binary_version": listed.get("binary_version"),
+        "unified_memory": listed.get("unified_memory", False),
+        "backend_warning": listed.get("backend_warning"),
         "gpus": gpus,
     }
     if listed.get("error"):
@@ -550,6 +620,8 @@ class PullBody(BaseModel):
     sha256: str
     size: int
     source: PullSource
+    manifest: dict[str, Any] | None = None
+    sources: list[PullSource] | None = None
 
 
 class LlamaSetupBody(BaseModel):
@@ -598,6 +670,7 @@ def llama_setup(
                 port=STATE.rpc_port or DEFAULT_RPC_PORT,
                 repo_root=str(root) if root else None,
                 env=gpu_env or None,
+                devices=[d["device"] for d in _resolve_gpu_selection(STATE.gpu_ids)["gpus"] if d.get("device")],
                 log_path=str(cluster_log.rpc_server_log_path()),
             )
             STATE.process_pid = launched.get("pid")
@@ -922,6 +995,7 @@ def status() -> dict[str, Any]:
         "download": model_ops.get_download_progress(),
         "distribute": model_ops.get_distribute_progress(),
         "receive": model_ops.get_receive_progress(),
+        "rpc_cache": rpc_cache.status(),
         "capacity": capacity,
         "control_port": STATE.control_port,
         "rpc_port": STATE.rpc_port,
@@ -1046,6 +1120,11 @@ def start_master(body: StartBody) -> dict[str, Any]:
         "available_ram_bytes": cap["available_ram_bytes"],
         "vram_bytes": vram,
         "backend": backend,
+        "actual_backend": backend,
+        "requested_backend": cap.get("requested_backend"),
+        "devices": gpu_sel["gpus"],
+        "unified_memory": cap.get("unified_memory", False),
+        "binary_version": cap.get("binary_version"),
         "gpu_ids": STATE.gpu_ids,
         "last_seen": time.time(),
         "latency_ms": 0.0,
@@ -1191,6 +1270,11 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         "available_ram_bytes": cap["available_ram_bytes"],
         "vram_bytes": vram,
         "backend": backend,
+        "actual_backend": backend,
+        "requested_backend": cap.get("requested_backend"),
+        "devices": gpu_sel["gpus"],
+        "unified_memory": cap.get("unified_memory", False),
+        "binary_version": cap.get("binary_version"),
         "gpu_ids": STATE.gpu_ids,
         "wg_public_key": wg_pub,
         "wg_listen_port": netsec.WG_LISTEN_PORT,
@@ -1279,6 +1363,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
             port=body.rpc_port,
             repo_root=str(root) if root else None,
             env=gpu_env or None,
+            devices=[d["device"] for d in gpu_sel["gpus"] if d.get("device")],
             log_path=str(cluster_log.rpc_server_log_path()),
         )
         STATE.process_pid = launched["pid"]
@@ -1642,6 +1727,16 @@ def get_logs(
     return _logs_snapshot(n, node, source)
 
 
+@app.get("/v1/models/manifest")
+def get_model_manifest(x_kllm_filename: str = Header(...), x_kllm_key: str | None = Header(default=None)):
+    if not STATE.join_key or x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid join key")
+    path = models_dir() / Path(x_kllm_filename).name
+    if not path.is_file():
+        raise HTTPException(404, "model not found")
+    return model_ops.manifest_for(path)
+
+
 @app.get("/v1/models/blob")
 def get_model_blob(
     request: Request,
@@ -1717,6 +1812,8 @@ def pull_model(
             source_host=body.source.host,
             source_port=body.source.port,
             join_key=x_kllm_key or "",
+            manifest=body.manifest,
+            sources=[source.model_dump() for source in body.sources or []],
         )
     except model_ops.ReceiveInProgressError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1849,7 +1946,7 @@ def run(body: RunBody) -> dict[str, Any]:
             plan_result.get("hint") or "model and context exceed cluster budget (overflow)",
         )
     path = model_ops.resolve_local_model(body.model)
-    rpc_servers = rpc_server_endpoints(STATE.members)
+    rpc_servers = plan_result.get("rpc_endpoints", rpc_server_endpoints(STATE.members))
     ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
     if STATE.process_pid:
@@ -1861,6 +1958,30 @@ def run(body: RunBody) -> dict[str, Any]:
         STATE.gpu_ids,
     )
     extra = sanitize_extra_args(body.extra_args) if body.extra_args else []
+    if os.getenv("KLLM_DEBUG_HARDWARE", "").lower() in ("1", "true", "yes"):
+        try:
+            from kllm._dbg_a1ff77 import write as _dbg_write
+
+            _dbg_write(
+                "H1,H2,H4",
+                "agent/__init__.py:run",
+                "run launch inputs",
+                {
+                    "backend": (STATE.members.get(STATE.node_id) or {}).get("backend"),
+                    "gpu_ids": STATE.gpu_ids,
+                    "gpu_env": gpu_env,
+                    "rpc_servers": rpc_servers,
+                    "tensor_split": plan_result.get("tensor_split_csv"),
+                    "node_ids": plan_result.get("node_ids"),
+                    "ngl": plan_result.get("ngl"),
+                    "node_devices": plan_result.get("node_devices"),
+                    "node_alloc_bytes": plan_result.get("node_alloc_bytes"),
+                    "device_effective": plan_result.get("device_effective"),
+                },
+            )
+        except Exception:
+            pass
+
     launch_cfg = build_master_launch(
         body,
         plan_result,

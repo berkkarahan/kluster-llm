@@ -146,6 +146,7 @@ def test_firewall_darwin_already_permitted(monkeypatch):
         raise AssertionError("should not run socketfilterfw when already permitted")
 
     monkeypatch.setattr(netsec, "_macos_socketfilterfw_run", fail_run)
+    monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
     out = netsec._firewall_darwin(50052, "192.168.68.62")
     assert out == {"ok": True, "applied": False, "warning": None}
     assert called["run"] == 0
@@ -169,6 +170,7 @@ def test_firewall_darwin_applies_add_and_unblock(monkeypatch):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(netsec, "_macos_socketfilterfw_run", fake_run)
+    monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
     out = netsec._firewall_darwin(50052, "192.168.68.62")
     assert out == {"ok": True, "applied": True, "warning": None}
     assert calls == [["--add", "/opt/rpc-server"], ["--unblockapp", "/opt/rpc-server"]]
@@ -178,6 +180,7 @@ def test_firewall_darwin_missing_binary_warns(monkeypatch):
     from kllm import netsec
 
     monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: None)
+    monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
     out = netsec._firewall_darwin(50052, "192.168.68.62")
     assert out["ok"] is True
     assert out["applied"] is False

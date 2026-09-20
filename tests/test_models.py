@@ -173,7 +173,8 @@ def test_hf_token_file_beats_env(kllm_home, monkeypatch):
     assert hf_token.resolve_hf_token() == "hf_file"
     path = hf_token.hf_token_path()
     assert path.is_file()
-    assert (path.stat().st_mode & 0o777) == 0o600
+    if __import__("os").name != "nt":
+        assert (path.stat().st_mode & 0o777) == 0o600
 
 
 def test_hf_token_env_fallback(kllm_home, monkeypatch):
@@ -602,7 +603,9 @@ def _fake_seed_client(payload: bytes, ranges: list[str]):
             rh = (headers or {}).get("Range") or ""
             ranges.append(rh)
             start, end = _range_bounds(rh)
-            return _FakeStreamResp(payload[start:end])
+            response = _FakeStreamResp(payload[start:end])
+            response.headers = {"Content-Range": f"bytes {start}-{end-1}/{len(payload)}", "Content-Length": str(end-start)}
+            return response
 
     return FakeClient
 
@@ -645,6 +648,10 @@ def test_pull_from_seed_resumes_missing_pieces(kllm_home, monkeypatch):
     bitmap = models.empty_piece_bitmap(3)
     models.piece_bit_set(bitmap, 1)
     models.save_piece_bitmap(models.bitmap_path_for_partial(tmp), bitmap)
+    models.atomic_json(tmp.with_name(tmp.name + ".resume.json"), {
+        "binding": {"sha256": digest, "size": len(payload), "piece_size": 8, "pieces": None},
+        "done": {"1": __import__("hashlib").sha256(payload[8:16]).hexdigest()},
+    })
 
     ranges: list[str] = []
     monkeypatch.setattr(models.httpx, "Client", _fake_seed_client(payload, ranges))

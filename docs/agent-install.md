@@ -237,6 +237,18 @@ kllm ui
 
 Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay private (LAN or WireGuard). Upstream llama.cpp RPC has **no auth**.
 
+### 4.4 Updating worker software from the master
+
+After you `git pull` (and rebuild) on the **master**, fan out the same pull + smart rebuild to joined workers:
+
+```bash
+# On master (workers must have a clean git checkout of this repo)
+kllm cluster update
+# Dashboard: Cluster → Update workers
+```
+
+Each worker runs `git pull --ff-only`, then `scripts/install.py` if `llama-release` changed or `scripts/build.py` otherwise, restarts its agent, and rejoins with the same key. Set `KLLM_REPO_ROOT` on workers if the checkout is not discoverable from the agent process.
+
 ### 4.4 Useful env overrides
 
 | Env | Purpose |

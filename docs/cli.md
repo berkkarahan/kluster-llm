@@ -35,6 +35,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
+| `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard) |
@@ -184,6 +185,9 @@ kllm model distribute llama-3.1-8b-instruct.Q4_K_M.gguf
 # master coordinates a LAN pull; finished workers seed others
 kllm plan --model llama-3.1-8b-instruct.Q4_K_M.gguf
 kllm run --model llama-3.1-8b-instruct.Q4_K_M.gguf
+
+# Later: after master has pulled/rebuilt, update workers' checkouts
+kllm cluster update
 ```
 
 ## Architecture notes

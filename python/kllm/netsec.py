@@ -107,6 +107,130 @@ def pick_rpc_bind_host(preferred: str | None = None, *, toward: str | None = Non
     return "127.0.0.1"
 
 
+def is_local_ipv4(ip: str | None, local_ips: list[str] | None = None) -> bool:
+    """True if ``ip`` is currently assigned to this host (non-loopback)."""
+    if not ip:
+        return False
+    ips = local_ips if local_ips is not None else _list_ipv4_addresses()
+    return str(ip).strip() in ips
+
+
+def should_apply_rpc_bind_hint(hint: str, current: str, local_ips: list[str] | None = None) -> bool:
+    """Accept a master's rpc_bind_hint only when it is a local address.
+
+    ``request.client.host`` on the master can be a different LAN client (mesh
+    hairpin, stale NAT mapping). Binding rpc-server to that IP fails silently
+    and leaves RPC on the wrong host.
+    """
+    if not is_usable_lan_peer(hint) or hint == current:
+        return False
+    return is_local_ipv4(hint, local_ips)
+
+
+def reconcile_rpc_bind(
+    bind: str | None, *, toward: str | None, overlay: str
+) -> tuple[str | None, str | None]:
+    """Replace a persisted bind that is not a local address. Returns (bind, warning)."""
+    if overlay == OVERLAY_WIREGUARD:
+        return bind, None
+    if not bind or bind in ("0.0.0.0", "127.0.0.1"):
+        return bind, None
+    if is_usable_lan_peer(bind) and is_local_ipv4(bind):
+        return bind, None
+    new = pick_rpc_bind_host(toward=toward)
+    return new, f"rpc_bind {bind} is not a local address; using {new}"
+
+
+def wifi_path_warning(toward: str | None) -> str | None:
+    """Warn when the route to ``toward`` is a Wi-Fi adapter (RPC is RTT-bound)."""
+    toward = (toward or "").strip()
+    if not toward or toward in ("0.0.0.0", "127.0.0.1"):
+        return None
+    try:
+        system = platform.system()
+        if system == "Windows":
+            alias, wifi = _wifi_route_windows(toward)
+        elif system == "Darwin":
+            alias, wifi = _wifi_route_darwin(toward)
+        else:
+            alias, wifi = _wifi_route_linux(toward)
+    except Exception:
+        return None
+    if not wifi:
+        return None
+    label = f" ({alias})" if alias else ""
+    return (
+        f"path to {toward} is via Wi-Fi{label}; llama.cpp RPC is latency-bound — "
+        f"prefer Ethernet or Thunderbolt"
+    )
+
+
+def _wifi_route_windows(toward: str) -> tuple[str | None, bool]:
+    out = subprocess.check_output(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                f"$r = Find-NetRoute -RemoteIPAddress '{toward}' -ErrorAction Stop | "
+                "Select-Object -First 1; "
+                "$a = Get-NetAdapter -InterfaceIndex $r.ifIndex -ErrorAction Stop; "
+                "$wifi = ($a.PhysicalMedium -eq 'Native802_11') -or ($a.Name -like 'Wi-Fi*') "
+                "-or ($a.InterfaceDescription -match 'Wi-Fi|Wireless|802\\.11'); "
+                "Write-Output \"$wifi`t$($a.Name)\""
+            ),
+        ],
+        text=True,
+        timeout=10,
+        stderr=subprocess.DEVNULL,
+    ).strip()
+    if not out:
+        return None, False
+    parts = out.split("\t", 1)
+    wifi = parts[0].strip().lower() in ("true", "1")
+    alias = parts[1].strip() if len(parts) > 1 else None
+    return alias, wifi
+
+
+def _wifi_route_darwin(toward: str) -> tuple[str | None, bool]:
+    route = subprocess.check_output(
+        ["route", "-n", "get", toward], text=True, timeout=5, stderr=subprocess.DEVNULL
+    )
+    alias = None
+    for line in route.splitlines():
+        if "interface:" in line:
+            alias = line.split(":", 1)[1].strip()
+            break
+    if not alias:
+        return None, False
+    ports = subprocess.check_output(
+        ["networksetup", "-listallhardwareports"], text=True, timeout=5, stderr=subprocess.DEVNULL
+    )
+    current = None
+    wifi = False
+    for line in ports.splitlines():
+        if line.startswith("Hardware Port:"):
+            current = line.split(":", 1)[1].strip().lower()
+        elif line.startswith("Device:") and alias == line.split(":", 1)[1].strip():
+            wifi = current in ("wi-fi", "wifi", "airport")
+            break
+    return alias, wifi
+
+
+def _wifi_route_linux(toward: str) -> tuple[str | None, bool]:
+    out = subprocess.check_output(
+        ["ip", "-o", "route", "get", toward], text=True, timeout=5, stderr=subprocess.DEVNULL
+    )
+    alias = None
+    parts = out.split()
+    if "dev" in parts:
+        alias = parts[parts.index("dev") + 1]
+    if not alias:
+        return None, False
+    wireless = Path(f"/sys/class/net/{alias}/wireless")
+    return alias, wireless.is_dir()
+
+
 def is_usable_lan_peer(ip: str | None) -> bool:
     """True if ``ip`` is a non-loopback unicast IPv4 suitable for RPC dial."""
     if not ip:

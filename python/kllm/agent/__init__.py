@@ -103,11 +103,31 @@ def _refresh_persisted_netsec_warnings() -> None:
     """Drop stale firewall warnings after agent reload (e.g. code upgrade)."""
     if STATE.role not in ("master", "worker"):
         return
+    warnings: list[str] = []
+    bind, bind_warn = netsec.reconcile_rpc_bind(
+        STATE.rpc_bind,
+        toward=STATE.master_host,
+        overlay=STATE.overlay or netsec.OVERLAY_NONE,
+    )
+    if bind_warn:
+        STATE.rpc_bind = bind
+        warnings.append(bind_warn)
     bind = STATE.rpc_bind
     port = STATE.rpc_port or DEFAULT_RPC_PORT
-    if not bind:
-        return
-    STATE.netsec_warnings = netsec.refresh_rpc_firewall_warnings(port, bind)
+    if bind:
+        warnings.extend(netsec.refresh_rpc_firewall_warnings(port, bind))
+    peer = STATE.master_host if STATE.role == "worker" else None
+    if STATE.role == "master":
+        for member in STATE.members.values():
+            if (member or {}).get("role") == "master":
+                continue
+            peer = (member or {}).get("lan_host") or (member or {}).get("host")
+            if peer:
+                break
+    wifi = netsec.wifi_path_warning(peer)
+    if wifi:
+        warnings.append(wifi)
+    STATE.netsec_warnings = warnings
     STATE.save()
 
 
@@ -1332,8 +1352,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         overlay == netsec.OVERLAY_NONE
         and not body.rpc_bind
         and isinstance(hint, str)
-        and netsec.is_usable_lan_peer(hint)
-        and hint != rpc_bind_host
+        and netsec.should_apply_rpc_bind_hint(hint, rpc_bind_host)
     ):
         rpc_bind_host = hint
         STATE.netsec_warnings = list(STATE.netsec_warnings or []) + [

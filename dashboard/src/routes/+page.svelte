@@ -80,7 +80,31 @@
         <button class="btn" disabled={!!appStore.busy || !isWorker} onclick={() => appStore.leaveCluster()}
           >Leave</button
         >
+        <button
+          class="btn col-span-2"
+          disabled={!!appStore.busy || !isMaster || members.filter((m) => m.role === 'worker').length === 0}
+          onclick={() => void appStore.updateWorkers()}
+          >Update workers</button
+        >
       </div>
+      {#if isMaster && appStore.status?.update}
+        <p class="mono text-[11px] mt-1" style="color: var(--muted)">
+          update
+          <span style="color: var(--fg)">{appStore.status.update.phase ?? '—'}</span>
+          {#if (appStore.status.update.pct ?? 0) > 0}
+            · {Math.round(appStore.status.update.pct ?? 0)}%
+          {/if}
+        </p>
+        {#each appStore.status.update.workers ?? [] as w}
+          <p class="mono text-[11px]" style="color: var(--muted)">
+            {w.host ?? w.node_id ?? '?'}
+            <span style="color: var(--fg)"> {w.phase}</span>
+            {#if w.error}
+              <span style="color: var(--danger, #c44)"> {w.error}</span>
+            {/if}
+          </p>
+        {/each}
+      {/if}
       <LoadProgressPanel />
       {#if appStore.status?.join_key}
         <p class="mono text-[11px] mt-2 break-all" style="color: var(--muted)">

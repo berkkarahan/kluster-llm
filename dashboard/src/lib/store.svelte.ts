@@ -836,6 +836,30 @@ class AppStore {
     await this.post('/v1/leave');
   }
 
+  async updateWorkers() {
+    this.busy = '/v1/cluster/update';
+    try {
+      const r = await fetch('/v1/cluster/update', { method: 'POST' });
+      const text = await r.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      if (!r.ok) {
+        const msg = apiErrorMessage(data, text, r.status, 'update');
+        pushToast('danger', msg);
+        throw new Error(msg);
+      }
+      pushToast('ok', 'worker update started');
+      await this.refresh();
+      return data;
+    } finally {
+      this.busy = '';
+    }
+  }
+
   async searchModels(): Promise<ModelSearchResponse | null> {
     const query = this.modelSource.trim();
     if (!query) return null;

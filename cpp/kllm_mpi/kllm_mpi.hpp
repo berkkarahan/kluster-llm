@@ -37,6 +37,9 @@ namespace kllm_mpi {
 constexpr std::size_t kHeaderBytes = 96;
 constexpr std::uint64_t kMpiChunkBytes = 1ull << 30;
 constexpr std::uint16_t kVersion = 1;
+// A single collective stays under this unless the caller raises it.
+// A full GGUF does not fit, so labeling weights as an activation still fails.
+constexpr std::uint64_t kDefaultMaxPayloadBytes = 4ull << 30;
 
 constexpr std::uint32_t kF32 = 0;
 constexpr std::uint32_t kF16 = 1;
@@ -110,18 +113,24 @@ ReducePlan plan_reduce(const std::vector<ShardView>& shards, const std::string& 
                        const std::vector<double>* weights);
 
 // Loopback stand-in for a communicator. One slot per rank.
-void balanced_bcast(std::vector<Tensor>& slots, int root, std::vector<TraceEvent>* trace);
+// Payloads larger than max_payload_bytes are refused before any rank is updated.
+void balanced_bcast(std::vector<Tensor>& slots, int root, std::vector<TraceEvent>* trace,
+                    std::uint64_t max_payload_bytes = kDefaultMaxPayloadBytes);
 
 void balanced_allreduce(std::vector<Tensor>& slots, const std::string& kind,
-                        const std::vector<double>* weights, std::vector<TraceEvent>* trace);
+                        const std::vector<double>* weights, std::vector<TraceEvent>* trace,
+                        std::uint64_t max_payload_bytes = kDefaultMaxPayloadBytes);
 
 #if defined(KLLM_HAVE_MPI)
 // Per-rank loops. Every rank in MPI_COMM_WORLD must call these.
-// A root that fails validation allreduces an error flag before the payload
-// bcast, so the other ranks do not block forever.
-void mpi_balanced_bcast(Tensor& tensor, int root);
+// Header and allocation failures are MPI_Allreduce'd before the payload
+// collective, so one rank cannot leave the others blocked.
+// kind and weights are allgathered and must match on every rank.
+void mpi_balanced_bcast(Tensor& tensor, int root,
+                        std::uint64_t max_payload_bytes = kDefaultMaxPayloadBytes);
 void mpi_balanced_allreduce(Tensor& local, const std::string& kind,
-                            const std::vector<double>* weights);
+                            const std::vector<double>* weights,
+                            std::uint64_t max_payload_bytes = kDefaultMaxPayloadBytes);
 #endif
 
 }  // namespace kllm_mpi

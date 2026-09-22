@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from kllm.mpi_comm import (
@@ -19,6 +21,10 @@ from kllm.mpi_comm import (
     f32_values,
     largest_remainder,
     payload_chunks,
+    attach_mpi_schedule,
+    llama_cli_fractions,
+    llama_cpp_layer_owners,
+    node_budget_bytes,
     render_flow,
     run_activation_pipeline,
     schedule_from_plan,
@@ -212,9 +218,29 @@ def test_pipeline_moves_activations_and_leaves_weights_resident():
     assert all(event["op"] == "MPI_Bcast" for event in result["trace"])
 
 
-def test_schedule_from_plan_follows_production_fractions():
+def test_schedule_without_block_count_does_not_invent_layers():
     plan = {
-        "estimated_layers": 31,
+        "estimated_layers": 80,
+        "tensor_split": [0.5, 0.5],
+        "node_ids": ["win", "mac"],
+        "ngl": 80,
+    }
+    nodes = [
+        {"node_id": "mac", "backend": "metal", "platform": "macos", "total_ram_bytes": 32 << 30, "unified_memory": True},
+        {"node_id": "win", "backend": "cuda", "platform": "windows", "vram_bytes": 12 << 30},
+    ]
+    schedule = schedule_from_plan(plan, nodes, headroom=0.8)
+    assert schedule["layer_ranges_authoritative"] is False
+    assert schedule["ranks"] == []
+    assert schedule["estimated_layers"] == 80
+    assert schedule["mpi_moves_activations"] is False
+    assert schedule["runtime_transport"] == "llama.cpp-rpc"
+    assert "32/48/80" in schedule["notes"]
+
+
+def test_schedule_from_plan_uses_llama_cpp_upper_bound():
+    plan = {
+        "estimated_layers": 80,
         "tensor_split": [0.5, 0.5],
         "node_ids": ["win", "mac"],
     }
@@ -222,11 +248,125 @@ def test_schedule_from_plan_follows_production_fractions():
         {"node_id": "mac", "backend": "metal", "platform": "macos", "total_ram_bytes": 32 << 30, "unified_memory": True},
         {"node_id": "win", "backend": "cuda", "platform": "windows", "vram_bytes": 12 << 30},
     ]
-    schedule = schedule_from_plan(plan, nodes, headroom=0.8)
+    # n_gpu_layers = block_count + 1 puts every repeating layer on a device.
+    schedule = schedule_from_plan(plan, nodes, headroom=0.8, block_count=31, n_gpu_layers=32)
     assert [rank["n_layers"] for rank in schedule["ranks"]] == [16, 15]
     assert [rank["node_id"] for rank in schedule["ranks"]] == ["win", "mac"]
+    assert [(rank["layer_start"], rank["layer_end"]) for rank in schedule["ranks"]] == [(0, 16), (16, 31)]
+    assert schedule["layer_ranges_authoritative"] is True
+    assert schedule["layer_assignment"] == "llama.cpp-b11026-upper-bound"
+    assert schedule["mpi_moves_activations"] is False
+    assert schedule["runtime_transport"] == "llama.cpp-rpc"
+    assert schedule["transport"] == "llama.cpp-rpc"
+    assert schedule["collectives"] == []
+    assert all(rank["wire"] == "none" for rank in schedule["ranks"])
     assert schedule["weights_on_wire"] is False
-    assert schedule["split_mode"] == "layer"
+    assert schedule["cpu_layers"] is None
+
+
+def test_cpu_prefix_is_not_handed_to_a_device():
+    plan = {
+        "estimated_layers": 80,
+        "tensor_split": [0.5, 0.5],
+        "node_ids": ["win", "mac"],
+        "ngl": 8,
+    }
+    nodes = [
+        {"node_id": "mac", "backend": "metal", "platform": "macos", "total_ram_bytes": 32 << 30, "unified_memory": True},
+        {"node_id": "win", "backend": "cuda", "platform": "windows", "vram_bytes": 12 << 30},
+    ]
+    # n_gpu_layers == block_count keeps repeating layer 0 on the host.
+    # The remaining 7 layers split 4/3, starting at layer 1.
+    schedule = schedule_from_plan(plan, nodes, headroom=0.8, block_count=8, n_gpu_layers=8)
+    assert schedule["cpu_layers"] == [0, 1]
+    assert [(rank["layer_start"], rank["layer_end"], rank["n_layers"]) for rank in schedule["ranks"]] == [
+        (1, 5, 4),
+        (5, 8, 3),
+    ]
+    assert schedule["collectives"] == []
+    assert schedule["mpi_moves_activations"] is False
+
+
+def test_llama_upper_bound_is_the_layer_start_edge():
+    # Full offload sets n_gpu_layers = n_layer + 1, so the denominator is
+    # n_layer + 1 (the output layer takes the last slot). A 4-layer model
+    # therefore does not split 2/2.
+    assert llama_cpp_layer_owners([0.5, 0.5], 4, n_gpu_layers=5) == [0, 0, 0, 1]
+    assert llama_cpp_layer_owners([0.5, 0.5], 2, n_gpu_layers=3) == [0, 0]
+    thirds = llama_cpp_layer_owners([1, 1, 1], 32, n_gpu_layers=33)
+    assert thirds.count(0) == 11
+    assert thirds.count(1) == 11
+    assert thirds.count(2) == 10
+    # n_gpu_layers == block count keeps layer 0 on the host CPU (output-layer slot).
+    with_cpu = llama_cpp_layer_owners([0.5, 0.5], 8, n_gpu_layers=8)
+    assert with_cpu[0] == -1
+    assert with_cpu.count(-1) == 1
+    # llama-server parses the 4-decimal CSV as float, so 1/3 becomes binary32(0.3333).
+    rounded = llama_cli_fractions([1 / 3, 1 / 3, 1 / 3])
+    as_f32 = struct.unpack("<f", struct.pack("<f", 0.3333))[0]
+    assert rounded == [as_f32, as_f32, as_f32]
+    assert [f"{v:.4f}" for v in rounded] == ["0.3333", "0.3333", "0.3333"]
+
+
+def test_attach_mpi_schedule_swallows_errors():
+    refused = attach_mpi_schedule(
+        {"tensor_split": [1.0], "node_ids": ["ghost"], "estimated_layers": 32},
+        [],
+        block_count=4,
+    )
+    assert refused["enabled"] is False
+    assert refused["mpi_moves_activations"] is False
+    assert refused["runtime_transport"] == "llama.cpp-rpc"
+    assert "error" in refused
+    with pytest.raises(MpiProtocolError, match="not in the cluster"):
+        schedule_from_plan(
+            {"tensor_split": [1.0], "node_ids": ["ghost"], "estimated_layers": 32},
+            [],
+            block_count=4,
+        )
+
+
+def test_zero_vram_is_not_treated_as_missing():
+    assert node_budget_bytes(
+        {"backend": "cuda", "vram_bytes": 0, "available_ram_bytes": 64 << 30},
+        0.8,
+    ) == 0
+    assert node_budget_bytes({"backend": "cuda", "available_ram_bytes": 64 << 30}, 0.8) == int((64 << 30) * 0.8)
+
+
+def test_column_parallel_reserves_the_full_kv_cache():
+    gib = 1024**3
+    nodes = [
+        {"node_id": "a", "backend": "cuda", "platform": "linux", "vram_bytes": 8 * gib, "compute_speed": 1.0},
+        {"node_id": "b", "backend": "cuda", "platform": "linux", "vram_bytes": 8 * gib, "compute_speed": 1.0},
+    ]
+    with pytest.raises(MpiProtocolError, match="caps"):
+        split_graph(
+            nodes,
+            n_layers=4,
+            model_size_bytes=2 * gib,
+            tensor_parallel=True,
+            n_cols=64,
+            context=10_000_000,
+        )
+
+
+def test_kv_cache_lowers_the_layer_cap():
+    tight = split_graph(
+        example_mixed_cluster(),
+        n_layers=EXAMPLE_LAYERS,
+        model_size_bytes=EXAMPLE_MODEL_BYTES,
+        context=600_000,
+    )
+    counts = [rank.n_layers for rank in tight.ranks]
+    assert sum(counts) == EXAMPLE_LAYERS
+    assert counts[2] < 7
+
+
+def test_payload_budget_rejects_a_weight_sized_activation():
+    blob = activation_f32([0.0] * 32, ne=(32,), src_rank=0, layer=0)
+    with pytest.raises(MpiProtocolError, match="budget"):
+        balanced_bcast([blob, None], 0, max_payload_bytes=8)
 
 
 def test_largest_remainder_and_chunks():

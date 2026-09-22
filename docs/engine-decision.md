@@ -80,10 +80,11 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 
 ## Experimental: MPI activation collectives
 
-`python/kllm/mpi_comm.py` and `cpp/kllm_mpi/` are an optional MPI wrapper for the same layer cut. They do not replace `llama-server` / `rpc-server`.
+`python/kllm/mpi_comm.py` and `cpp/kllm_mpi/` are an optional MPI wrapper for activation buffers. They do not replace `llama-server` / `rpc-server`, and they do not tensor-split Metal with ROCm or CUDA.
 
-- Weights and KV stay on the rank that owns the layer. The wire format is a 96-byte GGML header plus the activation bytes (token ids, hidden states, logits).
-- `balanced_bcast` broadcasts the header, then a payload whose length is `nbytes` from that header.
-- `balanced_allreduce` gathers per-rank counts. Equal f32 partial sums use `MPI_Allreduce`. Unequal column shards use `MPI_Allgatherv`. Unequal slices are not padded into an allreduce.
-- Tensor-parallel column shards are opt-in and only inside one backend. Metal + ROCm + CUDA stays a pipeline: mixed allreduces are refused because the backends do not round alike.
+- The `mpi` object on a run plan describes llama.cpp b11026 layer owners (`upper_bound` on cumulative f32 splits of the 4-decimal `--tensor-split`) when the GGUF `block_count` is known. `estimated_layers` is a file-size bucket (32/48/80) and is not that count. The object does not start MPI and does not move tensors; RPC remains the runtime.
+- Weights and KV stay on the rank that owns the layer. The wire format is a 96-byte GGML header plus the activation bytes (token ids, hidden states, logits). The activation flag is the sender's claim. A payload above 4 GiB is refused, so a weight tensor cannot cross by wearing that flag.
+- `balanced_bcast` validates the header (flags, overflow-safe `ne`, contiguous `nb`, `nbytes`) on every rank and agrees on success before anyone allocates or broadcasts the payload. An allocation failure is reduced the same way, so one rank cannot leave the others blocked in `MPI_Bcast`.
+- `balanced_allreduce` gathers counts, then gathers the reduction kind and weights. Equal f32 partial sums use `MPI_Allreduce`. Unequal column shards use `MPI_Allgatherv`. A mismatch or a `plan` failure is reduced before either payload collective, and unequal slices are not padded into an allreduce.
+- `split_graph` is the experimental harmonic planner. Its layer cap is weights plus KV (`context * 128 * (k + v) * slots` per layer). Column shards reserve the full KV on every rank, then a slice of the weights. Tensor-parallel column shards are opt-in and only inside one backend.
 - MPI is unauthenticated. Keep it on the private fabric, the same rule as port 50052.

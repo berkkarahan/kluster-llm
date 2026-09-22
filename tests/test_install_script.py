@@ -147,7 +147,7 @@ def test_copy_llama_binaries_renames_ggml_rpc_and_copies_dylibs(install, monkeyp
     assert (worker / "rpc-server").read_bytes() == b"rpc"
 
 
-def test_pick_release_asset_macos_vulkan_uses_metal_pack(install, monkeypatch):
+def test_pick_release_asset_macos_vulkan_does_not_relabel_metal(install, monkeypatch):
     monkeypatch.setattr(install, "_is_windows", lambda: False)
     monkeypatch.setattr(install, "_is_macos", lambda: True)
     monkeypatch.setattr(install, "_is_linux", lambda: False)
@@ -157,8 +157,7 @@ def test_pick_release_asset_macos_vulkan_uses_metal_pack(install, monkeypatch):
         {"name": "llama-b11026-bin-win-vulkan-x64.zip", "browser_download_url": "u2"},
     ]
     picked = install.pick_release_asset(assets, "vulkan")
-    assert picked is not None
-    assert "macos-arm64" in picked["name"]
+    assert picked is None
 
 
 def test_parse_args_llama_pin_flags(install):
@@ -216,6 +215,6 @@ def test_cached_llama_archive_prefers_platform_pack(install, monkeypatch, tmp_pa
     monkeypatch.setattr(install, "_is_linux", lambda: False)
     monkeypatch.setattr(install.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: home))
-    got = install._cached_llama_archive("b11026", "vulkan")
+    got = install._cached_llama_archive("b11026", "metal")
     assert got is not None
     assert got.name == "llama-b11026-bin-macos-arm64.tar.gz"

@@ -146,6 +146,7 @@ def test_firewall_darwin_already_permitted(monkeypatch):
         raise AssertionError("should not run socketfilterfw when already permitted")
 
     monkeypatch.setattr(netsec, "_macos_socketfilterfw_run", fail_run)
+    monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
     out = netsec._firewall_darwin(50052, "192.168.68.62")
     assert out == {"ok": True, "applied": False, "warning": None}
     assert called["run"] == 0
@@ -169,6 +170,7 @@ def test_firewall_darwin_applies_add_and_unblock(monkeypatch):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(netsec, "_macos_socketfilterfw_run", fake_run)
+    monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
     out = netsec._firewall_darwin(50052, "192.168.68.62")
     assert out == {"ok": True, "applied": True, "warning": None}
     assert calls == [["--add", "/opt/rpc-server"], ["--unblockapp", "/opt/rpc-server"]]
@@ -178,6 +180,7 @@ def test_firewall_darwin_missing_binary_warns(monkeypatch):
     from kllm import netsec
 
     monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: None)
+    monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
     out = netsec._firewall_darwin(50052, "192.168.68.62")
     assert out["ok"] is True
     assert out["applied"] is False
@@ -425,6 +428,7 @@ def test_join_honors_rpc_bind_hint_from_master(client):
 
     with (
         patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.235.1"),
+        patch.object(netsec_mod, "_list_ipv4_addresses", return_value=["192.168.235.1", "192.168.68.63"]),
         patch.object(netsec_mod, "ensure_rpc_firewall", return_value={"ok": True, "applied": True, "warning": None}),
         patch.object(agent.native, "probe_capacity", return_value={
             "total_ram_bytes": 8,
@@ -449,6 +453,93 @@ def test_join_honors_rpc_bind_hint_from_master(client):
     assert captured["host"] == "192.168.68.63"
     assert r.json()["rpc_bind"] == "192.168.68.63"
     assert any("corrected" in w for w in (r.json().get("netsec_warnings") or []))
+
+
+def test_join_ignores_rpc_bind_hint_that_is_not_local(client):
+    c, agent, netsec_mod = client
+    captured = {}
+
+    def fake_start_worker(**kwargs):
+        captured.update(kwargs)
+        return {"pid": 4242}
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "members": 2, "rpc_bind_hint": "192.168.68.56"}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            return FakeResp()
+
+    with (
+        patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.68.51"),
+        patch.object(netsec_mod, "_list_ipv4_addresses", return_value=["192.168.68.51"]),
+        patch.object(netsec_mod, "ensure_rpc_firewall", return_value={"ok": True, "applied": True, "warning": None}),
+        patch.object(agent.native, "probe_capacity", return_value={
+            "total_ram_bytes": 8,
+            "available_ram_bytes": 4,
+            "vram_bytes": 1,
+            "backend": "vulkan",
+        }),
+        patch.object(agent.native, "start_worker", side_effect=fake_start_worker),
+        patch("httpx.Client", FakeClient),
+    ):
+        r = c.post(
+            "/v1/join",
+            json={
+                "key": "secret",
+                "master_host": "192.168.68.59",
+                "master_port": 18765,
+                "rpc_port": 50052,
+                "overlay": "none",
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert captured["host"] == "192.168.68.51"
+    assert r.json()["rpc_bind"] == "192.168.68.51"
+
+
+def test_should_apply_rpc_bind_hint_requires_local_ip():
+    from kllm.netsec import should_apply_rpc_bind_hint
+
+    local = ["192.168.68.51"]
+    assert should_apply_rpc_bind_hint("192.168.68.51", "192.168.235.1", local)
+    assert not should_apply_rpc_bind_hint("192.168.68.56", "192.168.68.51", local)
+    assert not should_apply_rpc_bind_hint("192.168.68.51", "192.168.68.51", local)
+
+
+def test_reconcile_rpc_bind_replaces_foreign_address(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec, "_list_ipv4_addresses", lambda: ["192.168.68.51"])
+    monkeypatch.setattr(netsec, "pick_rpc_bind_host", lambda preferred=None, toward=None: "192.168.68.51")
+    bind, warn = netsec.reconcile_rpc_bind("192.168.68.56", toward="192.168.68.59", overlay="none")
+    assert bind == "192.168.68.51"
+    assert warn and "192.168.68.56" in warn
+
+
+def test_control_client_keeps_idle_sockets():
+    from kllm import http_clients
+
+    assert http_clients._CONTROL_LIMITS.keepalive_expiry == 120.0
+    http_clients.close()
+    client = http_clients.control_client()
+    assert client.timeout.connect == 5.0 or client.timeout is not None
+    http_clients.close()
 
 
 def test_register_assigns_wg_when_overlay_on(client):

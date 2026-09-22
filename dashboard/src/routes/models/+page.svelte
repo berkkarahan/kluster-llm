@@ -172,10 +172,16 @@
         <div class="mono text-[11px]" style="color: var(--muted)">
           receive {downloadLabel(recv)}{#if recv.filename}<span> · {recv.filename}</span>{/if}
           {#if recv.phase}<span> · {recv.phase}</span>{/if}
+          {#if recv.resumed_bytes}<span> · resumed {(recv.resumed_bytes / 1048576).toFixed(1)} MiB verified</span>{/if}
         </div>
       </div>
     {/if}
 
+    {#if appStore.status?.rpc_cache}
+      <p class="mono text-[11px]" style="color: var(--muted)">
+        RPC tensor cache: {appStore.status.rpc_cache.exists ? 'available' : 'created on worker startup'} · {appStore.status.rpc_cache.path}
+      </p>
+    {/if}
     <label class="mono text-[11px] mt-2 flex items-center gap-2" style="color: var(--muted)" for="hf-token">
       Hugging Face token
       {#if appStore.hfTokenConfigured}

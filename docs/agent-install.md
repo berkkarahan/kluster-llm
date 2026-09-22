@@ -53,8 +53,8 @@ After install on **this** machine:
 | Host OS | Default `--backend` | Notes |
 |---------|---------------------|--------|
 | Windows | `vulkan` (auto) | Prebuilt GitHub zip for the pin in `llama-release`. CUDA if `nvcc` / CUDA toolkit present → auto may pick `cuda`. |
-| macOS | `metal` (standalone) or **`vulkan`** (join a Vulkan master) | Standalone: `--backend metal`. **Cluster worker** on a Windows/Linux Vulkan master: `--backend vulkan` and `export KLLM_ACCEL_BACKEND=vulkan` so membership/planning report `vulkan` (MoltenVK), not Metal. GitHub macOS packs are Metal-only; they still match the pinned RPC protocol. |
-| Linux | `vulkan` or `cuda` if toolkit present | Prebuilt Ubuntu asset for the pin; `--from-source` when cmake/CUDA is required. |
+| macOS Apple Silicon | `metal` | Use Metal even when the master uses Vulkan. RPC supports mixed backends; an override cannot relabel installed devices. |
+| Linux | `cuda` with NVIDIA tooling, `rocm` with AMD HIP tooling, otherwise `vulkan` | Use `--backend rocm --from-source` on supported Linux AMD systems. Hardware validation remains required. |
 
 ---
 
@@ -163,7 +163,7 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 
 | Flag | When to use |
 |------|-------------|
-| `--backend auto\|metal\|cuda\|vulkan\|cpu` | Force accelerator; default `auto`. |
+| `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
 | `--prefer-prebuilt` | Prefer GitHub release zips (default on every OS unless `--from-source`). |
 | `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp`. |
 | `--tag TAG` | Override `llama-release` (keep every node on the same tag). |
@@ -181,7 +181,7 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 ```bash
 python scripts/install.py --llama-only
 python scripts/install.py --check
-python scripts/install.py --llama-only --backend vulkan   # Mac worker joining a Vulkan master
+python scripts/install.py --llama-only --backend metal    # Apple Silicon worker, including Vulkan masters
 ```
 
 **CLI/UI rebuild only** (no llama/WG/toolchains):

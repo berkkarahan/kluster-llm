@@ -161,7 +161,7 @@
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">gpus</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">ram</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">vram</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">latency</th>
+            <th class="font-medium py-1 border-b" style="border-color: var(--border)">control RTT</th>
           </tr>
         </thead>
         <tbody>
@@ -175,7 +175,7 @@
                 <td class="py-1.5 border-b" style="border-color: var(--border)">{m.node_id}</td>
                 <td class="py-1.5 border-b" style="border-color: var(--border)">{m.host}</td>
                 <td class="py-1.5 border-b" style="border-color: var(--border)">{m.role}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.backend}</td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.actual_backend ?? m.backend}{m.unified_memory ? ' · shared RAM' : ''}{m.requested_backend && m.requested_backend !== (m.actual_backend ?? m.backend) ? ` (requested ${m.requested_backend})` : ''}</td>
                 <td class="py-1.5 border-b" style="border-color: var(--border)"
                   >{m.gpu_ids?.length ? m.gpu_ids.join(',') : '—'}</td
                 >
@@ -249,7 +249,7 @@
           disabled={!appStore.status?.inference_up || appStore.chatStreaming}
           onchange={(e) => {
             const raw = (e.currentTarget as HTMLInputElement).value.trim();
-            appStore.temperature = raw === '' ? null : Number(raw);
+            appStore.temperature = raw === '' ? appStore.samplingDefault('temperature') : Number(raw);
           }}
         />
       </div>

@@ -10,7 +10,7 @@ def test_effective_accel_backend_override(monkeypatch):
     assert effective_accel_backend("metal") == "metal"
 
     monkeypatch.setenv("KLLM_ACCEL_BACKEND", "vulkan")
-    assert effective_accel_backend("metal") == "vulkan"
+    assert effective_accel_backend("metal") == "metal"
 
 
 def test_effective_accel_backend_config_after_env(tmp_path, monkeypatch):
@@ -28,10 +28,10 @@ def test_effective_accel_backend_config_after_env(tmp_path, monkeypatch):
 
     assert accel_mod.effective_accel_backend("metal") == "metal"
     config_mod.save_config({"accel_backend": "vulkan"})
-    assert accel_mod.effective_accel_backend("metal") == "vulkan"
+    assert accel_mod.effective_accel_backend("metal") == "metal"
 
     monkeypatch.setenv("KLLM_ACCEL_BACKEND", "cuda")
-    assert accel_mod.effective_accel_backend("metal") == "cuda"
+    assert accel_mod.effective_accel_backend("metal") == "metal"
 
 
 def test_allowed_accel_backends_by_vendor():
@@ -50,7 +50,7 @@ def test_allowed_accel_backends_by_vendor():
         "vulkan",
         [{"name": "AMD Radeon RX 7900"}],
         platform="win32",
-    ) == ["rocm", "vulkan"]
+    ) == ["vulkan"]
     assert allowed_accel_backends("vulkan", platform="linux") == ["vulkan"]
     assert allowed_accel_backends("cpu", platform="linux") == []
 

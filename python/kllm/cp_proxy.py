@@ -166,7 +166,8 @@ def stop_current() -> None:
     except OSError:
         pass
     try:
-        os.waitpid(handle.pid, os.WNOHANG)
+        if hasattr(os, "WNOHANG"):
+            os.waitpid(handle.pid, os.WNOHANG)
     except OSError:
         pass
 

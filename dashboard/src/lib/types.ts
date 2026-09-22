@@ -4,6 +4,9 @@ export type GpuInfo = {
   index: number;
   name: string;
   vram_bytes?: number | null;
+  device?: string;
+  backend?: string;
+  free_bytes?: number;
 };
 
 export type Member = {
@@ -11,6 +14,11 @@ export type Member = {
   host: string;
   role?: string;
   backend?: string;
+  actual_backend?: string;
+  requested_backend?: string | null;
+  devices?: GpuInfo[];
+  unified_memory?: boolean;
+  binary_version?: string;
   vram_bytes?: number | null;
   total_ram_bytes?: number;
   available_ram_bytes?: number;
@@ -63,6 +71,10 @@ export type ModelSettingsDoc = {
 
 export type ReceiveProgress = DownloadProgress & {
   phase?: string;
+  resumed_bytes?: number;
+  verified_bytes?: number;
+  manifest_sha256?: string;
+  piece_size?: number;
 };
 
 export type DistributeWorkerProgress = {
@@ -153,6 +165,29 @@ export type Status = {
   software?: SoftwareIdentity | null;
   /** Live receive on worker; null/absent when idle. */
   receive?: ReceiveProgress | null;
+  rpc_cache?: { enabled: boolean; path: string; exists: boolean; persistent: boolean };
+};
+
+export type DeviceAllocation = {
+  node_id: string;
+  device: string;
+  backend: string;
+  layer_start: number;
+  layer_end: number;
+  layers: number;
+  output_layer: boolean;
+  estimated_bytes: number;
+  budget_bytes: number;
+};
+
+export type PlacementPlan = {
+  device_allocations?: DeviceAllocation[];
+  device_order?: string[];
+  estimate_confidence?: string;
+  resolved_launch_settings?: Record<string, unknown>;
+  cpu_layers?: number;
+  cpu_alloc_bytes?: number;
+  [key: string]: unknown;
 };
 
 export type ClusterView = 'loading' | 'offline' | 'idle' | 'live';

@@ -259,9 +259,9 @@ impl LaunchConfig {
             "--ctx-size".into(),
             context.to_string(),
         ];
-        push_auto_i32(&mut argv, "--ubatch-size", micro_batch, 2);
-        push_auto_i32(&mut argv, "--parallel", parallel, -1);
-        push_auto_i32(&mut argv, "--batch-size", batch_size, -1);
+        push_auto_i32(&mut argv, "--ubatch-size", micro_batch, 128);
+        push_auto_i32(&mut argv, "--parallel", parallel, 1);
+        push_auto_i32(&mut argv, "--batch-size", batch_size, 512);
         if let Some(mode) = load_mode {
             if mode != "auto" {
                 argv.push("--load-mode".into());
@@ -372,6 +372,13 @@ impl LaunchConfig {
             // See docs/engine-decision.md (RPC operational rules).
             "-c".into(),
         ];
+        if let Some(devices) = dict.get_item("devices")? {
+            let devices: Vec<String> = devices.extract()?;
+            if !devices.is_empty() {
+                argv.push("--device".into());
+                argv.push(devices.join(","));
+            }
+        }
         if threads > 0 {
             argv.push("--threads".into());
             argv.push(threads.to_string());

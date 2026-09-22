@@ -12,6 +12,13 @@ BLOCKED_FLAGS = frozenset(
         "--host",
         "--port",
         "--rpc",
+        "--device", "-dev", "--tensor-split", "-ts", "--split-mode", "-sm",
+        "--gpu-layers", "--n-gpu-layers", "-ngl", "--main-gpu", "-mg",
+        "--override-tensor", "-ot", "--cpu-moe", "-cmoe", "--n-cpu-moe", "-ncmoe",
+        "--n-cpu-ffn", "-ncffn", "--fit", "-fit", "--override-kv",
+        "--model", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "-hfr",
+        "--no-kv-offload", "-nkvo", "--no-op-offload",
+        "--kv-unified-per-slot", "--model-draft", "-md", "--mmproj", "-mm",
         "-h",
         "-p",
     }
@@ -28,7 +35,11 @@ def tokenize_extra_args(raw: list[str]) -> list[str]:
     for part in raw:
         if not part or not str(part).strip():
             continue
-        out.extend(shlex.split(str(part), posix=True))
+        for token in shlex.split(str(part), posix=True):
+            if token.startswith("--") and "=" in token:
+                out.extend(token.split("=", 1))
+            else:
+                out.append(token)
     return out
 
 

@@ -269,8 +269,9 @@ def read_install_stamp() -> dict[str, str]:
     return out
 
 
-def stamp_matches(tag: str) -> bool:
-    return read_install_stamp().get("tag") == tag
+def stamp_matches(tag: str, backend: str | None = None) -> bool:
+    stamp = read_install_stamp()
+    return stamp.get("tag") == tag and (backend is None or stamp.get("backend") == backend)
 
 
 def llama_install_status(tag: str | None = None) -> dict[str, Any]:
@@ -278,12 +279,25 @@ def llama_install_status(tag: str | None = None) -> dict[str, Any]:
     llama = _find_built_binary("llama-server")
     rpc = _find_built_binary("rpc-server")
     stamp = read_install_stamp()
+    actual_backends = []
+    if llama:
+        try:
+            probe = subprocess.run([str(llama), "--list-devices"], capture_output=True, text=True, timeout=15)
+            for backend_name, pattern in (("metal", "Metal"), ("cuda", "CUDA"), ("rocm", "ROCm"), ("rocm", "HIP"), ("vulkan", "Vulkan")):
+                if re.search(r"\b" + pattern + r"\d*:", probe.stdout + probe.stderr):
+                    actual_backends.append(backend_name)
+            if probe.returncode == 0 and not actual_backends:
+                actual_backends = ["cpu"]
+        except (OSError, subprocess.SubprocessError):
+            pass
     return {
         "pin": pin,
         "stamp": stamp.get("tag"),
         "llama_server": str(llama) if llama else None,
         "rpc_server": str(rpc) if rpc else None,
-        "ok": bool(llama and rpc and stamp.get("tag") == pin),
+        "requested_backend": stamp.get("backend"),
+        "actual_backends": actual_backends,
+        "ok": bool(llama and rpc and stamp.get("tag") == pin and stamp.get("backend") in actual_backends),
     }
 
 
@@ -610,17 +624,23 @@ def detect_backend(preferred: str) -> str:
     # Prefer CUDA if toolkit present, else Vulkan, else CPU
     if _which("nvcc") or Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit").exists():
         return "cuda"
+    if _is_linux() and (_which("hipcc") or Path("/opt/rocm/bin/hipcc").exists()):
+        return "rocm"
     if _is_windows() or _is_linux():
         return "vulkan"
     return "cpu"
 
 
 def _cmake_backend_flags(backend: str) -> list[str]:
-    flags = ["-DGGML_RPC=ON", "-DCMAKE_BUILD_TYPE=Release"]
+    flags = ["-DGGML_RPC=ON", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_CUDA=OFF", "-DGGML_HIP=OFF", "-DGGML_VULKAN=OFF", "-DGGML_METAL=OFF"]
     if backend == "metal":
         flags.append("-DGGML_METAL=ON")
     elif backend == "cuda":
         flags.append("-DGGML_CUDA=ON")
+    elif backend == "rocm":
+        if not _is_linux():
+            raise SystemExit("ROCm installation is supported on Linux")
+        flags.extend(["-DGGML_HIP=ON", "-DCMAKE_C_COMPILER=hipcc", "-DCMAKE_CXX_COMPILER=hipcc"])
     elif backend == "vulkan":
         flags.append("-DGGML_VULKAN=ON")
     elif backend == "cpu":
@@ -769,17 +789,14 @@ def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, 
             s += 50
         elif backend == "vulkan" and "vulkan" in n:
             s += 50
-        elif backend == "vulkan" and "macos" in n:
-            # GitHub nightlies have no macos-vulkan pack; Metal pack still matches RPC proto.
-            s += 45
+        elif backend == "rocm" and ("rocm" in n or "hip" in n):
+            s += 50
         elif backend == "metal" and "macos" in n:
             s += 50
         elif backend == "cpu" and ("cpu" in n or ("cuda" not in n and "vulkan" not in n and "rocm" not in n)):
             s += 40
-        elif "cuda" in n or "vulkan" in n or "rocm" in n or "sycl" in n:
-            s += 10
         else:
-            s += 20
+            return -1
 
         # Prefer smaller / more common packs slightly when tied
         if "cudart" in n:
@@ -879,9 +896,9 @@ def _cached_llama_archive(tag: str, backend: str) -> Path | None:
     if not files:
         return None
     assets = [{"name": p.name, "browser_download_url": str(p)} for p in files]
-    picked = pick_release_asset(assets, backend) or pick_release_asset(assets, "cpu")
+    picked = pick_release_asset(assets, backend)
     if not picked:
-        return files[0]
+        return None
     return Path(picked["browser_download_url"])
 
 
@@ -1029,7 +1046,7 @@ def install_llama(
 
     llama = _find_built_binary("llama-server")
     rpc = _find_built_binary("rpc-server")
-    if llama and rpc and not force and stamp_matches(tag):
+    if llama and rpc and not force and stamp_matches(tag, backend) and llama_install_status(tag)["ok"]:
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
         print(f"Already at pinned {tag}")
@@ -1065,7 +1082,7 @@ def install_llama(
     else:
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
-    if llama and rpc and not stamp_matches(tag):
+    if llama and rpc and not stamp_matches(tag, backend):
         write_install_stamp(tag=tag, backend=backend, asset="source")
 
 
@@ -1106,7 +1123,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--backend",
         default="auto",
-        choices=["auto", "metal", "cuda", "vulkan", "cpu"],
+        choices=["auto", "metal", "cuda", "rocm", "vulkan", "cpu"],
         help="llama.cpp accelerator backend (default: auto-detect)",
     )
     p.add_argument(

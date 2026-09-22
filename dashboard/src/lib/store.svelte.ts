@@ -481,8 +481,14 @@ class AppStore {
         body: JSON.stringify({ parameter_set: body })
       });
       const text = await r.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
       if (!r.ok) {
-        pushToast('danger', apiErrorMessage(JSON.parse(text), text, r.status, 'save settings'));
+        pushToast('danger', apiErrorMessage(data, text, r.status, 'save settings'));
         return;
       }
       pushToast('ok', `settings saved for ${this.selectedModel}`);

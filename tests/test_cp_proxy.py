@@ -45,8 +45,14 @@ def echo_tcp():
                 cs, _ = srv.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                if stop.is_set():
+                    return
+                raise
             try:
                 cs.recv(64)
+            except ConnectionResetError:
+                pass
             finally:
                 cs.close()
 

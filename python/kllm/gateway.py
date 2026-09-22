@@ -10,6 +10,8 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.responses import Response
+from starlette.background import BackgroundTask
+import anyio
 
 from kllm.model_defaults import apply_defaults_to_chat_body, resolve_model_defaults
 
@@ -60,36 +62,43 @@ async def proxy_chat_completions(
     *,
     model_path: Path | str | None = None,
 ) -> Response:
-    await require_inference(port)
-    body = await request.json()
-    body = _openai_tools_passthrough(body)
-    body = _apply_model_defaults(body, model_path)
-    stream = bool(body.get("stream"))
-    url = f"{infer_base(port)}/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    body = _apply_model_defaults(_openai_tools_passthrough(await request.json()), model_path)
+    return await _proxy(request, port, "/v1/chat/completions", body)
 
-    if stream:
+
+async def _proxy(request: Request, port: int, path: str, body: dict[str, Any]) -> Response:
+    client = request.app.state.inference_client
+    try:
+        upstream = await client.send(
+            client.build_request("POST", f"{infer_base(port)}{path}", json=body),
+            stream=True,
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(503, "inference not running — use `kllm run --model …` or dashboard Plan & Run") from exc
+
+    async def close() -> None:
+        # Cancellation must not interrupt returning the connection to the pool.
+        with anyio.CancelScope(shield=True):
+            await upstream.aclose()
+
+    if body.get("stream") and upstream.status_code < 400:
+        async def chunks() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+            finally:
+                await close()
         return StreamingResponse(
-            _stream_upstream(url, body, headers),
-            media_type="text/event-stream",
+            chunks(), status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "text/event-stream"),
+            background=BackgroundTask(close),
         )
-
-    async with httpx.AsyncClient(timeout=None) as client:
-        r = await client.post(url, json=body, headers=headers)
-        return Response(
-            content=r.content,
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type", "application/json"),
-        )
-
-
-async def _stream_upstream(
-    url: str, body: dict[str, Any], headers: dict[str, str]
-) -> AsyncIterator[bytes]:
-    async with httpx.AsyncClient(timeout=None) as client:
-        async with client.stream("POST", url, json=body, headers=headers) as resp:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
+    try:
+        content = await upstream.aread()
+        return Response(content, status_code=upstream.status_code,
+                        media_type=upstream.headers.get("content-type", "application/json"))
+    finally:
+        await close()
 
 
 def _anthropic_to_openai(body: dict[str, Any]) -> dict[str, Any]:
@@ -217,78 +226,6 @@ async def proxy_anthropic_messages(
     *,
     model_path: Path | str | None = None,
 ) -> Response:
-    await require_inference(port)
-    body = await request.json()
-    oai = _anthropic_to_openai(body)
-    oai = _apply_model_defaults(oai, model_path)
-    stream = bool(oai.get("stream"))
-    url = f"{infer_base(port)}/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
-
-    if not stream:
-        async with httpx.AsyncClient(timeout=None) as client:
-            r = await client.post(url, json=oai, headers=headers)
-            if r.status_code >= 400:
-                return Response(content=r.content, status_code=r.status_code, media_type="application/json")
-            data = r.json()
-            choice = (data.get("choices") or [{}])[0]
-            message = choice.get("message") or {}
-            text = message.get("content") or ""
-            anthropic = {
-                "id": data.get("id", "msg_kllm"),
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "text", "text": text}],
-                "model": data.get("model", oai.get("model")),
-                "stop_reason": "end_turn",
-                "usage": {
-                    "input_tokens": (data.get("usage") or {}).get("prompt_tokens", 0),
-                    "output_tokens": (data.get("usage") or {}).get("completion_tokens", 0),
-                },
-            }
-            return Response(content=json.dumps(anthropic).encode(), media_type="application/json")
-
-    async def gen() -> AsyncIterator[bytes]:
-        msg_id = "msg_kllm_stream"
-        started = False
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", url, json=oai, headers=headers) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:].strip()
-                    if payload == "[DONE]":
-                        if started:
-                            for ev in (
-                                "event: content_block_stop\ndata: "
-                                + json.dumps({"type": "content_block_stop", "index": 0}),
-                                "event: message_delta\ndata: "
-                                + json.dumps(
-                                    {
-                                        "type": "message_delta",
-                                        "delta": {"stop_reason": "end_turn"},
-                                        "usage": {"output_tokens": 0},
-                                    }
-                                ),
-                                "event: message_stop\ndata: " + json.dumps({"type": "message_stop"}),
-                            ):
-                                yield (ev + "\n\n").encode()
-                        break
-                    try:
-                        data = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if not started:
-                        # Force message_start even if role omitted
-                        for ev in _openai_chunk_to_anthropic_sse(
-                            {"choices": [{"delta": {"role": "assistant"}}], "model": data.get("model", "")},
-                            msg_id,
-                        ):
-                            yield (ev + "\n\n").encode()
-                        started = True
-                    for ev in _openai_chunk_to_anthropic_sse(data, msg_id):
-                        if "message_start" in ev or "content_block_start" in ev:
-                            continue  # already emitted
-                        yield (ev + "\n\n").encode()
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    # b11026 implements Messages natively, including streaming and tool blocks.
+    body = _apply_model_defaults(await request.json(), model_path)
+    return await _proxy(request, port, "/v1/messages", body)

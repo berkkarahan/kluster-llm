@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import struct
+import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -225,3 +227,79 @@ def read_context_length(path: Path | str) -> int | None:
         return None
     ctx = meta.get("context_length")
     return int(ctx) if ctx else None
+
+
+def read_model_layout(path: Path | str) -> dict[str, Any] | None:
+    p = Path(path)
+    st = p.stat()
+    return _read_model_layout(str(p.resolve()), st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+@lru_cache(maxsize=16)
+def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str, Any] | None:
+    """Read tensor spans without loading weights; spans include alignment padding."""
+    del mtime, ctime
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            version, n_tensors, n_kv = struct.unpack("<IQQ", f.read(20))
+            if version not in (2, 3) or n_tensors > 1_000_000 or n_kv > 100_000:
+                return None
+            meta = {}
+            for _ in range(n_kv):
+                key = _read_string(f)
+                vtype, = struct.unpack("<I", f.read(4))
+                if key.startswith("tokenizer."):
+                    _skip_value(f, vtype)
+                elif vtype == _ARRAY:
+                    etype, count = struct.unpack("<IQ", f.read(12))
+                    if count > 100_000:
+                        raise ValueError("metadata array too large")
+                    meta[key] = [_read_scalar(f, etype) for _ in range(count)]
+                else:
+                    meta[key] = _read_scalar(f, vtype)
+            tensors = []
+            for _ in range(n_tensors):
+                name = _read_string(f)
+                ndim, = struct.unpack("<I", f.read(4))
+                if ndim > 4:
+                    raise ValueError("invalid tensor dimensions")
+                dims = struct.unpack("<" + "Q" * ndim, f.read(8 * ndim))
+                dtype, offset = struct.unpack("<IQ", f.read(12))
+                tensors.append(dict(name=name, dimensions=dims, dtype=dtype, offset=offset))
+            alignment = int(meta.get("general.alignment", 32))
+            if alignment <= 0:
+                raise ValueError("invalid alignment")
+            data_start = (f.tell() + alignment - 1) // alignment * alignment
+            tensors.sort(key=lambda t: t["offset"])
+            arch = str(meta.get("general.architecture", "unknown"))
+            n_layers = int(meta.get(f"{arch}.block_count", 0))
+            if not 0 < n_layers <= 10000:
+                return None
+            layers = [0] * n_layers
+            output = inputs = token_embd = 0
+            has_output = False
+            for i, tensor in enumerate(tensors):
+                end = tensors[i + 1]["offset"] if i + 1 < len(tensors) else size - data_start
+                nbytes = end - tensor["offset"]
+                if nbytes < 0 or data_start + end > size:
+                    raise ValueError("invalid tensor span")
+                tensor["size_bytes"] = nbytes
+                match = re.match(r"blk\.(\d+)\.", tensor["name"])
+                if match and int(match[1]) < n_layers:
+                    layers[int(match[1])] += nbytes
+                elif tensor["name"].startswith("output"):
+                    output += nbytes
+                    has_output |= tensor["name"] == "output.weight"
+                else:
+                    inputs += nbytes
+                    if tensor["name"] == "token_embd.weight":
+                        token_embd = nbytes
+            if not has_output:
+                output += token_embd  # tied embeddings are duplicated for offloaded output
+            return dict(architecture=arch, metadata=meta, layers=layers,
+                        output_bytes=output, input_bytes=inputs, tensors=tensors,
+                        confidence="metadata" if tensors and all(layers) else "approximate")
+    except (OSError, ValueError, struct.error):
+        return None

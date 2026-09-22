@@ -58,17 +58,37 @@ def generate_join_key() -> str:
     return secrets.token_urlsafe(12)
 
 
+def _looks_like_repo(path: Path) -> bool:
+    if (path / "crates" / "kllm-native").is_dir():
+        return True
+    if (path / "coordinator-macos").is_dir() and (path / "worker-windows").is_dir():
+        return True
+    return False
+
+
 def repo_root() -> Path | None:
     env = os.environ.get("KLLM_REPO_ROOT")
     if env:
         return Path(env)
-    # Walk up from CWD looking for marker files
-    cur = Path.cwd()
-    for p in [cur, *cur.parents]:
-        if (p / "coordinator-macos").is_dir() and (p / "worker-windows").is_dir():
-            return p
-        if (p / "crates" / "kllm-native").is_dir():
-            return p
+
+    starts: list[Path] = []
+    try:
+        import kllm as _kllm
+
+        # python/kllm/__init__.py → parents[2] is the repo root in a source checkout
+        starts.append(Path(_kllm.__file__).resolve().parents[2])
+    except Exception:
+        pass
+    starts.append(Path.cwd())
+
+    seen: set[Path] = set()
+    for start in starts:
+        for p in [start, *start.parents]:
+            if p in seen:
+                continue
+            seen.add(p)
+            if _looks_like_repo(p):
+                return p
     return None
 
 

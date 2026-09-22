@@ -78,6 +78,7 @@ def test_read_inference_metadata_sampling_and_template(tmp_path: Path):
             [
                 lambda b: _write_kv_string(b, "general.architecture", "qwen35moe"),
                 lambda b: _write_kv_u32(b, "qwen35moe.context_length", 262144),
+                lambda b: _write_kv_u32(b, "qwen35moe.block_count", 40),
                 lambda b: _write_kv_f32(b, "general.sampling.temp", 0.6),
                 lambda b: _write_kv_u32(b, "general.sampling.top_k", 20),
                 lambda b: _write_kv_f32(b, "general.sampling.top_p", 0.95),
@@ -90,6 +91,7 @@ def test_read_inference_metadata_sampling_and_template(tmp_path: Path):
     assert meta is not None
     assert meta["architecture"] == "qwen35moe"
     assert meta["context_length"] == 262144
+    assert meta["block_count"] == 40
     assert abs(float(meta["sampling"]["temperature"]) - 0.6) < 1e-5
     assert meta["sampling"]["top_k"] == 20
     assert abs(float(meta["sampling"]["top_p"]) - 0.95) < 1e-5

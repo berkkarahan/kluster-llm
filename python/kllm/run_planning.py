@@ -15,6 +15,7 @@ from kllm import native
 from kllm.cluster_log import llama_server_log_path
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.model_defaults import merge_defaults_into_extra_args, overlay_user_inference, resolve_model_defaults
+from kllm.mpi_comm import schedule_from_plan
 from kllm.run_settings import RunBody, RunSettingsFields
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
 
@@ -201,6 +202,17 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
     if result.get("fit_status") == "tight":
         warning = result.get("hint") or "Plan is tight against cluster budget"
     result["warning"] = warning
+    try:
+        result["mpi"] = schedule_from_plan(result, nodes, headroom=headroom)
+    except Exception as exc:
+        # The llama.cpp RPC plan is already decided. A bad MPI annotation must
+        # not block launch; weights still stay off this optional schedule.
+        result["mpi"] = {
+            "enabled": False,
+            "transport": "mpi",
+            "weights_on_wire": False,
+            "error": str(exc),
+        }
     return result
 
 

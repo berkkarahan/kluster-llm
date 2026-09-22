@@ -96,6 +96,30 @@ export type DistributeProgress = {
   workers: DistributeWorkerProgress[];
 };
 
+export type UpdateWorkerProgress = {
+  node_id?: string | null;
+  host?: string | null;
+  phase: string;
+  error?: string | null;
+  git_head?: string | null;
+  llama_release?: string | null;
+  rebuild?: string | null;
+};
+
+export type UpdateProgress = {
+  phase?: string;
+  pct?: number;
+  target_git_head?: string | null;
+  target_llama_release?: string | null;
+  workers: UpdateWorkerProgress[];
+  error?: string | null;
+};
+
+export type SoftwareIdentity = {
+  git_head?: string | null;
+  llama_release?: string | null;
+};
+
 export type HfTokenSource = 'file' | 'env' | null;
 
 export type HfTokenStatus = {
@@ -135,6 +159,10 @@ export type Status = {
   download?: DownloadProgress | null;
   /** Live multi-worker distribute on master; null/absent when idle. */
   distribute?: DistributeProgress | null;
+  /** Live cluster software update on master; null/absent when idle. */
+  update?: UpdateProgress | null;
+  /** Local checkout identity (git HEAD + llama-release pin). */
+  software?: SoftwareIdentity | null;
   /** Live receive on worker; null/absent when idle. */
   receive?: ReceiveProgress | null;
   rpc_cache?: { enabled: boolean; path: string; exists: boolean; persistent: boolean };

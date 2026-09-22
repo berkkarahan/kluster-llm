@@ -22,7 +22,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from kllm import config as kllm_config
-from kllm import discovery, gateway, load_progress, models as model_ops, native, netsec, runtime
+from kllm import (
+    cluster_update,
+    discovery,
+    gateway,
+    load_progress,
+    models as model_ops,
+    native,
+    netsec,
+    runtime,
+)
 from kllm.accel import allowed_accel_backends
 from kllm.auth import ensure_api_token, verify_api_token
 from kllm.hf_token import hf_token_status, save_hf_token
@@ -161,6 +170,7 @@ def _sync_master_liveness(*, shrink: bool = True) -> list[str]:
 
 def _heartbeat_payload() -> dict[str, Any]:
     mem = STATE.members.get(STATE.node_id) or {}
+    identity = cluster_update.software_identity()
     return {
         "node_id": STATE.node_id,
         "host": STATE.rpc_bind or mem.get("host") or mem.get("lan_host") or "",
@@ -174,6 +184,8 @@ def _heartbeat_payload() -> dict[str, Any]:
         "lan_host": mem.get("lan_host"),
         "wg_public_key": STATE.wg_public_key,
         "gpu_ids": STATE.gpu_ids,
+        "git_head": identity.get("git_head"),
+        "llama_release": identity.get("llama_release"),
     }
 
 
@@ -461,6 +473,18 @@ class RegisterBody(BaseModel):
     wg_public_key: str | None = None
     wg_listen_port: int = netsec.WG_LISTEN_PORT
     gpu_ids: list[int] | None = None
+    git_head: str | None = None
+    llama_release: str | None = None
+
+
+class UpdateProgressBody(BaseModel):
+    node_id: str | None = None
+    phase: str
+    error: str | None = None
+    git_head: str | None = None
+    llama_release: str | None = None
+    rebuild: str | None = None
+    host: str | None = None
 
 
 class LogLineBody(BaseModel):
@@ -861,6 +885,69 @@ def distribute_model(body: DistributeBody) -> dict[str, Any]:
     return {"ok": True, "results": results}
 
 
+@app.post("/v1/cluster/update")
+def cluster_update_endpoint(
+    x_kllm_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Master: fan out update to workers. Worker: accept and spawn detached updater."""
+    if STATE.role == "master":
+        if not STATE.join_key:
+            raise HTTPException(503, "master has no join key")
+        if x_kllm_key is not None and x_kllm_key != STATE.join_key:
+            raise HTTPException(401, "invalid join key")
+        workers = [m for m in STATE.members.values() if m.get("role") == "worker"]
+        try:
+            return cluster_update.fanout_worker_updates(
+                workers,
+                STATE.join_key,
+                default_port=STATE.control_port,
+            )
+        except cluster_update.UpdateInProgressError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    if STATE.role == "worker":
+        if STATE.join_key and x_kllm_key != STATE.join_key:
+            raise HTTPException(401, "invalid join key")
+        try:
+            return cluster_update.accept_local_update(
+                role=STATE.role,
+                node_id=STATE.node_id,
+                join_key=STATE.join_key,
+                master_host=STATE.master_host,
+                master_port=STATE.master_port,
+                control_port=STATE.control_port,
+                rpc_port=STATE.rpc_port,
+                rpc_bind=STATE.rpc_bind,
+                overlay=STATE.overlay,
+                gpu_ids=STATE.gpu_ids,
+                master_base=_master_control_base() if STATE.master_host else None,
+            )
+        except cluster_update.UpdateError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    raise HTTPException(400, "cluster update requires master or worker role")
+
+
+@app.post("/v1/cluster/update-progress")
+def cluster_update_progress(
+    body: UpdateProgressBody,
+    _: None = Depends(_require_key),
+) -> dict[str, Any]:
+    """Worker updater → master: report pull/rebuild/rejoin phase."""
+    if STATE.role != "master":
+        raise HTTPException(400, "update progress requires master role")
+    snap = cluster_update.apply_worker_progress(
+        node_id=body.node_id,
+        host=body.host,
+        phase=body.phase,
+        error=body.error,
+        git_head=body.git_head,
+        llama_release=body.llama_release,
+        rebuild=body.rebuild,
+    )
+    return {"ok": True, "update": snap or cluster_update.get_update_progress()}
+
+
 @app.post("/v1/models/delete")
 def delete_model(body: DeleteBody) -> dict[str, Any]:
     try:
@@ -1016,6 +1103,8 @@ def status() -> dict[str, Any]:
         "distribute": model_ops.get_distribute_progress(),
         "receive": model_ops.get_receive_progress(),
         "rpc_cache": rpc_cache.status(),
+        "update": cluster_update.get_update_progress(),
+        "software": cluster_update.software_identity(),
         "capacity": capacity,
         "control_port": STATE.control_port,
         "rpc_port": STATE.rpc_port,
@@ -1280,6 +1369,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         except Exception as exc:
             raise HTTPException(500, f"WireGuard keygen failed: {exc}") from exc
 
+    identity = cluster_update.software_identity()
     payload = {
         "node_id": STATE.node_id,
         "host": lan_host,
@@ -1298,6 +1388,8 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         "gpu_ids": STATE.gpu_ids,
         "wg_public_key": wg_pub,
         "wg_listen_port": netsec.WG_LISTEN_PORT,
+        "git_head": identity.get("git_head"),
+        "llama_release": identity.get("llama_release"),
     }
     import httpx
 

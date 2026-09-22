@@ -62,6 +62,9 @@
       {:else if appStore.status?.receive}
         <span class="chip chip-ok">xfer {Math.round(appStore.status.receive.pct)}%</span>
       {/if}
+      {#if appStore.status?.update && appStore.status.update.phase && appStore.status.update.phase !== 'done'}
+        <span class="chip chip-warn">upd {Math.round(appStore.status.update.pct ?? 0)}%</span>
+      {/if}
       {#if appStore.status?.inference_up}
         <span class="chip chip-ok">infer</span>
       {/if}

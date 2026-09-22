@@ -145,6 +145,7 @@ def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
 
             arch: str | None = None
             context_length: int | None = None
+            block_count: int | None = None
             sampling: dict[str, float | int] = {}
             reasoning: dict[str, Any] = {
                 "supports_enable_thinking": False,
@@ -171,6 +172,17 @@ def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
                         context_length = val if val > 0 else None
                     elif context_length is None and val > 0:
                         context_length = val
+                elif key.endswith(".block_count") and vtype in (
+                    _UINT32,
+                    _INT32,
+                    _UINT64,
+                    _INT64,
+                ):
+                    val = int(_read_scalar(f, vtype))
+                    if arch and key == f"{arch}.block_count" and val > 0:
+                        block_count = val
+                    elif block_count is None and val > 0:
+                        block_count = val
                 elif key.startswith("general.sampling.") and vtype in (
                     _UINT32,
                     _INT32,
@@ -197,6 +209,7 @@ def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
             return {
                 "architecture": arch,
                 "context_length": context_length,
+                "block_count": block_count,
                 "sampling": sampling,
                 "reasoning": reasoning,
                 "has_chat_template": has_chat_template,

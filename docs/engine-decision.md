@@ -77,3 +77,4 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
 - RPC bind / optional WireGuard overlay: `python/kllm/netsec.py`
+- Experimental activation collectives (not a replacement engine): `python/kllm/mpi_layer.py`, `cpp/kllm-mpi/`, `docs/mpi-collectives.md`

@@ -23,6 +23,7 @@ Do not invent alternate install flows until that guide’s recovery tree is exha
 | [docs/cli.md](docs/cli.md) | `kllm` command reference |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Runtime / network failures |
 | [docs/engine-decision.md](docs/engine-decision.md) | Why llama.cpp RPC; security posture |
+| [docs/mpi-collectives.md](docs/mpi-collectives.md) | Experimental MPI activation collectives (not the production engine) |
 | [README.md](README.md) | Human project overview |
 
 ## Conventions

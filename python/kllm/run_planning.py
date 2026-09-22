@@ -15,6 +15,8 @@ from kllm import native
 from kllm.cluster_log import llama_server_log_path
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.model_defaults import merge_defaults_into_extra_args, overlay_user_inference, resolve_model_defaults
+from kllm.gguf_meta import read_inference_metadata
+from kllm.mpi_comm import attach_mpi_schedule
 from kllm.run_settings import RunBody, RunSettingsFields
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
 
@@ -201,6 +203,17 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
     if result.get("fit_status") == "tight":
         warning = result.get("hint") or "Plan is tight against cluster budget"
     result["warning"] = warning
+    meta = read_inference_metadata(path) or {}
+    block_count = meta.get("block_count")
+    # ngl is the value llama-server receives. Layer owners use that together
+    # with the GGUF block count. estimated_layers is only a size bucket.
+    result["mpi"] = attach_mpi_schedule(
+        result,
+        nodes,
+        headroom=headroom,
+        block_count=int(block_count) if block_count else None,
+        n_gpu_layers=int(result["ngl"]) if result.get("ngl") is not None else None,
+    )
     return result
 
 

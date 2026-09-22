@@ -77,3 +77,13 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
 - RPC bind / optional WireGuard overlay: `python/kllm/netsec.py`
+
+## Experimental: MPI activation collectives
+
+`python/kllm/mpi_comm.py` and `cpp/kllm_mpi/` are an optional MPI wrapper for the same layer cut. They do not replace `llama-server` / `rpc-server`.
+
+- Weights and KV stay on the rank that owns the layer. The wire format is a 96-byte GGML header plus the activation bytes (token ids, hidden states, logits).
+- `balanced_bcast` broadcasts the header, then a payload whose length is `nbytes` from that header.
+- `balanced_allreduce` gathers per-rank counts. Equal f32 partial sums use `MPI_Allreduce`. Unequal column shards use `MPI_Allgatherv`. Unequal slices are not padded into an allreduce.
+- Tensor-parallel column shards are opt-in and only inside one backend. Metal + ROCm + CUDA stays a pipeline: mixed allreduces are refused because the backends do not round alike.
+- MPI is unauthenticated. Keep it on the private fabric, the same rule as port 50052.

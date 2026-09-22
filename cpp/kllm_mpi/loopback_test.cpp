@@ -113,12 +113,26 @@ int main() {
     }
     check(threw, "unequal row_sum is not padded");
     saw_reduce = false;
+    bool saw_gather = false;
     for (const auto& event : trace) {
         if (event.op == "MPI_Allreduce") {
             saw_reduce = true;
         }
+        if (event.op == "MPI_Allgather") {
+            saw_gather = true;
+        }
     }
-    check(!saw_reduce, "failed row_sum does not call MPI_Allreduce");
+    check(saw_gather && !saw_reduce, "failed row_sum exchanges counts and does not allreduce");
+
+    std::vector<Tensor> heavy(1);
+    heavy[0] = f32({1.f, 2.f, 3.f, 4.f}, 0, false);
+    threw = false;
+    try {
+        kllm_mpi::balanced_bcast(heavy, 0, nullptr, 8);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "payload over the budget is refused");
 
     trace.clear();
     kllm_mpi::balanced_allreduce(uneven, "column_concat", nullptr, &trace);

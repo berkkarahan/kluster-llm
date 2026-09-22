@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #if defined(KLLM_HAVE_MPI)
@@ -102,7 +103,11 @@ std::uint64_t numel(const std::int64_t ne[4]) {
         if (ne[i] < 0) {
             fail("ne dimensions must be >= 0");
         }
-        n *= static_cast<std::uint64_t>(ne[i]);
+        const std::uint64_t dim = static_cast<std::uint64_t>(ne[i]);
+        if (dim != 0 && n > UINT64_MAX / dim) {
+            fail("ne product overflows");
+        }
+        n *= dim;
     }
     return n;
 }
@@ -115,7 +120,14 @@ void expect_contiguous(const Tensor& tensor) {
             fail("only contiguous activations are broadcast (nb must be packed)");
         }
         if (i < 3) {
-            nb *= static_cast<std::uint64_t>(tensor.ne[i]);
+            if (tensor.ne[i] < 0) {
+                fail("ne dimensions must be >= 0");
+            }
+            const std::uint64_t dim = static_cast<std::uint64_t>(tensor.ne[i]);
+            if (dim != 0 && nb > UINT64_MAX / dim) {
+                fail("nb overflows");
+            }
+            nb *= dim;
         }
     }
 }
@@ -141,6 +153,50 @@ ParsedHeader parse_header(const std::uint8_t* bytes) {
     }
     parsed.nbytes = get_u64(bytes + 88);
     return parsed;
+}
+
+[[maybe_unused]] std::string activation_header_error(const ParsedHeader& parsed, std::uint64_t max_payload) {
+    try {
+        check_flags(parsed.meta.flags, parsed.meta.ggml_type);
+        std::uint64_t count = 1;
+        for (int i = 0; i < 4; ++i) {
+            if (parsed.meta.ne[i] < 0) {
+                return "ne dimensions must be >= 0";
+            }
+            const std::uint64_t dim = static_cast<std::uint64_t>(parsed.meta.ne[i]);
+            if (dim != 0 && count > UINT64_MAX / dim) {
+                return "ne product overflows";
+            }
+            count *= dim;
+        }
+        const std::size_t item = itemsize(parsed.meta.ggml_type);
+        if (item != 0 && count > UINT64_MAX / item) {
+            return "nbytes overflows";
+        }
+        const std::uint64_t expect = count * item;
+        if (parsed.nbytes != expect) {
+            return "nbytes does not match ne";
+        }
+        if (parsed.nbytes > max_payload) {
+            return "payload exceeds budget";
+        }
+        std::uint64_t stride = item;
+        for (int i = 0; i < 4; ++i) {
+            if (parsed.meta.nb[i] != stride) {
+                return "only contiguous activations are broadcast";
+            }
+            if (i < 3) {
+                const std::uint64_t dim = static_cast<std::uint64_t>(parsed.meta.ne[i]);
+                if (dim != 0 && stride > UINT64_MAX / dim) {
+                    return "nb overflows";
+                }
+                stride *= dim;
+            }
+        }
+    } catch (const std::exception& ex) {
+        return ex.what();
+    }
+    return {};
 }
 
 }  // namespace
@@ -268,7 +324,14 @@ void Tensor::set_contiguous() {
     for (int i = 0; i < 4; ++i) {
         nb[i] = stride;
         if (i < 3) {
-            stride *= static_cast<std::uint64_t>(ne[i]);
+            if (ne[i] < 0) {
+                fail("ne dimensions must be >= 0");
+            }
+            const std::uint64_t dim = static_cast<std::uint64_t>(ne[i]);
+            if (dim != 0 && stride > UINT64_MAX / dim) {
+                fail("nb overflows");
+            }
+            stride *= dim;
         }
     }
 }
@@ -439,19 +502,39 @@ ReducePlan plan_reduce(const std::vector<ShardView>& shards, const std::string& 
         plan.out_ne[d] = shards[0].ne[d];
     }
     if (!plan.row_sum) {
-        const std::int64_t tail = shards[0].ne[1] * shards[0].ne[2] * shards[0].ne[3];
-        plan.out_ne[0] = tail <= 0 ? 0 : static_cast<std::int64_t>(total_elems / static_cast<std::uint64_t>(tail));
+        std::uint64_t tail = 1;
+        for (int d = 1; d < 4; ++d) {
+            if (shards[0].ne[d] < 0) {
+                fail("ne dimensions must be >= 0");
+            }
+            const std::uint64_t dim = static_cast<std::uint64_t>(shards[0].ne[d]);
+            if (dim != 0 && tail > (UINT64_MAX / dim)) {
+                fail("ne product overflows");
+            }
+            tail *= dim;
+        }
+        if (tail == 0) {
+            plan.out_ne[0] = 0;
+        } else if (total_elems % tail != 0 || total_elems / tail > static_cast<std::uint64_t>(INT64_MAX)) {
+            fail("column width is not a legal ne[0]");
+        } else {
+            plan.out_ne[0] = static_cast<std::int64_t>(total_elems / tail);
+        }
     }
     return plan;
 }
 
-void balanced_bcast(std::vector<Tensor>& slots, int root, std::vector<TraceEvent>* trace) {
+void balanced_bcast(std::vector<Tensor>& slots, int root, std::vector<TraceEvent>* trace,
+                    std::uint64_t max_payload_bytes) {
     if (slots.empty() || root < 0 || root >= static_cast<int>(slots.size())) {
         fail("bcast root is outside the communicator");
     }
     // Step 1. Root packs the GGML header. The struct has type, ne, nb, nbytes.
     // No data pointer and no quantized weight blocks.
     const std::vector<std::uint8_t> packed = slots[root].pack();
+    if (packed.size() < kHeaderBytes || packed.size() - kHeaderBytes > max_payload_bytes) {
+        fail("payload exceeds budget; weights stay on the node");
+    }
     if (trace) {
         TraceEvent header;
         header.op = "MPI_Bcast";
@@ -478,22 +561,37 @@ void balanced_bcast(std::vector<Tensor>& slots, int root, std::vector<TraceEvent
 }
 
 void balanced_allreduce(std::vector<Tensor>& slots, const std::string& kind,
-                        const std::vector<double>* weights, std::vector<TraceEvent>* trace) {
+                        const std::vector<double>* weights, std::vector<TraceEvent>* trace,
+                        std::uint64_t max_payload_bytes) {
     std::vector<ShardView> shards;
     shards.reserve(slots.size());
+    std::uint64_t total_bytes = 0;
     for (const Tensor& slot : slots) {
         slot.pack();
         shards.push_back(view_of(slot));
+        if (shards.back().nbytes > max_payload_bytes) {
+            fail("reduction payload exceeds budget; weights stay on the node");
+        }
+        if (total_bytes > UINT64_MAX - shards.back().nbytes) {
+            fail("reduction payload overflows");
+        }
+        total_bytes += shards.back().nbytes;
     }
-    const ReducePlan plan = plan_reduce(shards, kind, weights);
+    if (total_bytes > max_payload_bytes) {
+        fail("reduction payload exceeds budget; weights stay on the node");
+    }
+    // Count exchange is visible even when the reduction is then refused.
     if (trace) {
         TraceEvent gather;
         gather.op = "MPI_Allgather";
         gather.what = "counts";
         gather.bytes = 8 * slots.size();
-        gather.counts = plan.counts;
+        for (const ShardView& shard : shards) {
+            gather.counts.push_back(shard.nbytes);
+        }
         trace->push_back(gather);
     }
+    const ReducePlan plan = plan_reduce(shards, kind, weights);
     if (plan.row_sum) {
         if (trace) {
             TraceEvent reduce;
@@ -602,26 +700,92 @@ void mpi_bcast_bytes(std::uint8_t* buf, std::uint64_t nbytes, int root) {
 
 }  // namespace
 
-void mpi_balanced_bcast(Tensor& tensor, int root) {
+struct Agree {
+    std::int32_t kind = 0;
+    std::int32_t nweights = -1;
+    std::uint64_t hash = 0;
+};
+
+std::uint64_t hash_weights(const std::vector<double>* weights) {
+    if (weights == nullptr) {
+        return 0;
+    }
+    std::uint64_t hash = 14695981039346656037ull;
+    for (double weight : *weights) {
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &weight, sizeof(bits));
+        for (int i = 0; i < 8; ++i) {
+            hash ^= (bits >> (8 * i)) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+    }
+    return hash;
+}
+
+Agree local_agree(const std::string& kind, const std::vector<double>* weights) {
+    Agree agree;
+    if (kind == "row_sum") {
+        agree.kind = 1;
+    } else if (kind == "column_concat") {
+        agree.kind = 2;
+    }
+    if (weights != nullptr) {
+        agree.nweights = static_cast<std::int32_t>(weights->size());
+        agree.hash = hash_weights(weights);
+    }
+    return agree;
+}
+
+static_assert(sizeof(Agree) == 16, "MPI agreement blob must be packed");
+
+void mpi_balanced_bcast(Tensor& tensor, int root, std::uint64_t max_payload_bytes) {
     const int rank = mpi_rank();
     std::vector<std::uint8_t> header(kHeaderBytes);
     int err = 0;
     if (rank == root) {
         try {
             const std::vector<std::uint8_t> packed = tensor.pack();
-            std::memcpy(header.data(), packed.data(), kHeaderBytes);
-        } catch (const std::runtime_error&) {
+            if (packed.size() < kHeaderBytes || packed.size() - kHeaderBytes > max_payload_bytes) {
+                err = 1;
+            } else {
+                std::memcpy(header.data(), packed.data(), kHeaderBytes);
+            }
+        } catch (const std::exception&) {
             err = 1;
         }
     }
-    // One integer allreduce so a bad root does not leave the others blocked in Bcast.
+    // Agree before any payload byte is sent.
     if (mpi_any_error(err)) {
         fail("root refused the activation header");
     }
     mpi_check(MPI_Bcast(header.data(), static_cast<int>(kHeaderBytes), MPI_BYTE, root, MPI_COMM_WORLD),
               "MPI_Bcast");
-    ParsedHeader parsed = parse_header(header.data());
-    std::vector<std::uint8_t> payload(static_cast<std::size_t>(parsed.nbytes));
+    ParsedHeader parsed;
+    err = 0;
+    try {
+        parsed = parse_header(header.data());
+        if (!activation_header_error(parsed, max_payload_bytes).empty()) {
+            err = 1;
+        }
+    } catch (const std::exception&) {
+        err = 1;
+    }
+    if (mpi_any_error(err)) {
+        fail("activation header rejected");
+    }
+    int alloc_err = 0;
+    std::vector<std::uint8_t> payload;
+    try {
+        payload.resize(static_cast<std::size_t>(parsed.nbytes));
+    } catch (const std::exception&) {
+        alloc_err = 1;
+    }
+    // A rank that cannot allocate must not enter the payload bcast.
+    if (mpi_any_error(alloc_err)) {
+        payload.clear();
+        payload.shrink_to_fit();
+        fail("a rank could not allocate the activation");
+    }
     if (rank == root) {
         payload = tensor.data;
     }
@@ -632,14 +796,18 @@ void mpi_balanced_bcast(Tensor& tensor, int root) {
 }
 
 void mpi_balanced_allreduce(Tensor& local, const std::string& kind,
-                            const std::vector<double>* weights) {
+                            const std::vector<double>* weights, std::uint64_t max_payload_bytes) {
     const int size = mpi_size();
     std::vector<std::uint8_t> my_header(kHeaderBytes);
     int err = 0;
     try {
         const std::vector<std::uint8_t> packed = local.pack();
-        std::memcpy(my_header.data(), packed.data(), kHeaderBytes);
-    } catch (const std::runtime_error&) {
+        if (packed.size() >= kHeaderBytes) {
+            std::memcpy(my_header.data(), packed.data(), kHeaderBytes);
+        } else {
+            err = 1;
+        }
+    } catch (const std::exception&) {
         err = 1;
     }
     if (mpi_any_error(err)) {
@@ -650,18 +818,72 @@ void mpi_balanced_allreduce(Tensor& local, const std::string& kind,
     mpi_check(MPI_Allgather(my_header.data(), static_cast<int>(kHeaderBytes), MPI_BYTE, all_headers.data(),
                             static_cast<int>(kHeaderBytes), MPI_BYTE, MPI_COMM_WORLD),
               "MPI_Allgather");
-    std::vector<ShardView> shards;
-    shards.reserve(static_cast<std::size_t>(size));
-    for (int i = 0; i < size; ++i) {
-        const ParsedHeader parsed = parse_header(all_headers.data() + static_cast<std::size_t>(i) * kHeaderBytes);
-        ShardView shard = view_of(parsed.meta);
-        shard.nbytes = parsed.nbytes;
-        shards.push_back(shard);
+    const Agree mine = local_agree(kind, weights);
+    std::vector<Agree> agrees(static_cast<std::size_t>(size));
+    mpi_check(MPI_Allgather(&mine, static_cast<int>(sizeof(Agree)), MPI_BYTE, agrees.data(),
+                            static_cast<int>(sizeof(Agree)), MPI_BYTE, MPI_COMM_WORLD),
+              "MPI_Allgather");
+    int disagree = 0;
+    for (const Agree& other : agrees) {
+        if (other.kind != agrees[0].kind || other.nweights != agrees[0].nweights || other.hash != agrees[0].hash ||
+            other.kind == 0) {
+            disagree = 1;
+        }
     }
-    const ReducePlan plan = plan_reduce(shards, kind, weights);
+    std::vector<ShardView> shards;
+    ReducePlan plan;
+    err = disagree;
+    if (err == 0) {
+        try {
+            shards.reserve(static_cast<std::size_t>(size));
+            for (int i = 0; i < size; ++i) {
+                const ParsedHeader parsed =
+                    parse_header(all_headers.data() + static_cast<std::size_t>(i) * kHeaderBytes);
+                if (!activation_header_error(parsed, max_payload_bytes).empty()) {
+                    throw std::runtime_error("activation header rejected");
+                }
+                ShardView shard = view_of(parsed.meta);
+                shard.nbytes = parsed.nbytes;
+                shards.push_back(shard);
+            }
+            plan = plan_reduce(shards, kind, weights);
+            std::uint64_t total = 0;
+            for (std::uint64_t n : plan.counts) {
+                if (n > max_payload_bytes || total > UINT64_MAX - n) {
+                    throw std::runtime_error("reduction payload exceeds budget");
+                }
+                total += n;
+            }
+            if (total > max_payload_bytes) {
+                throw std::runtime_error("reduction payload exceeds budget");
+            }
+        } catch (const std::exception&) {
+            err = 1;
+        }
+    }
+    // Every rank reaches this allreduce, including ranks whose plan_reduce threw
+    // and ranks whose kind or weights did not match.
+    if (mpi_any_error(err)) {
+        fail("reduction refused on at least one rank");
+    }
     if (plan.row_sum) {
-        std::vector<float> send = local.f32_values();
-        std::vector<float> recv(send.size());
+        int alloc_err = 0;
+        std::vector<float> send;
+        std::vector<float> recv;
+        try {
+            send = local.f32_values();
+            recv.resize(send.size());
+        } catch (const std::exception&) {
+            alloc_err = 1;
+        }
+        // One rank failing to allocate must not enter MPI_Allreduce alone.
+        if (mpi_any_error(alloc_err)) {
+            send.clear();
+            recv.clear();
+            send.shrink_to_fit();
+            recv.shrink_to_fit();
+            fail("a rank could not allocate the reduction");
+        }
         std::uint64_t off = 0;
         for (std::size_t chunk : payload_chunks(static_cast<std::uint64_t>(send.size()) * 4)) {
             const int count = static_cast<int>(chunk / 4);
@@ -679,13 +901,25 @@ void mpi_balanced_allreduce(Tensor& local, const std::string& kind,
     std::vector<int> counts(size);
     std::vector<int> displs(size);
     std::uint64_t total = 0;
-    for (int i = 0; i < size; ++i) {
-        counts[i] = fits_int(plan.counts[static_cast<std::size_t>(i)]);
-        displs[i] = fits_int(plan.displs[static_cast<std::size_t>(i)]);
-        total += plan.counts[static_cast<std::size_t>(i)];
+    int alloc_err = 0;
+    std::vector<std::uint8_t> recv;
+    int send_count = 0;
+    try {
+        for (int i = 0; i < size; ++i) {
+            counts[i] = fits_int(plan.counts[static_cast<std::size_t>(i)]);
+            displs[i] = fits_int(plan.displs[static_cast<std::size_t>(i)]);
+            total += plan.counts[static_cast<std::size_t>(i)];
+        }
+        recv.resize(static_cast<std::size_t>(total));
+        send_count = fits_int(local.data.size());
+    } catch (const std::exception&) {
+        alloc_err = 1;
     }
-    std::vector<std::uint8_t> recv(static_cast<std::size_t>(total));
-    const int send_count = fits_int(local.data.size());
+    if (mpi_any_error(alloc_err)) {
+        recv.clear();
+        recv.shrink_to_fit();
+        fail("a rank could not allocate the reduction");
+    }
     unsigned char dummy = 0;
     const void* send_ptr = local.data.empty() ? static_cast<const void*>(&dummy) : local.data.data();
     mpi_check(MPI_Allgatherv(send_ptr, send_count, MPI_BYTE, recv.empty() ? nullptr : recv.data(), counts.data(),

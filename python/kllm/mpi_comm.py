@@ -95,6 +95,10 @@ assert _HEADER.size == HEADER_BYTES
 EXAMPLE_LAYERS = 32
 # 40 GiB / 32 layers = 1.25 GiB of resident weights per layer.
 EXAMPLE_MODEL_BYTES = 40 * (1024**3)
+# One collective cannot carry a multi-gigabyte weight tensor by labeling it an activation.
+DEFAULT_MAX_PAYLOAD_BYTES = 4 * (1024**3)
+# Matches crates/kllm-native planner.rs KV_BASE_BYTES_PER_TOKEN_PER_LAYER.
+_KV_BASE_BYTES_PER_TOKEN_PER_LAYER = 128.0
 
 
 class MpiProtocolError(ValueError):
@@ -239,8 +243,11 @@ def node_budget_bytes(node: dict, headroom: float) -> int:
     if unified:
         base = int(node.get("total_ram_bytes") or node.get("available_ram_bytes") or 0)
     else:
-        vram = node.get("vram_bytes")
-        base = int(vram) if vram else int(node.get("available_ram_bytes") or 0)
+        # 0 is a real probe result (no VRAM). Only a missing field falls back to RAM.
+        if "vram_bytes" in node and node.get("vram_bytes") is not None:
+            base = int(node["vram_bytes"])
+        else:
+            base = int(node.get("available_ram_bytes") or 0)
     return int(base * float(headroom))
 
 
@@ -281,14 +288,77 @@ def harmonic_weights(budgets: Sequence[int], speeds: Sequence[float]) -> list[fl
     return out
 
 
-def layer_caps(budgets: Sequence[int], model_size_bytes: int, n_layers: int) -> list[int] | None:
-    """Max whole layers of resident weights that fit in each budget. ``None`` if size is unknown."""
+def _kv_dtype_bytes(dtype: str) -> float:
+    """Same widths as the Rust planner's ``kv_dtype_bytes``."""
+    key = str(dtype).lower()
+    return {
+        "f32": 4.0,
+        "f16": 2.0,
+        "bf16": 2.0,
+        "q8_0": 1.0,
+        "q5_0": 0.625,
+        "q5_1": 0.625,
+        "q4_0": 0.5,
+        "q4_1": 0.5,
+        "iq4_nl": 0.5,
+    }.get(key, 1.0)
+
+
+def kv_bytes_per_layer(
+    context: int,
+    cache_type_k: str = "q8_0",
+    cache_type_v: str = "q8_0",
+    parallel_slots: int = 1,
+) -> int:
+    """KV bytes one repeating layer needs. Same product as the Rust ``estimate_kv``."""
+    if int(context) <= 0:
+        return 0
+    width = _kv_dtype_bytes(cache_type_k) + _kv_dtype_bytes(cache_type_v)
+    slots = max(1, int(parallel_slots))
+    return int(int(context) * _KV_BASE_BYTES_PER_TOKEN_PER_LAYER * width * slots)
+
+
+def layer_caps(
+    budgets: Sequence[int],
+    model_size_bytes: int,
+    n_layers: int,
+    kv_per_layer: int = 0,
+) -> list[int] | None:
+    """Max whole layers whose weights and KV fit in each budget.
+
+    ``None`` if the model size is unknown. A layer costs
+    ``model_size / n_layers + kv_per_layer``.
+    """
     if n_layers <= 0:
         raise MpiProtocolError("n_layers must be positive")
     if model_size_bytes <= 0:
         return None
-    bytes_per_layer = max(1, int(model_size_bytes) // int(n_layers))
-    return [int(b) // bytes_per_layer for b in budgets]
+    weight = max(1, int(model_size_bytes) // int(n_layers))
+    cost = weight + max(0, int(kv_per_layer))
+    return [int(b) // cost for b in budgets]
+
+
+def column_caps(
+    budgets: Sequence[int],
+    model_size_bytes: int,
+    n_cols: int,
+    kv_total: int = 0,
+) -> list[int] | None:
+    """Max columns of weights that fit after the full KV cache is reserved.
+
+    Tensor-parallel ranks each keep every layer, so each pays the whole KV
+    and only a column slice of the weights.
+    """
+    if n_cols <= 0:
+        raise MpiProtocolError("n_cols must be positive")
+    if model_size_bytes <= 0:
+        return None
+    per_col = max(1, int(model_size_bytes) // int(n_cols))
+    caps: list[int] = []
+    for budget in budgets:
+        usable = int(budget) - max(0, int(kv_total))
+        caps.append(0 if usable <= 0 else usable // per_col)
+    return caps
 
 
 def _ne4(ne: Sequence[int]) -> tuple[int, int, int, int]:
@@ -494,6 +564,7 @@ def balanced_bcast(
     slots: list[Tensor | None],
     root: int,
     trace: list[dict] | None = None,
+    max_payload_bytes: int | None = None,
 ) -> None:
     """Every rank calls this. Loopback runs the ranks in one process.
 
@@ -516,6 +587,15 @@ def balanced_bcast(
         raise MpiProtocolError("bcast root has no activation")
     packed = src.pack()
     header, payload = packed[:HEADER_BYTES], packed[HEADER_BYTES:]
+    limit = DEFAULT_MAX_PAYLOAD_BYTES if max_payload_bytes is None else int(max_payload_bytes)
+    if limit < 0:
+        raise MpiProtocolError("payload budget must be >= 0")
+    # The activation flag is a sender claim. The budget is what stops a weight
+    # tensor from crossing the fabric under that flag.
+    if len(payload) > limit:
+        raise MpiProtocolError(
+            f"payload is {len(payload)} bytes, budget is {limit}; weights stay on the node"
+        )
     events = trace if trace is not None else []
     events.append(
         {"op": "MPI_Bcast", "what": "header", "bytes": HEADER_BYTES, "root": int(root)}
@@ -565,6 +645,7 @@ def balanced_allreduce(
     kind: str,
     weights: Sequence[float] | None = None,
     trace: list[dict] | None = None,
+    max_payload_bytes: int | None = None,
 ) -> None:
     """Weighted wrapper around ``MPI_Allreduce`` / ``MPI_Allgatherv``.
 
@@ -591,8 +672,15 @@ def balanced_allreduce(
     _check_weights(slots, weights)
     if kind == "column_concat" and any(not (t.flags & FLAG_PARTIAL) for t in slots):
         raise MpiProtocolError("column shards must be marked partial activations")
-    events = trace if trace is not None else []
+    limit = DEFAULT_MAX_PAYLOAD_BYTES if max_payload_bytes is None else int(max_payload_bytes)
+    if limit < 0:
+        raise MpiProtocolError("payload budget must be >= 0")
     counts = [len(t.data) for t in slots]
+    if sum(counts) > limit or any(n > limit for n in counts):
+        raise MpiProtocolError(
+            f"reduction payload exceeds budget {limit}; weights stay on the node"
+        )
+    events = trace if trace is not None else []
     events.append(
         {
             "op": "MPI_Allgather",
@@ -910,12 +998,16 @@ def split_graph(
     n_cols: int | None = None,
     batch: int = 1,
     dtype: str = "f32",
+    context: int = 4096,
+    cache_type_k: str = "q8_0",
+    cache_type_v: str = "q8_0",
+    parallel_slots: int = 1,
 ) -> PipelineSchedule:
     """Assign layers or columns. Weights stay where they are loaded.
 
     Pipeline (default): contiguous layer ranges in list order. Share is the
     harmonic mean of memory budget and compute speed, then largest-remainder,
-    then a memory cap of ``floor(budget / bytes_per_layer)``.
+    then a cap of ``floor(budget / (weight_per_layer + kv_per_layer))``.
 
     Tensor parallel: legal only when every node names the same backend.
     Every rank stores every layer and a column shard of width proportional
@@ -927,6 +1019,7 @@ def split_graph(
         raise MpiProtocolError("batch must be positive")
     budgets = [node_budget_bytes(n, headroom) for n in nodes]
     speeds = [node_speed(n) for n in nodes]
+    kv_layer = kv_bytes_per_layer(context, cache_type_k, cache_type_v, parallel_slots)
     if tensor_parallel:
         if not _backends_homogeneous(nodes):
             names = ", ".join(str(n.get("backend", "")) for n in nodes)
@@ -940,7 +1033,12 @@ def split_graph(
         weights = list(speeds)
         caps = None
         if model_size_bytes > 0:
-            caps = layer_caps(budgets, model_size_bytes, int(n_cols))
+            caps = column_caps(
+                budgets,
+                model_size_bytes,
+                int(n_cols),
+                kv_total=kv_layer * int(n_layers),
+            )
         columns = largest_remainder(weights, int(n_cols), caps)
         # Each rank still executes every layer; `counts` carries the layer span.
         counts = [int(n_layers)] * len(nodes)
@@ -970,7 +1068,7 @@ def split_graph(
         )
 
     weights = harmonic_weights(budgets, speeds)
-    caps = layer_caps(budgets, int(model_size_bytes), int(n_layers))
+    caps = layer_caps(budgets, int(model_size_bytes), int(n_layers), kv_per_layer=kv_layer)
     counts = largest_remainder(weights, int(n_layers), caps)
     ranks = _assignment(
         nodes,
@@ -1001,67 +1099,215 @@ def split_graph(
     )
 
 
+def _f32(value: float) -> float:
+    """Round to IEEE-754 binary32, matching llama.cpp's ``float`` splits."""
+    return struct.unpack("<f", struct.pack("<f", float(value)))[0]
+
+
+def llama_cli_fractions(fractions: Sequence[float]) -> list[float]:
+    """Fractions as llama-server parses ``--tensor-split`` (4 decimal places, then float)."""
+    return [_f32(float(f"{float(v):.4f}")) for v in fractions]
+
+
+def llama_cpp_layer_owners(
+    fractions: Sequence[float],
+    n_layers: int,
+    n_gpu_layers: int | None = None,
+) -> list[int]:
+    """Device index per repeating layer, or -1 when llama.cpp leaves it on CPU.
+
+    Pinned llama.cpp ``b11026`` ``llama_model::load_tensors``:
+
+    * cumulative ``float`` splits, each divided by the float sum
+    * ``i_gpu_start = max(n_layer + 1 - n_gpu_layers, 0)``
+    * ``act_gpu_layers = min(n_gpu_layers, n_layer + 1)``
+    * device = ``std::upper_bound(splits, float(il - i_gpu_start) / act_gpu_layers)``
+
+    ``n_gpu_layers is None`` means full offload (``n_layer + 1``), so every
+    repeating layer is on the device list.
+    """
+    n_layers = int(n_layers)
+    n_devices = len(fractions)
+    if n_devices == 0:
+        raise MpiProtocolError("at least one device is required")
+    if n_layers < 0:
+        raise MpiProtocolError("n_layers must be >= 0")
+    if n_gpu_layers is None:
+        n_gpu_layers = n_layers + 1
+    n_gpu_layers = int(n_gpu_layers)
+    if n_gpu_layers < 0:
+        raise MpiProtocolError("n_gpu_layers must be >= 0")
+    i_gpu_start = max(n_layers + 1 - n_gpu_layers, 0)
+    act_gpu_layers = min(n_gpu_layers, n_layers + 1)
+    weights = [_f32(float(w)) for w in fractions]
+    if any(w < 0 for w in weights):
+        raise MpiProtocolError("tensor_split fractions must be >= 0")
+    split_sum = _f32(0.0)
+    splits: list[float] = []
+    for weight in weights:
+        split_sum = _f32(split_sum + weight)
+        splits.append(split_sum)
+    if split_sum == 0.0:
+        raise MpiProtocolError("tensor_split sum is 0")
+    splits = [_f32(value / split_sum) for value in splits]
+    owners: list[int] = []
+    for il in range(n_layers):
+        if act_gpu_layers <= 0 or il < i_gpu_start or (il - i_gpu_start) >= act_gpu_layers:
+            owners.append(-1)
+            continue
+        pos = _f32(float(il - i_gpu_start) / float(act_gpu_layers))
+        device = n_devices - 1
+        for index, split in enumerate(splits):
+            if split > pos:
+                device = index
+                break
+        owners.append(device)
+    return owners
+
+
+def _disabled_schedule(plan: dict, notes: str, *, error: str | None = None) -> dict:
+    body = {
+        "enabled": False,
+        "runtime_transport": "llama.cpp-rpc",
+        "mpi_moves_activations": False,
+        "layer_ranges_authoritative": False,
+        "layer_assignment": "unavailable",
+        "transport": "mpi",
+        "split_mode": "layer",
+        "tensor_parallel": False,
+        "weights_on_wire": False,
+        "n_layers": None,
+        "estimated_layers": int(plan.get("estimated_layers") or 0),
+        "ranks": [],
+        "collectives": [],
+        "cpu_layers": None,
+        "notes": notes,
+    }
+    if error is not None:
+        body["error"] = error
+    return body
+
+
 def schedule_from_plan(
     plan: dict,
     nodes: Sequence[dict],
     *,
     headroom: float = 0.8,
-    n_embd: int | None = None,
-    n_vocab: int | None = None,
-    batch: int = 1,
-    dtype: str = "f32",
+    block_count: int | None = None,
+    n_gpu_layers: int | None = None,
 ) -> dict:
-    """MPI schedule whose layer counts follow the production ``tensor_split``.
+    """Describe llama.cpp's layer owners. This does not start an MPI job.
 
-    The Rust planner already weighted VRAM against latency. Re-deriving a
-    second harmonic split here would disagree with the layers llama.cpp loads.
+    ``estimated_layers`` is a file-size bucket (32, 48, or 80). Ranges are
+    published only for a real GGUF ``block_count``, using the b11026
+    ``upper_bound`` walk on the 4-decimal ``--tensor-split`` the server parses.
     """
-    n_layers = int(plan.get("estimated_layers") or 0)
     fractions = [float(x) for x in plan.get("tensor_split") or []]
     ordered = _align_nodes(plan, nodes)
-    if n_layers <= 0 or not ordered or not fractions:
-        return {
-            "enabled": False,
-            "transport": "mpi",
-            "split_mode": "layer",
-            "tensor_parallel": False,
-            "weights_on_wire": False,
-            "n_layers": n_layers,
-            "ranks": [],
-            "collectives": [],
-            "notes": "planner did not produce layers to schedule",
-        }
+    if not ordered or not fractions:
+        return _disabled_schedule(plan, "planner did not produce a tensor_split to describe")
     if len(fractions) != len(ordered):
         raise MpiProtocolError(
             f"tensor_split length {len(fractions)} != nodes {len(ordered)}"
         )
+    if block_count is None or int(block_count) <= 0:
+        return _disabled_schedule(
+            plan,
+            "Layer owners are not published. estimated_layers is a file-size bucket "
+            "(32/48/80), not GGUF block_count, so it is not the split llama-server loads. "
+            "Runtime transport is llama.cpp RPC; this process does not move tensors over MPI.",
+        )
+    n_layers = int(block_count)
+    if n_gpu_layers is None and plan.get("ngl") is not None:
+        n_gpu_layers = int(plan["ngl"])
+    cli_fractions = llama_cli_fractions(fractions)
+    owners = llama_cpp_layer_owners(cli_fractions, n_layers, n_gpu_layers)
+    counts = [sum(1 for owner in owners if owner == index) for index in range(len(ordered))]
     budgets = [node_budget_bytes(n, headroom) for n in ordered]
     speeds = [node_speed(n) for n in ordered]
-    counts = largest_remainder(fractions, n_layers, caps=None)
     ranks = _assignment(
         ordered,
         counts,
         budgets=budgets,
         speeds=speeds,
-        weights=fractions,
+        weights=cli_fractions,
         columns=None,
         pipeline=True,
     )
+    # _assignment lays counts contiguously from layer 0. CPU prefix layers are
+    # not on a device, so shift GPU ranges to start at i_gpu_start.
+    cpu_count = sum(1 for owner in owners if owner < 0)
+    if cpu_count:
+        shifted: list[RankAssignment] = []
+        for rank in ranks:
+            shifted.append(
+                RankAssignment(
+                    rank=rank.rank,
+                    node_id=rank.node_id,
+                    platform=rank.platform,
+                    backend=rank.backend,
+                    layer_start=rank.layer_start + cpu_count,
+                    layer_end=rank.layer_end + cpu_count,
+                    n_layers=rank.n_layers,
+                    budget_bytes=rank.budget_bytes,
+                    compute_speed=rank.compute_speed,
+                    weight=rank.weight,
+                    column_width=rank.column_width,
+                )
+            )
+        ranks = shifted
     schedule = PipelineSchedule(
         split_mode="layer",
         tensor_parallel=False,
         weights_on_wire=False,
         n_layers=n_layers,
         ranks=ranks,
-        collectives=_pipeline_collectives(
-            ranks, n_embd=n_embd, n_vocab=n_vocab, batch=batch, dtype=dtype
-        ),
+        collectives=[],
         notes=(
-            "layer ranges follow the production tensor_split; "
-            "MPI moves activations only"
+            "Layer owners follow llama.cpp b11026 load_tensors "
+            "(upper_bound on cumulative f32 splits of the 4-decimal tensor_split) "
+            "for this GGUF block_count. Runtime transport is llama.cpp RPC; "
+            "this schedule does not move tensors."
         ),
     )
-    return schedule.to_dict()
+    body = schedule.to_dict()
+    body["transport"] = "llama.cpp-rpc"
+    body["runtime_transport"] = "llama.cpp-rpc"
+    body["mpi_moves_activations"] = False
+    for rank in body["ranks"]:
+        rank["wire"] = "none"
+    body["layer_ranges_authoritative"] = True
+    body["layer_assignment"] = "llama.cpp-b11026-upper-bound"
+    body["block_count"] = n_layers
+    body["estimated_layers"] = int(plan.get("estimated_layers") or 0)
+    body["cpu_layers"] = [0, cpu_count] if cpu_count else None
+    body["n_gpu_layers"] = n_layers + 1 if n_gpu_layers is None else int(n_gpu_layers)
+    return body
+
+
+def attach_mpi_schedule(
+    plan: dict,
+    nodes: Sequence[dict],
+    *,
+    headroom: float = 0.8,
+    block_count: int | None = None,
+    n_gpu_layers: int | None = None,
+) -> dict:
+    """Never raises. A bad annotation leaves the llama.cpp RPC plan usable."""
+    try:
+        return schedule_from_plan(
+            plan,
+            nodes,
+            headroom=headroom,
+            block_count=block_count,
+            n_gpu_layers=n_gpu_layers,
+        )
+    except Exception as exc:
+        return _disabled_schedule(
+            plan,
+            "MPI schedule was not attached. llama-server still uses RPC.",
+            error=str(exc),
+        )
 
 
 def _align_nodes(plan: dict, nodes: Sequence[dict]) -> list[dict]:
@@ -1071,7 +1317,10 @@ def _align_nodes(plan: dict, nodes: Sequence[dict]) -> list[dict]:
     by_id = {str(n.get("node_id")): dict(n) for n in nodes}
     aligned = []
     for node_id in ids:
-        aligned.append(by_id.get(str(node_id), {"node_id": node_id, "backend": "unknown"}))
+        found = by_id.get(str(node_id))
+        if found is None:
+            raise MpiProtocolError(f"plan node_id {node_id} is not in the cluster")
+        aligned.append(found)
     return aligned
 
 
@@ -1155,7 +1404,7 @@ def run_activation_pipeline(
 
     slots: list[Tensor | None] = [None] * size
     slots[0] = token_tensor(token_ids, src_rank=0)
-    balanced_bcast(slots, root=0, trace=trace)
+    balanced_bcast(slots, root=0, trace=trace, max_payload_bytes=max(0, len(token_ids)) * 4)
     wire.append(slots[0].pack() if slots[0] is not None else b"")
 
     hidden = [0.0] * int(n_embd)
@@ -1175,7 +1424,7 @@ def run_activation_pipeline(
         )
         slots = [None] * size
         slots[rank.rank] = act
-        balanced_bcast(slots, root=rank.rank, trace=trace)
+        balanced_bcast(slots, root=rank.rank, trace=trace, max_payload_bytes=int(n_embd) * 4)
         if slots[0] is None:
             raise MpiProtocolError("activation bcast did not fill rank 0")
         hidden = f32_values(slots[0])

@@ -44,7 +44,7 @@ def find_cached_archive(tag: str, backend: str) -> Path | None:
         for a in assets:
             if a["name"] == picked["name"]:
                 return a["path"]
-    return assets[0]["path"]
+    return None
 
 
 def install_cached_llama_pack(
@@ -62,7 +62,7 @@ def install_cached_llama_pack(
     backend = install.detect_backend(backend)
     llama = install._find_built_binary("llama-server")
     rpc = install._find_built_binary("rpc-server")
-    if llama and rpc and not force and install.stamp_matches(pin):
+    if llama and rpc and not force and install.stamp_matches(pin, backend):
         return {
             "ok": True,
             "skipped": True,

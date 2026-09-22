@@ -25,6 +25,7 @@ LIVENESS_TIMEOUT_S = 20
 
 _SNAPSHOT_OPTIONAL = (
     "backend",
+    "actual_backend", "requested_backend", "devices", "unified_memory", "binary_version", "reclaimable_ram_bytes",
     "gpu_ids",
     "total_ram_bytes",
     "available_ram_bytes",
@@ -177,7 +178,7 @@ def _stop_inference(state: ClusterState) -> None:
 
 def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, Any]) -> None:
     path = model_ops.resolve_local_model(body.model)
-    rpc_servers = rpc_server_endpoints(state.members)
+    rpc_servers = plan_result.get("rpc_endpoints", rpc_server_endpoints(state.members))
     ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
     if state.process_pid:

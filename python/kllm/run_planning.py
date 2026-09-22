@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,8 @@ from fastapi import HTTPException
 
 from kllm import config as kllm_config
 from kllm import models as model_ops
-from kllm import native
+from kllm import native, http_clients
+from kllm.gguf_meta import read_model_layout
 from kllm.cluster_log import llama_server_log_path
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.model_defaults import merge_defaults_into_extra_args, overlay_user_inference, resolve_model_defaults
@@ -77,8 +77,7 @@ def ensure_rpc_peers_reachable(
             import httpx
 
             url = f"http://{host}:{DEFAULT_CONTROL_PORT}/v1/status"
-            with httpx.Client(timeout=3.0) as client:
-                resp = client.get(url)
+            resp = http_clients.control_client().get(url, timeout=3.0)
             if resp.status_code != 200:
                 unreachable.append(ep)
                 continue
@@ -135,7 +134,10 @@ def cluster_nodes(members: dict[str, Any]) -> list[dict[str, Any]]:
                 "available_ram_bytes": m.get("available_ram_bytes", 0),
                 "vram_bytes": m.get("vram_bytes"),
                 "backend": m.get("backend", "unknown"),
-                "unified_memory": m.get("backend") == "metal",
+                "unified_memory": m.get("unified_memory", m.get("backend") == "metal"),
+                "devices": m.get("devices", []),
+                "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
+                "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
                 "latency_ms": float(lat) if lat is not None else None,
                 "role": m.get("role", "worker"),
                 "is_master": m.get("role") == "master",
@@ -172,6 +174,55 @@ def _parallel_slots_for_estimate(value: int | str) -> int:
         return 1
 
 
+def resolve_launch_settings(body: RunSettingsFields) -> dict[str, Any]:
+    """Normalize overlapping flags once, before both planning and launch."""
+    result = {"parallel_slots": 1 if body.parallel_slots == "auto" else int(body.parallel_slots),
+              "batch_size": 512 if body.batch_size == "auto" else int(body.batch_size),
+              "micro_batch": 128 if body.micro_batch == "auto" else int(body.micro_batch),
+              "context": body.context, "cache_type_k": body.cache_type_k,
+              "cache_type_v": body.cache_type_v, "flash_attention": "auto",
+              "threads": body.threads,
+              "checkpoints": 32 if body.checkpoints == "auto" else int(body.checkpoints),
+              "cache_ram": 8192 if body.cache_ram == "auto" else int(body.cache_ram)}
+    aliases = {"-b": "batch_size", "--batch-size": "batch_size", "-ub": "micro_batch",
+               "--ubatch-size": "micro_batch", "-np": "parallel_slots", "--parallel": "parallel_slots",
+               "-c": "context", "--ctx-size": "context", "-ctk": "cache_type_k",
+               "--cache-type-k": "cache_type_k", "-ctv": "cache_type_v", "--cache-type-v": "cache_type_v",
+               "-fa": "flash_attention", "--flash-attn": "flash_attention", "-t": "threads", "--threads": "threads",
+               "--ctx-checkpoints": "checkpoints", "-ctxcp": "checkpoints", "--swa-checkpoints": "checkpoints",
+               "--cache-ram": "cache_ram", "-cram": "cache_ram"}
+    tokens = merge_and_sanitize_extra(body)
+    extra = []
+    i = 0
+    while i < len(tokens):
+        key = aliases.get(tokens[i])
+        if key:
+            if i + 1 == len(tokens):
+                raise HTTPException(400, f"missing value for {tokens[i]}")
+            value = tokens[i+1]
+            try:
+                result[key] = int(value) if key in ("parallel_slots", "batch_size", "micro_batch", "context", "threads", "checkpoints", "cache_ram") else value
+            except ValueError as exc:
+                raise HTTPException(400, f"invalid value for {tokens[i]}") from exc
+            i += 2
+        else:
+            extra.append(tokens[i])
+            i += 1
+    for key in ("parallel_slots", "batch_size", "micro_batch", "threads"):
+        if result[key] < 1:
+            raise HTTPException(400, f"{key} must be positive")
+    if result["context"] < 512 and not body.context_auto:
+        raise HTTPException(400, "context must be >= 512")
+    from kllm.placement import WIDTHS
+    if any(result[k] not in WIDTHS for k in ("cache_type_k", "cache_type_v")):
+        raise HTTPException(400, "unsupported cache type")
+    if result["flash_attention"] not in ("auto", "on", "off"):
+        raise HTTPException(400, "flash attention must be auto, on, or off")
+    result["micro_batch"] = min(result["micro_batch"], result["batch_size"])
+    result["extra_args"] = extra
+    return result
+
+
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
     path = model_ops.resolve_local_model(body.model)
     nodes = cluster_nodes(members)
@@ -179,20 +230,29 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
         raise HTTPException(400, "no cluster members")
     device = kllm_config.resolve_device(body.device)
     headroom = resolve_headroom(body)
-    merge_and_sanitize_extra(body)
+    settings = resolve_launch_settings(body)
+    layout = read_model_layout(path)
+    if body.gpu_ids is not None:
+        for node in nodes:
+            if node["is_master"]:
+                node["devices"] = [d for d in node["devices"] if d["index"] in body.gpu_ids]
+                if len(node["devices"]) != len(set(body.gpu_ids)):
+                    raise HTTPException(400, "gpu_ids includes unavailable devices")
     try:
         result = native.plan_split(
             nodes=nodes,
             model_size_bytes=path.stat().st_size,
-            context=body.context,
+            context=settings["context"],
             context_auto=body.context_auto,
             headroom=headroom,
             device=device,
             vram_weight=body.vram_weight,
             latency_weight=body.latency_weight,
-            cache_type_k=body.cache_type_k,
-            cache_type_v=body.cache_type_v,
-            parallel_slots=_parallel_slots_for_estimate(body.parallel_slots),
+            cache_type_k=settings["cache_type_k"],
+            cache_type_v=settings["cache_type_v"],
+            parallel_slots=settings["parallel_slots"],
+            model_layout=layout,
+            launch_settings=settings,
             mmproj_size_bytes=_file_size_bytes(body.mmproj),
             draft_model_size_bytes=_file_size_bytes(body.draft_model),
             vision=bool(body.vision),
@@ -203,6 +263,8 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
     if result.get("fit_status") == "tight":
         warning = result.get("hint") or "Plan is tight against cluster budget"
     result["warning"] = warning
+    settings["context"] = result.get("context_effective", settings["context"])
+    result["resolved_launch_settings"] = settings
     meta = read_inference_metadata(path) or {}
     block_count = meta.get("block_count")
     # ngl is the value llama-server receives. Layer owners use that together
@@ -253,7 +315,8 @@ def build_master_launch(
     gpu_env: dict[str, str],
     extra_args: list[str],
 ) -> dict[str, Any]:
-    ctx = int(plan_result.get("context_effective") or body.context)
+    settings = plan_result.get("resolved_launch_settings") or resolve_launch_settings(body)
+    ctx = int(plan_result.get("context_effective") or settings["context"])
     chat_template_file = None
     chat_template = body.chat_template
     if body.chat_template_text:
@@ -269,26 +332,26 @@ def build_master_launch(
         repeat_penalty=body.repeat_penalty,
         enable_thinking=body.enable_thinking,
     )
-    merged_extra = merge_defaults_into_extra_args(list(extra_args), defaults)
+    merged_extra = merge_defaults_into_extra_args(list(settings["extra_args"]), defaults)
     launch: dict[str, Any] = {
         "model": str(model_path),
         "tensor_split": plan_result["tensor_split_csv"],
         "ngl": plan_result["ngl"],
         "context": ctx,
-        "threads": body.threads,
+        "threads": settings["threads"],
         # Native start_master extracts micro_batch as i32 (str "2" raises TypeError).
-        "micro_batch": int(auto_launch_value(body.micro_batch)),
-        "parallel": auto_launch_i32(body.parallel_slots),
-        "batch_size": auto_launch_i32(body.batch_size),
-        "cache_type_k": body.cache_type_k,
-        "cache_type_v": body.cache_type_v,
+        "micro_batch": settings["micro_batch"],
+        "parallel": str(settings["parallel_slots"]),
+        "batch_size": str(settings["batch_size"]),
+        "cache_type_k": settings["cache_type_k"],
+        "cache_type_v": settings["cache_type_v"],
         "load_mode": body.mmap_mlock,
-        "ctx_checkpoints": auto_launch_i32(body.checkpoints),
-        "cache_ram": auto_launch_i32(body.cache_ram),
+        "ctx_checkpoints": auto_launch_i32(settings["checkpoints"]),
+        "cache_ram": str(settings["cache_ram"]),
         "port": infer_port,
-        "rpc_servers": rpc_servers,
+        "rpc_servers": plan_result.get("rpc_endpoints", rpc_servers),
         "repo_root": repo_root,
-        "extra_args": merged_extra,
+        "extra_args": merged_extra + ["--flash-attn", settings["flash_attention"], "--fit", "off"],
         "mmproj_auto": body.vision and not body.mmproj,
     }
     launch.update(defaults.to_launch_dict())
@@ -300,7 +363,9 @@ def build_master_launch(
         launch["chat_template_file"] = chat_template_file
     elif chat_template and chat_template != "default":
         launch["chat_template"] = chat_template
-    if gpu_env:
+    if "device_order" in plan_result:
+        launch["extra_args"] += ["--device", ",".join(plan_result["device_order"]) or "none"]
+    elif gpu_env:
         launch["env"] = gpu_env
     launch["log_path"] = str(llama_server_log_path())
     return launch

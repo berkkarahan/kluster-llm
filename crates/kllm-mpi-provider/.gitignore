@@ -1,0 +1,18 @@
+# Compiled artifacts and build output
+/target/
+
+# rustfmt backups
+**/*.rs.bk
+
+# Editor / IDE
+/.idea/
+/.vscode/
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Note: Cargo.lock is intentionally tracked — this crate ships binaries
+# (mpiexec/mpirun), so a pinned lockfile gives reproducible builds.

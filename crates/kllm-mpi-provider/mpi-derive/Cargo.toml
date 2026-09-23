@@ -1,0 +1,17 @@
+[package]
+name = "mpi-derive"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Derive macro for the pure-Rust mpi-rs crate's Equivalence trait."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eugenehp/mpi-rs"
+homepage = "https://github.com/eugenehp/mpi-rs"
+keywords = ["mpi", "derive", "proc-macro"]
+categories = ["concurrency"]
+authors = ["Eugene Hauptmann", "The mpi-rs contributors"]
+
+[lib]
+proc-macro = true
+
+[dependencies]

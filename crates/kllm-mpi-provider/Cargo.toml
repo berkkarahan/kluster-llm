@@ -1,0 +1,73 @@
+[package]
+name = "mpi-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+build = "build.rs"
+description = "A pure-Rust implementation of the Message Passing Interface (MPI), API-compatible with rsmpi. No C library required."
+license = "MIT OR Apache-2.0"
+keywords = ["mpi", "parallel", "hpc", "message-passing", "distributed"]
+categories = ["concurrency", "science"]
+readme = "README.md"
+repository = "https://github.com/eugenehp/mpi-rs"
+homepage = "https://github.com/eugenehp/mpi-rs"
+documentation = "https://docs.rs/mpi-rs"
+authors = ["Eugene Hauptmann", "The mpi-rs contributors"]
+exclude = ["/.github", "/.git"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# The library is imported as `mpi` (so rsmpi code — `use mpi::traits::*` —
+# works unchanged) even though the crate publishes as `mpi-rs`.
+[lib]
+name = "mpi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mpiexec"
+path = "src/bin/mpiexec.rs"
+
+[[bin]]
+name = "mpirun"
+path = "src/bin/mpirun.rs"
+
+[[bin]]
+name = "kllm-mpi-provider-check"
+path = "src/bin/kllm-mpi-provider-check.rs"
+
+[[bin]]
+name = "kllm-mpi-rank"
+path = "src/bin/kllm-mpi-rank.rs"
+
+[[example]]
+name = "derive"
+required-features = ["derive"]
+
+[workspace]
+members = ["mpi-derive"]
+
+[dependencies]
+sha2 = "0.10"
+mpi-derive = { path = "mpi-derive", version = "0.1.0", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[build-dependencies]
+sha2 = "0.10"
+
+[features]
+default = []
+# Enables `#[derive(Equivalence)]` for POD structs.
+derive = ["dep:mpi-derive"]
+
+[profile.release]
+opt-level = 3

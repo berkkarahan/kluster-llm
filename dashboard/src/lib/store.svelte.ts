@@ -58,6 +58,15 @@ function fp(s: Status | null): string {
   });
 }
 
+function mpiInputsFp(s: Status | null): string {
+  if (!s) return '';
+  return JSON.stringify(Object.values(s.members ?? {}).map((member) => ({
+    node_id: member.node_id,
+    role: member.role,
+    mpi_capabilities: member.mpi_capabilities
+  })).sort((a, b) => a.node_id.localeCompare(b.node_id)));
+}
+
 class AppStore {
   status = $state<Status | null>(null);
   connected = $state(false);
@@ -114,6 +123,8 @@ class AppStore {
   advancedOpen = $state(false);
   fieldErrors = $state<Record<string, string>>({});
   device = $state<'cpu' | 'gpu'>('gpu');
+  transport = $state<'rpc' | 'mpi'>('rpc');
+  mpiDeviceIds = $state<Record<string, string[]> | null>(null);
   vramPercent = $state(80);
   ramPercent = $state(80);
   vramWeight = $state(0.6);
@@ -124,6 +135,8 @@ class AppStore {
   estimating = $state(false);
   private estimateTimer: ReturnType<typeof setTimeout> | null = null;
   private estimateSeq = 0;
+  private modelSelectionSeq = 0;
+  private statusPlanHydrated = false;
   /** Live inference load state from /v1/load-progress (null when idle). */
   loadProgress = $state<LoadProgress | null>(null);
   /** Live HF download job from /v1/models/download-progress (null when idle). */
@@ -216,6 +229,7 @@ class AppStore {
       const r = await fetch('/v1/status');
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = (await r.json()) as Status;
+      const mpiInputsChanged = this.status !== null && mpiInputsFp(this.status) !== mpiInputsFp(data);
       this.statusSeen = true;
       this.status = data;
       this.connected = true;
@@ -232,11 +246,12 @@ class AppStore {
       if (next !== fingerprint) {
         fingerprint = next;
         if (data.model_name && !this.selectedModel) this.selectedModel = data.model_name;
-        if (data.role === 'master' && data.last_plan) {
+        if (!this.statusPlanHydrated && data.role === 'master' && data.last_plan) {
           this.planResult = data.last_plan as Record<string, unknown>;
-        } else {
+        } else if (!this.statusPlanHydrated && data.role !== 'master') {
           this.planResult = null;
         }
+        this.statusPlanHydrated = true;
         const err = data.apply_error ?? null;
         const warn = data.apply_warning ?? null;
         if (err && err !== this.lastApplyError) pushToast('danger', err);
@@ -244,6 +259,9 @@ class AppStore {
         this.lastApplyError = err;
         this.lastApplyWarning = warn;
         if (!this.selectionHydrated) this.hydrateGpuSelection();
+        if (mpiInputsChanged && this.transport === 'mpi' && this.selectedModel) {
+          this.scheduleEstimate(0);
+        }
       }
     } catch {
       this.connected = false;
@@ -383,6 +401,14 @@ class AppStore {
   }
 
   applyParameterSet(ps: Record<string, unknown>) {
+    this.transport = ps.transport === 'mpi' ? 'mpi' : 'rpc';
+    this.mpiDeviceIds = null;
+    if (ps.mpi_device_ids && typeof ps.mpi_device_ids === 'object' && !Array.isArray(ps.mpi_device_ids)) {
+      const selection = ps.mpi_device_ids as Record<string, unknown>;
+      if (Object.values(selection).every((ids) => Array.isArray(ids) && ids.every((id) => typeof id === 'string'))) {
+        this.mpiDeviceIds = selection as Record<string, string[]>;
+      }
+    }
     if (typeof ps.context === 'number') this.context = ps.context;
     if (typeof ps.context_auto === 'boolean') this.contextAuto = ps.context_auto;
     this.clampContextToModel();
@@ -429,9 +455,17 @@ class AppStore {
   }
 
   async selectModel(id: string) {
+    const selectionSeq = ++this.modelSelectionSeq;
     this.selectedModel = id;
+    // A model without saved settings starts from the safe default transport.
+    // The asynchronous response below may opt back into MPI for this model.
+    this.transport = 'rpc';
+    this.mpiDeviceIds = null;
+    this.planResult = null;
+    ++this.estimateSeq;
     try {
       const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
+      if (selectionSeq !== this.modelSelectionSeq || this.selectedModel !== id) return;
       if (!r.ok) {
         this.clampContextToModel();
         this.seedSamplingDefaults();
@@ -440,12 +474,14 @@ class AppStore {
         return;
       }
       const data = await r.json();
+      if (selectionSeq !== this.modelSelectionSeq || this.selectedModel !== id) return;
       if (data.parameter_set) this.applyParameterSet(data.parameter_set);
       else {
         this.clampContextToModel();
         this.seedSamplingDefaults();
       }
     } catch {
+      if (selectionSeq !== this.modelSelectionSeq || this.selectedModel !== id) return;
       this.clampContextToModel();
       this.seedSamplingDefaults();
     }
@@ -501,6 +537,8 @@ class AppStore {
   }
 
   resetRunSettings() {
+    this.transport = 'rpc';
+    this.mpiDeviceIds = null;
     this.context = Math.min(4096, this.selectedModelMaxContext());
     this.contextAuto = false;
     this.cacheTypeK = 'q8_0';
@@ -529,6 +567,24 @@ class AppStore {
     this.markSettingsClean();
   }
 
+  setTransport(mode: 'rpc' | 'mpi') {
+    if (this.transport === mode) return;
+    this.transport = mode;
+    this.scheduleEstimate();
+  }
+
+  setMpiDevice(nodeId: string, physicalId: string, enabled: boolean, available: string[]) {
+    const current = this.mpiDeviceIds?.[nodeId] ?? available;
+    const next = available.filter((id) =>
+      id === physicalId ? enabled : current.includes(id)
+    );
+    const selection = { ...(this.mpiDeviceIds ?? {}) };
+    if (next.length === available.length) delete selection[nodeId];
+    else selection[nodeId] = next;
+    this.mpiDeviceIds = Object.keys(selection).length ? selection : null;
+    this.scheduleEstimate();
+  }
+
   planRunBlockedReason(): string | null {
     if (!this.models.length) return 'Add a local model before planning or running.';
     if (this.status?.role !== 'master') return 'Start as cluster master before Plan & Run.';
@@ -551,6 +607,11 @@ class AppStore {
     if (this.latencyWeight < 0 || this.latencyWeight > 1) err.latencyWeight = 'Latency weight must be 0–1.';
     if (this.vramWeight + this.latencyWeight <= 0)
       err.placementWeights = 'VRAM and latency weights cannot both be zero.';
+    if (this.transport === 'mpi') {
+      if (this.device === 'cpu') err.device = 'MPI requires a GPU.';
+      if (this.mpiDeviceIds && Object.values(this.mpiDeviceIds).some((ids) => ids.length === 0))
+        err.mpiDevices = 'Select at least one physical GPU on each participating node.';
+    }
     this.fieldErrors = err;
     return Object.keys(err).length === 0;
   }
@@ -562,6 +623,8 @@ class AppStore {
       .filter(Boolean);
     const body: Record<string, unknown> = {
       model: this.selectedModel,
+      transport: this.transport,
+      mpi_device_ids: this.transport === 'mpi' ? this.mpiDeviceIds : null,
       context: this.context,
       context_auto: this.contextAuto,
       cache_type_k: this.cacheTypeK,
@@ -1007,6 +1070,8 @@ class AppStore {
   /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
   scheduleEstimate(delayMs = 300) {
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.planResult = null;
+    ++this.estimateSeq;
     this.estimateTimer = setTimeout(() => {
       this.estimateTimer = null;
       void this.refreshEstimate();
@@ -1034,10 +1099,13 @@ class AppStore {
         data = text;
       }
       if (seq !== this.estimateSeq) return;
-      if (!r.ok) return;
+      if (!r.ok) {
+        this.planResult = null;
+        return;
+      }
       this.planResult = data as Record<string, unknown>;
     } catch {
-      /* ignore transient estimate errors */
+      if (seq === this.estimateSeq) this.planResult = null;
     } finally {
       if (seq === this.estimateSeq) this.estimating = false;
     }
@@ -1068,6 +1136,21 @@ class AppStore {
   async run() {
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings()) return;
+    if (this.transport === 'mpi') {
+      const payload = this.planPayload();
+      const fresh = (await this.post('/v1/plan', payload)) as Record<string, unknown>;
+      this.planResult = fresh;
+      if (fresh.launchable !== true) {
+        pushToast('danger', String((fresh.blockers as string[] | undefined)?.join('; ') || 'MPI admission is blocked'));
+      }
+      if (typeof fresh.plan_fingerprint !== 'string' || !fresh.plan_fingerprint) {
+        pushToast('danger', 'MPI plan has no fingerprint');
+        return;
+      }
+      payload.plan_fingerprint = fresh.plan_fingerprint;
+      await this.post('/v1/run', payload);
+      return;
+    }
     if (this.planResult?.fit_status === 'overflow') {
       pushToast('danger', String(this.planResult.hint ?? 'overflow — adjust context and re-plan'));
       return;

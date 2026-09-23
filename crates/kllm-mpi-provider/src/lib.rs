@@ -45,6 +45,13 @@ use std::fmt;
 // Internal runtime (networking + bootstrap). Not part of the public API.
 mod transport;
 
+/// Authenticated, structured KLLM production jobs. This is separate from the
+/// upstream-compatible launcher, which remains available for test fixtures.
+pub mod production;
+
+/// Panic-contained C ABI used by the patched llama.cpp engine.
+pub mod cabi;
+
 // The process launcher, shared by the `mpiexec` / `mpirun` binaries.
 pub mod launcher;
 

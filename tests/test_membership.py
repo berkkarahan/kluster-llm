@@ -551,6 +551,26 @@ def test_shrink_without_last_settings_is_membership_only(tmp_path, monkeypatch):
     assert state.last_plan["node_ids"] == ["master1", "w1"]
 
 
+def test_mpi_membership_change_never_enters_rpc_relaunch(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
+    state = ClusterState(
+        role="master", node_id="master1",
+        members={"master1": {"node_id": "master1", "host": "h", "role": "master"}},
+        last_settings={"model": "toy.gguf", "transport": "mpi"},
+        last_plan={"transport": "mpi", "node_ids": ["master1", "w1"]},
+    )
+    with (
+        patch("kllm.membership.execute_plan") as rpc_plan,
+        patch("kllm.membership.native.start_master") as rpc_launch,
+    ):
+        on_membership_shrink(state)
+        on_membership_grow(state)
+    rpc_plan.assert_not_called()
+    rpc_launch.assert_not_called()
+    assert state.last_plan is None
+    assert "fresh plan" in state.apply_error
+
+
 def test_grow_clears_stale_shrink_overflow(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     models = Path(tmp_path / "kllm-home" / "models")
@@ -663,8 +683,9 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
     assert any("unreachable" in w for w in (agent.STATE.netsec_warnings or []))
 
 
-def test_worker_accepted_false_local_leave(client):
+def test_worker_accepted_false_local_leave(client, monkeypatch):
     c, agent = client
+    monkeypatch.setattr(agent.http_clients, "control", None)
     agent.STATE.role = "worker"
     agent.STATE.master_host = "10.0.0.1"
     agent.STATE.master_port = 18765

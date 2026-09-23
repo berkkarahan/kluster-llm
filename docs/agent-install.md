@@ -175,6 +175,7 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 | `--skip-wireguard` | Skip WG (LAN-only RPC; no overlay). |
 | `--skip-toolchains` | Do not auto-install Rust/Node/git/cmake. |
 | `--skip-npm-install` | Dashboard `npm run build` only. |
+| `--mpi-only` | Build the pinned Rust provider into isolated `vendor/mpi/<backend>`; RPC binaries remain intact. |
 
 **llama.cpp only** (pin in `llama-release`; run on every node after a pin bump or RPC mismatch):
 
@@ -183,6 +184,20 @@ python scripts/install.py --llama-only
 python scripts/install.py --check
 python scripts/install.py --llama-only --backend metal    # Apple Silicon worker, including Vulkan masters
 ```
+
+**Experimental MPI provider package:**
+
+```bash
+python scripts/install.py --mpi-only --backend vulkan
+```
+
+This runs the local three-rank provider test, stages the C ABI and structured
+rank executable, and records exact provider provenance in
+`vendor/mpi/<backend>/install.json`. A successful provider package is not an
+inference engine. The manifest reports the distributed graph engine as
+unavailable until its separate hardware gate passes. Metal, CUDA, ROCm, and
+Vulkan flavors are separate; ROCm remains Linux-only, and mixed GPU families
+require verified Vulkan on every selected rank.
 
 **CLI/UI rebuild only** (no llama/WG/toolchains):
 

@@ -298,7 +298,7 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
                         token_embd = nbytes
             if not has_output:
                 output += token_embd  # tied embeddings are duplicated for offloaded output
-            return dict(architecture=arch, metadata=meta, layers=layers,
+            return dict(architecture=arch, metadata=meta, data_offset=data_start, layers=layers,
                         output_bytes=output, input_bytes=inputs, tensors=tensors,
                         confidence="metadata" if tensors and all(layers) else "approximate")
     except (OSError, ValueError, struct.error):

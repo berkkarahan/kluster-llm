@@ -40,8 +40,8 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard) |
 | `kllm model distribute <name>` | Master coordinates a LAN pull to workers; finished workers seed others (SHA-256 verified) |
-| `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`) |
-| `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` with mapped flags + `--rpc` workers |
+| `kllm plan --model NAME …` | RPC dry-run with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`); `--transport mpi` reports admission blockers |
+| `kllm run --model NAME …` | RPC re-plan and launch by default; `--transport mpi` obtains a fresh fingerprinted plan and exits if admission is blocked |
 | `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
 | `kllm connect <agent>` | Launch Claude/OpenCode/Codex/… with kllm API baked in |
 
@@ -116,8 +116,10 @@ kllm run --model NAME --device cpu --ram-percent 50
 
 | Flag | Default | Notes |
 |------|---------|--------|
+| `--transport rpc\|mpi` | `rpc` | MPI is an explicit preview path; it never falls through to RPC |
+| `--mpi-device NODE_ID=PHYSICAL_GPU_ID` (repeatable) | all verified physical GPUs | MPI only; IDs come from the MPI capability inventory, independent of RPC GPU ordinals |
 | `--context` / `--context-auto` | 4096 / off | Auto picks largest viable context under budget |
-| `--cache-type-k`, `--cache-type-v` | `q8_0` | KV cache dtype |
+| `--cache-type-k`, `--cache-type-v` | `q8_0` | KV cache dtype; initial MPI surface requires both `f16` |
 | `--parallel`, `--batch-size`, `--micro-batch` | `auto` | Maps to llama-server parallel / batch / ubatch |
 | `--vision`, `--mmproj` | off / — | Vision requires a usable mmproj on run |
 | `--load-mode` | `auto` | mmap / mlock mapping |
@@ -131,6 +133,14 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--vram-weight`, `--latency-weight` | 0.6 / 0.4 | Greedy placement score weights (VRAM capacity vs low latency); normalized by sum |
 
 No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement via scored greedy knapsack: VRAM sacks first, then RAM).
+
+MPI planning currently reports `launchable=false`. The authenticated structured
+provider launch, C ABI, physical-device inventory, and b11026 shard manifest are
+implemented; the distributed tensor graph engine and mandatory GPU hardware
+gates remain unfinished. `kllm run --transport mpi` requests a fresh plan and
+stops with its blockers; `/v1/run` returns 503 without replacing an active RPC
+job. A changed submitted plan fingerprint returns 409. See
+[`mpi-runtime-validation.md`](mpi-runtime-validation.md) for gate evidence.
 
 ## Dashboard
 

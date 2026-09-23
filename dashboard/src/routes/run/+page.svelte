@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DeviceAllocation } from '$lib/types';
+  import type { DeviceAllocation, MpiPlan } from '$lib/types';
   import AutoEditField from '$lib/components/AutoEditField.svelte';
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
   import HardwareSettings from '$lib/components/HardwareSettings.svelte';
@@ -17,6 +17,8 @@
   const fitStatus = $derived(
     appStore.planResult?.fit_status ? String(appStore.planResult.fit_status) : null
   );
+  const mpiPlan = $derived(appStore.planResult?.transport === 'mpi'
+    ? appStore.planResult as unknown as MpiPlan : null);
   const maxContext = $derived(appStore.selectedModelMaxContext());
   const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
   const estimateLabel = $derived(appStore.device === 'cpu' ? 'Estimated memory' : 'Estimated VRAM');
@@ -57,7 +59,7 @@
   {/if}
 
   <div class="panel p-3 flex flex-col gap-3" style="border-color: var(--border)">
-    {#if !blocked && appStore.planResult?.estimated_bytes != null}
+    {#if !blocked && appStore.transport === 'rpc' && appStore.planResult?.estimated_bytes != null}
       <div class="mono text-[11px] p-2 rounded" style="background: var(--bg); border: 1px solid var(--border)">
         {estimateLabel}:
         {formatGb(Number(appStore.planResult.estimated_bytes), 1)}
@@ -85,6 +87,54 @@
         <option value={m.id}>{m.id}</option>
       {/each}
     </select>
+
+    <label class="mono text-[11px]" style="color: var(--muted)" for="run-transport">Inference transport</label>
+    <select
+      id="run-transport"
+      class="field mono"
+      value={appStore.transport}
+      disabled={!!appStore.busy}
+      onchange={(e) => appStore.setTransport((e.currentTarget as HTMLSelectElement).value as 'rpc' | 'mpi')}
+    >
+      <option value="rpc">RPC · layer split (default)</option>
+      <option value="mpi">MPI · tensor parallel preview</option>
+    </select>
+
+    {#if appStore.transport === 'mpi'}
+      <div class="mono text-[11px]" style="color: var(--muted)">
+        MPI selects one backend for all selected physical GPUs. Selected GPUs default to every
+        verified GPU on each member. The server decides Metal, CUDA, ROCm, or Vulkan.
+      </div>
+      <div class="flex flex-col gap-2">
+        {#each Object.values(appStore.status?.members ?? {}) as member}
+          {@const devices = member.mpi_capabilities?.devices ?? []}
+          <div class="mono text-[11px] p-2 rounded" style="border: 1px solid var(--border)">
+            <div>{member.node_id} · {member.role ?? 'worker'}</div>
+            {#if devices.length === 0}
+              <div style="color: var(--muted)">No verified MPI physical GPU inventory</div>
+            {:else}
+              {#each devices as gpu}
+                <label class="flex items-center gap-2 mt-1">
+                  <input type="checkbox"
+                    checked={appStore.mpiDeviceIds?.[member.node_id]?.includes(gpu.physical_id) ?? true}
+                    disabled={!!appStore.busy}
+                    onchange={(e) => appStore.setMpiDevice(member.node_id, gpu.physical_id,
+                      (e.currentTarget as HTMLInputElement).checked, devices.map((d) => d.physical_id))}
+                  />
+                  {gpu.name ?? gpu.physical_id} · {gpu.vendor} · {gpu.physical_id}
+                </label>
+              {/each}
+            {/if}
+          </div>
+        {/each}
+      </div>
+      {#if appStore.fieldErrors.mpiDevices}
+        <p class="mono text-[11px]" style="color: var(--danger, #c44)">{appStore.fieldErrors.mpiDevices}</p>
+      {/if}
+      {#if appStore.fieldErrors.device}
+        <p class="mono text-[11px]" style="color: var(--danger, #c44)">{appStore.fieldErrors.device}</p>
+      {/if}
+    {/if}
 
     <div class="flex items-center gap-2">
       <label class="mono text-[11px] flex-1" style="color: var(--muted)" title="Context window size for KV cache" for="run-context">
@@ -144,6 +194,7 @@
       </select>
     </div>
 
+    {#if appStore.transport === 'rpc'}
     <div class="pt-1 border-t flex flex-col gap-2" style="border-color: var(--border)">
       <div class="mono text-[11px] uppercase tracking-wider" style="color: var(--muted)">
         Hardware
@@ -153,8 +204,9 @@
         onChanged={bumpEstimate}
       />
     </div>
+    {/if}
 
-    {#if appStore.device === 'gpu'}
+    {#if appStore.transport === 'rpc' && appStore.device === 'gpu'}
       <div class="mono text-[11px]" style="color: var(--muted)">Placement weights (VRAM / latency)</div>
       <div class="flex flex-col gap-2">
         <SliderField
@@ -472,9 +524,11 @@
       <input type="checkbox" bind:checked={appStore.remember} /> Remember settings for this model
     </label>
 
-    <p class="mono text-[11px]" style="color: var(--muted)">
-      Automatic placement — layer split and RPC distribution are computed by kllm (no manual tensor split).
-    </p>
+    {#if appStore.transport === 'rpc'}
+      <p class="mono text-[11px]" style="color: var(--muted)">
+        Automatic placement — layer split and RPC distribution are computed by kllm.
+      </p>
+    {/if}
 
     <LoadProgressPanel />
 
@@ -500,7 +554,7 @@
       >
       <button
         class="btn btn-accent"
-        disabled={!!blocked || !appStore.selectedModel || !!appStore.busy || fitStatus === 'overflow'}
+        disabled={!!blocked || !appStore.selectedModel || !!appStore.busy || fitStatus === 'overflow' || mpiPlan?.launchable === false}
         onclick={() => appStore.run()}>Run</button
       >
     </div>
@@ -511,7 +565,26 @@
       </p>
     {/if}
 
-    {#if !blocked && appStore.planResult}
+    {#if !blocked && mpiPlan}
+      <div class="mono text-[11px] p-2 rounded" style="border: 1px solid var(--border)">
+        <div>MPI backend: {mpiPlan.effective_backend ?? 'unavailable'} · preferred {mpiPlan.preferred_backend ?? 'unknown'}</div>
+        <div>{mpiPlan.backend_reason}</div>
+        <div>Cluster: {mpiPlan.cluster_class ?? 'unverified'} · manifest {mpiPlan.manifest_identity ?? 'unavailable'}</div>
+        <div>Plan fingerprint: {mpiPlan.plan_fingerprint}</div>
+        {#each Object.entries(mpiPlan.backend_diagnostics) as [backend, reasons]}
+          {#each reasons as reason}
+            <div style="color: var(--warn, #b80)">{backend}: {reason}</div>
+          {/each}
+        {/each}
+        {#each mpiPlan.blockers as reason}
+          <div style="color: var(--danger, #c44)">Blocked: {reason}</div>
+        {/each}
+        {#each mpiPlan.mpi.ranks as rank}
+          <div>rank {rank.rank}: {rank.node_id}/{rank.physical_id} → {rank.backend} {rank.device}</div>
+        {/each}
+      </div>
+    {/if}
+    {#if !blocked && appStore.planResult && appStore.transport === 'rpc'}
       {#if appStore.planResult.hint}
         <p class="mono text-[11px]" style="color: var(--muted)">{String(appStore.planResult.hint)}</p>
       {/if}

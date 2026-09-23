@@ -8,6 +8,7 @@ Usage:
   uv run python scripts/install.py --backend vulkan
   uv run python scripts/install.py --skip-wireguard --skip-llama
   python scripts/install.py --llama-only
+  python scripts/install.py --mpi-only --backend vulkan
   python scripts/install.py --check
   python scripts/install.py --llama-only --from-source --force
 
@@ -18,6 +19,7 @@ CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -38,6 +40,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = ROOT / ".venv"
 DASHBOARD = ROOT / "dashboard"
 VENDOR_LLAMA = ROOT / "vendor" / "llama.cpp"
+MPI_PROVIDER = ROOT / "crates" / "kllm-mpi-provider"
+MPI_VENDOR = ROOT / "vendor" / "mpi"
 BIN_DIR = ROOT / "vendor" / "bin"
 WORKER_WIN = ROOT / "worker-windows"
 WORKER_WIN_SRC = WORKER_WIN / "src"
@@ -1111,6 +1115,207 @@ def verify_llama_installed(tag: str) -> None:
         )
 
 
+# ── isolated MPI provider/flavor package ────────────────────────────────────
+
+
+def _mpi_executable(name: str) -> str:
+    return f"{name}.exe" if _is_windows() else name
+
+
+def _mpi_library_names() -> tuple[str, ...]:
+    if _is_windows():
+        return ("mpi.dll", "mpi.lib", "mpi.dll.lib")
+    if _is_macos():
+        return ("libmpi.dylib", "libmpi.a")
+    return ("libmpi.so", "libmpi.a")
+
+
+_MPI_PROVIDER_STAMP_INPUTS = (
+    "Cargo.toml", "Cargo.lock", "build.rs", "stamp.rs", ".gitattributes",
+    "src", "mpi-derive", "THIRD_PARTY_NOTICES.md",
+)
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _mpi_provider_source_digest() -> str:
+    """Mirror the provider build stamp without requiring a Rust build."""
+    files: list[Path] = []
+    for relative in _MPI_PROVIDER_STAMP_INPUTS:
+        path = MPI_PROVIDER / relative
+        if path.is_file():
+            files.append(path)
+        elif path.is_dir():
+            files.extend(
+                child for child in path.rglob("*")
+                if child.is_file()
+                and "target" not in child.relative_to(MPI_PROVIDER).parts[:-1]
+                and ".git" not in child.relative_to(MPI_PROVIDER).parts[:-1]
+            )
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(MPI_PROVIDER).as_posix()):
+        name = path.relative_to(MPI_PROVIDER).as_posix().encode("utf-8")
+        contents = path.read_bytes().replace(b"\r\n", b"\n")
+        digest.update(name)
+        digest.update(b"\0")
+        digest.update(contents)
+        digest.update(b"\xff")
+    return "sha256:" + digest.hexdigest()
+
+
+def _mpi_cached_flavor_valid(flavor: Path, backend: str) -> bool:
+    manifest_path = flavor / "install.json"
+    try:
+        record = json.loads(manifest_path.read_text(encoding="utf-8"))
+        provider = record["provider"]
+        artifacts = record["artifacts"]
+        check = flavor / "bin" / _mpi_executable("kllm-mpi-provider-check")
+        rank = flavor / "bin" / _mpi_executable("kllm-mpi-rank")
+        staged_header = flavor / "include" / "provider_abi.h"
+        source_header = ROOT / "cpp" / "kllm_mpi" / "provider_abi.h"
+        if (
+            record.get("schema_version") != 1
+            or record.get("backend") != backend
+            or record.get("llama_revision") != read_pinned_release()
+            or provider.get("self_test") != "passed"
+            or provider.get("local_patch_digest") != _mpi_provider_source_digest()
+            or not all(path.is_file() for path in (check, rank, staged_header, source_header))
+            or artifacts.get("rank_binary_sha256") != _sha256_path(rank)
+            or artifacts.get("abi_header_sha256") != _sha256_path(staged_header)
+            or artifacts.get("abi_header_sha256") != _sha256_path(source_header)
+            or any(not (flavor / relative).is_file() for relative in record.get("files", []))
+        ):
+            return False
+        probe = subprocess.run(
+            [str(check), "--capabilities"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        live = json.loads(probe.stdout) if probe.returncode == 0 else {}
+        fields = (
+            "upstream_revision", "local_patch_digest", "protocol_version",
+            "target_triple", "features", "binary_sha256",
+        )
+        return live.get("kind") == "kllm-mpi-provider-capabilities" and all(
+            live.get("provider", {}).get(field) == provider.get(field) for field in fields
+        )
+    except (KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def install_mpi_flavor(backend: str, *, force: bool = False) -> Path:
+    """Build and stage the pinned Rust provider without touching RPC binaries.
+
+    The engine portion remains unavailable until the reviewed llama.cpp patch
+    is present. The install manifest records that blocker instead of promoting
+    a provider collective test to inference readiness.
+    """
+    backend = detect_backend(backend)
+    if backend == "cpu":
+        raise SystemExit("error: MPI requires a GPU backend")
+    if backend == "metal" and not _is_macos():
+        raise SystemExit("error: the Metal MPI flavor is supported only on macOS")
+    if backend == "rocm" and not _is_linux():
+        raise SystemExit("error: the ROCm MPI flavor is supported only on Linux")
+    if not MPI_PROVIDER.joinpath("Cargo.toml").is_file():
+        raise SystemExit(f"error: MPI provider source is missing at {MPI_PROVIDER}")
+    flavor = MPI_VENDOR / backend
+    manifest_path = flavor / "install.json"
+    if manifest_path.is_file() and not force and _mpi_cached_flavor_valid(flavor, backend):
+        print(f"MPI {backend} provider already staged at {flavor}")
+        return flavor
+    cargo = _which("cargo")
+    if not cargo:
+        raise SystemExit("error: cargo is required for --mpi-only")
+
+    print(f"MPI flavor: {backend}")
+    _run(
+        [cargo, "build", "--manifest-path", str(MPI_PROVIDER / "Cargo.toml"),
+         "--release", "--all-features"],
+        cwd=ROOT,
+    )
+    release = MPI_PROVIDER / "target" / "release"
+    check = release / _mpi_executable("kllm-mpi-provider-check")
+    rank = release / _mpi_executable("kllm-mpi-rank")
+    if not check.is_file() or not rank.is_file():
+        raise SystemExit("error: MPI provider build did not produce its production binaries")
+    probe = subprocess.run(
+        [str(check), "--self-test", "--ranks", "3"],
+        cwd=MPI_PROVIDER,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if probe.returncode != 0:
+        raise SystemExit(f"error: MPI provider self-test failed: {probe.stderr.strip()}")
+    try:
+        capabilities = json.loads(probe.stdout)
+    except ValueError as exc:
+        raise SystemExit("error: MPI provider emitted invalid capability JSON") from exc
+    if capabilities.get("readiness", {}).get("provider_self_test") != "passed":
+        raise SystemExit("error: MPI provider did not report a passed self-test")
+
+    bin_dir = flavor / "bin"
+    include_dir = flavor / "include"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    include_dir.mkdir(parents=True, exist_ok=True)
+    staged: list[str] = []
+    for source in (check, rank):
+        destination = bin_dir / source.name
+        shutil.copy2(source, destination)
+        _mark_executable(destination)
+        staged.append(str(destination.relative_to(flavor)).replace("\\", "/"))
+    for name in _mpi_library_names():
+        source = release / name
+        if source.is_file():
+            destination = bin_dir / name
+            shutil.copy2(source, destination)
+            staged.append(str(destination.relative_to(flavor)).replace("\\", "/"))
+    header = ROOT / "cpp" / "kllm_mpi" / "provider_abi.h"
+    if not header.is_file():
+        raise SystemExit("error: MPI provider C ABI header is missing")
+    shutil.copy2(header, include_dir / header.name)
+    staged.append("include/provider_abi.h")
+
+    provider = dict(capabilities["provider"])
+    provider["self_test"] = "passed"
+    source_digest = _mpi_provider_source_digest()
+    if provider.get("local_patch_digest") != source_digest:
+        raise SystemExit("error: MPI provider binary source digest differs from the checkout")
+    install_record = {
+        "schema_version": 1,
+        "backend": backend,
+        "llama_revision": read_pinned_release(),
+        "provider": provider,
+        "artifacts": {
+            "rank_binary_sha256": _sha256_path(bin_dir / rank.name),
+            "abi_header_sha256": _sha256_path(include_dir / header.name),
+        },
+        "provider_readiness": capabilities["readiness"],
+        "engine": {
+            "available": False,
+            "revision": None,
+            "operation_profile": None,
+            "blocker": "distributed llama.cpp tensor-parallel engine is not staged",
+        },
+        "files": staged,
+    }
+    flavor.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(install_record, indent=2) + "\n", encoding="utf-8")
+    print(f"MPI provider: {bin_dir}")
+    _warn(install_record["engine"]["blocker"])
+    return flavor
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
     p.add_argument("--skip-ui", action="store_true", help="Skip dashboard npm build")
@@ -1156,6 +1361,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Install only llama-server / rpc-server (pinned in llama-release)",
     )
+    p.add_argument(
+        "--mpi-only",
+        action="store_true",
+        help="Build an isolated MPI provider/flavor package under vendor/mpi",
+    )
     return p.parse_args(argv)
 
 
@@ -1169,6 +1379,14 @@ def main(argv: list[str] | None = None) -> int:
         args.skip_wireguard = True
         args.skip_toolchains = True
 
+    if args.mpi_only:
+        if args.llama_only:
+            raise SystemExit("error: --mpi-only and --llama-only are mutually exclusive")
+        args.skip_rust = True
+        args.skip_ui = True
+        args.skip_llama = True
+        args.skip_wireguard = True
+
     if args.check:
         return print_llama_check(tag)
 
@@ -1178,6 +1396,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.skip_toolchains:
         ensure_git()
+
+    if args.mpi_only:
+        install_mpi_flavor(args.backend, force=args.force)
+        print("\nMPI provider package complete; engine readiness remains recorded in install.json.")
+        return 0
 
     if not args.skip_rust:
         python = ensure_venv()

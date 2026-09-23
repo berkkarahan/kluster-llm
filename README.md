@@ -11,6 +11,7 @@ Distributed LLM inference across **Windows, Linux, and macOS**, pooling Metal / 
 | Tier | Engine | Status | Architecture |
 |------|--------|--------|--------------|
 | Stable | `llama.cpp` RPC | Production | Layer-pipeline split via coordinator + `rpc-server` workers |
+| Experimental | Pinned `llama.cpp` + Rust MPI provider | Admission blocked pending engine/hardware gates | One common backend and model-aware tensor shards |
 | Experimental | `Prima.cpp` (Halda scheduler) | Alpha | Automatic workload distribution across mixed CPUs/GPUs, mmap offload, <10% memory pressure |
 
 **Decision:** llama.cpp RPC remains the production engine for the full OS × backend matrix. See [docs/engine-decision.md](docs/engine-decision.md).
@@ -81,6 +82,12 @@ kllm connect claude
 ```
 
 CLI/UI-only rebuild: `python scripts/build.py`. Flags: `--backend vulkan|cuda|metal|cpu`, `--skip-wireguard`, `--prefer-prebuilt`.
+
+The optional MPI provider is packaged separately and does not replace the RPC
+binaries: `python scripts/install.py --mpi-only --backend vulkan`. Its
+`vendor/mpi/<backend>/install.json` remains `engine.available=false` until a
+validated distributed graph engine is staged. MPI planning is explicit with
+`--transport mpi`; a blocked MPI run never falls through to RPC.
 
 Dashboard is built by `install.py`; or manually `cd dashboard && npm install && npm run build`, then `kllm ui` → `http://127.0.0.1:18765/`.
 

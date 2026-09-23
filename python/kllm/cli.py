@@ -7,6 +7,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
 import httpx
@@ -27,6 +28,28 @@ cluster_app = typer.Typer(help="Cluster operations")
 app.add_typer(model_app, name="model")
 app.add_typer(cluster_app, name="cluster")
 console = Console()
+
+
+class InferenceTransport(str, Enum):
+    rpc = "rpc"
+    mpi = "mpi"
+
+
+def _parse_mpi_devices(values: list[str], transport: InferenceTransport) -> dict[str, list[str]] | None:
+    if values and transport != InferenceTransport.mpi:
+        raise typer.BadParameter("--mpi-device requires --transport mpi")
+    if not values:
+        return None
+    selection: dict[str, list[str]] = {}
+    for value in values:
+        node_id, separator, physical_id = value.partition("=")
+        if not separator or not node_id or not physical_id or any(c.isspace() for c in value):
+            raise typer.BadParameter("--mpi-device must be NODE_ID=PHYSICAL_GPU_ID")
+        devices = selection.setdefault(node_id, [])
+        if physical_id in devices:
+            raise typer.BadParameter(f"duplicate MPI physical GPU: {value}")
+        devices.append(physical_id)
+    return selection
 
 
 def _agent_base(port: int = DEFAULT_CONTROL_PORT) -> str:
@@ -377,6 +400,8 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         "join_key",
         "master_host",
         "process_pid",
+        "requested_transport",
+        "effective_transport",
         "model_name",
         "inference_up",
         "rpc_bind",
@@ -422,6 +447,8 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         console.print(mt)
     if data.get("last_plan"):
         console.print(f"Last plan: {data['last_plan']}")
+    if data.get("mpi_job"):
+        console.print(f"MPI job: {data['mpi_job']}")
 
 
 def _format_log_event(event: dict) -> Text:
@@ -534,10 +561,14 @@ def _run_settings_options(
     presence_penalty: Optional[float],
     repeat_penalty: Optional[float],
     enable_thinking: Optional[bool],
+    transport: str = "rpc",
+    mpi_device_ids: dict[str, list[str]] | None = None,
 ) -> dict:
     headroom = _headroom_override(device, vram_percent, ram_percent)
     return build_plan_run_payload(
         model=model,
+        transport=transport,
+        mpi_device_ids=mpi_device_ids,
         context=context,
         context_auto=context_auto,
         device=device,
@@ -633,9 +664,11 @@ def plan_cmd(
     ),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
+    transport: InferenceTransport = typer.Option(InferenceTransport.rpc, "--transport"),
+    mpi_device: list[str] = typer.Option([], "--mpi-device", help="Select NODE_ID=PHYSICAL_GPU_ID; repeat per GPU"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
-    """Dry-run capacity-aware layer split with RUN SETTINGS parity."""
+    """Preview the selected inference transport and its readiness."""
     payload = _run_settings_options(
         model,
         context,
@@ -669,6 +702,8 @@ def plan_cmd(
         presence_penalty,
         repeat_penalty,
         enable_thinking,
+        transport=transport.value,
+        mpi_device_ids=_parse_mpi_devices(mpi_device, transport),
     )
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
@@ -676,6 +711,13 @@ def plan_cmd(
             console.print(f"[red]{r.text}[/red]")
             raise typer.Exit(1)
         data = r.json()
+    if transport == InferenceTransport.mpi:
+        console.print(f"MPI backend: {data.get('effective_backend') or 'unavailable'}")
+        if data.get("blockers"):
+            for blocker in data["blockers"]:
+                console.print(f"[yellow]blocked:[/yellow] {blocker}")
+        console.print(data)
+        return
     console.print(
         f"[bold]fit[/bold]={data.get('fit_status')} "
         f"estimated={data.get('estimated_bytes')} budget={data.get('budget_bytes')}"
@@ -756,9 +798,11 @@ def run(
     ),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
+    transport: InferenceTransport = typer.Option(InferenceTransport.rpc, "--transport"),
+    mpi_device: list[str] = typer.Option([], "--mpi-device", help="Select NODE_ID=PHYSICAL_GPU_ID; repeat per GPU"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
-    """Plan and launch master llama-server with RPC workers."""
+    """Plan and launch the selected inference transport."""
     payload = _run_settings_options(
         model,
         context,
@@ -792,7 +836,24 @@ def run(
         presence_penalty,
         repeat_penalty,
         enable_thinking,
+        transport=transport.value,
+        mpi_device_ids=_parse_mpi_devices(mpi_device, transport),
     )
+    if transport == InferenceTransport.mpi:
+        with _client(port) as c:
+            preview = c.post("/v1/plan", json=payload)
+            if preview.status_code >= 400:
+                console.print(f"[red]{preview.text}[/red]")
+                raise typer.Exit(1)
+            plan = preview.json()
+            if not plan.get("launchable"):
+                for blocker in plan.get("blockers") or ["MPI admission is blocked"]:
+                    console.print(f"[yellow]blocked:[/yellow] {blocker}")
+            fingerprint = plan.get("plan_fingerprint")
+            if not fingerprint:
+                console.print("[red]MPI plan has no fingerprint[/red]")
+                raise typer.Exit(1)
+            payload["plan_fingerprint"] = fingerprint
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)
         if r.status_code >= 400:

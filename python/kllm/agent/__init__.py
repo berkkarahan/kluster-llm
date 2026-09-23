@@ -19,7 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from kllm import config as kllm_config
 from kllm import (
@@ -88,6 +88,9 @@ async def lifespan(app):
             if sampler:
                 sampler.cancel()
                 await asyncio.gather(sampler, return_exceptions=True)
+            with _mpi_launch_lock:
+                _release_mpi_pending()
+                _stop_local_mpi_rank()
             http_clients.close()
 
 
@@ -96,6 +99,12 @@ app = FastAPI(title="kllm-agent", version="0.1.0", lifespan=lifespan)
 
 @app.exception_handler(RequestValidationError)
 async def _plan_run_validation_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/v1/mpi/"):
+        errors = [
+            {key: value for key, value in error.items() if key != "input"}
+            for error in exc.errors()
+        ]
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(errors)})
     if request.url.path in ("/v1/plan", "/v1/run"):
         return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
@@ -147,11 +156,16 @@ ensure_api_token()
 _membership_lock = threading.Lock()
 _membership_thread_started = False
 _logs_thread_started = False
+_mpi_launch_lock = threading.RLock()
+_mpi_pending: dict[str, Any] | None = None
+_mpi_rank_supervisor: Any | None = None
+_mpi_active: dict[str, Any] | None = None
 
 
 def _persist_last_settings(body: PlanBody | RunBody) -> None:
     data = body.model_dump()
     data.pop("tensor_split", None)
+    data.pop("plan_fingerprint", None)
     STATE.last_settings = data
 
 
@@ -186,6 +200,7 @@ def _heartbeat_payload() -> dict[str, Any]:
         "gpu_ids": STATE.gpu_ids,
         "git_head": identity.get("git_head"),
         "llama_release": identity.get("llama_release"),
+        "mpi_capabilities": mem.get("mpi_capabilities"),
     }
 
 
@@ -208,6 +223,9 @@ def _worker_local_leave() -> None:
         STATE.process_pid = None
         STATE.process_role = None
         runtime.clear_children()
+    with _mpi_launch_lock:
+        _release_mpi_pending()
+        _stop_local_mpi_rank()
     _reset_netsec_state()
     membership_mod.clear_membership_fields(STATE)
     STATE.role = "idle"
@@ -379,6 +397,13 @@ def _start_logs_thread() -> None:
     threading.Thread(target=_logs_loop, name="kllm-logs", daemon=True).start()
 
 
+def _local_mpi_capabilities(gpus: list[dict[str, Any]]) -> dict[str, Any]:
+    from kllm.mpi_devices import physical_inventory
+    from kllm.mpi_runtime import cached_local_capabilities
+
+    return cached_local_capabilities(physical_inventory(gpus))
+
+
 def _refresh_local_capacity() -> None:
     member = STATE.members.get(STATE.node_id)
     if member is None:
@@ -388,6 +413,7 @@ def _refresh_local_capacity() -> None:
         selected = _resolve_gpu_selection(STATE.gpu_ids)
         member.update({k: cap[k] for k in ("total_ram_bytes", "available_ram_bytes", "requested_backend", "unified_memory", "binary_version") if k in cap})
         member.update(backend=selected["backend"], actual_backend=selected["backend"], devices=selected["gpus"])
+        member["mpi_capabilities"] = _local_mpi_capabilities(selected["gpus"])
         # RSS is measured from our own tracked child, never inferred from total RAM usage.
         member["reclaimable_ram_bytes"] = 0
         if STATE.process_pid:
@@ -405,6 +431,15 @@ def _require_key(x_kllm_key: str | None = Header(default=None)) -> None:
     if not STATE.join_key:
         raise HTTPException(503, "master has no join key")
     if x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid join key")
+
+
+def _require_worker_key(x_kllm_key: str | None = Header(default=None)) -> None:
+    """Authenticate process-launch endpoints on masters and workers alike."""
+    if not STATE.join_key:
+        raise HTTPException(503, "node has no active cluster join key")
+    supplied = x_kllm_key or ""
+    if not secrets.compare_digest(supplied.encode("utf-8"), STATE.join_key.encode("utf-8")):
         raise HTTPException(401, "invalid join key")
 
 
@@ -475,6 +510,49 @@ class RegisterBody(BaseModel):
     gpu_ids: list[int] | None = None
     git_head: str | None = None
     llama_release: str | None = None
+    mpi_capabilities: dict[str, Any] | None = None
+
+
+class MpiPrepareBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    rank: int = Field(ge=0, le=127)
+    world_size: int = Field(ge=1, le=128)
+    plan_fingerprint: str = Field(min_length=8, max_length=128)
+    backend: Literal["vulkan", "metal", "cuda", "rocm"]
+    physical_device_id: str = Field(min_length=1, max_length=512)
+    manifest_identity: str = Field(min_length=8, max_length=512)
+    model_id: str | None = Field(default=None, min_length=1, max_length=512)
+    purpose: Literal["provider_validation", "inference"] = "inference"
+
+
+class MpiPeerBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int = Field(ge=0, le=127)
+    address: str = Field(min_length=3, max_length=128)
+    nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class MpiCommitBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    prepare_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    job_secret: str = Field(pattern=r"^[0-9a-f]{64}$")
+    peers: list[MpiPeerBody] = Field(min_length=1, max_length=128)
+
+
+class MpiAbortBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class MpiBarrierBody(MpiAbortBody):
+    phase: str = Field(min_length=1, max_length=128)
+    layer: int = Field(default=-1, ge=-1, le=100_000)
 
 
 class UpdateProgressBody(BaseModel):
@@ -1087,7 +1165,32 @@ def status() -> dict[str, Any]:
     except Exception as exc:
         capacity = {"error": str(exc)}
     cfg = kllm_config.load_config()
+    if _mpi_active is not None:
+        mpi_job = {
+            "state": "provider_validation",
+            "job_id": _mpi_active.get("job_id"),
+            "backend": _mpi_active.get("backend"),
+            "physical_device_id": _mpi_active.get("physical_device_id"),
+            "plan_fingerprint": _mpi_active.get("plan_fingerprint"),
+            "local_rank": (_mpi_rank_supervisor.status()
+                           if _mpi_rank_supervisor is not None else {"state": "stopped"}),
+            "mpi_moves_activations": False,
+        }
+    elif STATE.last_plan and STATE.last_plan.get("transport") == "mpi":
+        mpi_job = {
+            "state": "blocked",
+            "blockers": STATE.last_plan.get("blockers", []),
+            "ranks": STATE.last_plan.get("mpi", {}).get("ranks", []),
+            "plan_fingerprint": STATE.last_plan.get("plan_fingerprint"),
+            "manifest_identity": STATE.last_plan.get("manifest_identity"),
+        }
+    else:
+        mpi_job = None
     return {
+        "requested_transport": (STATE.last_plan or {}).get("transport") or
+                               (STATE.last_settings or {}).get("transport", "rpc"),
+        "effective_transport": "llama.cpp-rpc" if STATE.process_role == "master" and STATE.process_pid else None,
+        "mpi_job": mpi_job,
         "role": STATE.role,
         "node_id": STATE.node_id,
         "join_key": STATE.join_key if STATE.role == "master" else None,
@@ -1237,6 +1340,7 @@ def start_master(body: StartBody) -> dict[str, Any]:
         "gpu_ids": STATE.gpu_ids,
         "last_seen": time.time(),
         "latency_ms": 0.0,
+        "mpi_capabilities": _local_mpi_capabilities(gpu_sel["gpus"]),
     }
 
     if overlay == netsec.OVERLAY_WIREGUARD:
@@ -1277,6 +1381,9 @@ def stop() -> dict[str, Any]:
         STATE.process_role = None
         runtime.clear_children()
         load_progress.end()
+    with _mpi_launch_lock:
+        _release_mpi_pending()
+        _stop_local_mpi_rank()
     if STATE.role == "master":
         if _advertiser:
             _advertiser.stop()
@@ -1390,6 +1497,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         "wg_listen_port": netsec.WG_LISTEN_PORT,
         "git_head": identity.get("git_head"),
         "llama_release": identity.get("llama_release"),
+        "mpi_capabilities": _local_mpi_capabilities(gpu_sel["gpus"]),
     }
     import httpx
 
@@ -1546,6 +1654,9 @@ def leave() -> dict[str, Any]:
         STATE.process_pid = None
         STATE.process_role = None
         runtime.clear_children()
+    with _mpi_launch_lock:
+        _release_mpi_pending()
+        _stop_local_mpi_rank()
     _reset_netsec_state()
     membership_mod.clear_membership_fields(STATE)
     STATE.role = "idle"
@@ -1707,6 +1818,251 @@ def heartbeat(
         "accepted": accepted,
         **membership_mod.snapshot_payload(STATE),
     }
+
+
+def _release_mpi_pending() -> None:
+    global _mpi_pending
+    pending = _mpi_pending
+    _mpi_pending = None
+    if pending is not None:
+        pending["reservation"].release()
+
+
+def _stop_local_mpi_rank() -> None:
+    global _mpi_rank_supervisor, _mpi_active
+    supervisor = _mpi_rank_supervisor
+    _mpi_rank_supervisor = None
+    _mpi_active = None
+    if supervisor is not None:
+        supervisor.stop()
+
+
+@app.post("/v1/mpi/prepare")
+def mpi_prepare(
+    body: MpiPrepareBody,
+    _: None = Depends(_require_worker_key),
+) -> dict[str, Any]:
+    """Reserve one local production rank without accepting launch commands."""
+    global _mpi_pending
+    from kllm import mpi_runtime
+
+    if body.rank >= body.world_size:
+        raise HTTPException(400, "MPI rank is outside the communicator")
+    if body.purpose == "inference":
+        raise HTTPException(
+            503,
+            "distributed llama.cpp engine launch is unavailable; provider validation is isolated",
+        )
+    with _mpi_launch_lock:
+        if _mpi_rank_supervisor is not None and _mpi_rank_supervisor.status()["state"] == "ready":
+            raise HTTPException(409, "an MPI rank is already active on this node")
+        capabilities = _local_mpi_capabilities(_resolve_gpu_selection(STATE.gpu_ids)["gpus"])
+        provider = capabilities.get("provider")
+        if not isinstance(provider, dict) or provider.get("self_test") != "passed":
+            raise HTTPException(503, "verified MPI provider is unavailable")
+        backend_report = (capabilities.get("backends") or {}).get(body.backend)
+        if not isinstance(backend_report, dict):
+            raise HTTPException(503, f"MPI {body.backend} flavor is not installed")
+        physical = next(
+            (
+                item for item in capabilities.get("devices") or []
+                if item.get("physical_id") == body.physical_device_id
+            ),
+            None,
+        )
+        if physical is None:
+            raise HTTPException(400, "unknown physical GPU identity for this node")
+        bind_ip = STATE.wg_address if STATE.overlay == netsec.OVERLAY_WIREGUARD else STATE.rpc_bind
+        if not bind_ip:
+            raise HTTPException(503, "node has no fixed private MPI bind address")
+        try:
+            reservation = mpi_runtime.reserve_private_port(bind_ip)
+        except mpi_runtime.MpiRuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        _release_mpi_pending()
+        token = secrets.token_hex(32)
+        nonce = secrets.token_hex(32)
+        backend_device = str(physical.get("platform_handle") or "")
+        if not backend_device:
+            reservation.release()
+            raise HTTPException(503, "physical GPU has no platform handle")
+        _mpi_pending = {
+            "expires_at": time.monotonic() + 30.0,
+            "prepare_token": token,
+            "nonce": nonce,
+            "reservation": reservation,
+            "provider": provider,
+            "backend_device": backend_device,
+            "body": body.model_dump(),
+        }
+        return {
+            "kind": "kllm-mpi-rank-prepared",
+            "job_id": body.job_id,
+            "rank": body.rank,
+            "world_size": body.world_size,
+            "address": reservation.address,
+            "nonce": nonce,
+            "prepare_token": token,
+            "provider": provider,
+            "backend": body.backend,
+            "physical_device_id": body.physical_device_id,
+            "backend_device": backend_device,
+            "expires_in_ms": 30_000,
+        }
+
+
+@app.post("/v1/mpi/commit")
+def mpi_commit(
+    body: MpiCommitBody,
+    _: None = Depends(_require_worker_key),
+) -> dict[str, Any]:
+    """Consume a prepared allocation and start the fixed provider rank."""
+    global _mpi_rank_supervisor, _mpi_active
+    from kllm import mpi_runtime
+
+    with _mpi_launch_lock:
+        pending = _mpi_pending
+        if pending is None:
+            raise HTTPException(409, "no MPI rank allocation is pending")
+        prepared = pending["body"]
+        if time.monotonic() > pending["expires_at"]:
+            _release_mpi_pending()
+            raise HTTPException(409, "MPI rank allocation expired")
+        if (
+            body.job_id != prepared["job_id"]
+            or not secrets.compare_digest(body.prepare_token, pending["prepare_token"])
+        ):
+            raise HTTPException(409, "MPI prepare identity changed")
+        peers = [peer.model_dump() for peer in body.peers]
+        ranks = [peer["rank"] for peer in peers]
+        if ranks != list(range(prepared["world_size"])):
+            raise HTTPException(400, "MPI peer table must be ordered and contiguous")
+        own = peers[prepared["rank"]]
+        reservation = pending["reservation"]
+        if own["address"] != reservation.address or own["nonce"] != pending["nonce"]:
+            raise HTTPException(409, "MPI local allocation differs from the prepared peer table")
+        provider = pending["provider"]
+        spec = {
+            "job_id": prepared["job_id"],
+            "rank": prepared["rank"],
+            "world_size": prepared["world_size"],
+            "bind_address": reservation.address,
+            "peers": peers,
+            "job_secret": body.job_secret,
+            "protocol_version": provider["protocol_version"],
+            "provider_revision": provider["upstream_revision"],
+            "provider_patch_digest": provider["local_patch_digest"],
+            "engine_revision": "provider-validation-v1",
+            "backend": prepared["backend"],
+            "physical_device_id": prepared["physical_device_id"],
+            "backend_device": pending["backend_device"],
+            "model_id": "provider-validation",
+            "manifest_identity": prepared["manifest_identity"],
+            "collective_timeout_ms": 30_000,
+            "max_collective_bytes": 256 * 1024 * 1024,
+        }
+        try:
+            binary = mpi_runtime.rank_binary(prepared["backend"])
+            reservation.release()
+            supervisor = mpi_runtime.MpiRankSupervisor(binary, startup_timeout=30.0)
+            ready = supervisor.start(spec)
+        except mpi_runtime.MpiRuntimeError as exc:
+            _release_mpi_pending()
+            _stop_local_mpi_rank()
+            raise HTTPException(503, str(exc)) from exc
+        _mpi_rank_supervisor = supervisor
+        _mpi_active = {
+            "job_id": prepared["job_id"],
+            "plan_fingerprint": prepared["plan_fingerprint"],
+            "backend": prepared["backend"],
+            "physical_device_id": prepared["physical_device_id"],
+            "purpose": prepared["purpose"],
+            "ready": ready,
+        }
+        _release_mpi_pending()
+        return {"ok": True, **_mpi_active}
+
+
+@app.post("/v1/mpi/abort")
+def mpi_abort(
+    body: MpiAbortBody,
+    _: None = Depends(_require_worker_key),
+) -> dict[str, Any]:
+    with _mpi_launch_lock:
+        if _mpi_active is not None and _mpi_active.get("job_id") != body.job_id:
+            raise HTTPException(409, "a different MPI job is active")
+        if _mpi_pending is not None and _mpi_pending["body"].get("job_id") != body.job_id:
+            raise HTTPException(409, "a different MPI job is pending")
+        _release_mpi_pending()
+        _stop_local_mpi_rank()
+    return {"ok": True, "job_id": body.job_id, "state": "stopped"}
+
+
+@app.post("/v1/mpi/rank/barrier")
+def mpi_rank_barrier(
+    body: MpiBarrierBody,
+    _: None = Depends(_require_worker_key),
+) -> dict[str, Any]:
+    with _mpi_launch_lock:
+        if _mpi_active is None or _mpi_active.get("job_id") != body.job_id:
+            raise HTTPException(409, "requested MPI job is not active")
+        if _mpi_rank_supervisor is None:
+            raise HTTPException(503, "local MPI rank is not running")
+        try:
+            response = _mpi_rank_supervisor.command(
+                {"command": "barrier", "phase": body.phase, "layer": body.layer},
+                timeout=35.0,
+            )
+        except Exception as exc:
+            _stop_local_mpi_rank()
+            raise HTTPException(503, f"MPI barrier failed: {exc}") from exc
+        return response
+
+
+@app.post("/v1/mpi/rank/collectives")
+def mpi_rank_collectives(
+    body: MpiBarrierBody,
+    _: None = Depends(_require_worker_key),
+) -> dict[str, Any]:
+    with _mpi_launch_lock:
+        if _mpi_active is None or _mpi_active.get("job_id") != body.job_id:
+            raise HTTPException(409, "requested MPI job is not active")
+        if _mpi_rank_supervisor is None:
+            raise HTTPException(503, "local MPI rank is not running")
+        try:
+            response = _mpi_rank_supervisor.command(
+                {"command": "collectives", "phase": body.phase}, timeout=35.0
+            )
+        except Exception as exc:
+            _stop_local_mpi_rank()
+            raise HTTPException(503, f"MPI collective validation failed: {exc}") from exc
+        return response
+
+
+@app.post("/v1/mpi/rank/fail")
+def mpi_rank_fail(
+    body: MpiAbortBody,
+    _: None = Depends(_require_worker_key),
+) -> dict[str, Any]:
+    """Force one provider-validation rank down for cleanup testing."""
+    with _mpi_launch_lock:
+        if (
+            _mpi_active is None
+            or _mpi_active.get("job_id") != body.job_id
+            or _mpi_active.get("purpose") != "provider_validation"
+        ):
+            raise HTTPException(409, "provider-validation MPI job is not active")
+        if _mpi_rank_supervisor is None:
+            raise HTTPException(503, "local MPI rank is not running")
+        _mpi_rank_supervisor.terminate()
+        return {"ok": True, "job_id": body.job_id, "state": "terminated"}
+
+
+@app.get("/v1/mpi/rank/status")
+def mpi_rank_status(_: None = Depends(_require_worker_key)) -> dict[str, Any]:
+    with _mpi_launch_lock:
+        local = _mpi_rank_supervisor.status() if _mpi_rank_supervisor is not None else {"state": "stopped"}
+        return {"active": dict(_mpi_active) if _mpi_active else None, "local": local}
 
 
 def _logs_snapshot(n: int, node: str | None, source: str | None) -> dict[str, Any]:
@@ -2024,6 +2380,22 @@ def plan(body: PlanBody) -> dict[str, Any]:
         raise HTTPException(400, "plan requires master role")
     _guard_context(body)
     merge_and_sanitize_extra(body)
+    if body.transport == "mpi":
+        from kllm.mpi_plan import execute_mpi_plan
+
+        path = model_ops.resolve_local_model(body.model)
+        result = execute_mpi_plan(body, STATE.members, path)
+        STATE.last_plan = result
+        STATE.model_name = path.name
+        # A preview must not replace the active RPC settings used for automatic
+        # membership recovery while that RPC process is still serving.
+        if not (STATE.process_pid and STATE.process_role == "master"):
+            STATE.apply_error = "; ".join(result["blockers"])
+            STATE.apply_warning = None
+            _persist_last_settings(body)
+        STATE.save()
+        _maybe_remember(body)
+        return result
     result = execute_plan(body, STATE.members)
     path = model_ops.resolve_local_model(body.model)
     STATE.last_plan = result
@@ -2049,6 +2421,16 @@ def run(body: RunBody) -> dict[str, Any]:
         raise HTTPException(400, "run requires master role")
     _guard_context(body)
     merge_and_sanitize_extra(body)
+    if body.transport == "mpi":
+        from kllm.mpi_plan import execute_mpi_plan
+
+        path = model_ops.resolve_local_model(body.model)
+        mpi_plan = execute_mpi_plan(body, STATE.members, path)
+        if body.plan_fingerprint and body.plan_fingerprint != mpi_plan["plan_fingerprint"]:
+            raise HTTPException(409, "MPI plan changed; request a fresh plan")
+        raise HTTPException(503, {"message": "MPI prerequisites are not met; RPC fallback is disabled",
+                                  "blockers": mpi_plan["blockers"],
+                                  "plan_fingerprint": mpi_plan["plan_fingerprint"]})
     validate_vision_for_run(body)
     plan_result = execute_plan(body, STATE.members)
     if plan_result.get("fit_status") == "overflow":

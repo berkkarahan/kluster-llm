@@ -1,0 +1,6 @@
+# Provider stamp inputs must have stable checkout bytes on every supported host.
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+LICENSE-* text eol=lf

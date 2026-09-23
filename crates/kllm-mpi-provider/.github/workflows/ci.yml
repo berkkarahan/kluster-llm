@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build (all targets, all features)
+        run: cargo build --all-targets --features derive
+      - name: Test (unit + multi-process integration)
+        run: cargo test --features derive
+
+  lint:
+    name: clippy + rustfmt + docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --features derive -- -D warnings
+      - run: cargo doc --no-deps --features derive
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  miri:
+    name: miri (unsafe soundness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      # Only the pure library unit tests — networking/process spawning is not
+      # supported under Miri.
+      - run: cargo +nightly miri test --lib --features derive

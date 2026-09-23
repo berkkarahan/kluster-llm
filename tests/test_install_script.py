@@ -66,6 +66,7 @@ def test_parse_args_defaults(install):
     assert args.backend == "auto"
     assert args.skip_llama is False
     assert args.skip_wireguard is False
+    assert args.mpi_only is False
 
 
 def test_migrate_worker_root_dlls(install, monkeypatch, tmp_path):
@@ -172,6 +173,83 @@ def test_parse_args_llama_only_and_check(install):
     assert args.check is True
     assert args.llama_only is True
     assert args.backend == "vulkan"
+
+
+def test_parse_args_mpi_only(install):
+    args = install.parse_args(["--mpi-only", "--backend", "vulkan"])
+    assert args.mpi_only is True
+    assert args.backend == "vulkan"
+
+
+def test_mpi_flavor_stages_separately_and_records_engine_blocker(
+    install, monkeypatch, tmp_path
+):
+    provider = tmp_path / "provider"
+    release = provider / "target" / "release"
+    release.mkdir(parents=True)
+    (provider / "Cargo.toml").write_text("[package]\nname='probe'\n", encoding="utf-8")
+    check = release / "kllm-mpi-provider-check"
+    rank = release / "kllm-mpi-rank"
+    check.write_bytes(b"check")
+    rank.write_bytes(b"rank")
+    header = tmp_path / "provider_abi.h"
+    header.write_text("/* abi */", encoding="utf-8")
+    rpc_bin = tmp_path / "rpc-bin"
+    rpc_bin.mkdir()
+    (rpc_bin / "llama-server").write_bytes(b"rpc-untouched")
+
+    monkeypatch.setattr(install, "MPI_PROVIDER", provider)
+    monkeypatch.setattr(install, "MPI_VENDOR", tmp_path / "mpi")
+    monkeypatch.setattr(install, "BIN_DIR", rpc_bin)
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_which", lambda name: "/usr/bin/cargo" if name == "cargo" else None)
+    monkeypatch.setattr(install, "_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "b11026")
+    monkeypatch.setattr(install, "_mpi_provider_source_digest", lambda: "digest")
+    monkeypatch.setattr(
+        install.subprocess,
+        "run",
+        lambda *args, **kwargs: __import__("subprocess").CompletedProcess(
+            args[0], 0,
+            stdout='{"kind":"kllm-mpi-provider-capabilities","provider":{"upstream_revision":"rev","local_patch_digest":"digest","protocol_version":1,"target_triple":"target","features":["derive"],"binary_sha256":"sha256:x"},"readiness":{"provider_self_test":"passed"}}',
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        install,
+        "_mpi_library_names",
+        lambda: (),
+    )
+    # ROOT is patched, so provide the tracked header at its expected location.
+    expected_header = tmp_path / "cpp" / "kllm_mpi" / "provider_abi.h"
+    expected_header.parent.mkdir(parents=True)
+    expected_header.write_text(header.read_text(encoding="utf-8"), encoding="utf-8")
+
+    flavor = install.install_mpi_flavor("vulkan")
+    record = __import__("json").loads((flavor / "install.json").read_text(encoding="utf-8"))
+    assert record["backend"] == "vulkan"
+    assert record["provider"]["self_test"] == "passed"
+    assert record["artifacts"]["rank_binary_sha256"].startswith("sha256:")
+    assert record["engine"]["available"] is False
+    assert (rpc_bin / "llama-server").read_bytes() == b"rpc-untouched"
+
+    monkeypatch.setattr(
+        install,
+        "_run",
+        lambda *args, **kwargs: pytest.fail("valid MPI package should be reused"),
+    )
+    assert install.install_mpi_flavor("vulkan") == flavor
+
+
+def test_mpi_flavor_rejects_platform_incompatible_native_backend(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    with pytest.raises(SystemExit, match="Metal.*macOS"):
+        install.install_mpi_flavor("metal")
+    with pytest.raises(SystemExit, match="ROCm.*Linux"):
+        install.install_mpi_flavor("rocm")
 
 
 def test_print_llama_check_ok(install, monkeypatch):

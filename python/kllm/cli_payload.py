@@ -8,6 +8,8 @@ from typing import Any
 def build_plan_run_payload(
     *,
     model: str,
+    transport: str = "rpc",
+    mpi_device_ids: dict[str, list[str]] | None = None,
     context: int = 4096,
     context_auto: bool = False,
     device: str | None = None,
@@ -48,6 +50,8 @@ def build_plan_run_payload(
         chat_text = Path(chat_template_file).read_text(encoding="utf-8")
     payload: dict[str, Any] = {
         "model": model,
+        "transport": transport,
+        "mpi_device_ids": mpi_device_ids,
         "context": context,
         "context_auto": context_auto,
         "cache_type_k": cache_type_k,

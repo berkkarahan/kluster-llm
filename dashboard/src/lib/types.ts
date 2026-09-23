@@ -26,6 +26,39 @@ export type Member = {
   rpc_port?: number;
   gpu_ids?: number[] | null;
   latency_ms?: number | null;
+  mpi_capabilities?: {
+    protocol: number;
+    available: boolean;
+    platform: 'win32' | 'darwin' | 'linux';
+    fingerprint: string;
+    devices: { physical_id: string; vendor: string; name?: string }[];
+  } | null;
+};
+
+export type MpiRank = {
+  rank: number;
+  node_id: string;
+  physical_id: string;
+  device: string;
+  backend: AccelBackend;
+};
+
+export type MpiPlan = {
+  transport: 'mpi';
+  runtime_transport: 'mpi';
+  cluster_class: string | null;
+  preferred_backend: AccelBackend | null;
+  effective_backend: AccelBackend | null;
+  backend_reason: string;
+  backend_diagnostics: Record<string, string[]>;
+  launchable: boolean;
+  blockers: string[];
+  plan_fingerprint: string;
+  capability_fingerprints: Record<string, string>;
+  engine_revision: string | null;
+  manifest_version: string | null;
+  manifest_identity: string | null;
+  mpi: { state: string; ranks: MpiRank[]; manifest_identity: string | null; warmup_complete: boolean };
 };
 
 export type DownloadProgress = {
@@ -135,6 +168,10 @@ export type Status = {
   members: Record<string, Member>;
   process_pid?: number | null;
   process_role?: string | null;
+  requested_transport?: 'rpc' | 'mpi';
+  effective_transport?: 'llama.cpp-rpc' | 'mpi' | null;
+  mpi_job?: { state: string; blockers: string[]; ranks: MpiRank[];
+              plan_fingerprint: string | null } | null;
   last_plan?: Record<string, unknown> | null;
   model_name?: string | null;
   capacity?: Record<string, unknown>;

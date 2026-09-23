@@ -78,13 +78,30 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
 - RPC bind / optional WireGuard overlay: `python/kllm/netsec.py`
 
-## Experimental: MPI activation collectives
+## Experimental: MPI tensor parallelism
 
-`python/kllm/mpi_comm.py` and `cpp/kllm_mpi/` are an optional MPI wrapper for activation buffers. They do not replace `llama-server` / `rpc-server`, and they do not tensor-split Metal with ROCm or CUDA.
+MPI is an explicit, admission-gated path. RPC stays the default. The production
+provider is the pinned pure-Rust fork under `crates/kllm-mpi-provider`; the old
+native-MPI CMake branch is no longer a production option.
 
-- The `mpi` object on a run plan describes llama.cpp b11026 layer owners (`upper_bound` on cumulative f32 splits of the 4-decimal `--tensor-split`) when the GGUF `block_count` is known. `estimated_layers` is a file-size bucket (32/48/80) and is not that count. The object does not start MPI and does not move tensors; RPC remains the runtime.
-- Weights and KV stay on the rank that owns the layer. The wire format is a 96-byte GGML header plus the activation bytes (token ids, hidden states, logits). The activation flag is the sender's claim. A payload above 4 GiB is refused, so a weight tensor cannot cross by wearing that flag.
-- `balanced_bcast` validates the header (flags, overflow-safe `ne`, contiguous `nb`, `nbytes`) on every rank and agrees on success before anyone allocates or broadcasts the payload. An allocation failure is reduced the same way, so one rank cannot leave the others blocked in `MPI_Bcast`.
-- `balanced_allreduce` gathers counts, then gathers the reduction kind and weights. Equal f32 partial sums use `MPI_Allreduce`. Unequal column shards use `MPI_Allgatherv`. A mismatch or a `plan` failure is reduced before either payload collective, and unequal slices are not padded into an allreduce.
-- `split_graph` is the experimental harmonic planner. Its layer cap is weights plus KV (`context * 128 * (k + v) * slots` per layer). Column shards reserve the full KV on every rank, then a slice of the weights. Tensor-parallel column shards are opt-in and only inside one backend.
-- MPI is unauthenticated. Keep it on the private fabric, the same rule as port 50052.
+- Each selected physical GPU receives one deterministic rank. All-Mac clusters
+  prefer Metal, all-NVIDIA clusters prefer CUDA, all-AMD clusters prefer ROCm,
+  and mixed or unknown families require Vulkan. Every rank must verify the same
+  engine, operation profile, provider protocol, and physical-device mapping.
+- The structured rank path binds only fixed private addresses in ports
+  20000–20999 and mutually authenticates peers with a per-job secret and fresh
+  nonces. KLLM worker endpoints check the cluster key on worker roles. Commands,
+  executable paths, raw environments, and user ports are absent from the launch
+  grammar.
+- `python/kllm/mpi_manifest.py` implements the pinned b11026 dense-Llama split
+  axes, layer rotation, quantization alignment, and exact rank weight bytes.
+  Planning, future loading, and engine verification share its identity.
+- The first engine surface is dense Llama text, one sequence, explicit context,
+  f16 KV, and Flash Attention. Unsupported settings block before launch.
+- Provider collectives, the panic-contained C ABI, process ownership, and local
+  rank-loss behavior have software tests. The distributed llama.cpp graph patch
+  and mandatory mixed/native GPU runs remain release gates, so `/v1/run`
+  currently returns 503 for MPI and never substitutes RPC.
+
+See [mpi-runtime-validation.md](mpi-runtime-validation.md) for exact evidence and
+unpassed hardware gates.

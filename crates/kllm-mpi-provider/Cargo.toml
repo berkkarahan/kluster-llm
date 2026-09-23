@@ -24,6 +24,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lib]
 name = "mpi"
 path = "src/lib.rs"
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [[bin]]
 name = "mpiexec"
@@ -50,13 +51,17 @@ members = ["mpi-derive"]
 
 [dependencies]
 sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 mpi-derive = { path = "mpi-derive", version = "0.1.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-serde_json = "1"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }

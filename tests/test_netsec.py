@@ -14,7 +14,6 @@ def client(tmp_path, monkeypatch):
     import kllm.state as state_mod
     import kllm.agent as agent_mod
     import kllm.netsec as netsec_mod
-
     importlib.reload(state_mod)
     importlib.reload(netsec_mod)
     importlib.reload(agent_mod)
@@ -532,11 +531,13 @@ def test_reconcile_rpc_bind_replaces_foreign_address(monkeypatch):
     assert warn and "192.168.68.56" in warn
 
 
-def test_control_client_keeps_idle_sockets():
+def test_control_client_keeps_idle_sockets(monkeypatch):
     from kllm import http_clients
 
     assert http_clients._CONTROL_LIMITS.keepalive_expiry == 120.0
-    http_clients.close()
+    # Earlier tests can leave a minimal patched httpx.Client in the pool.
+    # This test needs a fresh real client to check its configured timeout.
+    monkeypatch.setattr(http_clients, "control", None)
     client = http_clients.control_client()
     assert client.timeout.connect == 5.0 or client.timeout is not None
     http_clients.close()

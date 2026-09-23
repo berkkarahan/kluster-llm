@@ -35,6 +35,7 @@ _SNAPSHOT_OPTIONAL = (
     "lan_host",
     "last_seen",
     "latency_ms",
+    "mpi_capabilities",
 )
 
 _UNREACHABLE_WARNING = "master heartbeat unreachable"
@@ -215,6 +216,12 @@ def on_membership_grow(state: ClusterState) -> None:
             state.apply_warning = None
             state.save()
         return
+    if state.last_settings.get("transport") == "mpi":
+        state.last_plan = None
+        state.apply_error = "MPI membership changed; request a fresh plan"
+        state.apply_warning = None
+        state.save()
+        return
     try:
         body = _settings_body(state.last_settings)
         plan = execute_plan(body, state.members)
@@ -243,6 +250,16 @@ def on_membership_shrink(state: ClusterState) -> None:
     """
     state.save()
     if not state.last_settings:
+        return
+    if state.last_settings.get("transport") == "mpi":
+        state.last_plan = None
+        state.apply_error = "MPI membership changed; request a fresh plan"
+        state.apply_warning = None
+        # A fixed communicator cannot be resized and must never enter the RPC
+        # shrink/relaunch path. No MPI job can launch until its engine gate passes.
+        if state.process_role == "mpi":
+            _stop_inference(state)
+        state.save()
         return
 
     was_running = bool(state.process_pid and state.process_role == "master")

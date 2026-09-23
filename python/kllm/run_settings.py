@@ -18,6 +18,9 @@ DEFAULT_MEMORY_PERCENT = 80
 
 class RunSettingsFields(BaseModel):
     model: str
+    transport: Literal["rpc", "mpi"] = "rpc"
+    mpi_device_ids: dict[str, list[str]] | None = None
+    plan_fingerprint: str | None = None
     context: int = DEFAULT_CONTEXT
     context_auto: bool = False
     cache_type_k: str = DEFAULT_CACHE_TYPE
@@ -64,6 +67,15 @@ class RunSettingsFields(BaseModel):
 
     @model_validator(mode="after")
     def validate_context_and_percents(self) -> RunSettingsFields:
+        if self.transport == "mpi" and self.device == "cpu":
+            raise ValueError("MPI requires verified GPU devices")
+        if self.mpi_device_ids is not None:
+            if self.transport != "mpi":
+                raise ValueError("mpi_device_ids requires MPI transport")
+            if any(not node or not devices or any(not device for device in devices)
+                   or len(devices) != len(set(devices))
+                   for node, devices in self.mpi_device_ids.items()):
+                raise ValueError("mpi_device_ids requires nonempty unique physical GPU IDs per node")
         if self.tensor_split is not None:
             raise ValueError(
                 "tensor_split is not supported on the primary path; use automatic placement"
@@ -81,6 +93,8 @@ class RunSettingsFields(BaseModel):
             return "auto" if v == "auto" else int(v)
 
         return {
+            "transport": self.transport,
+            "mpi_device_ids": self.mpi_device_ids,
             "context": int(self.context),
             "context_auto": bool(self.context_auto),
             "cache_type_k": self.cache_type_k,

@@ -103,6 +103,81 @@ def _payload(**overrides):
     return body
 
 
+@pytest.mark.parametrize("endpoint,expected", [("/v1/plan", 200), ("/v1/run", 503)])
+def test_mpi_request_never_calls_rpc_planner_or_launcher(client, monkeypatch, endpoint, expected):
+    c, agent, tmp = client
+    _model_file(tmp)
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append("rpc")
+        raise AssertionError("MPI request entered RPC path")
+
+    monkeypatch.setattr(agent, "execute_plan", forbidden)
+    monkeypatch.setattr(agent.native, "start_master", forbidden)
+    response = c.post(endpoint, json=_payload(transport="mpi"))
+    assert response.status_code == expected, response.text
+    assert calls == []
+    if endpoint == "/v1/plan":
+        data = response.json()
+        assert data["transport"] == "mpi"
+        assert data["runtime_transport"] == "mpi"
+        assert data["launchable"] is False
+        assert data["effective_backend"] is None
+        assert data["blockers"]
+        assert data["mpi_moves_activations"] is False
+    else:
+        assert "RPC fallback is disabled" in response.text
+
+
+def test_mpi_stale_fingerprint_returns_409_without_stopping_rpc(client, monkeypatch):
+    c, agent, tmp = client
+    _model_file(tmp)
+    agent.STATE.process_pid = 4242
+    agent.STATE.process_role = "master"
+    stopped = []
+    monkeypatch.setattr(agent.native, "stop_process", lambda *args, **kwargs: stopped.append(args))
+    response = c.post("/v1/run", json=_payload(transport="mpi", plan_fingerprint="sha256:stale"))
+    assert response.status_code == 409
+    assert stopped == []
+    assert agent.STATE.process_pid == 4242
+
+
+def test_mpi_membership_change_invalidates_plan_fingerprint(client, monkeypatch):
+    c, agent, tmp = client
+    _model_file(tmp)
+    preview = c.post("/v1/plan", json=_payload(transport="mpi"))
+    assert preview.status_code == 200
+    fingerprint = preview.json()["plan_fingerprint"]
+    agent.STATE.members["w2"] = {"node_id": "w2", "role": "worker", "host": "127.0.0.2"}
+    stopped = []
+    monkeypatch.setattr(agent.native, "stop_process", lambda *args, **kwargs: stopped.append(args))
+    response = c.post("/v1/run", json=_payload(transport="mpi", plan_fingerprint=fingerprint))
+    assert response.status_code == 409
+    assert stopped == []
+
+
+def test_mpi_preview_preserves_active_rpc_recovery_settings(client):
+    c, agent, tmp = client
+    _model_file(tmp)
+    agent.STATE.process_pid = 4242
+    agent.STATE.process_role = "master"
+    agent.STATE.last_settings = _payload(transport="rpc")
+    response = c.post("/v1/plan", json=_payload(transport="mpi"))
+    assert response.status_code == 200
+    assert agent.STATE.last_settings["transport"] == "rpc"
+    assert agent.STATE.process_pid == 4242
+
+
+def test_mpi_unknown_device_member_is_invalid_request(client):
+    c, agent, tmp = client
+    _model_file(tmp)
+    response = c.post("/v1/plan", json=_payload(transport="mpi",
+                                                  mpi_device_ids={"unknown": ["gpu-a"]}))
+    assert response.status_code == 400
+    assert "unknown MPI members" in response.text
+
+
 def test_plan_response_contract_keys(client):
     c, agent, tmp = client
     _model_file(tmp)

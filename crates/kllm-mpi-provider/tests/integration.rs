@@ -3,7 +3,7 @@
 
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1016,6 +1016,70 @@ fn rank_binary_rejects_an_unstructured_direct_launch() {
         .expect("rank binary should start");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("KLLM control-plane launch"));
+}
+
+#[test]
+fn structured_singleton_rank_warms_up_health_checks_and_stops() {
+    let _job_slot = acquire_job_slot();
+    let address = (20_000..=20_999)
+        .find_map(|port| {
+            let address = format!("127.0.0.1:{port}");
+            std::net::TcpListener::bind(&address).ok().map(|listener| {
+                drop(listener);
+                address
+            })
+        })
+        .expect("a production data-plane test port should be available");
+    let spec = serde_json::json!({
+        "job_id": "11".repeat(16),
+        "rank": 0,
+        "world_size": 1,
+        "bind_address": address,
+        "peers": [{"rank": 0, "address": address, "nonce": "22".repeat(32)}],
+        "job_secret": "33".repeat(32),
+        "protocol_version": 1,
+        "provider_revision": env!("KLLM_MPI_UPSTREAM_REVISION"),
+        "provider_patch_digest": env!("KLLM_MPI_PATCH_DIGEST"),
+        "engine_revision": "provider-validation-v1",
+        "backend": "vulkan",
+        "physical_device_id": "test-gpu",
+        "backend_device": "test-device",
+        "model_id": "provider-validation",
+        "manifest_identity": "sha256:test-manifest",
+        "collective_timeout_ms": 2000,
+        "max_collective_bytes": 4096,
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kllm-mpi-rank"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("structured rank should start");
+    {
+        let input = child.stdin.as_mut().unwrap();
+        writeln!(input, "{spec}").unwrap();
+        writeln!(input, "{{\"command\":\"health\"}}").unwrap();
+        writeln!(input, "{{\"command\":\"stop\"}}").unwrap();
+    }
+    let output = child
+        .wait_with_output()
+        .expect("structured rank should exit");
+    assert!(
+        output.status.success(),
+        "rank failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["kind"], "kllm-mpi-rank-ready");
+    assert_eq!(records[0]["warmup"], "passed");
+    assert_eq!(records[1]["kind"], "kllm-mpi-rank-health");
+    assert_eq!(records[2]["kind"], "kllm-mpi-rank-stopped");
+    assert!(!stdout.contains(&"33".repeat(32)));
 }
 
 #[test]

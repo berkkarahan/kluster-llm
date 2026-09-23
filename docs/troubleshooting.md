@@ -116,16 +116,46 @@ export CXX=/opt/homebrew/opt/llvm/bin/clang++
 
 ### macOS worker on a Vulkan master (Windows/Linux)
 
-**Cause:** Default macOS install uses **Metal** (`hw` probe + `install.py --backend auto`). A Vulkan master cluster expects workers to run **Vulkan** `rpc-server` binaries and to register `backend=vulkan` for layer split / distribute planning. Metal workers in a Vulkan-first cluster mis-report capacity and backend.
+For the default RPC transport, this is valid: the Mac worker can use Metal while
+Windows/Linux nodes use Vulkan, CUDA, or ROCm. Install the backend appropriate
+to each node and keep the same llama.cpp tag. Do not set
+`KLLM_ACCEL_BACKEND=vulkan` to relabel a Metal binary.
 
-**Solution:**
+For an explicit mixed-family MPI job, every selected rank must instead verify
+the common Vulkan MPI engine. On the Mac that requires a separately built and
+validated Vulkan/MoltenVK flavor:
+
 ```bash
-uv run python scripts/install.py --backend vulkan
-uv run python scripts/install.py --llama-only --backend vulkan
-export KLLM_ACCEL_BACKEND=vulkan   # add to shell profile for kllm-agent
-uv run kllm join --key '<key>' --master <windows-lan-ip>
+uv run python scripts/install.py --mpi-only --backend vulkan
 ```
-Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. GitHub macOS packs are Metal-only but still match the pinned RPC protocol. A Vulkan `rpc-server` source build needs Vulkan SDK / MoltenVK.
+
+The RPC member remains `backend: metal`; MPI capability and device mappings are
+reported separately.
+
+### MPI Plan is blocked or MPI Run returns 503
+
+MPI requires a separate verified flavor on every selected physical GPU. Install
+the provider package with `python scripts/install.py --mpi-only --backend
+<vulkan|metal|cuda|rocm>`, then inspect
+`vendor/mpi/<backend>/install.json`. `provider.self_test=passed` proves local
+collectives only. `engine.available=false` is still a launch blocker.
+
+MPI does not use RPC GPU ordinals. Check `kllm status` for each member's
+`mpi_capabilities.devices[].physical_id` and use those values with repeated
+`--mpi-device NODE=PHYSICAL_ID`. A missing or ambiguous PCI/PNP identity blocks
+the device. Changed membership, binaries, device mappings, model metadata, or
+manifest identity requires a fresh Plan fingerprint.
+
+The initial surface also requires a dense Llama GGUF, explicit context, one
+sequence, f16 key/value caches, Flash Attention, and no vision, speculative
+decode, or extra llama arguments. Use `--cache-type-k f16 --cache-type-v f16`.
+There is no CPU, RPC, per-rank backend, or runtime backend-switch fallback.
+
+Provider data ports 20000–20999 must be reachable only on the configured private
+LAN or WireGuard address. A public, wildcard, or unallocated bind is rejected.
+If a rank dies, collectives fail within the job timeout and the owned process
+group or Windows Job Object is terminated. Treat any remaining process after a
+hardware validation run as a failed gate.
 
 ### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
 

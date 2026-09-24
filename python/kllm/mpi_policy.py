@@ -35,9 +35,13 @@ def _candidates(selected: list[tuple[str, dict, dict]]) -> tuple[str, tuple[str,
     if all(cap["platform"] == "darwin" for _, cap, _ in selected):
         return "all_macs", ("metal", "vulkan"), "All participating hosts are macOS"
     vendors = {_vendor_from_id(device) for _, _, device in selected}
+    platforms = {cap["platform"] for _, cap, _ in selected}
     if vendors == {"nvidia"}:
         return "all_nvidia", ("cuda", "vulkan"), "All selected GPUs are NVIDIA"
     if vendors == {"amd"}:
+        # Windows AMD prefers Vulkan over ROCm for broader driver support
+        if "win32" in platforms:
+            return "all_amd", ("vulkan", "rocm"), "All selected GPUs are AMD (Windows prefers Vulkan)"
         return "all_amd", ("rocm", "vulkan"), "All selected GPUs are AMD"
     return ("heterogeneous_or_unknown", ("vulkan",),
             "Mixed or unknown GPU families require Vulkan")

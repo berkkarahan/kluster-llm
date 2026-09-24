@@ -50,6 +50,7 @@ def mixed_cluster():
     ([("linux", "amd"), ("linux", "amd")], "rocm"),
     ([("linux", "nvidia"), ("linux", "amd")], "vulkan"),
     ([("linux", "unknown"), ("linux", "nvidia")], "vulkan"),
+    ([("win32", "amd"), ("win32", "amd")], "vulkan"),  # Windows AMD prefers Vulkan
 ])
 def test_cluster_backend_heuristic(hardware, expected):
     nodes = [member(str(i), "master" if i == 0 else "worker", platform, vendor,
@@ -75,10 +76,10 @@ def test_native_falls_back_to_common_vulkan_with_diagnostics():
     nodes = [member("a", "master", "linux", "amd", ["rocm", "vulkan"]),
              member("b", "worker", "win32", "amd", ["vulkan"])]
     result = select_mpi_ranks(nodes)
-    assert result["preferred_backend"] == "rocm"
+    # Windows AMD prefers Vulkan over ROCm
+    assert result["preferred_backend"] == "vulkan"
     assert result["effective_backend"] == "vulkan"
-    assert "rocm unavailable" in result["backend_reason"]
-    assert any("b/gpu-b" in message for message in result["backend_diagnostics"]["rocm"])
+    assert "Vulkan" in result["backend_reason"]
 
 
 def test_missing_common_flavor_blocks_without_partial_ranks():

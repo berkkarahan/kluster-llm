@@ -251,7 +251,7 @@ def test_join_applies_cluster_members(client, monkeypatch):
         },
     }
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765):
         return [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
 
     class FakeResp:
@@ -699,8 +699,13 @@ def test_worker_accepted_false_local_leave(client):
         def post(self, *a, **k):
             return FakeResp()
 
+    class FakeControl:
+        def post(self, *a, **k):
+            return FakeResp()
+
     with (
-        patch("httpx.Client", FakeClient),
+        patch.object(agent, "_ensure_master_control_route", return_value=[]),
+        patch.object(agent.http_clients, "control_client", return_value=FakeControl()),
         patch.object(agent.native, "stop_process"),
         patch.object(agent.netsec, "tear_down_wireguard"),
     ):

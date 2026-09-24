@@ -52,6 +52,12 @@ pub mod production;
 /// Panic-contained C ABI used by the patched llama.cpp engine.
 pub mod cabi;
 
+/// Activation tensor header and packing (balanced collectives).
+pub mod header;
+
+/// Balanced activation collectives (unequal shard handling).
+pub mod balanced;
+
 // The process launcher, shared by the `mpiexec` / `mpirun` binaries.
 pub mod launcher;
 

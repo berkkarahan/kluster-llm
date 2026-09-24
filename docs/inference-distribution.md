@@ -1,6 +1,6 @@
 # Placement, inference, and transfers
 
-Every node must use llama.cpp **b11026**. Use each node's installed accelerator:
+Every node must use llama.cpp **v0.5.0** (stable pin in `llama-release`). Use each node's installed accelerator:
 Metal on Apple Silicon, CUDA on supported NVIDIA installations, ROCm on supported
 Linux AMD installations, and Vulkan where native support is unavailable. RPC layer
 splitting supports mixed backends. Keep RPC port 50052 private to LAN/WireGuard.
@@ -76,6 +76,6 @@ distribution comparisons, plus cold/warm loads, after both nodes are updated. Ca
 warmth, paging, and background load must be comparable before applying the 5% regression
 criterion. CUDA/ROCm combinations remain unverified until tested on that hardware.
 
-Pinned upstream references: [server arguments](https://github.com/ggml-org/llama.cpp/blob/b11026/tools/server/README.md),
-[device assignment](https://github.com/ggml-org/llama.cpp/blob/b11026/src/llama-model.cpp),
-[RPC registration/cache](https://github.com/ggml-org/llama.cpp/blob/b11026/ggml/src/ggml-rpc/ggml-rpc.cpp).
+Pinned upstream references: [server arguments](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/tools/server/README.md),
+[device assignment](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/src/llama-model.cpp),
+[RPC registration/cache](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/ggml/src/ggml-rpc/ggml-rpc.cpp).

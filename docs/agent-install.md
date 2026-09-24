@@ -320,7 +320,7 @@ kllm run --model file.gguf
 |------|------|
 | `scripts/install.py` | Full installer |
 | `scripts/install.py --llama-only` | llama.cpp only, pinned by `llama-release` |
-| `llama-release` | Committed ggml-org/llama.cpp GitHub tag (e.g. `b11026`) |
+| `llama-release` | Committed ggml-org/llama.cpp **stable** GitHub tag (e.g. `v0.5.0`; not `bNNNN` nightlies) |
 | `scripts/build.py` | CLI + dashboard rebuild only |
 | `.venv/` | Project virtualenv |
 | `dashboard/build/` | Static UI served by agent |
@@ -339,7 +339,7 @@ kllm run --model file.gguf
 3. **Activate `.venv`** before every `kllm` command in a new shell.  
 4. **Match** `--backend` to the GPU on that node; mixed backends across nodes are supported (layer split).  
 5. **Treat RPC as insecure** at the app layer; rely on LAN isolation or WireGuard overlay.  
-6. **Keep every node on the same llama.cpp tag** (`llama-release` + `python scripts/install.py --llama-only`). Mixed nightlies break RPC HELLO.  
+6. **Keep every node on the same llama.cpp tag** (`llama-release` + `python scripts/install.py --llama-only`). Mixed tags break RPC HELLO.  
 7. After changes to Rust/Python packaging, re-run install or `python scripts/build.py` (not only `pip install -e .` unless you know maturin is required).  
 8. When reporting status to the user, cite which §0 checks passed/failed.
 

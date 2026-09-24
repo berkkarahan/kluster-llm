@@ -142,7 +142,7 @@ Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`
 
 ### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
 
-**Cause:** Master and worker are on different llama.cpp builds. RPC HELLO (`RPC_CMD_HELLO`) is unversioned across nightlies; a Windows `b11026` `llama-server` talking to a Mac HEAD/`git pull` `rpc-server` closes the socket.
+**Cause:** Master and worker are on different llama.cpp builds. RPC HELLO (`RPC_CMD_HELLO`) is unversioned across builds; a Windows `v0.5.0` `llama-server` talking to a Mac HEAD/`git pull` `rpc-server` closes the socket.
 
 **Solution:**
 1. Confirm the committed pin: `cat llama-release` (must be the same git revision on every node).

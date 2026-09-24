@@ -49,47 +49,35 @@ def _gpu_names(gpus: Sequence[dict[str, Any]] | None) -> str:
     return " ".join(parts)
 
 
+def selectable_accel_backends() -> list[str]:
+    """Every RPC engine a node may prefer locally (cluster may mix backends)."""
+    return ["metal", "cuda", "rocm", "vulkan"]
+
+
 def allowed_accel_backends(
     probed: str | None,
     gpus: Sequence[dict[str, Any]] | None = None,
     *,
     platform: str | None = None,
 ) -> list[str]:
-    """Vendor-appropriate backend choices for the UI selector.
+    """Backend choices for the dashboard / config (heterogeneous clusters)."""
+    del probed, gpus, platform
+    return selectable_accel_backends()
 
-    - macOS → metal, vulkan
-    - NVIDIA (probe or name) → cuda, vulkan
-    - AMD (probe or name) → rocm, vulkan
-    - otherwise vulkan-only when probe is vulkan; empty when cpu-only
-    """
-    plat = platform if platform is not None else sys.platform
-    probed_s = (probed or "cpu").strip().lower()
-    names = _gpu_names(gpus)
 
-    if plat == "darwin" or probed_s == "metal":
-        return ["metal", "vulkan"]
-
-    nvidia = (
-        probed_s == "cuda"
-        or "nvidia" in names
-        or "geforce" in names
-        or "quadro" in names
-        or "tesla" in names
-        or "rtx " in names
-    )
-    amd = (
-        probed_s == "rocm"
-        or "amd" in names
-        or "radeon" in names
-        or "instinct" in names
-    )
-    if nvidia:
-        return ["cuda", "vulkan"]
-    if amd:
-        return ["rocm", "vulkan"] if plat.startswith("linux") else ["vulkan"]
-    if probed_s == "vulkan":
-        return ["vulkan"]
-    return []
+def llama_device_for_backend(backend: str) -> tuple[str, str]:
+    """Map membership backend to llama.cpp ``--list-devices`` id."""
+    b = str(backend or "vulkan").strip().lower()
+    if b == "hip":
+        b = "rocm"
+    device = {
+        "metal": "Metal",
+        "vulkan": "Vulkan0",
+        "cuda": "CUDA0",
+        "rocm": "HIP0",
+    }.get(b, "Vulkan0")
+    norm = b if b in {"metal", "vulkan", "cuda", "rocm"} else "vulkan"
+    return device, norm
 
 
 def effective_accel_backend(probed: str | None) -> str:

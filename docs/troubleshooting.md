@@ -240,9 +240,9 @@ Also grant **System Settings → Privacy & Security → Local Network** to Pytho
 
 ### Cluster members show mismatched backends (Metal vs Vulkan)
 
-**Cause:** Each node reports its accelerator via probe, optional `accel_backend` in `~/.kllm/config.toml`, or `KLLM_ACCEL_BACKEND`. Mixed Metal/Vulkan (or CUDA/Vulkan) labels are intentional when you pick **Backend** on the Cluster panel before Start/Join.
+**Cause:** Each node picks its own engine via probe, `accel_backend` in `~/.kllm/config.toml`, `KLLM_ACCEL_BACKEND`, or the dashboard **Engine backend** selector before Start/Join. Mixed Metal, Vulkan, CUDA, and ROCm across workers is normal for llama.cpp RPC layer splits.
 
-**Solution:** Set the same Backend on every node (dashboard selector or `accel_backend = "vulkan"` / `export KLLM_ACCEL_BACKEND=vulkan`), then Stop/Start or Leave/Join.
+**Solution:** Only align backends when you intentionally want the same engine on one machine (e.g. Vulkan on Windows and Vulkan on a Mac for testing). Otherwise leave per-node settings as-is; planning uses each member's reported devices.
 
 ### "No route to host" (wrong subnet)
 

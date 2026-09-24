@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from kllm import config as kllm_config
 from kllm import models as model_ops
 from kllm import runtime
 from kllm.cli_payload import build_plan_run_payload
@@ -220,9 +221,16 @@ def start(
     gpus: Optional[str] = typer.Option(
         None, "--gpus", help="Comma-separated GPU indices to use (default: all / interactive)"
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Preferred llama.cpp engine on this node: metal|cuda|rocm|vulkan (omit = all devices)",
+    ),
 ) -> None:
     """Become cluster master and advertise on the LAN."""
     _replace_tracked_instance(port)
+    if backend is not None:
+        kllm_config.save_config({"accel_backend": backend.strip().lower()})
     with _client(port) as c:
         gpu_ids = _resolve_cli_gpus(c, gpus)
         payload: dict = {
@@ -285,6 +293,11 @@ def join(
     gpus: Optional[str] = typer.Option(
         None, "--gpus", help="Comma-separated GPU indices to use (default: all / interactive)"
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Preferred llama.cpp engine on this node: metal|cuda|rocm|vulkan (omit = all devices)",
+    ),
 ) -> None:
     """Join as worker using the join key (mDNS discovery) or an explicit --master."""
     if not key:
@@ -304,6 +317,8 @@ def join(
         console.print("[dim]Discovering master via join key…[/dim]")
 
     _replace_tracked_instance(port)
+    if backend is not None:
+        kllm_config.save_config({"accel_backend": backend.strip().lower()})
     with _client(port) as c:
         gpu_ids = _resolve_cli_gpus(c, gpus)
         if gpu_ids is not None:
@@ -338,17 +353,25 @@ def gpus(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
             raise typer.Exit(1)
         data = r.json()
     backend = data.get("backend") or "cpu"
-    rows = data.get("gpus") or []
-    console.print(f"backend={backend}")
+    rows = data.get("gpus") or data.get("devices") or []
+    console.print(f"effective_backend={backend}")
+    if data.get("backend_warning"):
+        console.print(f"[yellow]{data['backend_warning']}[/yellow]")
     if not rows:
         console.print("[dim]No GPUs detected[/dim]")
         return
     table = Table(title="Local GPUs")
     table.add_column("index")
+    table.add_column("backend")
     table.add_column("name")
     table.add_column("vram")
     for g in rows:
-        table.add_row(str(g.get("index")), str(g.get("name")), _fmt_vram(g.get("vram_bytes")))
+        table.add_row(
+            str(g.get("index")),
+            str(g.get("backend") or "—"),
+            str(g.get("name")),
+            _fmt_vram(g.get("vram_bytes")),
+        )
     console.print(table)
 
 

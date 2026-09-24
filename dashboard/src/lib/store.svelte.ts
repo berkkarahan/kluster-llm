@@ -757,7 +757,7 @@ class AppStore {
     }
   }
 
-  async setAccelBackend(backend: AccelBackend) {
+  async setAccelBackend(backend: AccelBackend | null) {
     await this.saveConfig({ accel_backend: backend });
   }
 

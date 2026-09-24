@@ -70,6 +70,14 @@ def test_tcp_reachable_localhost(echo_tcp):
     assert not cp_proxy.tcp_reachable("127.0.0.1", 1)
 
 
+def test_shell_can_reach_localhost(echo_tcp):
+    from kllm import cp_proxy
+
+    assert cp_proxy._shell_can_reach("127.0.0.1", echo_tcp)
+    assert not cp_proxy._shell_can_reach("127.0.0.1", 1)
+    assert not cp_proxy._shell_can_reach("127.0.0.1; rm -rf /", echo_tcp)
+
+
 def test_ensure_for_master_direct_when_reachable(echo_tcp):
     from kllm import cp_proxy
 
@@ -147,7 +155,12 @@ def test_join_uses_proxy_base(client, monkeypatch):
     monkeypatch.setattr(
         agent,
         "_resolve_gpu_selection",
-        lambda ids: {"gpu_ids": [], "gpus": [], "vram_bytes": 0, "backend": "cpu"},
+        lambda gpu_ids, listed=None: {
+            "gpu_ids": [],
+            "gpus": [],
+            "vram_bytes": 0,
+            "backend": "cpu",
+        },
     )
     monkeypatch.setattr(agent.netsec, "ensure_rpc_firewall", lambda *a, **k: {})
     monkeypatch.setattr(agent.netsec, "pick_rpc_bind_host", lambda preferred, toward=None: "10.0.0.2")

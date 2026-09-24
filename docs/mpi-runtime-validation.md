@@ -45,6 +45,28 @@ does not establish a production communicator or tensor-parallel inference.
   verified and reused the complete source, binary, rank, header, backend, and
   llama revision identity without touching the RPC package.
 
+## 2026-09-24 — Rust port of C++ balanced collectives
+
+| Task | Pass criterion | Result and evidence |
+|---|---|---|
+| Phase 1: header.rs | Tensor pack/unpack, ShardView, ReducePlan, payload_chunks, largest_remainder, plan_reduce logic | **PASS.** 17 unit tests pass. `Tensor::pack()`/`unpack()` roundtrip verified. `payload_chunks()` handles zero, small, and >1GiB payloads. `largest_remainder()` normalizes weights and distributes by largest remainder. `plan_reduce()` validates row_sum (equal shapes) vs column_concat (unequal columns). |
+| Phase 2: plan_reduce | Decide allreduce vs allgatherv, validate weights, check shape consistency | **PASS.** 17 unit tests pass. `test_plan_reduce_row_sum` verifies equal f32 partials → allreduce. `test_plan_reduce_column_concat` verifies unequal columns → allgatherv with summed ne[0]. Invalid kind, mismatched ne[1:], and unequal row_sum shapes are rejected. |
+| Phase 3: balanced.rs | balanced_bcast and balanced_allreduce using SimpleCommunicator primitives | **PASS.** 44 Rust tests pass, 70 Python tests pass. `balanced_bcast()` validates header before payload broadcast. `balanced_allreduce()` allgathers headers, runs plan_reduce, then either allreduces (row_sum) or allgathervs (column_concat) with chunked transfers. |
+
+### Implementation notes
+
+- `crates/kllm-mpi-provider/src/header.rs` (569 lines): Tensor, ShardView, ReducePlan, constants, packing, plan_reduce, largest_remainder, payload_chunks.
+- `crates/kllm-mpi-provider/src/balanced.rs` (267 lines): balanced_bcast, balanced_allreduce using `CommunicatorCollectives` and `Root` traits.
+- All C++ algorithms from `cpp/kllm_mpi/kllm_mpi.cpp` (944 lines) are now in Rust.
+- Phase 4 (CMake cleanup, C++ deprecation) remains.
+
+### Test results
+
+- `cargo test --lib -p kllm-mpi-provider`: 44 passed, 0 failed.
+- `uv run python -m pytest tests/test_mpi_*.py`: 70 passed, 0 failed.
+
+---
+
 ## 2026-09-24 — macOS (arm64, Darwin 25.6.0) workspace
 
 | Gate | Pass criterion | Result and evidence |

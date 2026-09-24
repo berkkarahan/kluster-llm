@@ -104,7 +104,19 @@ def list_gpus() -> dict[str, Any]:
             selected = list(installed)
             actual = preferred if preferred in supported else (supported[0] if supported else "cpu")
         selected = [dict(d, index=i) for i, d in enumerate(selected)]
-        return {
+        probe_error: str | None = None
+        wants_metal = probed == "metal" or requested == "metal"
+        if capabilities.get("metal_init_failed"):
+            probe_error = (
+                "llama-server linked Metal but could not create a Metal device "
+                "(empty device id in --list-devices)"
+            )
+        elif wants_metal and not selected:
+            probe_error = (
+                "llama-server did not expose any Metal devices in --list-devices "
+                f"(hardware probe reported {len(devices)} device(s))"
+            )
+        out: dict[str, Any] = {
             "backend": actual,
             "actual_backend": actual,
             "requested_backend": requested,
@@ -118,6 +130,9 @@ def list_gpus() -> dict[str, Any]:
             "backend_warning": backend_warning,
             "probed_device_count": len(devices),
         }
+        if probe_error:
+            out["error"] = probe_error
+        return out
     except Exception as exc:
         # Hardware probes alone do not establish installed llama.cpp capabilities.
         return {"backend": "cpu", "actual_backend": "unknown", "requested_backend": requested,

@@ -45,10 +45,36 @@ def test_allowed_accel_backends_lists_all_rpc_engines():
 def test_llama_device_for_backend_names():
     from kllm.accel import llama_device_for_backend
 
-    assert llama_device_for_backend("metal") == ("Metal", "metal")
+    assert llama_device_for_backend("metal") == ("MTL0", "metal")
     assert llama_device_for_backend("vulkan") == ("Vulkan0", "vulkan")
     assert llama_device_for_backend("cuda") == ("CUDA0", "cuda")
     assert llama_device_for_backend("rocm") == ("HIP0", "rocm")
+
+
+def test_parse_devices_mtl0_prefix():
+    from kllm.accel import parse_devices
+
+    text = (
+        "Available devices:\n"
+        "  MTL0: Apple M1 Pro (25559 MiB, 25558 MiB free)\n"
+    )
+    devices = parse_devices(text)
+    assert len(devices) == 1
+    assert devices[0]["device"] == "MTL0"
+    assert devices[0]["backend"] == "metal"
+    assert devices[0]["name"] == "Apple M1 Pro"
+
+
+def test_metal_device_init_failed_detects_zombie_line():
+    from kllm.accel import metal_device_init_failed, parse_devices
+
+    zombie = (
+        "Available devices:\n"
+        "  :  (0 MiB, 0 MiB free)\n"
+        "  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
+    )
+    assert metal_device_init_failed(zombie)
+    assert parse_devices(zombie) == []
 
 
 def test_list_gpus_respects_accel_override(monkeypatch):
@@ -58,5 +84,5 @@ def test_list_gpus_respects_accel_override(monkeypatch):
     if not native.native_available():
         pytest.skip("native extension not built")
     data = native.list_gpus()
-    assert data["backend"] == "vulkan"
+    assert data["requested_backend"] == "vulkan"
     assert "probed_backend" in data

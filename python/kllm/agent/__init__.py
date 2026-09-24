@@ -1504,10 +1504,19 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         cp_proxy.stop_current()
         STATE.cp_proxy_port = None
         STATE.cp_proxy_pid = None
-        raise HTTPException(
-            502,
-            f"cannot reach master at {master_host}:{master_port}: {exc}",
-        ) from exc
+        detail = (
+            f"cannot reach master at {master_host}:{master_port}: {exc}; "
+            f"ensure `kllm start --key …` is running on the master and try "
+            f"`curl http://{master_host}:{master_port}/health` from this machine"
+        )
+        err_text = str(exc).lower()
+        if "connection reset" in err_text or "errno 54" in err_text:
+            detail += (
+                ". Connection reset usually means the master agent is down, "
+                "crashed, or a firewall closed TCP "
+                f"{master_port} (not macOS Local Network / errno 65)"
+            )
+        raise HTTPException(502, detail) from exc
     if resp.status_code == 401:
         raise HTTPException(401, "invalid join key")
     if resp.status_code >= 400:

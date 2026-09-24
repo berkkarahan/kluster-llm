@@ -226,6 +226,6 @@ async def proxy_anthropic_messages(
     *,
     model_path: Path | str | None = None,
 ) -> Response:
-    # b11026 implements Messages natively, including streaming and tool blocks.
+    # v0.5.0 implements Messages natively, including streaming and tool blocks.
     body = _apply_model_defaults(await request.json(), model_path)
     return await _proxy(request, port, "/v1/messages", body)

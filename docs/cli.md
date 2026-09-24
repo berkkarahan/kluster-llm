@@ -13,7 +13,7 @@ uv run python scripts/install.py
 
 This creates `.venv` with **uv** (Python version from `.python-version`), installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
 
-llama.cpp is pinned in committed [`llama-release`](../llama-release) (same role as `.python-version`). Every node must run the same tag or RPC HELLO fails. Sync binaries only:
+llama.cpp is pinned in committed [`llama-release`](../llama-release) to a stable tag (same role as `.python-version`). Every node must run the same tag or RPC HELLO fails. Sync binaries only:
 
 ```bash
 python scripts/install.py --llama-only

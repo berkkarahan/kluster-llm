@@ -1116,7 +1116,7 @@ def llama_cpp_layer_owners(
 ) -> list[int]:
     """Device index per repeating layer, or -1 when llama.cpp leaves it on CPU.
 
-    Pinned llama.cpp ``b11026`` ``llama_model::load_tensors``:
+    Pinned llama.cpp ``v0.5.0`` ``llama_model::load_tensors``:
 
     * cumulative ``float`` splits, each divided by the float sum
     * ``i_gpu_start = max(n_layer + 1 - n_gpu_layers, 0)``
@@ -1199,7 +1199,7 @@ def schedule_from_plan(
     """Describe llama.cpp's layer owners. This does not start an MPI job.
 
     ``estimated_layers`` is a file-size bucket (32, 48, or 80). Ranges are
-    published only for a real GGUF ``block_count``, using the b11026
+    published only for a real GGUF ``block_count``, using the v0.5.0
     ``upper_bound`` walk on the 4-decimal ``--tensor-split`` the server parses.
     """
     fractions = [float(x) for x in plan.get("tensor_split") or []]
@@ -1264,7 +1264,7 @@ def schedule_from_plan(
         ranks=ranks,
         collectives=[],
         notes=(
-            "Layer owners follow llama.cpp b11026 load_tensors "
+            "Layer owners follow llama.cpp v0.5.0 load_tensors "
             "(upper_bound on cumulative f32 splits of the 4-decimal tensor_split) "
             "for this GGUF block_count. Runtime transport is llama.cpp RPC; "
             "this schedule does not move tensors."
@@ -1277,7 +1277,7 @@ def schedule_from_plan(
     for rank in body["ranks"]:
         rank["wire"] = "none"
     body["layer_ranges_authoritative"] = True
-    body["layer_assignment"] = "llama.cpp-b11026-upper-bound"
+    body["layer_assignment"] = "llama.cpp-v0.5.0-upper-bound"
     body["block_count"] = n_layers
     body["estimated_layers"] = int(plan.get("estimated_layers") or 0)
     body["cpu_layers"] = [0, cpu_count] if cpu_count else None

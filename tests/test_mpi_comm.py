@@ -254,7 +254,7 @@ def test_schedule_from_plan_uses_llama_cpp_upper_bound():
     assert [rank["node_id"] for rank in schedule["ranks"]] == ["win", "mac"]
     assert [(rank["layer_start"], rank["layer_end"]) for rank in schedule["ranks"]] == [(0, 16), (16, 31)]
     assert schedule["layer_ranges_authoritative"] is True
-    assert schedule["layer_assignment"] == "llama.cpp-b11026-upper-bound"
+    assert schedule["layer_assignment"] == "llama.cpp-v0.5.0-upper-bound"
     assert schedule["mpi_moves_activations"] is False
     assert schedule["runtime_transport"] == "llama.cpp-rpc"
     assert schedule["transport"] == "llama.cpp-rpc"

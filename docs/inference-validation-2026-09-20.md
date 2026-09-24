@@ -10,7 +10,7 @@ The Windows control agent was restarted; the existing Qwen inference process (PI
 - Native: **28 passed**; Windows build has an existing unused Metal enum warning.
 - Dashboard: production build passed; `npm run check` passed with 0 errors and 11
   existing accessibility warnings.
-- Installer `--check`: **b11026**, both llama-server and rpc-server present.
+- Installer `--check`: **b11026** at the time of this run (repo now pins stable **v0.5.0**); both llama-server and rpc-server present.
 - Agent install guide §0: venv/package/native/dashboard/binaries/pin/WireGuard/agent
   checks passed on Windows. Both cluster members are present and inference is healthy.
 - The Windows binary reports `Vulkan0`, AMD Radeon RX 9070 XT, build 11026.

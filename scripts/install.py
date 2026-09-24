@@ -45,9 +45,17 @@ PIN_FILE = ROOT / "llama-release"
 STAMP_FILE = BIN_DIR / "llama-release.txt"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 GITHUB_HEADERS = {"User-Agent": "kllm-install", "Accept": "application/vnd.github+json"}
+# Binary/asset downloads must not use the GitHub API Accept — some CDNs/proxies
+# return HTML/JSON error bodies with HTTP 200, which then fail as BadZipFile.
+DOWNLOAD_HEADERS = {"User-Agent": "kllm-install", "Accept": "*/*"}
+_DOWNLOAD_ATTEMPTS = 3
 # Upstream llama.cpp ≥2025 ships ggml-rpc-server; older trees used rpc-server.
 _RPC_UPSTREAM_NAMES = ("ggml-rpc-server", "rpc-server")
 _SHARED_LIB_PATTERNS = ("*.dll", "*.dylib", "*.so", "*.so.*")
+_ZIP_MAGIC = b"PK\x03\x04"
+_GZIP_MAGIC = b"\x1f\x8b"
+_TAR_MAGIC_OFFSET = 257
+_TAR_MAGIC = b"ustar"
 
 
 # ── shared helpers (also used by build.py) ───────────────────────────────────
@@ -183,7 +191,17 @@ def _curl_download(url: str, dest: Path) -> None:
         raise RuntimeError("curl not found")
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        [curl, "-fsSL", "-A", GITHUB_HEADERS["User-Agent"], "-o", str(dest), url],
+        [
+            curl,
+            "-fsSL",
+            "-A",
+            DOWNLOAD_HEADERS["User-Agent"],
+            "-H",
+            f"Accept: {DOWNLOAD_HEADERS['Accept']}",
+            "-o",
+            str(dest),
+            url,
+        ],
         check=True,
     )
 
@@ -204,15 +222,86 @@ def _http_json(url: str) -> Any:
     raise errors[-1]
 
 
-def _download(url: str, dest: Path) -> None:
+def _sniff_archive_kind(path: Path) -> str | None:
+    """Return 'zip', 'gzip', or 'tar' when magic bytes look like an archive."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(512)
+    except OSError:
+        return None
+    if head.startswith(_ZIP_MAGIC):
+        return "zip"
+    if head.startswith(_GZIP_MAGIC):
+        return "gzip"
+    if len(head) > _TAR_MAGIC_OFFSET + 5 and head[_TAR_MAGIC_OFFSET : _TAR_MAGIC_OFFSET + 5] == _TAR_MAGIC:
+        return "tar"
+    return None
+
+
+def _expected_archive_kind(name: str) -> str | None:
+    lower = name.lower()
+    if lower.endswith(".zip"):
+        return "zip"
+    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
+        return "gzip"
+    if lower.endswith(".tar"):
+        return "tar"
+    return None
+
+
+def _validate_downloaded_file(
+    dest: Path,
+    *,
+    expected_size: int | None = None,
+    expected_kind: str | None = None,
+    content_length: int | None = None,
+) -> None:
+    if not dest.is_file():
+        raise RuntimeError(f"download missing: {dest}")
+    size = dest.stat().st_size
+    if size <= 0:
+        raise RuntimeError(f"download empty: {dest}")
+    if content_length is not None and content_length > 0 and size != content_length:
+        raise RuntimeError(
+            f"download truncated: got {size} bytes, Content-Length was {content_length}"
+        )
+    if expected_size is not None and expected_size > 0 and size != expected_size:
+        raise RuntimeError(
+            f"download size mismatch: got {size} bytes, expected {expected_size}"
+        )
+    if expected_kind is None:
+        return
+    kind = _sniff_archive_kind(dest)
+    if kind != expected_kind:
+        preview = dest.read_bytes()[:120]
+        raise RuntimeError(
+            f"download is not a valid {expected_kind} archive "
+            f"(got {size} bytes, magic={preview!r})"
+        )
+
+
+def _download_once(
+    url: str,
+    dest: Path,
+    *,
+    expected_size: int | None = None,
+    expected_kind: str | None = None,
+) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  downloading {url}", flush=True)
-    req = urllib.request.Request(url, headers=GITHUB_HEADERS)
+    req = urllib.request.Request(url, headers=DOWNLOAD_HEADERS)
     errors: list[BaseException] = []
     for ctx in _ssl_contexts():
         try:
             with urllib.request.urlopen(req, context=ctx, timeout=600) as resp, dest.open("wb") as out:
+                cl_raw = resp.headers.get("Content-Length")
+                content_length = int(cl_raw) if cl_raw and cl_raw.isdigit() else None
                 shutil.copyfileobj(resp, out)
+            _validate_downloaded_file(
+                dest,
+                expected_size=expected_size,
+                expected_kind=expected_kind,
+                content_length=content_length,
+            )
             return
         except Exception as exc:
             errors.append(exc)
@@ -220,9 +309,45 @@ def _download(url: str, dest: Path) -> None:
                 dest.unlink()
     try:
         _curl_download(url, dest)
+        _validate_downloaded_file(
+            dest,
+            expected_size=expected_size,
+            expected_kind=expected_kind,
+        )
         return
     except Exception as exc:
         errors.append(exc)
+        if dest.exists():
+            dest.unlink()
+    raise errors[-1]
+
+
+def _download(
+    url: str,
+    dest: Path,
+    *,
+    expected_size: int | None = None,
+    expected_kind: str | None = None,
+) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  downloading {url}", flush=True)
+    kind = expected_kind or _expected_archive_kind(dest.name) or _expected_archive_kind(url)
+    errors: list[BaseException] = []
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        try:
+            _download_once(
+                url,
+                dest,
+                expected_size=expected_size,
+                expected_kind=kind,
+            )
+            return
+        except Exception as exc:
+            errors.append(exc)
+            if dest.exists():
+                dest.unlink()
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                _warn(f"download attempt {attempt}/{_DOWNLOAD_ATTEMPTS} failed ({exc}); retrying")
     raise errors[-1]
 
 
@@ -977,10 +1102,21 @@ def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
 
     url = asset["browser_download_url"]
     name = asset["name"]
+    size_raw = asset.get("size")
+    expected_size: int | None = None
+    if isinstance(size_raw, int):
+        expected_size = size_raw
+    elif isinstance(size_raw, str) and size_raw.isdigit():
+        expected_size = int(size_raw)
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         archive = Path(td) / name
-        _download(url, archive)
+        _download(
+            url,
+            archive,
+            expected_size=expected_size,
+            expected_kind=_expected_archive_kind(name),
+        )
         return _install_llama_archive(archive, tag=tag, backend=backend, asset_name=name)
 
 
@@ -1006,16 +1142,33 @@ def _install_llama_archive(
     asset_name: str | None = None,
 ) -> bool:
     name = asset_name or archive.name
+    kind = _expected_archive_kind(name)
+    sniffed = _sniff_archive_kind(archive)
+    if kind and sniffed != kind:
+        preview = archive.read_bytes()[:120] if archive.is_file() else b""
+        _warn(
+            f"archive {name} is not a valid {kind} "
+            f"(size={archive.stat().st_size if archive.is_file() else 0}, magic={preview!r})"
+        )
+        return False
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         extract_dir = Path(td) / "out"
         extract_dir.mkdir()
-        if name.endswith(".zip"):
-            with zipfile.ZipFile(archive) as zf:
-                zf.extractall(extract_dir)
-        else:
-            with tarfile.open(archive, "r:*") as tf:
-                tf.extractall(extract_dir)
+        try:
+            if name.endswith(".zip"):
+                with zipfile.ZipFile(archive) as zf:
+                    zf.extractall(extract_dir)
+            else:
+                with tarfile.open(archive, "r:*") as tf:
+                    tf.extractall(extract_dir)
+        except (zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
+            preview = archive.read_bytes()[:120] if archive.is_file() else b""
+            _warn(
+                f"failed to extract {name} ({exc}); "
+                f"size={archive.stat().st_size if archive.is_file() else 0}, magic={preview!r}"
+            )
+            return False
         copied = _copy_llama_binaries_from(extract_dir)
         if not copied:
             _warn(f"archive {name} extracted but llama-server/rpc-server not found inside")

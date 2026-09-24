@@ -241,7 +241,7 @@ def read_pinned_release(override: str | None = None) -> str:
         return normalize_llama_tag(override)
     if not PIN_FILE.is_file():
         raise SystemExit(
-            f"error: pin file {PIN_FILE} is missing. Add a llama.cpp tag (e.g. b11026)."
+            f"error: pin file {PIN_FILE} is missing. Add a stable llama.cpp tag (e.g. v0.5.0)."
         )
     for line in PIN_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -274,6 +274,25 @@ def stamp_matches(tag: str, backend: str | None = None) -> bool:
     return stamp.get("tag") == tag and (backend is None or stamp.get("backend") == backend)
 
 
+def parse_list_devices_backends(text: str) -> list[str]:
+    """Map llama-server --list-devices output to backend names.
+
+    Newer llama.cpp labels Metal as ``MTL0:`` rather than ``Metal0:``.
+    """
+    found: list[str] = []
+    # (backend, regex). Patterns match the device id prefix before ':'.
+    probes = (
+        ("metal", r"\b(?:Metal|MTL)\d*:"),
+        ("cuda", r"\bCUDA\d*:"),
+        ("rocm", r"\b(?:ROCm|HIP)\d*:"),
+        ("vulkan", r"\bVulkan\d*:"),
+    )
+    for backend_name, pattern in probes:
+        if re.search(pattern, text) and backend_name not in found:
+            found.append(backend_name)
+    return found
+
+
 def llama_install_status(tag: str | None = None) -> dict[str, Any]:
     pin = tag or read_pinned_release()
     llama = _find_built_binary("llama-server")
@@ -283,9 +302,7 @@ def llama_install_status(tag: str | None = None) -> dict[str, Any]:
     if llama:
         try:
             probe = subprocess.run([str(llama), "--list-devices"], capture_output=True, text=True, timeout=15)
-            for backend_name, pattern in (("metal", "Metal"), ("cuda", "CUDA"), ("rocm", "ROCm"), ("rocm", "HIP"), ("vulkan", "Vulkan")):
-                if re.search(r"\b" + pattern + r"\d*:", probe.stdout + probe.stderr):
-                    actual_backends.append(backend_name)
+            actual_backends = parse_list_devices_backends(probe.stdout + probe.stderr)
             if probe.returncode == 0 and not actual_backends:
                 actual_backends = ["cpu"]
         except (OSError, subprocess.SubprocessError):
@@ -814,8 +831,53 @@ def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, 
     return None
 
 
-def fetch_release_by_tag(tag: str) -> dict[str, Any] | None:
-    """Fetch one ggml-org/llama.cpp GitHub release by tag (e.g. b11026)."""
+def _asset_looks_like_bin_pack(name: str) -> bool:
+    n = name.lower()
+    if not (n.endswith(".zip") or n.endswith(".tar.gz")):
+        return False
+    return bool(
+        re.match(r"llama-b\d+-bin-", name)
+        or "bin-win" in n
+        or "bin-ubuntu" in n
+        or "bin-macos" in n
+        or "bin-linux" in n
+        or ("bin" in n and "llama" in n)
+    )
+
+
+def release_has_bin_assets(assets: list[dict[str, Any]]) -> bool:
+    return any(_asset_looks_like_bin_pack(a.get("name", "")) for a in assets)
+
+
+def _refuse_unstable_pin(tag: str, rel: dict[str, Any]) -> None:
+    if rel.get("draft") or rel.get("prerelease"):
+        raise SystemExit(
+            f"error: llama.cpp {tag} is a GitHub pre-release or draft. "
+            "Pin a stable vX.Y.Z tag (e.g. v0.5.0), not a bNNNN nightly."
+        )
+
+
+def resolve_nightly_tag(assets: list[dict[str, Any]]) -> str | None:
+    """Read nightly-tag.txt from a stable release's assets, if present."""
+    for asset in assets:
+        if asset.get("name") != "nightly-tag.txt":
+            continue
+        tag_url = asset.get("browser_download_url")
+        if not tag_url:
+            continue
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "nightly-tag.txt"
+                _download(tag_url, path)
+                tag = path.read_text(encoding="utf-8").strip()
+            return tag or None
+        except Exception as exc:
+            _warn(f"nightly-tag resolve failed ({exc})")
+            return None
+    return None
+
+
+def _fetch_release_json(tag: str) -> dict[str, Any] | None:
     try:
         rel = _http_json(f"{LLAMA_API}/tags/{tag}")
     except Exception as exc:
@@ -823,14 +885,40 @@ def fetch_release_by_tag(tag: str) -> dict[str, Any] | None:
         return None
     if not isinstance(rel, dict):
         return None
-    if not (rel.get("assets") or []):
+    return rel
+
+
+def fetch_release_by_tag(tag: str, *, require_stable: bool = True) -> dict[str, Any] | None:
+    """Fetch one ggml-org/llama.cpp GitHub release by tag (e.g. v0.5.0).
+
+    Stable semver releases often ship only nightly-tag.txt; when so, follow that
+    pointer to the associated nightly for binary assets. The caller's pin/stamp
+    remains ``tag`` (not the nightly).
+    """
+    rel = _fetch_release_json(tag)
+    if not rel:
+        return None
+    if require_stable:
+        _refuse_unstable_pin(tag, rel)
+    assets = rel.get("assets") or []
+    if release_has_bin_assets(assets):
+        return rel
+    nightly = resolve_nightly_tag(assets)
+    if nightly:
+        print(f"Stable {tag} uses nightly build {nightly} for prebuilt binaries")
+        bin_rel = _fetch_release_json(nightly)
+        if bin_rel and (bin_rel.get("assets") or []):
+            return bin_rel
+        _warn(f"nightly {nightly} for {tag} has no usable assets")
+        return None
+    if not assets:
         _warn(f"GitHub release {tag} has no assets")
         return None
     return rel
 
 
-def fetch_latest_b_release() -> dict[str, Any] | None:
-    """Find a recent release that has binary assets (prefer b* nightlies)."""
+def fetch_latest_stable_release() -> dict[str, Any] | None:
+    """Find the newest non-draft, non-prerelease release with installable binaries."""
     try:
         releases = _http_json(f"{LLAMA_API}?per_page=30")
     except Exception as exc:
@@ -839,26 +927,34 @@ def fetch_latest_b_release() -> dict[str, Any] | None:
     if not isinstance(releases, list):
         return None
     for rel in releases:
+        if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+            continue
+        tag = rel.get("tag_name") or ""
         assets = rel.get("assets") or []
-        if any(
-            re.match(r"llama-b\d+-bin-", a.get("name", "")) or "bin-win" in a.get("name", "") or "bin-ubuntu" in a.get("name", "") or "bin-macos" in a.get("name", "")
-            for a in assets
-        ):
+        if release_has_bin_assets(assets):
             return rel
-        # Semver releases may only ship nightly-tag.txt
-        for a in assets:
-            if a.get("name") == "nightly-tag.txt":
-                try:
-                    tag_url = a["browser_download_url"]
-                    with tempfile.TemporaryDirectory() as td:
-                        p = Path(td) / "nightly-tag.txt"
-                        _download(tag_url, p)
-                        tag = p.read_text(encoding="utf-8").strip()
-                    if tag:
-                        return _http_json(f"{LLAMA_API}/tags/{tag}")
-                except Exception as exc:
-                    _warn(f"nightly-tag resolve failed ({exc})")
+        nightly = resolve_nightly_tag(assets)
+        if not nightly:
+            continue
+        bin_rel = _fetch_release_json(nightly)
+        if bin_rel and release_has_bin_assets(bin_rel.get("assets") or []):
+            print(f"Latest stable {tag} uses nightly build {nightly} for prebuilt binaries")
+            return bin_rel
     return None
+
+
+def assert_stable_llama_pin(tag: str) -> None:
+    """Refuse draft/prerelease pins before install (stable vX.Y.Z only)."""
+    if re.fullmatch(r"b\d+", tag):
+        raise SystemExit(
+            f"error: llama.cpp pin {tag!r} is a nightly (bNNNN). "
+            "Pin a stable vX.Y.Z tag (e.g. v0.5.0)."
+        )
+    rel = _fetch_release_json(tag)
+    if rel is None:
+        # Offline / API failure: still block obvious nightlies; allow v* through.
+        return
+    _refuse_unstable_pin(tag, rel)
 
 
 def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
@@ -1041,6 +1137,7 @@ def install_llama(
 ) -> None:
     backend = detect_backend(backend)
     tag = tag or read_pinned_release()
+    assert_stable_llama_pin(tag)
     print(f"llama.cpp backend: {backend}")
     print(f"llama.cpp pin:     {tag}")
 
@@ -1104,11 +1201,20 @@ def print_llama_check(tag: str) -> int:
 
 def verify_llama_installed(tag: str) -> None:
     status = llama_install_status(tag)
-    if not status["ok"]:
+    if status["ok"]:
+        return
+    requested = status["requested_backend"]
+    actual = status["actual_backends"]
+    if status["stamp"] == tag and requested and actual and requested not in actual:
         raise SystemExit(
-            f"error: llama.cpp {tag} is not installed (stamp={status['stamp']!r}). "
+            f"error: llama.cpp {tag} stamp ok but backend mismatch "
+            f"(requested={requested!r}, probed={actual!r}). "
             "Retry with --force or --from-source."
         )
+    raise SystemExit(
+        f"error: llama.cpp {tag} is not installed (stamp={status['stamp']!r}). "
+        "Retry with --force or --from-source."
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1139,7 +1245,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--tag",
         default=None,
-        help="Override the llama.cpp tag in llama-release (e.g. b11026)",
+        help="Override the llama.cpp tag in llama-release (e.g. v0.5.0; stable only)",
     )
     p.add_argument(
         "--force",

@@ -301,3 +301,44 @@ def test_fetch_release_by_tag_rejects_prerelease_pin(install, monkeypatch):
     )
     with pytest.raises(SystemExit, match="pre-release"):
         install.fetch_release_by_tag("b11146")
+
+
+def test_sniff_and_validate_zip_magic(install, tmp_path):
+    good = tmp_path / "ok.zip"
+    good.write_bytes(b"PK\x03\x04" + b"\x00" * 20)
+    assert install._sniff_archive_kind(good) == "zip"
+    install._validate_downloaded_file(good, expected_kind="zip", expected_size=24)
+
+    bad = tmp_path / "bad.zip"
+    bad.write_text("<!DOCTYPE html>error", encoding="utf-8")
+    assert install._sniff_archive_kind(bad) is None
+    with pytest.raises(RuntimeError, match="not a valid zip"):
+        install._validate_downloaded_file(bad, expected_kind="zip")
+
+
+def test_download_retries_corrupt_payload(install, monkeypatch, tmp_path):
+    dest = tmp_path / "llama-b1-bin-win-vulkan-x64.zip"
+    attempts = {"n": 0}
+
+    def fake_once(url, path, *, expected_size=None, expected_kind=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            path.write_text("not a zip", encoding="utf-8")
+            raise RuntimeError("download is not a valid zip archive")
+        path.write_bytes(b"PK\x03\x04" + b"\x00" * 8)
+
+    monkeypatch.setattr(install, "_DOWNLOAD_ATTEMPTS", 3)
+    monkeypatch.setattr(install, "_download_once", fake_once)
+    install._download("https://example.test/x.zip", dest, expected_kind="zip")
+    assert attempts["n"] == 3
+    assert dest.read_bytes().startswith(b"PK\x03\x04")
+
+
+def test_install_llama_archive_rejects_html_payload(install, tmp_path, monkeypatch):
+    archive = tmp_path / "llama-b1-bin-win-vulkan-x64.zip"
+    archive.write_text("<html>rate limit</html>", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setattr(install, "BIN_DIR", bin_dir)
+    monkeypatch.setattr(install, "write_install_stamp", lambda **kwargs: None)
+    assert install._install_llama_archive(archive, tag="v0.5.0", backend="vulkan") is False
+    assert not bin_dir.exists() or not any(bin_dir.iterdir())

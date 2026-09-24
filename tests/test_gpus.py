@@ -277,6 +277,42 @@ def test_start_rejects_explicit_gpu_ids_when_inventory_empty(client, monkeypatch
     assert "install.py" in detail
 
 
+def test_list_gpus_empty_metal_inventory_sets_error(monkeypatch, tmp_path):
+    import kllm.native as native_mod
+
+    binary = tmp_path / "llama-server"
+    binary.write_text("stub", encoding="utf-8")
+
+    class FakeDev:
+        index = 0
+        name = "Apple M1 Pro"
+        vram_bytes = 16 * 1024**3
+
+    class FakeNative:
+        @staticmethod
+        def list_gpus():
+            return ([FakeDev()], "metal")
+
+    monkeypatch.setattr(native_mod, "_NATIVE", FakeNative())
+    monkeypatch.setattr(native_mod, "resolve_llama_server", lambda rr=None: str(binary))
+    monkeypatch.setattr(
+        native_mod,
+        "binary_capabilities",
+        lambda *a, **k: {
+            "devices": [],
+            "binary_version": "test",
+            "metal_init_failed": True,
+        },
+    )
+    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setenv("KLLM_ACCEL_BACKEND", "metal")
+
+    data = native_mod.list_gpus()
+    assert data["gpus"] == []
+    assert "error" in data
+    assert "Metal" in data["error"]
+
+
 def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
     import kllm.native as native_mod
 
@@ -302,7 +338,7 @@ def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
             "devices": [
                 {
                     "index": 0,
-                    "device": "metal0",
+                    "device": "MTL0",
                     "name": "Apple GPU",
                     "backend": "metal",
                     "vram_bytes": 16 * 1024**3,
@@ -310,6 +346,7 @@ def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
                 }
             ],
             "binary_version": "test",
+            "metal_init_failed": False,
         },
     )
     monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))

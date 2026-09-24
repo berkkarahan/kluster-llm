@@ -70,8 +70,9 @@ def llama_device_for_backend(backend: str) -> tuple[str, str]:
     b = str(backend or "vulkan").strip().lower()
     if b == "hip":
         b = "rocm"
+    # llama.cpp v0.5+ labels Metal as MTL0 (older builds used Metal / Metal0).
     device = {
-        "metal": "Metal",
+        "metal": "MTL0",
         "vulkan": "Vulkan0",
         "cuda": "CUDA0",
         "rocm": "HIP0",
@@ -96,12 +97,30 @@ def parse_devices(output: str) -> list[dict[str, Any]]:
         r"^\s*(\w+): (.*?) \((\d+) MiB, (\d+) MiB free\)", output, re.M
     ):
         prefix = re.sub(r"\d+$", "", name).lower()
-        backend = {"hip": "rocm", "rocm": "rocm", "cuda": "cuda", "metal": "metal", "vulkan": "vulkan"}.get(prefix)
+        backend = {
+            "hip": "rocm",
+            "rocm": "rocm",
+            "cuda": "cuda",
+            "metal": "metal",
+            "mtl": "metal",
+            "vulkan": "vulkan",
+        }.get(prefix)
         if backend:
             result.append(dict(index=len(result), device=name, name=description,
                                backend=backend, vram_bytes=int(total) * 1024**2,
                                free_bytes=int(free) * 1024**2))
     return result
+
+
+def metal_device_init_failed(output: str) -> bool:
+    """True when Metal is linked but ``MTLCreateSystemDefaultDevice`` returned nil.
+
+    llama.cpp still registers a zombie device printed as ``: (0 MiB, 0 MiB free)``
+    with an empty id — distinct from a healthy ``MTL0: Apple M…`` line.
+    """
+    import re
+
+    return bool(re.search(r"^\s*:\s*\(\d+ MiB,", output, re.M))
 
 
 @lru_cache(maxsize=8)
@@ -115,5 +134,9 @@ def binary_capabilities(binary: str, mtime_ns: int, epoch: int) -> dict[str, Any
     devices = subprocess.run([binary, "--list-devices"], **kwargs)
     devices.check_returncode()
     version = subprocess.run([binary, "--version"], **kwargs)
-    return {"devices": parse_devices(devices.stdout + devices.stderr),
-            "binary_version": (version.stdout + version.stderr).strip()[-1000:]}
+    text = devices.stdout + devices.stderr
+    return {
+        "devices": parse_devices(text),
+        "binary_version": (version.stdout + version.stderr).strip()[-1000:],
+        "metal_init_failed": metal_device_init_failed(text),
+    }

@@ -102,7 +102,9 @@ export CXX=/opt/homebrew/opt/llvm/bin/clang++
 python scripts/install.py --backend metal   # macOS Apple Silicon
 python scripts/install.py --check
 ```
-Confirm GPUs appear in the dashboard Cluster panel (System settings). If the panel shows "No local GPUs detected", clear stale selection: set `gpu_ids = null` in `~/.kllm/config.toml` or re-save hardware settings after install.
+Confirm GPUs appear in the dashboard Cluster panel (System settings). llama.cpp **v0.5+** lists Apple GPUs as `MTL0:` in `llama-server --list-devices` (older builds used `Metal0:`). If you see a nameless `: (0 MiB, 0 MiB free)` line instead, Metal is linked but device creation failed — reinstall with `--backend metal` and confirm `--check` reports `metal` in `actual_backends`.
+
+If the panel shows "No local GPUs detected", clear stale selection: set `gpu_ids = null` in `~/.kllm/config.toml` or re-save hardware settings after install.
 
 After the fix, Start succeeds even with an empty local GPU inventory (CPU-only master); explicit `gpu_ids` in the request still require a working `llama-server` GPU probe.
 
@@ -237,6 +239,22 @@ export KLLM_CP_PROXY_PYTHON=/opt/homebrew/bin/python3
 ```
 
 Also grant **System Settings → Privacy & Security → Local Network** to Python/Cursor when prompted. Use `--master-port` for the remote control port — `--port` is only the **local** agent.
+
+### "Connection reset by peer" / Errno 54 on Join
+
+**Cause:** The worker opened TCP to the master control plane (`18765`) but the remote side reset the connection. This is different from macOS **errno 65** (Local Network / no route). Typical causes: master `kllm-agent` not running or crashed, wrong LAN IP, or firewall (e.g. Windows Defender) blocking inbound TCP **18765**.
+
+**Solution:**
+```bash
+# On the worker (same machine as the dashboard):
+curl -v http://<master-lan-ip>:18765/health
+
+# On the master: ensure the agent is up
+kllm status
+# Windows (PowerShell as Administrator, once):
+New-NetFirewallRule -Name "kllm-Control" -DisplayName "Kluster LLM Control Plane" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 18765 -Profile Any
+```
+Restart `kllm start --key …` on the master, then Join again.
 
 ### Cluster members show mismatched backends (Metal vs Vulkan)
 

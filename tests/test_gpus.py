@@ -241,6 +241,31 @@ def test_start_ignores_config_gpu_ids_when_inventory_empty(client, monkeypatch):
     assert agent.STATE.gpu_ids == []
 
 
+def test_install_recovery_command_matches_platform(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod.sys, "platform", "win32")
+    windows = native_mod.install_recovery_command()
+    assert windows == "python scripts/install.py && python scripts/install.py --check"
+    assert "metal" not in windows
+
+    monkeypatch.setattr(native_mod.sys, "platform", "darwin")
+    macos = native_mod.install_recovery_command()
+    assert macos.startswith("python scripts/install.py --backend metal && ")
+
+
+def test_list_gpus_reports_missing_native(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "_NATIVE", None)
+    monkeypatch.setattr(native_mod, "_IMPORT_ERROR", ImportError("cannot import name '_native'"))
+    data = native_mod.list_gpus()
+    assert data["gpus"] == []
+    assert data["backend"] == "cpu"
+    assert "kllm._native extension is not built" in data["error"]
+    assert "cannot import name '_native'" in data["error"]
+
+
 def test_start_rejects_explicit_gpu_ids_when_inventory_empty(client, monkeypatch):
     c, agent = client
     with patch.object(agent.native, "list_gpus", return_value=EMPTY_GPUS):

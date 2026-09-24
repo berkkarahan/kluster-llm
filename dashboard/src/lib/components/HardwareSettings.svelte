@@ -101,7 +101,7 @@
           {appStore.gpuProbeError}
         </p>
         <p class="mono text-[10px]" style="color: var(--muted)">
-          Run: python scripts/install.py --backend metal && python scripts/install.py --check
+          Run: {appStore.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'}
         </p>
       {/if}
     {/if}

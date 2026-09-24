@@ -27,13 +27,25 @@ def native_available() -> bool:
     return _NATIVE is not None
 
 
+def install_recovery_command() -> str:
+    """Installer invocation for this OS. Metal exists only on Apple Silicon."""
+    cmd = "python scripts/install.py"
+    if sys.platform == "darwin":
+        cmd += " --backend metal"
+    return f"{cmd} && python scripts/install.py --check"
+
+
+def _missing_native_message() -> str:
+    return (
+        "kllm._native extension is not built. "
+        "Install with: python scripts/install.py\n"
+        f"Import error: {_IMPORT_ERROR}"
+    )
+
+
 def require_native():
     if _NATIVE is None:
-        raise RuntimeError(
-            "kllm._native extension is not built. "
-            "Install with: python scripts/install.py\n"
-            f"Import error: {_IMPORT_ERROR}"
-        )
+        raise RuntimeError(_missing_native_message())
     return _NATIVE
 
 
@@ -55,7 +67,12 @@ def probe_capacity() -> dict[str, Any]:
 def list_gpus() -> dict[str, Any]:
     """Return ``{backend, probed_backend, gpus: [{index, name, vram_bytes}, ...]}``."""
     if _NATIVE is None or not hasattr(_NATIVE, "list_gpus"):
-        return {"backend": "cpu", "probed_backend": "cpu", "gpus": []}
+        error = (
+            _missing_native_message()
+            if _NATIVE is None
+            else "kllm._native has no list_gpus"
+        )
+        return {"backend": "cpu", "probed_backend": "cpu", "gpus": [], "error": error}
     devices, backend = _NATIVE.list_gpus()
     probed = str(backend or "cpu").lower()
     requested = requested_backend()

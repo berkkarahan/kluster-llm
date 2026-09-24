@@ -11,6 +11,8 @@ pub const METAL_VRAM_FRACTION: f64 = 0.80;
 /// See `docs/engine-decision.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendHint {
+    /// Built only by the macOS probe. Other targets still name the variant so `as_str` stays exhaustive.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Metal,
     Cuda,
     Rocm,

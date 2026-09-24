@@ -55,11 +55,9 @@ def test_get_gpus(client, monkeypatch):
     data = r.json()
     assert data["backend"] == "cuda"
     assert data["probed_backend"] == "cuda"
-    from kllm.accel import allowed_accel_backends
+    from kllm.accel import selectable_accel_backends
 
-    assert data["allowed_backends"] == allowed_accel_backends(
-        data["probed_backend"], data["gpus"]
-    )
+    assert data["allowed_backends"] == selectable_accel_backends()
     assert len(data["gpus"]) == 2
 
 
@@ -74,11 +72,6 @@ def test_put_config_accel_backend(client, monkeypatch):
         }
 
     monkeypatch.setattr(agent.native, "list_gpus", fake_list)
-    monkeypatch.setattr(
-        agent,
-        "allowed_accel_backends",
-        lambda probed, gpus=None, platform=None: ["metal", "vulkan"],
-    )
     r = c.put("/v1/config", json={"device": "gpu", "accel_backend": "vulkan"})
     assert r.status_code == 200
     assert r.json()["accel_backend"] == "vulkan"
@@ -88,7 +81,8 @@ def test_put_config_accel_backend(client, monkeypatch):
     assert r.json()["accel_backend"] == "vulkan"
 
     r = c.put("/v1/config", json={"device": "gpu", "accel_backend": "cuda"})
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.json()["accel_backend"] == "cuda"
 
     r = c.put("/v1/config", json={"device": "gpu", "accel_backend": None})
     assert r.status_code == 200
@@ -298,7 +292,7 @@ def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
 
     data = native_mod.list_gpus()
     assert len(data["gpus"]) == 1
-    assert data["backend"] == "metal"
+    assert data["gpus"][0]["backend"] == "metal"
     assert data["backend_warning"]
 
 
@@ -321,7 +315,7 @@ def test_join_passes_gpu_env(client, monkeypatch):
     kid = join_key_id("secret")
     captured: dict = {}
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765):
         return [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
 
     class FakeResp:
@@ -373,8 +367,9 @@ def test_join_passes_gpu_env(client, monkeypatch):
         patch.object(agent.native, "start_worker", side_effect=fake_start_worker),
         patch("httpx.Client", FakeClient),
     ):
-        r = c.post("/v1/join", json={"key": "secret", "overlay": "none", "gpu_ids": [0]})
-    assert r.status_code == 200
+        tc = TestClient(agent.app)
+        r = tc.post("/v1/join", json={"key": "secret", "overlay": "none", "gpu_ids": [0]})
+    assert r.status_code == 200, r.text
     assert r.json()["gpu_ids"] == [0]
     assert captured["payload"]["gpu_ids"] == [0]
     assert captured["payload"]["vram_bytes"] == 24 * 1024**3

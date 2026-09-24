@@ -34,25 +34,21 @@ def test_effective_accel_backend_config_after_env(tmp_path, monkeypatch):
     assert accel_mod.effective_accel_backend("metal") == "metal"
 
 
-def test_allowed_accel_backends_by_vendor():
-    from kllm.accel import allowed_accel_backends
+def test_allowed_accel_backends_lists_all_rpc_engines():
+    from kllm.accel import allowed_accel_backends, selectable_accel_backends
 
-    assert allowed_accel_backends("metal", platform="darwin") == ["metal", "vulkan"]
-    assert allowed_accel_backends("cpu", platform="darwin") == ["metal", "vulkan"]
-    assert allowed_accel_backends("cuda", platform="linux") == ["cuda", "vulkan"]
-    assert allowed_accel_backends(
-        "vulkan",
-        [{"name": "NVIDIA GeForce RTX 4090"}],
-        platform="linux",
-    ) == ["cuda", "vulkan"]
-    assert allowed_accel_backends("rocm", platform="linux") == ["rocm", "vulkan"]
-    assert allowed_accel_backends(
-        "vulkan",
-        [{"name": "AMD Radeon RX 7900"}],
-        platform="win32",
-    ) == ["vulkan"]
-    assert allowed_accel_backends("vulkan", platform="linux") == ["vulkan"]
-    assert allowed_accel_backends("cpu", platform="linux") == []
+    expected = selectable_accel_backends()
+    assert allowed_accel_backends("metal", platform="darwin") == expected
+    assert allowed_accel_backends("cpu", platform="linux") == expected
+
+
+def test_llama_device_for_backend_names():
+    from kllm.accel import llama_device_for_backend
+
+    assert llama_device_for_backend("metal") == ("Metal", "metal")
+    assert llama_device_for_backend("vulkan") == ("Vulkan0", "vulkan")
+    assert llama_device_for_backend("cuda") == ("CUDA0", "cuda")
+    assert llama_device_for_backend("rocm") == ("HIP0", "rocm")
 
 
 def test_list_gpus_respects_accel_override(monkeypatch):

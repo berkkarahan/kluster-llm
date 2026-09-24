@@ -46,22 +46,25 @@
       <select
         id="hw-backend"
         class="field mono"
-        value={appStore.accelBackend ?? appStore.allowedBackends[0]}
+        value={appStore.accelBackend ?? ''}
         disabled={lockBackend || !!appStore.busy}
         onchange={(e) => {
           const v = (e.currentTarget as HTMLSelectElement).value;
-          if (v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan') {
+          if (v === '') {
+            void appStore.setAccelBackend(null).then(afterChange);
+          } else if (v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan') {
             void appStore.setAccelBackend(v).then(afterChange);
           }
         }}
       >
+        <option value="">auto (all devices)</option>
         {#each appStore.allowedBackends as b}
           <option value={b}>{appStore.accelBackendLabel(b)}</option>
         {/each}
       </select>
       <p class="mono text-[10px]" style="color: var(--muted)">
-        Probed {appStore.probedBackend}
-        {#if lockBackend} · switch before Start{/if}
+        Probed {appStore.probedBackend}. RPC clusters may mix Metal, CUDA, ROCm, and Vulkan.
+        {#if lockBackend} Switch before Start.{/if}
       </p>
     {/if}
 

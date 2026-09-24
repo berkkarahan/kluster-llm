@@ -93,7 +93,7 @@ ram_percent = 80      # used when device = cpu (scales total RAM)
 accel_backend = "vulkan"  # optional; Cluster Backend selector (metal|cuda|rocm|vulkan)
 ```
 
-Precedence for accelerator label on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Dashboard Cluster panel shows vendor pairs (Apple: Metal/Vulkan, NVIDIA: CUDA/Vulkan, AMD: ROCm/Vulkan) before Start/Join.
+Precedence for the local engine preference on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Omit `accel_backend` (or choose **auto** in the dashboard) to expose every device the installed llama.cpp binary lists. Each cluster node may use a different backend (Metal, Vulkan, CUDA, ROCm); RPC layer splits are designed for that mix. `kllm start --backend vulkan` and `kllm join --backend metal` write config before registering.
 
 Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`.
 

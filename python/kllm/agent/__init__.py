@@ -510,20 +510,58 @@ def _probe_capacity_for_cluster() -> dict[str, Any]:
         ) from exc
 
 
-def _resolve_gpu_selection(gpu_ids: list[int] | None) -> dict[str, Any]:
+def _gpu_inventory(listed: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
+    listed = listed or native.list_gpus()
+    gpus = list(listed.get("gpus") or [])
+    available = {int(g["index"]): g for g in gpus}
+    return listed, available
+
+
+def _membership_gpu_ids(
+    body_gpu_ids: list[int] | None,
+    *,
+    body_sent: bool,
+    listed: dict[str, Any] | None = None,
+) -> list[int] | None:
+    """Resolve gpu_ids for start/join; ignore stale config when inventory is empty."""
+    _, available = _gpu_inventory(listed)
+    if available:
+        if body_sent or body_gpu_ids is not None:
+            return body_gpu_ids
+        return kllm_config.get_gpu_ids()
+    if body_sent:
+        return body_gpu_ids
+    return None
+
+
+def _empty_gpu_inventory_detail(gpu_ids: list[int], listed: dict[str, Any]) -> str:
+    detail = f"no GPUs available; cannot select {gpu_ids}"
+    probe_err = listed.get("error")
+    if probe_err:
+        detail += f" ({probe_err})"
+    detail += ". On this machine run: python scripts/install.py"
+    if sys.platform == "darwin":
+        detail += " --backend metal"
+    detail += " && python scripts/install.py --check"
+    return detail
+
+
+def _resolve_gpu_selection(
+    gpu_ids: list[int] | None,
+    *,
+    listed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Validate optional gpu_ids against list_gpus(); default = all indices.
 
     Returns dict with keys: gpu_ids, backend, gpus (selected device dicts),
     vram_bytes (sum of selected discrete VRAM, or None).
     """
-    listed = native.list_gpus()
+    listed, available = _gpu_inventory(listed)
     backend = listed.get("backend") or "cpu"
-    gpus = list(listed.get("gpus") or [])
-    available = {int(g["index"]): g for g in gpus}
 
     if not available:
         if gpu_ids:
-            raise HTTPException(400, f"no GPUs available; cannot select {gpu_ids}")
+            raise HTTPException(503, _empty_gpu_inventory_detail(gpu_ids, listed))
         return {
             "gpu_ids": [],
             "backend": backend,
@@ -1209,8 +1247,13 @@ def start_master(body: StartBody) -> dict[str, Any]:
     if fw.get("warning"):
         STATE.netsec_warnings.append(str(fw["warning"]))
 
-    gpu_ids = body.gpu_ids if body.gpu_ids is not None else kllm_config.get_gpu_ids()
-    gpu_sel = _resolve_gpu_selection(gpu_ids)
+    listed = native.list_gpus()
+    gpu_ids = _membership_gpu_ids(
+        body.gpu_ids,
+        body_sent="gpu_ids" in body.model_fields_set,
+        listed=listed,
+    )
+    gpu_sel = _resolve_gpu_selection(gpu_ids, listed=listed)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
     cap = _probe_capacity_for_cluster()
@@ -1333,8 +1376,13 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         master_host = found[0].host
         master_port = found[0].port
 
-    gpu_ids = body.gpu_ids if body.gpu_ids is not None else kllm_config.get_gpu_ids()
-    gpu_sel = _resolve_gpu_selection(gpu_ids)
+    listed = native.list_gpus()
+    gpu_ids = _membership_gpu_ids(
+        body.gpu_ids,
+        body_sent="gpu_ids" in body.model_fields_set,
+        listed=listed,
+    )
+    gpu_sel = _resolve_gpu_selection(gpu_ids, listed=listed)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
     try:

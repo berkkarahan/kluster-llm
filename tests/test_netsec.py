@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -330,7 +331,9 @@ def test_join_missing_native_returns_503(client):
             },
         )
     assert r.status_code == 503
-    assert "install.py" in r.text
+    assert agent.native.install_recovery_command() in r.text
+    if sys.platform != "darwin":
+        assert "--backend metal" not in r.text
 
 
 def test_join_binds_private_host_not_wildcard(client):

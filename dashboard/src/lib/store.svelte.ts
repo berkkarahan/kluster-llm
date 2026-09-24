@@ -71,6 +71,7 @@ class AppStore {
   overlay = $state<'none' | 'wireguard'>('none');
   gpus = $state<GpuInfo[]>([]);
   gpuProbeError = $state('');
+  gpuInstallHint = $state('');
   gpuBackend = $state('cpu');
   probedBackend = $state('cpu');
   allowedBackends = $state<AccelBackend[]>([]);
@@ -645,6 +646,7 @@ class AppStore {
 
   private applyGpusPayload(data: Record<string, unknown>) {
     this.gpuProbeError = typeof data.error === 'string' ? data.error : '';
+    this.gpuInstallHint = typeof data.install_hint === 'string' ? data.install_hint : '';
     this.gpuBackend = typeof data.backend === 'string' ? data.backend : 'cpu';
     this.probedBackend =
       typeof data.probed_backend === 'string' ? data.probed_backend : this.gpuBackend;
@@ -806,12 +808,19 @@ class AppStore {
     }
   }
 
+  private recoveryCommand() {
+    return (
+      this.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'
+    );
+  }
+
   private gpuStartWarning() {
     if (this.device !== 'gpu' || this.gpus.length > 0) return;
-    const hint = this.gpuProbeError
-      ? `${this.gpuProbeError}. Run: python scripts/install.py --backend metal && python scripts/install.py --check`
-      : 'No local GPUs detected. Run: python scripts/install.py --backend metal && python scripts/install.py --check';
-    pushToast('warn', hint);
+    if (this.gpuProbeError) {
+      pushToast('warn', `${this.gpuProbeError}. Run: ${this.recoveryCommand()}`);
+      return;
+    }
+    pushToast('warn', 'No local GPUs detected — inference will fall back to CPU layers.');
   }
 
   async startMaster() {

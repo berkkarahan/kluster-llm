@@ -567,8 +567,7 @@ def _probe_capacity_for_cluster() -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(
             503,
-            f"{exc} On this machine run: python scripts/install.py "
-            "(macOS Apple Silicon: --backend metal)",
+            f"{exc} On this machine run: {native.install_recovery_command()}",
         ) from exc
 
 
@@ -601,10 +600,7 @@ def _empty_gpu_inventory_detail(gpu_ids: list[int], listed: dict[str, Any]) -> s
     probe_err = listed.get("error")
     if probe_err:
         detail += f" ({probe_err})"
-    detail += ". On this machine run: python scripts/install.py"
-    if sys.platform == "darwin":
-        detail += " --backend metal"
-    detail += " && python scripts/install.py --check"
+    detail += f". On this machine run: {native.install_recovery_command()}"
     return detail
 
 
@@ -713,6 +709,7 @@ def _list_gpus_payload() -> dict[str, Any]:
             "allowed_backends": [],
             "gpus": [],
             "error": str(exc),
+            "install_hint": native.install_recovery_command(),
         }
     gpus = listed.get("gpus") or []
     probed = str(listed.get("probed_backend") or listed.get("backend") or "cpu").strip().lower()
@@ -727,6 +724,7 @@ def _list_gpus_payload() -> dict[str, Any]:
         "unified_memory": listed.get("unified_memory", False),
         "backend_warning": listed.get("backend_warning"),
         "gpus": gpus,
+        "install_hint": native.install_recovery_command(),
     }
     if listed.get("error"):
         out["error"] = listed["error"]

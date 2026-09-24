@@ -14,9 +14,14 @@ pub enum BackendHint {
     /// Built only by the macOS probe. Other targets still name the variant so `as_str` stays exhaustive.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Metal,
+    /// Built only by the non-macOS probe.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Cuda,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Rocm,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Vulkan,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Cpu,
     #[allow(dead_code)]
     Unknown,
@@ -146,35 +151,39 @@ fn enumerate_gpus() -> (Vec<GpuDevice>, BackendHint) {
         sys.refresh_memory();
         let total_ram = sys.total_memory();
         let vram = (total_ram as f64 * METAL_VRAM_FRACTION) as u64;
-        return (
+        (
             vec![GpuDevice {
                 index: 0,
                 name: macos_gpu_name(),
                 vram_bytes: Some(vram),
             }],
             BackendHint::Metal,
-        );
+        )
     }
 
-    // Preference: CUDA > ROCm > Vulkan. Never report two backends for one card.
-    if let Some(devices) = list_nvidia_gpus() {
-        if !devices.is_empty() {
-            return (devices, BackendHint::Cuda);
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Preference: CUDA > ROCm > Vulkan. Never report two backends for one card.
+        if let Some(devices) = list_nvidia_gpus() {
+            if !devices.is_empty() {
+                return (devices, BackendHint::Cuda);
+            }
         }
-    }
-    if let Some(devices) = list_rocm_gpus() {
-        if !devices.is_empty() {
-            return (devices, BackendHint::Rocm);
+        if let Some(devices) = list_rocm_gpus() {
+            if !devices.is_empty() {
+                return (devices, BackendHint::Rocm);
+            }
         }
-    }
-    if let Some(devices) = list_windows_wmi_gpus() {
-        if !devices.is_empty() {
-            return (devices, BackendHint::Vulkan);
+        if let Some(devices) = list_windows_wmi_gpus() {
+            if !devices.is_empty() {
+                return (devices, BackendHint::Vulkan);
+            }
         }
+        (Vec::new(), BackendHint::Cpu)
     }
-    (Vec::new(), BackendHint::Cpu)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn list_nvidia_gpus() -> Option<Vec<GpuDevice>> {
     let output = Command::new("nvidia-smi")
         .args([
@@ -196,6 +205,7 @@ fn list_nvidia_gpus() -> Option<Vec<GpuDevice>> {
 }
 
 /// Parse `nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits`.
+#[cfg_attr(all(not(test), target_os = "macos"), allow(dead_code))]
 pub fn parse_nvidia_smi_csv(text: &str) -> Vec<GpuDevice> {
     let mut devices = Vec::new();
     for line in text.lines() {
@@ -225,6 +235,7 @@ pub fn parse_nvidia_smi_csv(text: &str) -> Vec<GpuDevice> {
     devices
 }
 
+#[cfg(not(target_os = "macos"))]
 fn list_rocm_gpus() -> Option<Vec<GpuDevice>> {
     let output = Command::new("rocm-smi")
         .args(["--showmeminfo", "vram", "--csv"])
@@ -315,7 +326,7 @@ exit 0
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
     None
 }

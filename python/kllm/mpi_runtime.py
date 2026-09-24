@@ -412,7 +412,9 @@ class MpiRankSupervisor:
         done = threading.Event()
 
         def read() -> None:
-            result.append(process.stdout.readline())
+            line = process.stdout.readline()
+            if line:
+                result.append(line)
             done.set()
 
         threading.Thread(target=read, name="kllm-mpi-rank-read", daemon=True).start()

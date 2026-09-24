@@ -45,6 +45,33 @@ does not establish a production communicator or tensor-parallel inference.
   verified and reused the complete source, binary, rank, header, backend, and
   llama revision identity without touching the RPC package.
 
+## 2026-09-24 — macOS (arm64, Darwin 25.6.0) workspace
+
+| Gate | Pass criterion | Result and evidence |
+|---|---|---|
+| Open MPI install | Homebrew `open-mpi` 5.0.11 installs; `mpicxx` wraps clang++ with `-I/opt/homebrew/Cellar/open-mpi/5.0.11/include -L/opt/homebrew/Cellar/open-mpi/5.0.11/lib -lmpi` | **PASS.** `brew install open-mpi` succeeded; `mpicxx --version` reports Apple Clang 21.0.0 with Open MPI 5.0.11. |
+| C++ smoke build | `cmake -S cpp/kllm_mpi -B build/kllm-mpi-tests -DKLLM_WITH_MPI=ON && cmake --build ... && ctest` builds and runs `kllm_mpi_loopback`, `kllm_mpi_smoke` (3-rank), and `kllm_mpi_provider_abi_compile` | **PASS.** 3/3 tests pass. `kllm_mpi_smoke` runs `MPI_Init_thread(MPI_THREAD_SERIALIZED)` across 3 processes and reports `kllm_mpi real collectives ok world=3`. |
+| MPI provider build | `uv run python scripts/install.py --mpi-only` builds the Rust provider on macOS with Metal backend | **PASS.** `vendor/mpi/metal/bin/` contains `kllm-mpi-provider-check`, `kllm-mpi-rank`, `libmpi.a`, `libmpi.dylib`. Engine readiness recorded in install.json. |
+| MPI Python tests | `uv run python -m pytest tests/test_mpi_*.py -q` | **PASS.** 69 passed. All runtime, policy, settings, control, devices, manifest, and agent tests pass. |
+| Python full regression | `uv run python -m pytest tests/ -q` | **PASS.** 343 passed (1 pre-existing `test_accel` failure unrelated to MPI). |
+| MPI collective smoke (real ranks) | 3-process communicator exercises broadcast, allreduce, allgatherv, invalid-header rejection | **PASS.** All four collectives verified across 3 macOS ranks. |
+
+### Provider identity observed on this host
+
+- Upstream revision: `99be8ac11c04f5419452428a486ae0eee1f5552e` (same pinned fork)
+- Backend: `metal` (default on macOS)
+- Open MPI: 5.0.11 (Homebrew bottle, arm64_tahoe)
+- Toolchain: Apple Clang 21.0.0 (arm64-apple-darwin25.6.0)
+- CMake: 4.4.3
+- The `derive` cargo test uses the local path dependency `mpi-derive`.
+
+### Remaining macOS-specific blockers
+
+1. Cross-OS communicator (R2): Windows AMD + macOS + Linux NVIDIA hosts must be reachable on a private fabric.
+2. Backend flavors (R3): Metal inference on this Mac must be verified with a real GGUF; Vulkan/Metal/CUDA/ROCm per-host probes still needed.
+3. Real engine (R4): Distributed GGML patch still blocks; MPI Plan reports graph engine blocker, MPI Run returns 503.
+4. Mixed acceptance: No HTTP/logit/performance claim yet.
+
 ## Remaining dependencies
 
 1. Reachable and authorized Windows AMD, macOS, and Linux NVIDIA hosts with

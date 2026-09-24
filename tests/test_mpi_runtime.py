@@ -74,7 +74,10 @@ for line in sys.stdin:
     if os.name == "nt":
         wrapper.write_text(f'@"{os.sys.executable}" "{script}"\r\n', encoding="utf-8")
     else:
-        wrapper.write_text(f"#!{os.sys.executable}\nexec {os.sys.executable} {script}\n", encoding="utf-8")
+        wrapper.write_text(
+            f"#!/bin/bash\nexec {os.sys.executable} {script}\n",
+            encoding="utf-8",
+        )
         wrapper.chmod(0o755)
     supervisor = mpi_runtime.MpiRankSupervisor(wrapper, startup_timeout=2)
     secret = "ab" * 32
@@ -109,7 +112,7 @@ for line in sys.stdin:
         wrapper.write_text(f'@"{os.sys.executable}" "{script}"\r\n', encoding="utf-8")
     else:
         wrapper.write_text(
-            f"#!{os.sys.executable}\nexec {os.sys.executable} {script}\n",
+            f"#!/bin/bash\nexec {os.sys.executable} {script}\n",
             encoding="utf-8",
         )
         wrapper.chmod(0o755)

@@ -165,3 +165,25 @@ Mixed acceptance ──BLOCKED (depends on R2, R3, R4)
 
 **Last updated:** 2026-09-24  
 **Next review:** After R1 macOS/Linux validation and host reachability re-probe
+
+---
+
+## Provider Strategy Update (2026-09-24)
+
+**Decision:** MPI provider must be the **same binary** across all OSes (Windows, macOS, Linux).
+
+**Rationale:**
+- Uniform binary simplifies deployment, testing, and debugging
+- Eliminates OS-specific build variations and compatibility issues
+- Enables identical collective behavior across platforms
+
+**Windows backend strategy:**
+- **Primary:** Vulkan (recommended for all Windows hosts)
+- **Optional:** ROCm (if AMD GPU + ROCm drivers installed)
+- **Rationale:** Vulkan has broader Windows GPU driver support (NVIDIA, AMD, Intel); ROCm requires specific AMD GPUs and Linux-first driver maturity
+
+**Implications:**
+1. Rust MPI provider builds must produce identical binaries on Windows/macOS/Linux (modulo platform-specific linking)
+2. Windows hosts default to Vulkan backend unless ROCm is explicitly configured
+3. Cluster heuristic must respect this: Windows + AMD GPU → Vulkan preferred over ROCm
+4. Cross-OS communicator validation must use same provider binary on all hosts

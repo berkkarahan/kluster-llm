@@ -72,6 +72,28 @@ does not establish a production communicator or tensor-parallel inference.
 3. Real engine (R4): Distributed GGML patch still blocks; MPI Plan reports graph engine blocker, MPI Run returns 503.
 4. Mixed acceptance: No HTTP/logit/performance claim yet.
 
+## Provider Strategy (2026-09-24)
+
+**MPI provider binary must be identical across all OSes** (Windows, macOS, Linux).
+
+**Rationale:**
+- Uniform binary simplifies deployment, testing, and debugging
+- Eliminates OS-specific build variations and compatibility issues
+- Enables identical collective behavior across platforms
+
+**Windows backend strategy:**
+- **Primary:** Vulkan (recommended for all Windows hosts)
+- **Optional:** ROCm (if AMD GPU + ROCm drivers installed)
+- **Rationale:** Vulkan has broader Windows GPU driver support (NVIDIA, AMD, Intel); ROCm requires specific AMD GPUs and Linux-first driver maturity
+
+**Implications:**
+1. Rust MPI provider builds must produce identical binaries on Windows/macOS/Linux (modulo platform-specific linking)
+2. Windows hosts default to Vulkan backend unless ROCm is explicitly configured
+3. Cluster heuristic must respect this: Windows + AMD GPU → Vulkan preferred over ROCm
+4. Cross-OS communicator validation must use same provider binary on all hosts
+
+---
+
 ## Remaining dependencies
 
 1. Reachable and authorized Windows AMD, macOS, and Linux NVIDIA hosts with

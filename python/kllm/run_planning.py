@@ -16,7 +16,7 @@ from kllm.cluster_log import llama_server_log_path
 from kllm.extra_args import ExtraArgsError, sanitize_extra_args
 from kllm.model_defaults import merge_defaults_into_extra_args, overlay_user_inference, resolve_model_defaults
 from kllm.gguf_meta import read_inference_metadata
-from kllm.mpi_comm import attach_mpi_schedule
+from kllm.accel import llama_device_for_backend
 from kllm.run_settings import RunBody, RunSettingsFields
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
 
@@ -123,10 +123,34 @@ def resolve_headroom(body: RunSettingsFields) -> float:
     return kllm_config.resolve_memory_fraction(device)
 
 
+def _member_devices(member: dict[str, Any]) -> list[dict[str, Any]]:
+    devices = list(member.get("devices") or [])
+    if devices:
+        return devices
+    if not member.get("unified_memory"):
+        return devices
+    vram = int(member.get("vram_bytes") or 0)
+    if vram <= 0:
+        return devices
+    pref = member.get("requested_backend") or member.get("actual_backend") or member.get("backend")
+    device_name, backend = llama_device_for_backend(str(pref or "metal"))
+    return [
+        {
+            "index": 0,
+            "device": device_name,
+            "name": device_name,
+            "backend": backend,
+            "vram_bytes": vram,
+            "free_bytes": vram,
+        }
+    ]
+
+
 def cluster_nodes(members: dict[str, Any]) -> list[dict[str, Any]]:
     nodes = []
     for m in ordered_members(members):
         lat = m.get("latency_ms")
+        devices = _member_devices(m)
         nodes.append(
             {
                 "node_id": m["node_id"],
@@ -135,7 +159,7 @@ def cluster_nodes(members: dict[str, Any]) -> list[dict[str, Any]]:
                 "vram_bytes": m.get("vram_bytes"),
                 "backend": m.get("backend", "unknown"),
                 "unified_memory": m.get("unified_memory", m.get("backend") == "metal"),
-                "devices": m.get("devices", []),
+                "devices": devices,
                 "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
                 "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
                 "latency_ms": float(lat) if lat is not None else None,
@@ -265,17 +289,6 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
     result["warning"] = warning
     settings["context"] = result.get("context_effective", settings["context"])
     result["resolved_launch_settings"] = settings
-    meta = read_inference_metadata(path) or {}
-    block_count = meta.get("block_count")
-    # ngl is the value llama-server receives. Layer owners use that together
-    # with the GGUF block count. estimated_layers is only a size bucket.
-    result["mpi"] = attach_mpi_schedule(
-        result,
-        nodes,
-        headroom=headroom,
-        block_count=int(block_count) if block_count else None,
-        n_gpu_layers=int(result["ngl"]) if result.get("ngl") is not None else None,
-    )
     return result
 
 

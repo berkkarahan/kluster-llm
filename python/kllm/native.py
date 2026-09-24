@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from kllm.accel import effective_accel_backend, requested_backend, binary_capabilities
+from kllm.accel import (
+    binary_capabilities,
+    effective_accel_backend,
+    requested_backend,
+    selectable_accel_backends,
+)
 from pathlib import Path
 import time
 import sys
@@ -62,45 +67,48 @@ def list_gpus() -> dict[str, Any]:
         capabilities = binary_capabilities(binary, Path(binary).stat().st_mtime_ns, int(time.monotonic() // 30))
         installed = capabilities["devices"]
         supported = list(dict.fromkeys(d["backend"] for d in installed))
-        preferred = "metal" if sys.platform == "darwin" else ("cuda" if "cuda" in supported else "rocm" if sys.platform.startswith("linux") and "rocm" in supported else "vulkan")
-        actual = requested if requested in supported else preferred if preferred in supported else next(iter(supported), "cpu")
-        backend_warning: str | None = (
-            f"requested {requested} is not installed; using {actual}"
-            if requested and requested != actual
-            else None
+        preferred = "metal" if sys.platform == "darwin" else (
+            "cuda" if "cuda" in supported
+            else "rocm" if sys.platform.startswith("linux") and "rocm" in supported
+            else "vulkan"
         )
-        selected = [d for d in installed if d["backend"] == actual]
-        if not selected and installed:
-            probed_match = [d for d in installed if d["backend"] == probed]
-            if probed_match:
-                selected = probed_match
-                actual = probed
-                backend_warning = (
-                    f"requested {requested} has no devices; using probed {probed}"
-                    if requested and requested != probed
-                    else backend_warning
-                )
-            else:
-                selected = installed
-                actual = str(selected[0]["backend"])
-                backend_warning = (
-                    f"requested {requested} has no devices; using {actual}"
-                    if requested and requested != actual
-                    else backend_warning
-                )
+        backend_warning: str | None = None
+        if requested and requested in supported:
+            selected = [d for d in installed if d["backend"] == requested]
+            actual = requested
+        elif requested and requested not in supported:
+            selected = list(installed)
+            actual = preferred if preferred in supported else (supported[0] if supported else "cpu")
+            backend_warning = (
+                f"requested {requested} is not installed on this binary; "
+                f"listing all {len(selected)} device(s) for placement"
+            )
+        else:
+            selected = list(installed)
+            actual = preferred if preferred in supported else (supported[0] if supported else "cpu")
         selected = [dict(d, index=i) for i, d in enumerate(selected)]
-        return {"backend": actual, "actual_backend": actual, "requested_backend": requested,
-                "probed_backend": probed, "gpus": selected, "devices": selected,
-                "unified_memory": probed == "metal", "binary_version": capabilities["binary_version"],
-                "allowed_backends": supported,
-                "backend_warning": backend_warning,
-                "probed_device_count": len(devices)}
+        return {
+            "backend": actual,
+            "actual_backend": actual,
+            "requested_backend": requested,
+            "probed_backend": probed,
+            "gpus": selected,
+            "devices": selected,
+            "unified_memory": probed == "metal",
+            "binary_version": capabilities["binary_version"],
+            "allowed_backends": selectable_accel_backends(),
+            "installed_backends": supported,
+            "backend_warning": backend_warning,
+            "probed_device_count": len(devices),
+        }
     except Exception as exc:
         # Hardware probes alone do not establish installed llama.cpp capabilities.
         return {"backend": "cpu", "actual_backend": "unknown", "requested_backend": requested,
                 "probed_backend": probed, "gpus": [], "devices": [],
                 "unified_memory": probed == "metal", "binary_version": None,
-                "allowed_backends": [], "error": str(exc),
+                "allowed_backends": selectable_accel_backends(),
+                "installed_backends": [],
+                "error": str(exc),
                 "probed_device_count": len(devices)}
 
 

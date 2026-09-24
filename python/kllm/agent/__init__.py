@@ -75,6 +75,7 @@ async def _sample_diagnostics():
 async def lifespan(app):
     http_clients.control_client()
     _background_stop.clear()
+    _ensure_master_member(persist=True)
     if "pytest" not in sys.modules:
         _start_membership_thread()
         _start_logs_thread()
@@ -379,7 +380,68 @@ def _start_logs_thread() -> None:
     threading.Thread(target=_logs_loop, name="kllm-logs", daemon=True).start()
 
 
+def _build_master_member_record(lan_host: str) -> dict[str, Any]:
+    listed = native.list_gpus()
+    gpu_sel = _resolve_gpu_selection(STATE.gpu_ids, listed=listed)
+    cap = _probe_capacity_for_cluster()
+    vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
+    backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
+    return {
+        "node_id": STATE.node_id,
+        "host": lan_host,
+        "lan_host": lan_host,
+        "control_port": STATE.control_port,
+        "rpc_port": STATE.rpc_port,
+        "role": "master",
+        "total_ram_bytes": cap["total_ram_bytes"],
+        "available_ram_bytes": cap["available_ram_bytes"],
+        "vram_bytes": vram,
+        "backend": backend,
+        "actual_backend": backend,
+        "requested_backend": cap.get("requested_backend"),
+        "devices": gpu_sel["gpus"],
+        "unified_memory": cap.get("unified_memory", False),
+        "binary_version": cap.get("binary_version"),
+        "gpu_ids": STATE.gpu_ids,
+        "last_seen": time.time(),
+        "latency_ms": 0.0,
+    }
+
+
+def _ensure_master_member(*, persist: bool = False) -> bool:
+    """Reinsert the local master when persisted membership lost the master row."""
+    if STATE.role != "master":
+        return False
+    nid = STATE.node_id
+    mem = STATE.members.get(nid)
+    if mem is not None and mem.get("role") == "master":
+        return False
+    try:
+        lan_host = (
+            (mem or {}).get("lan_host")
+            or (mem or {}).get("host")
+            or STATE.rpc_bind
+            or netsec.pick_rpc_bind_host(None)
+        )
+        record = _build_master_member_record(str(lan_host))
+        if mem:
+            for key in ("wg_address", "wg_public_key"):
+                if mem.get(key) is not None:
+                    record[key] = mem[key]
+            if STATE.overlay == netsec.OVERLAY_WIREGUARD and mem.get("host"):
+                record["host"] = mem["host"]
+        STATE.members[nid] = record
+        if persist:
+            STATE.save()
+        return True
+    except HTTPException:
+        return False
+    except Exception:
+        return False
+
+
 def _refresh_local_capacity() -> None:
+    _ensure_master_member(persist=False)
     member = STATE.members.get(STATE.node_id)
     if member is None:
         return
@@ -1106,18 +1168,7 @@ def put_config(body: ConfigBody) -> dict[str, Any]:
         if body.ram_percent is not None:
             payload["ram_percent"] = body.ram_percent
         if "accel_backend" in body.model_fields_set:
-            choice = body.accel_backend
-            if choice is not None:
-                choice = str(choice).strip().lower()
-                gpus_info = _list_gpus_payload()
-                allowed = gpus_info.get("allowed_backends") or []
-                if choice not in allowed:
-                    raise HTTPException(
-                        400,
-                        f"accel_backend {choice!r} not allowed on this host "
-                        f"(allowed: {allowed or ['(none)']})",
-                    )
-            payload["accel_backend"] = choice
+            payload["accel_backend"] = body.accel_backend
         return kllm_config.save_config(payload)
     except HTTPException:
         raise
@@ -1266,31 +1317,7 @@ def start_master(body: StartBody) -> dict[str, Any]:
     gpu_sel = _resolve_gpu_selection(gpu_ids, listed=listed)
     STATE.gpu_ids = gpu_sel["gpu_ids"]
 
-    cap = _probe_capacity_for_cluster()
-    # Prefer selected VRAM sum when discrete GPUs were chosen
-    vram = gpu_sel["vram_bytes"] if gpu_sel["gpus"] else cap.get("vram_bytes")
-    backend = gpu_sel["backend"] if gpu_sel["gpus"] or gpu_sel["backend"] != "cpu" else cap.get("backend", "cpu")
-
-    STATE.members[STATE.node_id] = {
-        "node_id": STATE.node_id,
-        "host": lan_host,
-        "lan_host": lan_host,
-        "control_port": STATE.control_port,
-        "rpc_port": STATE.rpc_port,
-        "role": "master",
-        "total_ram_bytes": cap["total_ram_bytes"],
-        "available_ram_bytes": cap["available_ram_bytes"],
-        "vram_bytes": vram,
-        "backend": backend,
-        "actual_backend": backend,
-        "requested_backend": cap.get("requested_backend"),
-        "devices": gpu_sel["gpus"],
-        "unified_memory": cap.get("unified_memory", False),
-        "binary_version": cap.get("binary_version"),
-        "gpu_ids": STATE.gpu_ids,
-        "last_seen": time.time(),
-        "latency_ms": 0.0,
-    }
+    STATE.members[STATE.node_id] = _build_master_member_record(lan_host)
 
     if overlay == netsec.OVERLAY_WIREGUARD:
         _setup_master_overlay(STATE.join_key, lan_host)
@@ -2082,6 +2109,7 @@ def _guard_context(body: PlanBody | RunBody) -> None:
 def plan(body: PlanBody) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "plan requires master role")
+    _ensure_master_member(persist=True)
     _guard_context(body)
     merge_and_sanitize_extra(body)
     result = execute_plan(body, STATE.members)
@@ -2107,6 +2135,7 @@ def plan(body: PlanBody) -> dict[str, Any]:
 def run(body: RunBody) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "run requires master role")
+    _ensure_master_member(persist=True)
     _guard_context(body)
     merge_and_sanitize_extra(body)
     validate_vision_for_run(body)

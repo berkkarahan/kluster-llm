@@ -93,6 +93,14 @@
       <p class="mono text-[11px]" style="color: var(--muted)">
         No local GPUs detected — inference will fall back to CPU layers.
       </p>
+      {#if appStore.gpuProbeError}
+        <p class="mono text-[11px]" style="color: var(--danger, #c44)">
+          {appStore.gpuProbeError}
+        </p>
+        <p class="mono text-[10px]" style="color: var(--muted)">
+          Run: python scripts/install.py --backend metal && python scripts/install.py --check
+        </p>
+      {/if}
     {/if}
 
     <SliderField

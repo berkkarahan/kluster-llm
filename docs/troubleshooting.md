@@ -93,6 +93,19 @@ export CXX=/opt/homebrew/opt/llvm/bin/clang++
 
 ## Runtime Issues
 
+### "no GPUs available; cannot select [0]" on Start / Join
+
+**Cause:** The dashboard (or saved `~/.kllm/config.toml`) still references GPU index `0`, but `/v1/gpus` reports an empty inventory — usually because `llama-server` is missing, failed `--list-devices`, or the installed binary does not match the selected accel backend.
+
+**Solution:**
+```bash
+python scripts/install.py --backend metal   # macOS Apple Silicon
+python scripts/install.py --check
+```
+Confirm GPUs appear in the dashboard Cluster panel (System settings). If the panel shows "No local GPUs detected", clear stale selection: set `gpu_ids = null` in `~/.kllm/config.toml` or re-save hardware settings after install.
+
+After the fix, Start succeeds even with an empty local GPU inventory (CPU-only master); explicit `gpu_ids` in the request still require a working `llama-server` GPU probe.
+
 ### RPC must stay on a private LAN
 
 **Cause:** llama.cpp RPC is unauthenticated (upstream documents it as PoC / insecure on open networks; no in-app auth planned).

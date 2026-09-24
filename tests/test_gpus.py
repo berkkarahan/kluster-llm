@@ -203,6 +203,105 @@ def test_start_rejects_unknown_gpu(client, monkeypatch):
     assert "unknown gpu_ids" in r.json()["detail"]
 
 
+EMPTY_GPUS = {
+    "backend": "cpu",
+    "gpus": [],
+    "error": "llama-server is not installed",
+}
+
+
+def test_start_ignores_config_gpu_ids_when_inventory_empty(client, monkeypatch):
+    c, agent = client
+    import importlib
+
+    import kllm.config as config_mod
+
+    importlib.reload(config_mod)
+    config_mod.save_config({"device": "gpu", "gpu_ids": [0]})
+
+    with (
+        patch.object(agent.native, "list_gpus", return_value=EMPTY_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 16 * 1024**3,
+                "vram_bytes": None,
+                "backend": "metal",
+            },
+        ),
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="10.0.0.1"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.discovery, "MasterAdvertiser") as Adv,
+    ):
+        Adv.return_value.start = lambda: None
+        Adv.return_value.stop = lambda: None
+        r = c.post("/v1/start", json={"overlay": "none"})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == []
+    assert agent.STATE.gpu_ids == []
+
+
+def test_start_rejects_explicit_gpu_ids_when_inventory_empty(client, monkeypatch):
+    c, agent = client
+    with patch.object(agent.native, "list_gpus", return_value=EMPTY_GPUS):
+        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [0]})
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert "no GPUs available" in detail
+    assert "llama-server is not installed" in detail
+    assert "install.py" in detail
+
+
+def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
+    import kllm.native as native_mod
+
+    binary = tmp_path / "llama-server"
+    binary.write_text("stub", encoding="utf-8")
+
+    class FakeDev:
+        index = 0
+        name = "Apple GPU"
+        vram_bytes = 16 * 1024**3
+
+    class FakeNative:
+        @staticmethod
+        def list_gpus():
+            return ([FakeDev()], "metal")
+
+    monkeypatch.setattr(native_mod, "_NATIVE", FakeNative())
+    monkeypatch.setattr(native_mod, "resolve_llama_server", lambda rr=None: str(binary))
+    monkeypatch.setattr(
+        native_mod,
+        "binary_capabilities",
+        lambda *a, **k: {
+            "devices": [
+                {
+                    "index": 0,
+                    "device": "metal0",
+                    "name": "Apple GPU",
+                    "backend": "metal",
+                    "vram_bytes": 16 * 1024**3,
+                    "free_bytes": 8 * 1024**3,
+                }
+            ],
+            "binary_version": "test",
+        },
+    )
+    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setenv("KLLM_ACCEL_BACKEND", "vulkan")
+
+    data = native_mod.list_gpus()
+    assert len(data["gpus"]) == 1
+    assert data["backend"] == "metal"
+    assert data["backend_warning"]
+
+
 def test_gpu_visibility_env():
     from kllm.agent import _gpu_visibility_env
 

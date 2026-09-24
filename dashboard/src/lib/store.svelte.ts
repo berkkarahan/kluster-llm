@@ -70,6 +70,7 @@ class AppStore {
   rpcBindInput = $state('');
   overlay = $state<'none' | 'wireguard'>('none');
   gpus = $state<GpuInfo[]>([]);
+  gpuProbeError = $state('');
   gpuBackend = $state('cpu');
   probedBackend = $state('cpu');
   allowedBackends = $state<AccelBackend[]>([]);
@@ -643,6 +644,7 @@ class AppStore {
   }
 
   private applyGpusPayload(data: Record<string, unknown>) {
+    this.gpuProbeError = typeof data.error === 'string' ? data.error : '';
     this.gpuBackend = typeof data.backend === 'string' ? data.backend : 'cpu';
     this.probedBackend =
       typeof data.probed_backend === 'string' ? data.probed_backend : this.gpuBackend;
@@ -804,7 +806,17 @@ class AppStore {
     }
   }
 
+  private gpuStartWarning() {
+    if (this.device !== 'gpu' || this.gpus.length > 0) return;
+    const hint = this.gpuProbeError
+      ? `${this.gpuProbeError}. Run: python scripts/install.py --backend metal && python scripts/install.py --check`
+      : 'No local GPUs detected. Run: python scripts/install.py --backend metal && python scripts/install.py --check';
+    pushToast('warn', hint);
+  }
+
   async startMaster() {
+    await this.loadGpus();
+    this.gpuStartWarning();
     const body: Record<string, unknown> = {
       key: this.joinKeyInput || null,
       rpc_bind: this.rpcBindInput || null,
@@ -822,6 +834,8 @@ class AppStore {
   }
 
   async joinCluster() {
+    await this.loadGpus();
+    this.gpuStartWarning();
     const masterHost = this.masterHostInput.trim();
     const body: Record<string, unknown> = {
       key: this.joinKeyInput,

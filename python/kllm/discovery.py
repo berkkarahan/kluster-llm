@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
+import ipaddress
 import json
 import site
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -188,20 +192,126 @@ def _browse_via_helper(timeout: float, key: str | None) -> list[DiscoveredMaster
     return None
 
 
-def browse_masters(timeout: float = 2.0, key: str | None = None) -> list[DiscoveredMaster]:
-    """Discover masters on the LAN via mDNS.
+def _http_probe_hosts(port: int = DEFAULT_CONTROL_PORT) -> list[str]:
+    """Private /24 peers on local interfaces (plus loopback for same-host tests)."""
+    from kllm import netsec
+
+    hosts: list[str] = ["127.0.0.1"]
+    seen: set[str] = {"127.0.0.1"}
+    for ip in netsec._list_ipv4_addresses():
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if not addr.is_private or addr.is_loopback or addr.is_link_local:
+            continue
+        parts = ip.split(".")
+        if len(parts) != 4:
+            continue
+        prefix = ".".join(parts[:3])
+        for last in range(1, 255):
+            cand = f"{prefix}.{last}"
+            if cand not in seen:
+                seen.add(cand)
+                hosts.append(cand)
+    return hosts
+
+
+def _probe_http_master(
+    host: str,
+    port: int,
+    want_kid: str | None,
+    timeout: float,
+) -> DiscoveredMaster | None:
+    """Return a master if ``host:port`` is healthy and matches optional key id."""
+    try:
+        with urllib.request.urlopen(f"http://{host}:{int(port)}/health", timeout=timeout) as resp:
+            health = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(health, dict) or health.get("role") != "master":
+        return None
+    kid = health.get("kid") if isinstance(health.get("kid"), str) else None
+    if kid is None:
+        # Older masters: fall back to status.join_key (LAN-only).
+        try:
+            with urllib.request.urlopen(
+                f"http://{host}:{int(port)}/v1/status", timeout=timeout
+            ) as resp:
+                status = json.loads(resp.read().decode("utf-8", errors="replace"))
+            jk = status.get("join_key") if isinstance(status, dict) else None
+            if isinstance(jk, str) and jk:
+                kid = join_key_id(jk)
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+            kid = None
+    if want_kid is not None and kid != want_kid:
+        return None
+    node = health.get("node_id")
+    name = f"kllm-{node}" if isinstance(node, str) and node else f"kllm-{host}"
+    return DiscoveredMaster(name=name, host=host, port=int(port), key_id=kid)
+
+
+def _browse_via_http(
+    timeout: float,
+    key: str | None,
+    port: int = DEFAULT_CONTROL_PORT,
+) -> list[DiscoveredMaster]:
+    """Scan local private /24s for a master when mDNS is silent (e.g. Windows)."""
+    want = join_key_id(key) if key else None
+    hosts = _http_probe_hosts(port)
+    per_host = min(0.45, max(0.12, timeout / 10.0))
+    found: list[DiscoveredMaster] = []
+    deadline = time.time() + max(timeout, 1.0) + 1.5
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+    try:
+        futs = [
+            pool.submit(_probe_http_master, host, port, want, per_host) for host in hosts
+        ]
+        try:
+            for fut in concurrent.futures.as_completed(futs, timeout=max(timeout, 1.0) + 2.0):
+                if time.time() > deadline:
+                    break
+                try:
+                    hit = fut.result()
+                except Exception:
+                    continue
+                if hit is not None:
+                    found.append(hit)
+                    if want is not None:
+                        # Keyed join only needs one match; stop early.
+                        break
+        except concurrent.futures.TimeoutError:
+            pass
+    finally:
+        # Do not wait for the rest of the /24 — join latency matters more.
+        pool.shutdown(wait=False, cancel_futures=True)
+    # Deduplicate by host:port
+    uniq: dict[tuple[str, int], DiscoveredMaster] = {}
+    for m in found:
+        uniq[(m.host, m.port)] = m
+    return list(uniq.values())
+
+
+def browse_masters(
+    timeout: float = 2.0,
+    key: str | None = None,
+    port: int = DEFAULT_CONTROL_PORT,
+) -> list[DiscoveredMaster]:
+    """Discover masters on the LAN via mDNS, then HTTP /24 probe.
 
     When this interpreter cannot see mDNS (macOS Local Network / Zscaler on
     uv-managed Python), fall back to the same helper-Python pattern used by
-    ``cp_proxy`` so Join-by-key still works without ``master_host``.
+    ``cp_proxy``. If mDNS is still empty (common for Windows masters without
+    Bonjour), probe private LAN /24s for ``/health`` role=master matching
+    the join-key fingerprint so Join-by-key works without ``master_host``.
     """
     found = _browse_inprocess(timeout, key)
     if found:
         return found
     helper = _browse_via_helper(timeout, key)
-    if helper is not None:
+    if helper:
         return helper
-    return []
+    return _browse_via_http(timeout, key, port=port)
 
 
 class MasterAdvertiser:

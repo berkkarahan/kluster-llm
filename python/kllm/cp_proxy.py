@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import shutil
 import signal
 import socket
@@ -28,6 +29,9 @@ _LAN_BLOCKED_ERRNOS = {
     errno.EHOSTUNREACH,  # 65 on macOS
     errno.ENETUNREACH,
 }
+
+# Hostnames and IP literals only (no shell metacharacters).
+_PROBE_HOST_RE = re.compile(r"^[a-zA-Z0-9.\-:\[\]]+$")
 
 _RELAY = r"""
 import select, socket, sys, threading
@@ -105,33 +109,52 @@ def probe_master(host: str, port: int, timeout: float = 1.5) -> str:
         return "down"
 
 
-def _helper_candidates() -> list[str]:
-    env = os.environ.get("KLLM_CP_PROXY_PYTHON", "").strip()
-    out: list[str] = []
-    if env:
-        out.append(env)
-    for path in (
-        "/usr/bin/python3",
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-    ):
-        if path not in out and Path(path).is_file():
-            out.append(path)
-    which = shutil.which("python3")
-    if which and which not in out and Path(which).resolve() != Path(sys.executable).resolve():
-        out.append(which)
-    return out
+def _probe_host_safe(host: str) -> str | None:
+    host = host.strip()
+    if not host or not _PROBE_HOST_RE.fullmatch(host):
+        return None
+    return host
 
 
-def _helper_can_reach(python: str, host: str, port: int) -> bool:
-    probe = (
-        "import socket,sys;\n"
-        f"s=socket.socket(); s.settimeout(2);\n"
-        f"s.connect(({host!r}, {int(port)})); s.close();\n"
-    )
+def _shell_can_reach(host: str, port: int) -> bool:
+    """True if a platform shell (bash or PowerShell) can TCP-connect to host:port."""
+    safe = _probe_host_safe(host)
+    if safe is None:
+        return False
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not (1 <= p <= 65535):
+        return False
+
+    if sys.platform == "win32":
+        powershell = shutil.which("powershell")
+        if not powershell:
+            return False
+        ps_host = safe.replace("'", "''")
+        cmd = (
+            f"$c=New-Object Net.Sockets.TcpClient; "
+            f"try{{$c.Connect('{ps_host}',{p});$c.Close();exit 0}}catch{{exit 1}}"
+        )
+        try:
+            r = subprocess.run(
+                [powershell, "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return r.returncode == 0
+
+    bash = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
+    if not bash:
+        return False
+    script = f"exec 3<>/dev/tcp/{safe}/{p}"
     try:
         r = subprocess.run(
-            [python, "-c", probe],
+            [bash, "-c", script],
             capture_output=True,
             timeout=5,
             check=False,
@@ -141,8 +164,38 @@ def _helper_can_reach(python: str, host: str, port: int) -> bool:
     return r.returncode == 0
 
 
+def _helper_candidates() -> list[str]:
+    env = os.environ.get("KLLM_CP_PROXY_PYTHON", "").strip()
+    out: list[str] = []
+    if env:
+        out.append(env)
+    if sys.platform != "win32":
+        for path in (
+            "/usr/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+        ):
+            if path not in out and Path(path).is_file():
+                out.append(path)
+    me = Path(sys.executable).resolve()
+    names = ("python3", "python") if sys.platform == "win32" else ("python3",)
+    for name in names:
+        which = shutil.which(name)
+        if not which or which in out:
+            continue
+        try:
+            if Path(which).resolve() == me:
+                continue
+        except OSError:
+            pass
+        out.append(which)
+    return out
+
+
 def find_lan_python(host: str, port: int) -> str | None:
-    """Return a Python binary that can reach host:port (not this interpreter)."""
+    """Return a helper Python to run the relay when shell can reach host:port."""
+    if not _shell_can_reach(host, port):
+        return None
     me = Path(sys.executable).resolve()
     for py in _helper_candidates():
         try:
@@ -150,7 +203,7 @@ def find_lan_python(host: str, port: int) -> str | None:
                 continue
         except OSError:
             continue
-        if _helper_can_reach(py, host, port):
+        if Path(py).is_file():
             return py
     return None
 

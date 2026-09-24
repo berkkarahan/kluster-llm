@@ -769,7 +769,17 @@ def llama_setup(
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "role": STATE.role, "node_id": STATE.node_id, "pid": os.getpid()}
+    out: dict[str, Any] = {
+        "ok": True,
+        "role": STATE.role,
+        "node_id": STATE.node_id,
+        "pid": os.getpid(),
+    }
+    # Non-secret fingerprint (same as mDNS ``kid``) so Join-by-key can HTTP-probe
+    # when Bonjour/mDNS is unavailable on the LAN.
+    if STATE.role == "master" and STATE.join_key:
+        out["kid"] = discovery.join_key_id(STATE.join_key)
+    return out
 
 
 @app.get("/v1/discover")
@@ -1361,7 +1371,9 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
     master_host = body.master_host
     master_port = body.master_port
     if not master_host:
-        found = discovery.browse_masters(timeout=2.5, key=body.key)
+        found = discovery.browse_masters(
+            timeout=2.5, key=body.key, port=master_port or DEFAULT_CONTROL_PORT
+        )
         if not found:
             raise HTTPException(
                 404,

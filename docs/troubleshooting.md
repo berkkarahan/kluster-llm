@@ -104,7 +104,7 @@ python scripts/install.py --check
 ```
 Confirm GPUs appear in the dashboard Cluster panel (System settings). llama.cpp **v0.5+** lists Apple GPUs as `MTL0:` in `llama-server --list-devices` (older builds used `Metal0:`). If you see a nameless `: (0 MiB, 0 MiB free)` line instead, Metal is linked but device creation failed — reinstall with `--backend metal` and confirm `--check` reports `metal` in `actual_backends`.
 
-If the panel shows "No local GPUs detected", clear stale selection: set `gpu_ids = null` in `~/.kllm/config.toml` or re-save hardware settings after install.
+If the panel shows "No local GPUs detected", check `/v1/gpus` for `backend_warning` — a saved `accel_backend` (e.g. `vulkan` from joining a Windows cluster) that is not installed on this node is ignored; the effective backend falls back to the hardware probe (Metal on any Apple Silicon Mac). Clear stale selection: set `gpu_ids = null` in `~/.kllm/config.toml` or re-save hardware settings after install. Restart the agent after `install.py` so it picks up the latest GPU probe logic.
 
 After the fix, Start succeeds even with an empty local GPU inventory (CPU-only master); explicit `gpu_ids` in the request still require a working `llama-server` GPU probe.
 

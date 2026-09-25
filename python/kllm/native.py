@@ -6,8 +6,10 @@ from typing import Any
 
 from kllm.accel import (
     binary_capabilities,
+    devices_for_backend,
     effective_accel_backend,
     requested_backend,
+    resolve_effective_backend,
     selectable_accel_backends,
 )
 from pathlib import Path
@@ -84,25 +86,12 @@ def list_gpus() -> dict[str, Any]:
         capabilities = binary_capabilities(binary, Path(binary).stat().st_mtime_ns, int(time.monotonic() // 30))
         installed = capabilities["devices"]
         supported = list(dict.fromkeys(d["backend"] for d in installed))
-        preferred = "metal" if sys.platform == "darwin" else (
-            "cuda" if "cuda" in supported
-            else "rocm" if sys.platform.startswith("linux") and "rocm" in supported
-            else "vulkan"
+        actual, backend_warning = resolve_effective_backend(
+            probed=probed,
+            supported=supported,
+            requested=requested,
         )
-        backend_warning: str | None = None
-        if requested and requested in supported:
-            selected = [d for d in installed if d["backend"] == requested]
-            actual = requested
-        elif requested and requested not in supported:
-            selected = list(installed)
-            actual = preferred if preferred in supported else (supported[0] if supported else "cpu")
-            backend_warning = (
-                f"requested {requested} is not installed on this binary; "
-                f"listing all {len(selected)} device(s) for placement"
-            )
-        else:
-            selected = list(installed)
-            actual = preferred if preferred in supported else (supported[0] if supported else "cpu")
+        selected = devices_for_backend(installed, actual)
         selected = [dict(d, index=i) for i, d in enumerate(selected)]
         probe_error: str | None = None
         wants_metal = probed == "metal" or requested == "metal"

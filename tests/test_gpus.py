@@ -355,7 +355,10 @@ def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
     data = native_mod.list_gpus()
     assert len(data["gpus"]) == 1
     assert data["gpus"][0]["backend"] == "metal"
+    assert data["actual_backend"] == "metal"
+    assert data["requested_backend"] == "vulkan"
     assert data["backend_warning"]
+    assert "using metal" in data["backend_warning"]
 
 
 def test_gpu_visibility_env():

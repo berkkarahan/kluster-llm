@@ -53,7 +53,7 @@ After install on **this** machine:
 | Host OS | Default `--backend` | Notes |
 |---------|---------------------|--------|
 | Windows | `vulkan` (auto) | Prebuilt GitHub zip for the pin in `llama-release`. CUDA if `nvcc` / CUDA toolkit present → auto may pick `cuda`. |
-| macOS Apple Silicon | `metal` | Use Metal even when the master uses Vulkan. RPC supports mixed backends; an override cannot relabel installed devices. |
+| macOS Apple Silicon | `metal` (auto) | Default install is a **source** build with **Metal + Vulkan** (MoltenVK via Homebrew). Stamp `backend=metal+vulkan`. Runtime preference defaults to Metal; set `KLLM_ACCEL_BACKEND=vulkan` for Vulkan-master clusters. `--prefer-prebuilt` = Metal-only GitHub pack. `--backend cpu` = CPU-only. |
 | Linux | `cuda` with NVIDIA tooling, `rocm` with AMD HIP tooling, otherwise `vulkan` | Use `--backend rocm --from-source` on supported Linux AMD systems. Hardware validation remains required. |
 
 ---
@@ -80,10 +80,24 @@ python scripts/install.py
 py -3 scripts\install.py
 ```
 
-**macOS Metal explicit:**
+**macOS Metal+Vulkan (default source multi-backend):**
 
 ```bash
+python3 scripts/install.py
+# or explicit:
 python3 scripts/install.py --backend metal
+```
+
+**macOS Metal-only prebuilt (no Vulkan):**
+
+```bash
+python3 scripts/install.py --prefer-prebuilt
+```
+
+**macOS CPU-only:**
+
+```bash
+python3 scripts/install.py --backend cpu --from-source
 ```
 
 **Windows Vulkan prebuilt explicit:**
@@ -103,7 +117,7 @@ python3 scripts/install.py --backend cuda --from-source
 1. Ensures **git** (and other toolchains unless `--skip-toolchains`).  
 2. Ensures **uv**, creates/repairs **`.venv`** (Python from **`.python-version`**), runs **`uv sync`**, installs **Rust** if missing, builds **`kllm`** with maturin, installs wheel + pytest.  
 3. Ensures **Node/npm**, runs `dashboard` `npm install` + `npm run build`.  
-4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): GitHub prebuilt assets first, cmake source at that tag if the pack is missing; stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.  
+4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default (provisions MoltenVK via Homebrew); otherwise prefers GitHub prebuilt assets, with cmake source fallback; stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.  
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).
@@ -164,8 +178,8 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 | Flag | When to use |
 |------|-------------|
 | `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
-| `--prefer-prebuilt` | Prefer GitHub release zips (default on every OS unless `--from-source`). |
-| `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp`. |
+| `--prefer-prebuilt` | Prefer GitHub release zips (default on Windows/Linux; Metal-only on macOS). |
+| `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp` (macOS default for Metal+Vulkan). |
 | `--tag TAG` | Override `llama-release` (keep every node on the same tag). |
 | `--force` | Reinstall llama.cpp even when `vendor/bin/llama-release.txt` matches. |
 | `--release` | Release-mode maturin build. |
@@ -181,7 +195,9 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 ```bash
 python scripts/install.py --llama-only
 python scripts/install.py --check
-python scripts/install.py --llama-only --backend metal    # Apple Silicon worker, including Vulkan masters
+python scripts/install.py --llama-only --backend metal    # macOS: Metal+Vulkan multi-backend (default)
+# Vulkan-master cluster: keep the multi binary; prefer Vulkan at runtime:
+#   export KLLM_ACCEL_BACKEND=vulkan
 ```
 
 **CLI/UI rebuild only** (no llama/WG/toolchains):

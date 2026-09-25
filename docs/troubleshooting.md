@@ -131,16 +131,18 @@ After the fix, Start succeeds even with an empty local GPU inventory (CPU-only m
 
 ### macOS worker on a Vulkan master (Windows/Linux)
 
-**Cause:** Default macOS install uses **Metal** (`hw` probe + `install.py --backend auto`). A Vulkan master cluster expects workers to run **Vulkan** `rpc-server` binaries and to register `backend=vulkan` for layer-split planning. Metal workers in a Vulkan-first cluster mis-report capacity and backend.
+**Cause:** Hardware probe and planner preference default to **Metal** on macOS. A Vulkan master cluster needs the Mac member to register `backend=vulkan` and expose Vulkan devices from `llama-server --list-devices`.
 
-**Solution:**
+**Solution:** The default macOS install builds a **Metal+Vulkan** binary (MoltenVK via Homebrew; stamp `backend=metal+vulkan`). Prefer Vulkan at runtime — no separate Vulkan-only rebuild:
+
 ```bash
-uv run python scripts/install.py --backend vulkan
-uv run python scripts/install.py --llama-only --backend vulkan
-export KLLM_ACCEL_BACKEND=vulkan   # add to shell profile for kllm-agent
+uv run python scripts/install.py            # Metal+Vulkan source (default on macOS)
+# or: uv run python scripts/install.py --llama-only --force
+export KLLM_ACCEL_BACKEND=vulkan            # add to shell profile for kllm-agent
 uv run kllm join --key '<key>' --master <windows-lan-ip>
 ```
-Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. GitHub macOS packs are Metal-only but still match the pinned RPC protocol. A Vulkan `rpc-server` source build needs Vulkan SDK / MoltenVK.
+
+Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Confirm locally: `python scripts/install.py --check` and `vendor/bin/llama-server --list-devices` lists both `MTL`/`Metal` and `Vulkan` devices. `--prefer-prebuilt` installs Metal-only GitHub packs (no Vulkan).
 
 ### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
 

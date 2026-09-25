@@ -1,6 +1,5 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
-  import HardwareSettings from '$lib/components/HardwareSettings.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
 
   function fmtBytes(n?: number | null) {
@@ -11,12 +10,10 @@
 
   const members = $derived(Object.values(appStore.status?.members ?? {}));
   const view = $derived(appStore.viewState());
-  const live = $derived(view === 'live');
   const idle = $derived(view === 'idle');
   const isMaster = $derived(appStore.status?.role === 'master');
   const isWorker = $derived(appStore.status?.role === 'worker');
   const startJoinDisabled = $derived(!idle || !!appStore.busy);
-  const networkLocked = $derived(live);
 </script>
 
 <div class="grid h-[calc(100vh-40px)] grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_360px]">
@@ -26,45 +23,6 @@
       Cluster
     </div>
     <div class="p-3 flex flex-col gap-2 overflow-y-auto flex-1 min-h-0">
-      {#if !isWorker}
-        <label class="mono text-[11px]" style="color: var(--muted)">Join key</label>
-        <input
-          class="field mono"
-          bind:value={appStore.joinKeyInput}
-          placeholder={idle ? 'auto or paste' : '—'}
-          readonly={networkLocked}
-          disabled={view === 'loading' || view === 'offline'}
-        />
-        <label class="mono text-[11px]" style="color: var(--muted)">Master host (optional)</label>
-        <input
-          class="field mono"
-          bind:value={appStore.masterHostInput}
-          placeholder={idle ? 'master LAN IP if mDNS fails' : '—'}
-          readonly={networkLocked}
-          disabled={view === 'loading' || view === 'offline'}
-        />
-      {:else}
-        <p class="mono text-[11px]" style="color: var(--muted)">Joined as worker</p>
-      {/if}
-      <label class="mono text-[11px]" style="color: var(--muted)">RPC bind (optional)</label>
-      <input
-        class="field mono"
-        bind:value={appStore.rpcBindInput}
-        placeholder={idle ? 'auto private IP' : '—'}
-        readonly={networkLocked}
-        disabled={view === 'loading' || view === 'offline'}
-      />
-      <label class="mono text-[11px]" style="color: var(--muted)">Overlay</label>
-      <select class="field mono" bind:value={appStore.overlay} disabled={!idle || !!appStore.busy}>
-        <option value="none">Off (LAN bind)</option>
-        <option value="wireguard">WireGuard</option>
-      </select>
-      <div class="mt-2 pt-2 border-t flex flex-col gap-2" style="border-color: var(--border)">
-        <div class="mono text-[11px] uppercase tracking-wider" style="color: var(--muted)">
-          System settings
-        </div>
-        <HardwareSettings lockBackend={!idle} />
-      </div>
       <div class="grid grid-cols-2 gap-2 mt-1">
         <button class="btn btn-accent" disabled={startJoinDisabled} onclick={() => appStore.startMaster()}
           >Start</button

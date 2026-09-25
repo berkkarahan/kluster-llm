@@ -65,6 +65,73 @@ def test_parse_devices_mtl0_prefix():
     assert devices[0]["name"] == "Apple M1 Pro"
 
 
+def test_parse_devices_mtl0_m5_pro():
+    from kllm.accel import parse_devices
+
+    text = (
+        "Available devices:\n"
+        "  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
+    )
+    devices = parse_devices(text)
+    assert len(devices) == 1
+    assert devices[0]["backend"] == "metal"
+    assert devices[0]["name"] == "Apple M5 Pro"
+
+
+def test_resolve_effective_backend_honors_installed_request():
+    from kllm.accel import resolve_effective_backend
+
+    actual, warning = resolve_effective_backend(
+        probed="metal",
+        supported=["metal", "vulkan"],
+        requested="vulkan",
+        platform="darwin",
+    )
+    assert actual == "vulkan"
+    assert warning is None
+
+
+def test_resolve_effective_backend_falls_back_to_probed_metal():
+    from kllm.accel import resolve_effective_backend
+
+    actual, warning = resolve_effective_backend(
+        probed="metal",
+        supported=["metal"],
+        requested="vulkan",
+        platform="darwin",
+    )
+    assert actual == "metal"
+    assert warning is not None
+    assert "using metal" in warning
+
+
+def test_resolve_effective_backend_auto_uses_probed():
+    from kllm.accel import resolve_effective_backend
+
+    actual, warning = resolve_effective_backend(
+        probed="metal",
+        supported=["metal"],
+        requested=None,
+        platform="darwin",
+    )
+    assert actual == "metal"
+    assert warning is None
+
+
+def test_devices_for_backend_filters_mtl_entries():
+    from kllm.accel import devices_for_backend
+
+    installed = [
+        {"device": "MTL0", "backend": "metal", "name": "Apple M5 Pro"},
+        {"device": "Vulkan0", "backend": "vulkan", "name": "Discrete GPU"},
+    ]
+    metal = devices_for_backend(installed, "metal")
+    assert len(metal) == 1
+    assert metal[0]["name"] == "Apple M5 Pro"
+    assert devices_for_backend(installed, "vulkan") == [installed[1]]
+    assert devices_for_backend(installed, "cpu") == []
+
+
 def test_metal_device_init_failed_detects_zombie_line():
     from kllm.accel import metal_device_init_failed, parse_devices
 

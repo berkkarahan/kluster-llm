@@ -723,6 +723,7 @@ def _list_gpus_payload() -> dict[str, Any]:
         "binary_version": listed.get("binary_version"),
         "unified_memory": listed.get("unified_memory", False),
         "backend_warning": listed.get("backend_warning"),
+        "installed_backends": listed.get("installed_backends", []),
         "gpus": gpus,
         "install_hint": native.install_recovery_command(),
     }

@@ -68,6 +68,17 @@
       </p>
     {/if}
 
+    {#if appStore.gpuBackendWarning}
+      <p class="mono text-[11px]" style="color: var(--warn, #b80)">
+        {appStore.gpuBackendWarning}
+      </p>
+    {/if}
+    {#if appStore.installedBackends.length > 0}
+      <p class="mono text-[10px]" style="color: var(--muted)">
+        Installed on this node: {appStore.installedBackends.join(', ')}
+      </p>
+    {/if}
+
     {#if appStore.gpus.length > 0}
       <div class="mono text-[11px]" style="color: var(--muted)">
         GPUs ({appStore.gpuBackend}) — heterogeneous shards OK
@@ -92,7 +103,7 @@
           </label>
         {/each}
       </div>
-    {:else}
+    {:else if !appStore.gpuBackendWarning}
       <p class="mono text-[11px]" style="color: var(--muted)">
         No local GPUs detected — inference will fall back to CPU layers.
       </p>
@@ -104,6 +115,10 @@
           Run: {appStore.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'}
         </p>
       {/if}
+    {:else}
+      <p class="mono text-[10px]" style="color: var(--muted)">
+        Run: {appStore.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'}
+      </p>
     {/if}
 
     <SliderField

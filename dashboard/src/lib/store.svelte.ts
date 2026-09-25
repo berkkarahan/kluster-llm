@@ -72,6 +72,8 @@ class AppStore {
   gpus = $state<GpuInfo[]>([]);
   gpuProbeError = $state('');
   gpuInstallHint = $state('');
+  gpuBackendWarning = $state('');
+  installedBackends = $state<AccelBackend[]>([]);
   gpuBackend = $state('cpu');
   probedBackend = $state('cpu');
   allowedBackends = $state<AccelBackend[]>([]);
@@ -647,6 +649,8 @@ class AppStore {
   private applyGpusPayload(data: Record<string, unknown>) {
     this.gpuProbeError = typeof data.error === 'string' ? data.error : '';
     this.gpuInstallHint = typeof data.install_hint === 'string' ? data.install_hint : '';
+    this.gpuBackendWarning =
+      typeof data.backend_warning === 'string' ? data.backend_warning : '';
     this.gpuBackend = typeof data.backend === 'string' ? data.backend : 'cpu';
     this.probedBackend =
       typeof data.probed_backend === 'string' ? data.probed_backend : this.gpuBackend;
@@ -654,15 +658,19 @@ class AppStore {
       ? (data.allowed_backends as unknown[]).filter(isAccelBackend)
       : [];
     this.allowedBackends = allowed;
+    const installed = Array.isArray(data.installed_backends)
+      ? (data.installed_backends as unknown[]).filter(isAccelBackend)
+      : [];
+    this.installedBackends = installed;
     const list = (data.gpus ?? []) as GpuInfo[];
     this.gpus = list;
-    // Prefer saved preference; else effective backend if allowed; else first allowed / probe.
-    if (this.accelBackend && allowed.includes(this.accelBackend)) {
+    // Prefer saved preference when installed; else effective backend from probe resolution.
+    if (this.accelBackend && installed.includes(this.accelBackend)) {
       /* keep */
-    } else if (isAccelBackend(this.gpuBackend) && allowed.includes(this.gpuBackend)) {
+    } else if (isAccelBackend(this.gpuBackend) && installed.includes(this.gpuBackend)) {
       this.accelBackend = this.gpuBackend;
-    } else if (allowed.length > 0) {
-      this.accelBackend = allowed[0];
+    } else if (installed.length > 0) {
+      this.accelBackend = installed[0];
     } else {
       this.accelBackend = null;
     }
@@ -818,6 +826,10 @@ class AppStore {
     if (this.device !== 'gpu' || this.gpus.length > 0) return;
     if (this.gpuProbeError) {
       pushToast('warn', `${this.gpuProbeError}. Run: ${this.recoveryCommand()}`);
+      return;
+    }
+    if (this.gpuBackendWarning) {
+      pushToast('warn', `${this.gpuBackendWarning}. Run: ${this.recoveryCommand()}`);
       return;
     }
     pushToast('warn', 'No local GPUs detected — inference will fall back to CPU layers.');

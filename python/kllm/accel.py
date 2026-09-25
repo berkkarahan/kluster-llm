@@ -90,6 +90,75 @@ def requested_backend() -> str | None:
     return accel_backend_override() or accel_backend_from_config()
 
 
+def platform_preferred_backend(
+    supported: Sequence[str],
+    *,
+    platform: str | None = None,
+) -> str:
+    """Platform default when auto-selecting among installed GPU backends."""
+    plat = platform or sys.platform
+    if plat == "darwin":
+        return "metal" if "metal" in supported else (supported[0] if supported else "cpu")
+    if "cuda" in supported:
+        return "cuda"
+    if plat.startswith("linux") and "rocm" in supported:
+        return "rocm"
+    if "vulkan" in supported:
+        return "vulkan"
+    return supported[0] if supported else "cpu"
+
+
+def resolve_effective_backend(
+    *,
+    probed: str,
+    supported: Sequence[str],
+    requested: str | None,
+    platform: str | None = None,
+) -> tuple[str, str | None]:
+    """Pick runtime backend from hardware probe + installed binary capabilities.
+
+    Config/env ``requested`` is honored only when that backend is actually installed.
+    Otherwise fall back to probed hardware (e.g. metal on any Apple Silicon Mac),
+    then platform preference, then any installed backend.
+    """
+    probed_n = str(probed or "cpu").strip().lower()
+    supported_set = frozenset(str(b).strip().lower() for b in supported)
+    preferred = platform_preferred_backend(supported, platform=platform)
+
+    def _pick(*candidates: str) -> str | None:
+        for candidate in candidates:
+            c = str(candidate or "").strip().lower()
+            if c and c in supported_set:
+                return c
+        return None
+
+    if requested:
+        req = str(requested).strip().lower()
+        if req in supported_set:
+            return req, None
+        fallback = _pick(probed_n, preferred, *supported)
+        if fallback:
+            return fallback, (
+                f"requested {req} is not installed on this binary; "
+                f"using {fallback} ({len(supported)} backend(s) available)"
+            )
+        return "cpu", f"requested {req} is not installed; no GPU backends available"
+
+    fallback = _pick(probed_n, preferred, *supported)
+    return (fallback or "cpu"), None
+
+
+def devices_for_backend(
+    installed: Sequence[dict[str, Any]],
+    backend: str,
+) -> list[dict[str, Any]]:
+    """Filter ``--list-devices`` entries for the resolved effective backend."""
+    b = str(backend or "cpu").strip().lower()
+    if b == "cpu":
+        return []
+    return [dict(d) for d in installed if str(d.get("backend") or "").lower() == b]
+
+
 def parse_devices(output: str) -> list[dict[str, Any]]:
     import re
     result = []

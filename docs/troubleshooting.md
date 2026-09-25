@@ -144,6 +144,23 @@ uv run kllm join --key '<key>' --master <windows-lan-ip>
 
 Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Confirm locally: `python scripts/install.py --check` and `vendor/bin/llama-server --list-devices` lists both `MTL`/`Metal` and `Vulkan` devices. `--prefer-prebuilt` installs Metal-only GitHub packs (no Vulkan).
 
+### macOS: "error: Vulkan build deps still missing after install"
+
+**Cause:** The installer's gate checks everything llama.cpp's cmake configure needs: **Vulkan headers**, a **MoltenVK ICD manifest**, **`glslc`**, and the **`SPIRV-Headers` CMake config**. Three known gotchas:
+
+1. Homebrew puts MoltenVK's ICD manifest at `$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json`, **not** `share/vulkan/icd.d`. A check that only looks at `share/` fails even with everything installed.
+2. `glslc` comes from the separate **`shaderc`** formula — it is *not* pulled in by `molten-vk`, `vulkan-headers`, or `vulkan-loader`.
+3. llama.cpp also runs `find_package(SPIRV-Headers CONFIG REQUIRED)`, satisfied by the **`spirv-headers`** formula (`share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake`). Missing it fails with `Could not find a package configuration file provided by "SPIRV-Headers"`.
+
+**Solution:**
+
+```bash
+brew install molten-vk vulkan-headers vulkan-loader shaderc spirv-headers
+python3 scripts/install.py --llama-only --from-source --force
+```
+
+Confirm: `which glslc` (→ `/opt/homebrew/bin/glslc`), `ls $(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json`, `ls $(brew --prefix)/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake`, then `python3 scripts/install.py --check`. Alternatively set `VULKAN_SDK` to a LunarG SDK install. The error lists exactly which pieces are still missing.
+
 ### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
 
 **Cause:** Master and worker are on different llama.cpp builds. RPC HELLO (`RPC_CMD_HELLO`) is unversioned across builds; a Windows `v0.5.0` `llama-server` talking to a Mac HEAD/`git pull` `rpc-server` closes the socket.

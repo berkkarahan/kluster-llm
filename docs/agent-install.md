@@ -117,7 +117,8 @@ python3 scripts/install.py --backend cuda --from-source
 1. Ensures **git** (and other toolchains unless `--skip-toolchains`).  
 2. Ensures **uv**, creates/repairs **`.venv`** (Python from **`.python-version`**), runs **`uv sync`**, installs **Rust** if missing, builds **`kllm`** with maturin, installs wheel + pytest.  
 3. Ensures **Node/npm**, runs `dashboard` `npm install` + `npm run build`.  
-4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default (provisions MoltenVK via Homebrew); otherwise prefers GitHub prebuilt assets, with cmake source fallback; stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.  
+4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
+   The macOS Homebrew dependencies are `molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`. The Vulkan gate checks `glslc` (provided by `shaderc`) and the `SPIRV-Headers` CMake config alongside Vulkan headers and the MoltenVK ICD manifest.
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).

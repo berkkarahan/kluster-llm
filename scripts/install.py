@@ -672,34 +672,94 @@ def _brew_prefix() -> Path | None:
     return prefix if prefix.is_dir() else None
 
 
+# Homebrew installs MoltenVK's ICD manifest under ``etc/vulkan/icd.d`` (the
+# loader is built with CMAKE_INSTALL_SYSCONFDIR set to the brew ``etc`` dir),
+# while LunarG SDKs and some formula revisions use ``share/vulkan/icd.d``.
+# Search both.
+_VULKAN_ICD_SUBDIRS = (
+    Path("etc") / "vulkan" / "icd.d",
+    Path("share") / "vulkan" / "icd.d",
+)
+
+
 def _macos_moltenvk_icd(prefix: Path | None = None) -> Path | None:
     prefix = prefix or _brew_prefix()
     if not prefix:
         return None
-    icd = prefix / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json"
-    return icd if icd.is_file() else None
+    for sub in _VULKAN_ICD_SUBDIRS:
+        icd = prefix / sub / "MoltenVK_icd.json"
+        if icd.is_file():
+            return icd
+    return None
 
 
-def _macos_vulkan_ready() -> bool:
-    """True when MoltenVK ICD + Vulkan headers are findable for a source build."""
+def _spirv_headers_config(root: Path) -> Path | None:
+    for sub in (
+        Path("share") / "cmake" / "SPIRV-Headers",
+        Path("lib") / "cmake" / "SPIRV-Headers",
+    ):
+        cfg = root / sub / "SPIRV-HeadersConfig.cmake"
+        if cfg.is_file():
+            return cfg
+    return None
+
+
+def _macos_vulkan_missing() -> list[str]:
+    """Names the pieces a ``GGML_VULKAN=ON`` cmake configure still needs.
+
+    llama.cpp requires ``find_package(Vulkan COMPONENTS glslc REQUIRED)`` and
+    ``find_package(SPIRV-Headers CONFIG REQUIRED)``, plus Vulkan headers and a
+    MoltenVK/SDK ICD manifest. Homebrew splits these across formulae:
+    ``shaderc`` provides glslc, ``spirv-headers`` the SPIRV-Headers config.
+    """
+    missing: list[str] = []
+    if not _which("glslc"):
+        missing.append("glslc (brew: shaderc)")
+
+    roots: list[Path] = []
     sdk = os.environ.get("VULKAN_SDK", "").strip()
     if sdk:
         sdk_path = Path(sdk)
-        if (sdk_path / "macOS" / "share" / "vulkan" / "icd.d").is_dir() or (
-            sdk_path / "share" / "vulkan" / "icd.d"
-        ).is_dir():
-            return True
+        roots += [sdk_path / "macOS", sdk_path]
     prefix = _brew_prefix()
-    if not prefix:
-        return False
-    headers = prefix / "include" / "vulkan" / "vulkan.h"
-    return _macos_moltenvk_icd(prefix) is not None and headers.is_file()
+    if prefix:
+        roots.append(prefix)
+    if not roots:
+        missing.append("Homebrew prefix or VULKAN_SDK")
+        return missing
+
+    if not any((root / "include" / "vulkan" / "vulkan.h").is_file() for root in roots):
+        missing.append("Vulkan headers (brew: vulkan-headers)")
+    if not any(
+        any((root / sub / "MoltenVK_icd.json").is_file() for sub in _VULKAN_ICD_SUBDIRS)
+        for root in roots
+    ):
+        missing.append("MoltenVK ICD (brew: molten-vk)")
+    if not any(_spirv_headers_config(root) for root in roots):
+        missing.append("SPIRV-Headers CMake config (brew: spirv-headers)")
+    return missing
+
+
+def _macos_vulkan_ready() -> bool:
+    """True when all Vulkan source-build deps are provisioned."""
+    return not _macos_vulkan_missing()
+
+
+# Homebrew formulae that satisfy every check above.
+_BREW_VULKAN_PACKAGES = (
+    "molten-vk",
+    "vulkan-headers",
+    "vulkan-loader",
+    "shaderc",
+    "spirv-headers",
+)
 
 
 def ensure_vulkan_macos() -> dict[str, str]:
-    """Install MoltenVK via Homebrew when needed; return cmake/probe env extras.
+    """Install MoltenVK + glslc + SPIRV-Headers via Homebrew when needed.
 
-    Raises SystemExit when multi-backend Vulkan deps cannot be provisioned.
+    Returns cmake/probe env extras. Raises SystemExit when the multi-backend
+    Vulkan deps cannot be provisioned.
     """
     if not _is_macos():
         return {}
@@ -707,17 +767,20 @@ def ensure_vulkan_macos() -> dict[str, str]:
     if not _macos_vulkan_ready():
         if not brew and not os.environ.get("VULKAN_SDK", "").strip():
             raise SystemExit(
-                "error: macOS Metal+Vulkan builds need MoltenVK. "
+                "error: macOS Metal+Vulkan builds need Homebrew (or VULKAN_SDK). "
                 "Install Homebrew (https://brew.sh) and re-run, or install the LunarG "
                 "Vulkan SDK and set VULKAN_SDK."
             )
         if brew:
-            print("Installing MoltenVK / Vulkan headers via Homebrew…")
-            _run([brew, "install", "molten-vk", "vulkan-headers", "vulkan-loader"])
-        if not _macos_vulkan_ready():
+            print("Installing Vulkan build deps via Homebrew...")
+            _run([brew, "install", *_BREW_VULKAN_PACKAGES])
+        missing = _macos_vulkan_missing()
+        if missing:
             raise SystemExit(
-                "error: MoltenVK / Vulkan headers still missing after install. "
-                "Install molten-vk vulkan-headers vulkan-loader (brew) or set VULKAN_SDK."
+                "error: Vulkan build deps still missing after install: "
+                + ", ".join(missing)
+                + ". Install " + " ".join(_BREW_VULKAN_PACKAGES)
+                + " (brew) or set VULKAN_SDK to a LunarG Vulkan SDK."
             )
 
     env: dict[str, str] = {}

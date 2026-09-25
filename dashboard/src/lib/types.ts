@@ -69,33 +69,6 @@ export type ModelSettingsDoc = {
   updated_at: string | null;
 };
 
-export type ReceiveProgress = DownloadProgress & {
-  phase?: string;
-  resumed_bytes?: number;
-  verified_bytes?: number;
-  manifest_sha256?: string;
-  piece_size?: number;
-};
-
-export type DistributeWorkerProgress = {
-  node_id?: string | null;
-  host: string;
-  phase: string;
-  bytes: number;
-  total: number | null;
-  pct: number;
-  error?: string | null;
-};
-
-export type DistributeProgress = {
-  filename: string;
-  phase?: string;
-  bytes?: number;
-  total?: number | null;
-  pct: number;
-  workers: DistributeWorkerProgress[];
-};
-
 export type UpdateWorkerProgress = {
   node_id?: string | null;
   host?: string | null;
@@ -157,14 +130,10 @@ export type Status = {
   apply_warning?: string | null;
   /** Live GGUF download; null/absent when idle. */
   download?: DownloadProgress | null;
-  /** Live multi-worker distribute on master; null/absent when idle. */
-  distribute?: DistributeProgress | null;
   /** Live cluster software update on master; null/absent when idle. */
   update?: UpdateProgress | null;
   /** Local checkout identity (git HEAD + llama-release pin). */
   software?: SoftwareIdentity | null;
-  /** Live receive on worker; null/absent when idle. */
-  receive?: ReceiveProgress | null;
   rpc_cache?: { enabled: boolean; path: string; exists: boolean; persistent: boolean };
 };
 

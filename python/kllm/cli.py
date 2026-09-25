@@ -932,77 +932,12 @@ def model_download(
         time.sleep(0.4)
 
 
-@model_app.command("distribute")
-def model_distribute(
-    name: str = typer.Argument(..., help="Local model name or path"),
-    port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
-) -> None:
-    """Copy a local model to joined workers (LAN pull tree)."""
-    result: dict = {"done": False, "status_code": 0, "data": None, "text": ""}
-
-    def _post() -> None:
-        with _client(port) as c:
-            r = c.post("/v1/models/distribute", json={"name": name}, timeout=None)
-            result["status_code"] = r.status_code
-            result["text"] = r.text
-            try:
-                result["data"] = r.json()
-            except Exception:
-                result["data"] = None
-            result["done"] = True
-
-    thread = threading.Thread(target=_post, daemon=True)
-    thread.start()
-    last_line = ""
-    with _client(port) as c:
-        while thread.is_alive() or not result["done"]:
-            try:
-                st = c.get("/v1/status", timeout=2.0).json()
-                dist = st.get("distribute")
-                if dist:
-                    phase = dist.get("phase") or ""
-                    pct = int(dist.get("pct") or 0)
-                    workers = dist.get("workers") or []
-                    if phase == "hashing" and not workers:
-                        line = f"hashing {pct}%"
-                    else:
-                        parts = []
-                        for w in workers:
-                            host = w.get("host") or w.get("node_id") or "?"
-                            wp = int(w.get("pct") or 0)
-                            wphase = w.get("phase") or ""
-                            parts.append(f"{host}:{wphase} {wp}%")
-                        line = f"[{pct}%] " + (" | ".join(parts) if parts else phase)
-                    if line != last_line:
-                        console.print(f"[dim]{line}[/dim]")
-                        last_line = line
-            except Exception:
-                pass
-            if result["done"]:
-                break
-            thread.join(timeout=0.4)
-
-    if result["status_code"] >= 400:
-        console.print(f"[red]{result['text']}[/red]")
-        raise typer.Exit(1)
-    data = result["data"] or {}
-    for row in data.get("results") or []:
-        if row.get("ok"):
-            skipped = (row.get("result") or {}).get("skipped")
-            tag = "skipped" if skipped else "ok"
-            console.print(f"  [green]{tag}[/green] {row.get('host')}")
-        else:
-            console.print(f"  [red]fail[/red] {row.get('host')}: {row.get('error')}")
-    if any(not row.get("ok") for row in (data.get("results") or [])):
-        raise typer.Exit(1)
-
-
 @model_app.command("delete")
 def model_delete(
     name: str = typer.Argument(..., help="Local model name or path"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
 ) -> None:
-    """Delete a local model and remove copies from joined workers."""
+    """Delete a local model from the master ``~/.kllm/models`` store."""
     with _client(port) as c:
         r = c.post("/v1/models/delete", json={"name": name}, timeout=None)
         if r.status_code >= 400:
@@ -1010,11 +945,6 @@ def model_delete(
             raise typer.Exit(1)
         data = r.json()
     console.print(f"[green]Deleted[/green] {data.get('name') or name}")
-    for row in data.get("results") or []:
-        if row.get("ok"):
-            console.print(f"  [green]ok[/green] {row.get('host')}")
-        else:
-            console.print(f"  [red]fail[/red] {row.get('host')}: {row.get('error')}")
 
 
 @cluster_app.command("update")

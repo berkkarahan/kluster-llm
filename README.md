@@ -69,9 +69,7 @@ kllm model download 'org/repo:Q4_K_M'
 # Worker (another machine — run install.py there too)
 kllm join --key '<join-key-from-master>'
 
-# Master
-kllm model distribute model.Q4_K_M.gguf
-# LAN pull tree: finished workers seed others
+# Master — GGUF stays on the master; workers only run rpc-server
 kllm run --model model.Q4_K_M.gguf
 kllm ui
 # optional: coding harness against the cluster API
@@ -188,7 +186,7 @@ Halda scheduler automatically distributes layers across Mac CPU+GPU and Windows 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--split-mode layer` | enforced | Pipeline parallelism — prevents precision drift between Apple Silicon and AMD |
-| `--tensor-split` | auto-calculated | Ratio of layers on Mac vs Windows (see [docs/layer-split-calculator.md](docs/layer-split-calculator.md)) |
+| `--tensor-split` | auto-calculated | Layer counts from VRAM-aware placement (see [docs/layer-split-calculator.md](docs/layer-split-calculator.md)) |
 | `--cache-type-k q8_0` | enforced | 8-bit KV cache key quantization — halves KV memory footprint |
 | `--cache-type-v q8_0` | enforced | 8-bit KV cache value quantization — halves KV memory footprint |
 | `-ngl` | auto-calculated | GPU layers. Excess layers spill to system RAM + CPU |

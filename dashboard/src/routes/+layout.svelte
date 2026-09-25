@@ -57,11 +57,6 @@
       {:else if appStore.loadProgress?.phase === 'ready'}
         <span class="chip chip-ok">load ✓</span>
       {/if}
-      {#if appStore.status?.distribute}
-        <span class="chip chip-ok">xfer {Math.round(appStore.status.distribute.pct)}%</span>
-      {:else if appStore.status?.receive}
-        <span class="chip chip-ok">xfer {Math.round(appStore.status.receive.pct)}%</span>
-      {/if}
       {#if appStore.status?.update && appStore.status.update.phase && appStore.status.update.phase !== 'done'}
         <span class="chip chip-warn">upd {Math.round(appStore.status.update.pct ?? 0)}%</span>
       {/if}

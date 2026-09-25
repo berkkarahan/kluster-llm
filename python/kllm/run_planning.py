@@ -362,7 +362,14 @@ def build_master_launch(
         "ctx_checkpoints": auto_launch_i32(settings["checkpoints"]),
         "cache_ram": str(settings["cache_ram"]),
         "port": infer_port,
-        "rpc_servers": plan_result.get("rpc_endpoints", rpc_servers),
+        # Prefer plan rpc_endpoints only — never fall back to every joined worker
+        # (empty list means local-only; omit --rpc). Legacy callers may still pass
+        # rpc_servers when the plan predates the key.
+        "rpc_servers": (
+            list(plan_result["rpc_endpoints"])
+            if "rpc_endpoints" in plan_result
+            else list(rpc_servers)
+        ),
         "repo_root": repo_root,
         "extra_args": merged_extra + ["--flash-attn", settings["flash_attention"], "--fit", "off"],
         "mmproj_auto": body.vision and not body.mmproj,

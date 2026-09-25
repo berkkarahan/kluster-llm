@@ -970,65 +970,9 @@ class AppStore {
     }
   }
 
-  async distributeModel(name?: string) {
-    const model = (name ?? this.selectedModel).trim();
-    if (!model) return;
-    this.selectedModel = model;
-    this.busy = '/v1/models/distribute';
-    try {
-      const r = await fetch('/v1/models/distribute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: model })
-      });
-      const text = await r.text();
-      let data: unknown = null;
-      try {
-        data = text ? JSON.parse(text) : null;
-      } catch {
-        data = text;
-      }
-      if (!r.ok) {
-        const msg = apiErrorMessage(data, text, r.status, 'distribute');
-        pushToast('danger', msg);
-        throw new Error(msg);
-      }
-      const body = data as { results?: Array<Record<string, unknown>> };
-      const results = Array.isArray(body?.results) ? body.results : [];
-      const failed = results.filter((row) => !row.ok);
-      if (failed.length) {
-        const msg = failed
-          .map((row) => `fail ${String(row.host ?? '?')}: ${String(row.error ?? 'error')}`)
-          .join(' | ');
-        pushToast('danger', msg);
-        throw new Error(msg);
-      }
-      if (
-        results.length > 0 &&
-        results.every((row) => {
-          const result = row.result;
-          return (
-            typeof result === 'object' &&
-            result !== null &&
-            (result as { skipped?: boolean }).skipped === true
-          );
-        })
-      ) {
-        pushToast('ok', 'distribute skipped (already on workers)');
-      } else {
-        pushToast('ok', 'distribute ok');
-      }
-      await this.refresh();
-      await this.loadModels();
-      return data;
-    } finally {
-      this.busy = '';
-    }
-  }
-
   async deleteModel(name: string) {
     if (!name) return;
-    if (!confirm(`Delete ${name} locally and on workers?`)) return;
+    if (!confirm(`Delete ${name} from this node's model store?`)) return;
     await this.post('/v1/models/delete', { name });
     if (this.selectedModel === name) this.selectedModel = this.models[0]?.id ?? '';
   }

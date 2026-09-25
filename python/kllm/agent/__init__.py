@@ -45,7 +45,6 @@ from kllm.run_planning import (
     execute_plan,
     member_rpc_host,
     merge_and_sanitize_extra,
-    rpc_server_endpoints,
     validate_vision_for_run,
 )
 from kllm.run_settings import PlanBody, RunBody
@@ -745,26 +744,8 @@ class HfTokenBody(BaseModel):
     token: str
 
 
-class DistributeBody(BaseModel):
-    name: str
-
-
 class DeleteBody(BaseModel):
     name: str
-
-
-class PullSource(BaseModel):
-    host: str
-    port: int
-
-
-class PullBody(BaseModel):
-    filename: str
-    sha256: str
-    size: int
-    source: PullSource
-    manifest: dict[str, Any] | None = None
-    sources: list[PullSource] | None = None
 
 
 class LlamaSetupBody(BaseModel):
@@ -969,31 +950,6 @@ def load_progress_endpoint() -> dict[str, Any]:
     return load_progress.sample(STATE.infer_port)
 
 
-@app.post("/v1/models/distribute")
-def distribute_model(body: DistributeBody) -> dict[str, Any]:
-    if STATE.role != "master":
-        raise HTTPException(400, "distribute requires master role")
-    if not STATE.join_key:
-        raise HTTPException(503, "master has no join key")
-    try:
-        path = model_ops.resolve_local_model(body.name)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    workers = [m for m in STATE.members.values() if m.get("role") == "worker"]
-    try:
-        results = model_ops.distribute_to_workers(
-            path,
-            workers,
-            STATE.join_key,
-            default_port=STATE.control_port,
-            master_host=_master_lan_host(),
-            master_port=STATE.control_port,
-        )
-    except model_ops.DistributeInProgressError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "results": results}
-
-
 @app.post("/v1/cluster/update")
 def cluster_update_endpoint(
     x_kllm_key: str | None = Header(default=None),
@@ -1074,24 +1030,7 @@ def delete_model(body: DeleteBody) -> dict[str, Any]:
         deleted = model_ops.delete_local_model(path.name)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(400 if isinstance(exc, ValueError) else 404, str(exc)) from exc
-
-    results: list[dict[str, Any]] = []
-    if STATE.role == "master" and STATE.join_key:
-        for m in STATE.members.values():
-            if m.get("role") != "worker":
-                continue
-            ctrl_host = m.get("lan_host") or m.get("host")
-            try:
-                result = model_ops.delete_model_on_worker(
-                    host=ctrl_host,
-                    port=m.get("control_port", STATE.control_port),
-                    join_key=STATE.join_key,
-                    filename=deleted.name,
-                )
-                results.append({"host": ctrl_host, "ok": True, "result": result})
-            except Exception as exc:
-                results.append({"host": ctrl_host, "ok": False, "error": str(exc)})
-    return {"ok": True, "name": deleted.name, "path": str(deleted), "results": results}
+    return {"ok": True, "name": deleted.name, "path": str(deleted), "results": []}
 
 
 @app.post("/v1/chat/completions")
@@ -1198,8 +1137,6 @@ def status() -> dict[str, Any]:
         "last_plan": membership_mod.public_last_plan(STATE),
         "model_name": STATE.model_name,
         "download": model_ops.get_download_progress(),
-        "distribute": model_ops.get_distribute_progress(),
-        "receive": model_ops.get_receive_progress(),
         "rpc_cache": rpc_cache.status(),
         "update": cluster_update.get_update_progress(),
         "software": cluster_update.software_identity(),
@@ -1933,136 +1870,6 @@ def get_logs(
     return _logs_snapshot(n, node, source)
 
 
-@app.get("/v1/models/manifest")
-def get_model_manifest(x_kllm_filename: str = Header(...), x_kllm_key: str | None = Header(default=None)):
-    if not STATE.join_key or x_kllm_key != STATE.join_key:
-        raise HTTPException(401, "invalid join key")
-    path = models_dir() / Path(x_kllm_filename).name
-    if not path.is_file():
-        raise HTTPException(404, "model not found")
-    return model_ops.manifest_for(path)
-
-
-@app.get("/v1/models/blob")
-def get_model_blob(
-    request: Request,
-    x_kllm_key: str | None = Header(default=None),
-    x_kllm_filename: str = Header(...),
-):
-    """Seed endpoint: Range-capable GGUF bytes (join-key auth)."""
-    if STATE.join_key and x_kllm_key != STATE.join_key:
-        raise HTTPException(401, "invalid join key")
-    filename = Path(x_kllm_filename).name
-    dest = models_dir() / filename
-    if not dest.is_file():
-        raise HTTPException(404, f"model not found: {filename}")
-    file_size = dest.stat().st_size
-    try:
-        start, end, partial = model_ops.parse_bytes_range(
-            request.headers.get("range"), file_size
-        )
-    except model_ops.RangeUnsatisfiable:
-        raise HTTPException(
-            416,
-            "range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        ) from None
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(end - start),
-        "X-Kllm-Filename": filename,
-    }
-    if partial:
-        headers["Content-Range"] = f"bytes {start}-{end - 1}/{file_size}"
-        status = 206
-    else:
-        status = 200
-    return StreamingResponse(
-        iterate_in_threadpool(model_ops.iter_file_range(dest, start, end)),
-        status_code=status,
-        media_type="application/octet-stream",
-        headers=headers,
-    )
-
-
-@app.post("/v1/models/pull")
-def pull_model(
-    body: PullBody,
-    x_kllm_key: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """Worker: pull a GGUF from one assigned seed via Range GETs."""
-    if STATE.join_key and x_kllm_key != STATE.join_key:
-        raise HTTPException(401, "invalid join key")
-    filename = Path(body.filename).name
-    dest = models_dir() / filename
-    expected = (body.sha256 or "").lower()
-    if dest.is_file():
-        meta = model_ops.local_model_meta(dest)
-        if (
-            int(meta.get("size_bytes") or 0) == body.size
-            and (meta.get("sha256") or "").lower() == expected
-        ):
-            return {
-                "ok": True,
-                "skipped": True,
-                "path": str(dest),
-                "sha256": expected,
-            }
-    try:
-        return model_ops.pull_from_seed(
-            filename=filename,
-            size=body.size,
-            digest=expected,
-            source_host=body.source.host,
-            source_port=body.source.port,
-            join_key=x_kllm_key or "",
-            manifest=body.manifest,
-            sources=[source.model_dump() for source in body.sources or []],
-        )
-    except model_ops.ReceiveInProgressError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-
-@app.get("/v1/models/file")
-def get_model_file_meta(
-    x_kllm_key: str | None = Header(default=None),
-    x_kllm_filename: str = Header(...),
-) -> dict[str, Any]:
-    """Probe whether a model exists locally (size + sidecar sha256)."""
-    if STATE.join_key and x_kllm_key != STATE.join_key:
-        raise HTTPException(401, "invalid join key")
-    filename = Path(x_kllm_filename).name
-    dest = models_dir() / filename
-    if not dest.is_file():
-        raise HTTPException(404, f"model not found: {filename}")
-    meta = model_ops.local_model_meta(dest)
-    meta["path"] = str(dest)
-    return meta
-
-
-@app.delete("/v1/models/file")
-def delete_model_file(
-    x_kllm_key: str | None = Header(default=None),
-    x_kllm_filename: str = Header(...),
-) -> dict[str, Any]:
-    """Worker endpoint: delete a received model file (authenticated with join key)."""
-    if STATE.join_key and x_kllm_key != STATE.join_key:
-        raise HTTPException(401, "invalid join key")
-    filename = Path(x_kllm_filename).name
-    dest = models_dir() / filename
-    if not dest.is_file():
-        raise HTTPException(404, f"model not found: {filename}")
-    try:
-        deleted = model_ops.delete_local_model(filename)
-    except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(400 if isinstance(exc, ValueError) else 404, str(exc)) from exc
-    return {"ok": True, "path": str(deleted), "name": deleted.name}
-
-
 def _maybe_remember(body: PlanBody | RunBody) -> None:
     if not body.remember:
         return
@@ -2154,7 +1961,7 @@ def run(body: RunBody) -> dict[str, Any]:
             plan_result.get("hint") or "model and context exceed cluster budget (overflow)",
         )
     path = model_ops.resolve_local_model(body.model)
-    rpc_servers = plan_result.get("rpc_endpoints", rpc_server_endpoints(STATE.members))
+    rpc_servers = list(plan_result.get("rpc_endpoints") or [])
     ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
     if STATE.process_pid:

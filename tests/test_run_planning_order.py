@@ -69,12 +69,13 @@ def test_build_master_launch_rpc_aligns_with_worker_order():
         "tensor_split_csv": "0.2000,0.3000,0.5000",
         "ngl": 32,
         "context_effective": 4096,
+        "rpc_endpoints": ["10.0.0.2:50052", "10.0.0.3:50053"],
     }
     launch = build_master_launch(
         body,
         plan,
         model_path=Path("/tmp/toy.gguf"),
-        rpc_servers=rpc_server_endpoints(members),
+        rpc_servers=[],  # must not override plan rpc_endpoints
         infer_port=8080,
         repo_root=None,
         gpu_env={},
@@ -83,6 +84,35 @@ def test_build_master_launch_rpc_aligns_with_worker_order():
     assert launch["rpc_servers"] == ["10.0.0.2:50052", "10.0.0.3:50053"]
     assert launch["tensor_split"] == "0.2000,0.3000,0.5000"
     assert len(launch["tensor_split"].split(",")) == len(ordered_members(members))
+    assert launch["micro_batch"] == 128
+    assert isinstance(launch["micro_batch"], int)
+
+
+def test_build_master_launch_empty_rpc_endpoints_skips_workers():
+    body = RunBody(model="toy.gguf")
+    plan = {
+        "tensor_split_csv": "32",
+        "ngl": 32,
+        "context_effective": 4096,
+        "rpc_endpoints": [],
+    }
+    launch = build_master_launch(
+        body,
+        plan,
+        model_path=Path("/tmp/toy.gguf"),
+        rpc_servers=rpc_server_endpoints(
+            {
+                "m": {"node_id": "m", "role": "master", "host": "10.0.0.1"},
+                "w1": {"node_id": "w1", "role": "worker", "host": "10.0.0.2", "rpc_port": 50052},
+            }
+        ),
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
+    assert launch["rpc_servers"] == []
+    assert launch["tensor_split"] == "32"
     assert launch["micro_batch"] == 128
     assert isinstance(launch["micro_batch"], int)
 

@@ -11,6 +11,10 @@ Usage:
   python scripts/install.py --check
   python scripts/install.py --llama-only --from-source --force
 
+On macOS (non-CPU), the default llama.cpp install is a Metal+Vulkan source
+build (MoltenVK via Homebrew). Use ``--prefer-prebuilt`` for Metal-only
+GitHub packs, or ``--backend cpu`` for a CPU-only build.
+
 This is the one-shot installer. ``scripts/build.py`` remains a thinner
 CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
 """
@@ -394,9 +398,40 @@ def read_install_stamp() -> dict[str, str]:
     return out
 
 
+def parse_stamp_backends(raw: str | None) -> list[str]:
+    """Split stamp backend values such as ``metal+vulkan`` or ``metal,vulkan``."""
+    if not raw:
+        return []
+    return [p.strip().lower() for p in re.split(r"[+,]", raw.strip()) if p.strip()]
+
+
+def stamp_backend_for_install(backend: str) -> str:
+    """Stamp string for an install flavor (macOS multi → ``metal+vulkan``)."""
+    if _is_macos() and backend != "cpu":
+        if backend in ("cuda", "rocm"):
+            raise SystemExit(f"error: {backend} is not supported on macOS")
+        return "metal+vulkan"
+    return backend
+
+
+def backends_satisfied(requested: str | None, actual: list[str]) -> bool:
+    """True when every stamped backend appears in probed ``--list-devices`` backends."""
+    needed = parse_stamp_backends(requested)
+    if not needed:
+        return False
+    actual_set = frozenset(str(b).strip().lower() for b in actual)
+    return all(b in actual_set for b in needed)
+
+
 def stamp_matches(tag: str, backend: str | None = None) -> bool:
     stamp = read_install_stamp()
-    return stamp.get("tag") == tag and (backend is None or stamp.get("backend") == backend)
+    if stamp.get("tag") != tag:
+        return False
+    if backend is None:
+        return True
+    return frozenset(parse_stamp_backends(stamp.get("backend"))) == frozenset(
+        parse_stamp_backends(backend)
+    )
 
 
 def parse_list_devices_backends(text: str) -> list[str]:
@@ -432,14 +467,20 @@ def llama_install_status(tag: str | None = None) -> dict[str, Any]:
                 actual_backends = ["cpu"]
         except (OSError, subprocess.SubprocessError):
             pass
+    requested = stamp.get("backend")
     return {
         "pin": pin,
         "stamp": stamp.get("tag"),
         "llama_server": str(llama) if llama else None,
         "rpc_server": str(rpc) if rpc else None,
-        "requested_backend": stamp.get("backend"),
+        "requested_backend": requested,
         "actual_backends": actual_backends,
-        "ok": bool(llama and rpc and stamp.get("tag") == pin and stamp.get("backend") in actual_backends),
+        "ok": bool(
+            llama
+            and rpc
+            and stamp.get("tag") == pin
+            and backends_satisfied(requested, actual_backends)
+        ),
     }
 
 
@@ -620,6 +661,84 @@ def ensure_cmake() -> bool:
     return bool(_which("cmake"))
 
 
+def _brew_prefix() -> Path | None:
+    brew = _which("brew")
+    if not brew:
+        return None
+    result = subprocess.run([brew, "--prefix"], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return None
+    prefix = Path(result.stdout.strip())
+    return prefix if prefix.is_dir() else None
+
+
+def _macos_moltenvk_icd(prefix: Path | None = None) -> Path | None:
+    prefix = prefix or _brew_prefix()
+    if not prefix:
+        return None
+    icd = prefix / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json"
+    return icd if icd.is_file() else None
+
+
+def _macos_vulkan_ready() -> bool:
+    """True when MoltenVK ICD + Vulkan headers are findable for a source build."""
+    sdk = os.environ.get("VULKAN_SDK", "").strip()
+    if sdk:
+        sdk_path = Path(sdk)
+        if (sdk_path / "macOS" / "share" / "vulkan" / "icd.d").is_dir() or (
+            sdk_path / "share" / "vulkan" / "icd.d"
+        ).is_dir():
+            return True
+    prefix = _brew_prefix()
+    if not prefix:
+        return False
+    headers = prefix / "include" / "vulkan" / "vulkan.h"
+    return _macos_moltenvk_icd(prefix) is not None and headers.is_file()
+
+
+def ensure_vulkan_macos() -> dict[str, str]:
+    """Install MoltenVK via Homebrew when needed; return cmake/probe env extras.
+
+    Raises SystemExit when multi-backend Vulkan deps cannot be provisioned.
+    """
+    if not _is_macos():
+        return {}
+    brew = _which("brew")
+    if not _macos_vulkan_ready():
+        if not brew and not os.environ.get("VULKAN_SDK", "").strip():
+            raise SystemExit(
+                "error: macOS Metal+Vulkan builds need MoltenVK. "
+                "Install Homebrew (https://brew.sh) and re-run, or install the LunarG "
+                "Vulkan SDK and set VULKAN_SDK."
+            )
+        if brew:
+            print("Installing MoltenVK / Vulkan headers via Homebrew…")
+            _run([brew, "install", "molten-vk", "vulkan-headers", "vulkan-loader"])
+        if not _macos_vulkan_ready():
+            raise SystemExit(
+                "error: MoltenVK / Vulkan headers still missing after install. "
+                "Install molten-vk vulkan-headers vulkan-loader (brew) or set VULKAN_SDK."
+            )
+
+    env: dict[str, str] = {}
+    prefix = _brew_prefix()
+    paths: list[str] = []
+    if prefix:
+        paths.append(str(prefix))
+        icd = _macos_moltenvk_icd(prefix)
+        if icd:
+            env["VK_ICD_FILENAMES"] = str(icd)
+    sdk = os.environ.get("VULKAN_SDK", "").strip()
+    if sdk:
+        paths.append(sdk)
+        env["VULKAN_SDK"] = sdk
+    if paths:
+        existing = os.environ.get("CMAKE_PREFIX_PATH", "")
+        merged = os.pathsep.join([*paths, existing] if existing else paths)
+        env["CMAKE_PREFIX_PATH"] = merged
+    return env
+
+
 # ── kllm package + UI ────────────────────────────────────────────────────────
 
 
@@ -774,7 +893,28 @@ def detect_backend(preferred: str) -> str:
 
 
 def _cmake_backend_flags(backend: str) -> list[str]:
-    flags = ["-DGGML_RPC=ON", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_CUDA=OFF", "-DGGML_HIP=OFF", "-DGGML_VULKAN=OFF", "-DGGML_METAL=OFF"]
+    flags = [
+        "-DGGML_RPC=ON",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DGGML_CUDA=OFF",
+        "-DGGML_HIP=OFF",
+        "-DGGML_VULKAN=OFF",
+        "-DGGML_METAL=OFF",
+    ]
+    # macOS: one binary with Metal + Vulkan (CPU always available). CPU-only escape hatch.
+    if _is_macos():
+        if backend == "cpu":
+            return flags
+        if backend in ("cuda", "rocm"):
+            raise SystemExit(f"error: {backend} is not supported on macOS")
+        return [
+            "-DGGML_RPC=ON",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DGGML_CUDA=OFF",
+            "-DGGML_HIP=OFF",
+            "-DGGML_VULKAN=ON",
+            "-DGGML_METAL=ON",
+        ]
     if backend == "metal":
         flags.append("-DGGML_METAL=ON")
     elif backend == "cuda":
@@ -843,8 +983,12 @@ def build_llama_from_source(backend: str, tag: str | None = None) -> bool:
     clone_or_update_llama(tag)
     build_dir = VENDOR_LLAMA / "build"
     flags = _cmake_backend_flags(backend)
+    cmake_env: dict[str, str] | None = None
+    if _is_macos() and backend != "cpu":
+        cmake_env = ensure_vulkan_macos()
+        print("macOS source build: enabling Metal + Vulkan (CPU always available)")
     try:
-        _run(["cmake", "-B", str(build_dir), *flags], cwd=VENDOR_LLAMA)
+        _run(["cmake", "-B", str(build_dir), *flags], cwd=VENDOR_LLAMA, env=cmake_env)
         jobs = str(os.cpu_count() or 4)
         # llama-server + RPC worker (target name varies by upstream revision).
         rpc_target_ok = False
@@ -855,6 +999,7 @@ def build_llama_from_source(backend: str, tag: str | None = None) -> bool:
                 ["cmake", "--build", str(build_dir), "--config", "Release", "--target", t, "-j", jobs],
                 cwd=VENDOR_LLAMA,
                 check=False,
+                env=cmake_env,
             )
             if result.returncode == 0 and t in _RPC_UPSTREAM_NAMES:
                 rpc_target_ok = True
@@ -935,7 +1080,15 @@ def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, 
             s += 50
         elif backend == "metal" and "macos" in n:
             s += 50
-        elif backend == "cpu" and ("cpu" in n or ("cuda" not in n and "vulkan" not in n and "rocm" not in n)):
+        elif backend == "cpu" and "cpu" in n:
+            s += 50
+        elif (
+            backend == "cpu"
+            and not _is_macos()
+            and ("cuda" not in n and "vulkan" not in n and "rocm" not in n)
+        ):
+            # Non-macOS: unnamed packs without a GPU tag may be CPU. macOS
+            # ``bin-macos-*`` packs are Metal — never treat them as CPU.
             s += 40
         else:
             return -1
@@ -1289,14 +1442,15 @@ def install_llama(
     tag: str | None = None,
 ) -> None:
     backend = detect_backend(backend)
+    stamp_be = stamp_backend_for_install(backend)
     tag = tag or read_pinned_release()
     assert_stable_llama_pin(tag)
-    print(f"llama.cpp backend: {backend}")
+    print(f"llama.cpp backend: {backend}" + (f" (stamp {stamp_be})" if stamp_be != backend else ""))
     print(f"llama.cpp pin:     {tag}")
 
     llama = _find_built_binary("llama-server")
     rpc = _find_built_binary("rpc-server")
-    if llama and rpc and not force and stamp_matches(tag, backend) and llama_install_status(tag)["ok"]:
+    if llama and rpc and not force and stamp_matches(tag, stamp_be) and llama_install_status(tag)["ok"]:
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
         print(f"Already at pinned {tag}")
@@ -1307,12 +1461,39 @@ def install_llama(
         print(f"Installed llama.cpp is {current}; upgrading to pin {tag}")
 
     ok = False
-    if prefer_prebuilt:
+    built_from_source = False
+    macos_multi = _is_macos() and backend != "cpu"
+
+    if macos_multi:
+        # GitHub macOS packs are Metal-only; default is source Metal+Vulkan.
+        if prefer_prebuilt:
+            ok = install_llama_prebuilt("metal", tag=tag)
+            if ok:
+                _warn(
+                    "GitHub macOS packs are Metal-only; Vulkan is not included. "
+                    "Omit --prefer-prebuilt (macOS default) for a Metal+Vulkan source build."
+                )
+            else:
+                ok = build_llama_from_source(backend, tag=tag)
+                built_from_source = ok
+        else:
+            ok = build_llama_from_source(backend, tag=tag)
+            built_from_source = ok
+            if not ok:
+                ok = install_llama_prebuilt("metal", tag=tag)
+                if ok:
+                    _warn(
+                        "Metal+Vulkan source build failed; fell back to Metal-only prebuilt. "
+                        "Fix MoltenVK / cmake and re-run without --prefer-prebuilt."
+                    )
+    elif prefer_prebuilt:
         ok = install_llama_prebuilt(backend, tag=tag)
         if not ok:
             ok = build_llama_from_source(backend, tag=tag)
+            built_from_source = ok
     else:
         ok = build_llama_from_source(backend, tag=tag)
+        built_from_source = ok
         if not ok:
             ok = install_llama_prebuilt(backend, tag=tag)
 
@@ -1332,8 +1513,8 @@ def install_llama(
     else:
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
-    if llama and rpc and not stamp_matches(tag, backend):
-        write_install_stamp(tag=tag, backend=backend, asset="source")
+    if llama and rpc and built_from_source and not stamp_matches(tag, stamp_be):
+        write_install_stamp(tag=tag, backend=stamp_be, asset="source")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -1358,7 +1539,7 @@ def verify_llama_installed(tag: str) -> None:
         return
     requested = status["requested_backend"]
     actual = status["actual_backends"]
-    if status["stamp"] == tag and requested and actual and requested not in actual:
+    if status["stamp"] == tag and requested and actual and not backends_satisfied(requested, actual):
         raise SystemExit(
             f"error: llama.cpp {tag} stamp ok but backend mismatch "
             f"(requested={requested!r}, probed={actual!r}). "
@@ -1388,12 +1569,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--prefer-prebuilt",
         action="store_true",
-        help="Prefer GitHub release binaries (default unless --from-source)",
+        help="Prefer GitHub release binaries (default on non-macOS; Metal-only on macOS)",
     )
     p.add_argument(
         "--from-source",
         action="store_true",
-        help="Compile the pinned llama.cpp tag instead of using GitHub binaries",
+        help="Compile the pinned llama.cpp tag (macOS default: Metal+Vulkan multi-backend)",
     )
     p.add_argument(
         "--tag",
@@ -1455,7 +1636,16 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=== llama.cpp (llama-server + rpc-server) ===")
         if args.llama_only:
             print(f"Pin file:  {PIN_FILE} ({tag})")
-        prefer_prebuilt = not args.from_source
+        # macOS Metal+Vulkan needs a source build; GitHub packs are Metal-only.
+        # Prefer prebuilt only when explicitly requested (or for CPU / non-macOS).
+        if args.from_source:
+            prefer_prebuilt = False
+        elif args.prefer_prebuilt:
+            prefer_prebuilt = True
+        elif _is_macos() and detect_backend(args.backend) != "cpu":
+            prefer_prebuilt = False
+        else:
+            prefer_prebuilt = True
         install_llama(
             args.backend,
             prefer_prebuilt=prefer_prebuilt,

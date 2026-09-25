@@ -47,9 +47,9 @@ Supported cells to ship and test:
 3. AMD → `rocm` (Linux), else `vulkan` (Windows or ROCm-less)
 4. else → `cpu`
 
-Do not double-bind one physical GPU (e.g. both CUDA and Vulkan for the same NVIDIA card).
+Do not double-bind one physical GPU (e.g. both CUDA and Vulkan for the same NVIDIA card). On macOS, the default install builds **one** binary with Metal **and** Vulkan (MoltenVK); runtime preference (`KLLM_ACCEL_BACKEND` / `accel_backend`) selects a single backend per process so the same Apple GPU is not double-bound.
 
-**Binary flavors:** ship/build per cell (Metal macOS; CUDA Linux/Windows; ROCm Linux; Vulkan Windows/Linux), not one universal binary.
+**Binary flavors:** ship/build per cell on Windows/Linux (CUDA; ROCm Linux; Vulkan). On **macOS**, the default source install is a **multi-backend** binary (`Metal+Vulkan`, CPU always available); `--prefer-prebuilt` is Metal-only; `--backend cpu` is CPU-only.
 
 ## Split policy
 

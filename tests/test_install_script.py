@@ -342,3 +342,109 @@ def test_install_llama_archive_rejects_html_payload(install, tmp_path, monkeypat
     monkeypatch.setattr(install, "write_install_stamp", lambda **kwargs: None)
     assert install._install_llama_archive(archive, tag="v0.5.0", backend="vulkan") is False
     assert not bin_dir.exists() or not any(bin_dir.iterdir())
+
+
+def test_cmake_backend_flags_macos_multi(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    for backend in ("metal", "vulkan", "auto"):
+        # auto is resolved before cmake in install_llama; flags still accept metal/vulkan.
+        if backend == "auto":
+            continue
+        flags = install._cmake_backend_flags(backend)
+        assert "-DGGML_METAL=ON" in flags
+        assert "-DGGML_VULKAN=ON" in flags
+        assert "-DGGML_CUDA=OFF" in flags
+
+
+def test_cmake_backend_flags_macos_cpu_only(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    flags = install._cmake_backend_flags("cpu")
+    assert "-DGGML_METAL=OFF" in flags
+    assert "-DGGML_VULKAN=OFF" in flags
+    assert "-DGGML_METAL=ON" not in flags
+    assert "-DGGML_VULKAN=ON" not in flags
+
+
+def test_cmake_backend_flags_non_macos_exclusive(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: True)
+    vulkan = install._cmake_backend_flags("vulkan")
+    assert "-DGGML_VULKAN=ON" in vulkan
+    assert "-DGGML_METAL=OFF" in vulkan
+    assert "-DGGML_METAL=ON" not in vulkan
+
+
+def test_pick_release_asset_macos_cpu_rejects_metal_pack(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    monkeypatch.setattr(install.platform, "machine", lambda: "arm64")
+    assets = [
+        {"name": "llama-b100-bin-macos-arm64.tar.gz", "browser_download_url": "u1"},
+        {"name": "llama-b100-bin-macos-arm64-cpu.tar.gz", "browser_download_url": "u2"},
+    ]
+    picked = install.pick_release_asset(assets, "cpu")
+    assert picked is not None
+    assert "cpu" in picked["name"]
+    assert install.pick_release_asset(
+        [{"name": "llama-b100-bin-macos-arm64.tar.gz", "browser_download_url": "u1"}],
+        "cpu",
+    ) is None
+
+
+def test_stamp_backend_helpers(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    assert install.stamp_backend_for_install("metal") == "metal+vulkan"
+    assert install.stamp_backend_for_install("vulkan") == "metal+vulkan"
+    assert install.stamp_backend_for_install("cpu") == "cpu"
+    assert install.parse_stamp_backends("metal+vulkan") == ["metal", "vulkan"]
+    assert install.parse_stamp_backends("metal,vulkan") == ["metal", "vulkan"]
+    assert install.backends_satisfied("metal+vulkan", ["metal", "vulkan"])
+    assert install.backends_satisfied("metal+vulkan", ["vulkan", "metal", "cuda"])
+    assert not install.backends_satisfied("metal+vulkan", ["metal"])
+    assert install.backends_satisfied("metal", ["metal"])
+
+
+def test_stamp_matches_multi_backend(install, monkeypatch, tmp_path):
+    monkeypatch.setattr(install, "BIN_DIR", tmp_path)
+    monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
+    install.write_install_stamp(tag="v0.5.0", backend="metal+vulkan", asset="source")
+    assert install.stamp_matches("v0.5.0", "metal+vulkan")
+    assert install.stamp_matches("v0.5.0", "vulkan+metal")  # order-independent via frozenset
+    assert not install.stamp_matches("v0.5.0", "metal")
+
+
+def test_llama_install_status_ok_requires_all_stamped_backends(install, monkeypatch, tmp_path):
+    monkeypatch.setattr(install, "BIN_DIR", tmp_path)
+    monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
+    install.write_install_stamp(tag="v0.5.0", backend="metal+vulkan", asset="source")
+    llama = tmp_path / "llama-server"
+    rpc = tmp_path / "rpc-server"
+    llama.write_bytes(b"x")
+    rpc.write_bytes(b"x")
+
+    monkeypatch.setattr(
+        install,
+        "_find_built_binary",
+        lambda name: llama if name == "llama-server" else rpc,
+    )
+
+    class Result:
+        returncode = 0
+        stdout = "Available devices:\n  MTL0: Apple M1 (8192 MiB, 8000 MiB free)\n  Vulkan0: Apple M1 (8192 MiB, 8000 MiB free)\n"
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: Result())
+    status = install.llama_install_status("v0.5.0")
+    assert status["ok"] is True
+    assert status["actual_backends"] == ["metal", "vulkan"]
+
+    class MetalOnly:
+        returncode = 0
+        stdout = "MTL0: Apple M1 (8192 MiB, 8000 MiB free)\n"
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: MetalOnly())
+    status = install.llama_install_status("v0.5.0")
+    assert status["ok"] is False

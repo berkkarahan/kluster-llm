@@ -93,6 +93,12 @@ export type SoftwareIdentity = {
   llama_release?: string | null;
 };
 
+export type HomePaths = {
+  home: string;
+  models: string;
+  logs: string;
+};
+
 export type HfTokenSource = 'file' | 'env' | null;
 
 export type HfTokenStatus = {

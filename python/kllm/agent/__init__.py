@@ -54,6 +54,8 @@ from kllm.state import (
     DEFAULT_RPC_PORT,
     ClusterState,
     generate_join_key,
+    home_dir,
+    logs_dir,
     models_dir,
     repo_root,
 )
@@ -1112,6 +1114,16 @@ def put_config(body: ConfigBody) -> dict[str, Any]:
         raise
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/v1/home")
+def get_home() -> dict[str, Any]:
+    """Data-directory layout for the System Settings > Data directory panel."""
+    return {
+        "home": str(home_dir()),
+        "models": str(models_dir()),
+        "logs": str(logs_dir()),
+    }
 
 
 @app.get("/v1/status")

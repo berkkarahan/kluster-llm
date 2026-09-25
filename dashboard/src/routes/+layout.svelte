@@ -16,7 +16,8 @@
     { href: '/', label: 'Home' },
     { href: '/models', label: 'Models' },
     { href: '/run', label: 'Plan & Run' },
-    { href: '/integrations', label: 'Connect' }
+    { href: '/integrations', label: 'Connect' },
+    { href: '/settings', label: 'Settings' }
   ];
 </script>
 

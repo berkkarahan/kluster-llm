@@ -4,39 +4,9 @@
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import { formatGb } from '$lib/format-transfer';
-  import type {
-    DistributeProgress,
-    DownloadProgress,
-    ModelSearchFit,
-    ModelSearchHit,
-    ReceiveProgress,
-  } from '$lib/types';
+  import type { ModelSearchFit, ModelSearchHit } from '$lib/types';
 
   let modalOpen = $state(false);
-
-  function downloadLabel(d: DownloadProgress | ReceiveProgress) {
-    const pct = Math.round(d.pct);
-    if (d.total == null) return `${pct}% · ${formatGb(d.bytes)}`;
-    return `${pct}% · ${formatGb(d.bytes)} / ${formatGb(d.total)}`;
-  }
-
-  function transferLabel(d: DistributeProgress) {
-    const pct = Math.round(d.pct);
-    const phase = d.phase ?? 'pulling';
-    if (phase === 'hashing' && d.total != null && d.bytes != null) {
-      return `hashing ${pct}% · ${formatGb(d.bytes)} / ${formatGb(d.total)}`;
-    }
-    return `distribute ${pct}%`;
-  }
-
-  function workerLabel(w: DistributeProgress['workers'][number]) {
-    const pct = Math.round(w.pct);
-    const host = w.host || w.node_id || 'worker';
-    if (w.phase === 'skipped') return `${host} · skipped`;
-    if (w.phase === 'error') return `${host} · error${w.error ? `: ${w.error}` : ''}`;
-    if (w.total == null) return `${host} · ${w.phase} ${pct}%`;
-    return `${host} · ${w.phase} ${pct}% · ${formatGb(w.bytes)} / ${formatGb(w.total)}`;
-  }
 
   function fitChip(fit: ModelSearchFit) {
     if (fit === 'fits') return 'chip-ok';
@@ -49,10 +19,6 @@
     const vram = appStore.searchTotalVram != null ? formatGb(appStore.searchTotalVram, 1) : '—';
     return `${size} / ${vram}`;
   }
-
-  const dist = $derived(appStore.status?.distribute ?? null);
-  const recv = $derived(appStore.status?.receive ?? null);
-  const isMaster = $derived(appStore.status?.role === 'master');
 
   $effect(() => {
     if (!modalOpen) return;
@@ -88,7 +54,7 @@
 <div class="max-w-4xl mx-auto p-4">
   <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">Models</h1>
   <p class="mono text-[11px] mb-3" style="color: var(--muted)">
-    Search Hugging Face GGUFs, download without blocking the UI, then Load into VRAM/RAM from Plan &amp; Run.
+    Search Hugging Face GGUFs, download on the master (workers need no local copy), then Load from Plan &amp; Run.
   </p>
 
   <div class="flex flex-col gap-3 mb-4">
@@ -121,61 +87,6 @@
         >Search</button
       >
     </form>
-
-    {#if dist}
-      <div class="flex flex-col gap-2 mt-1">
-        <div class="mono text-[11px]" style="color: var(--muted)">
-          {transferLabel(dist)}{#if dist.filename}<span> · {dist.filename}</span>{/if}
-        </div>
-        <div
-          class="progress"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(dist.pct)}
-          aria-label={dist.phase === 'hashing' ? 'Model hashing' : 'Model distribute'}
-        >
-          <span style:width={`${Math.min(100, Math.max(0, dist.pct))}%`}></span>
-        </div>
-        {#each dist.workers as w (w.host + (w.node_id ?? ''))}
-          <div class="flex flex-col gap-1">
-            <div
-              class="progress"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(w.pct)}
-              aria-label={`Distribute to ${w.host}`}
-            >
-              <span style:width={`${Math.min(100, Math.max(0, w.pct))}%`}></span>
-            </div>
-            <div class="mono text-[11px]" style="color: var(--muted)">{workerLabel(w)}</div>
-          </div>
-        {/each}
-      </div>
-    {:else if appStore.busy === '/v1/models/distribute'}
-      <div class="mono text-[11px]" style="color: var(--muted)">distributing…</div>
-    {/if}
-
-    {#if recv}
-      <div class="flex flex-col gap-1 mt-1">
-        <div
-          class="progress"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(recv.pct)}
-          aria-label="Model receive"
-        >
-          <span style:width={`${Math.min(100, Math.max(0, recv.pct))}%`}></span>
-        </div>
-        <div class="mono text-[11px]" style="color: var(--muted)">
-          receive {downloadLabel(recv)}{#if recv.filename}<span> · {recv.filename}</span>{/if}
-          {#if recv.phase}<span> · {recv.phase}</span>{/if}
-          {#if recv.resumed_bytes}<span> · resumed {(recv.resumed_bytes / 1048576).toFixed(1)} MiB verified</span>{/if}
-        </div>
-      </div>
-    {/if}
 
     {#if appStore.status?.rpc_cache}
       <p class="mono text-[11px]" style="color: var(--muted)">
@@ -245,13 +156,6 @@
                   disabled={!!appStore.busy}
                   onclick={() => void useModel(m.id)}>Load</button
                 >
-                {#if isMaster}
-                  <button
-                    class="btn"
-                    disabled={!!appStore.busy}
-                    onclick={() => void appStore.distributeModel(m.id)}>Distribute</button
-                  >
-                {/if}
                 <button
                   class="btn btn-danger"
                   disabled={!!appStore.busy}
@@ -278,79 +182,35 @@
       if (e.target === e.currentTarget) modalOpen = false;
     }}
   >
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="model-search-title">
-      <div
-        class="flex items-center justify-between gap-2 px-3 py-2 border-b"
-        style="border-color: var(--border)"
-      >
-        <h2 id="model-search-title" class="mono text-[12px] uppercase tracking-wider" style="color: var(--muted)">
-          Hugging Face GGUFs
-        </h2>
+    <div class="panel modal p-4 max-w-2xl w-full mx-4" role="dialog" aria-modal="true">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="mono text-[12px] uppercase tracking-wider" style="color: var(--muted)">Search results</h2>
         <button class="btn" type="button" onclick={() => (modalOpen = false)}>Close</button>
       </div>
-      <div class="overflow-auto flex-1 min-h-0">
-        <table class="w-full text-left">
-          <thead>
-            <tr class="mono text-[11px]" style="color: var(--muted)">
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">repo</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">file / quant</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">size</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">fit</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#if appStore.searching}
-              <tr>
-                <td colspan="5" class="px-3 py-6 mono" style="color: var(--muted)">searching…</td>
-              </tr>
-            {:else if appStore.searchError}
-              <tr>
-                <td colspan="5" class="px-3 py-6 mono" style="color: var(--danger)">{appStore.searchError}</td>
-              </tr>
-            {:else}
-              {#each appStore.searchResults as row}
-                <tr class="mono">
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
-                    <div>{row.repo_id}</div>
-                    {#if row.gated}
-                      <span class="chip chip-warn">gated</span>
-                    {/if}
-                  </td>
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
-                    <div>{row.filename}</div>
-                    {#if row.quant}
-                      <div class="text-[11px]" style="color: var(--muted)">{row.quant}</div>
-                    {/if}
-                  </td>
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)"
-                    >{formatGb(row.size_bytes)}</td
-                  >
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
-                    <div class="flex flex-col gap-1 items-start">
-                      <span class="chip {fitChip(row.fit)}"
-                        >{row.fit === 'overflow' ? 'OOM risk' : row.fit}</span
-                      >
-                      <span class="text-[11px]" style="color: var(--muted)">{fitLabel(row)}</span>
-                    </div>
-                  </td>
-                  <td class="px-3 py-2 border-b text-right align-top" style="border-color: var(--border)">
-                    <button
-                      class="btn btn-accent"
-                      disabled={!!appStore.busy}
-                      onclick={() => void downloadRow(row.source)}>Download</button
-                    >
-                  </td>
-                </tr>
-              {:else}
-                <tr>
-                  <td colspan="5" class="px-3 py-6 mono" style="color: var(--muted)">No matching GGUFs</td>
-                </tr>
-              {/each}
-            {/if}
-          </tbody>
-        </table>
-      </div>
+      {#if appStore.searchError}
+        <p class="mono text-[12px]" style="color: var(--danger)">{appStore.searchError}</p>
+      {:else if appStore.busy === '/v1/models/search'}
+        <p class="mono text-[12px]" style="color: var(--muted)">searching…</p>
+      {:else if appStore.searchHits.length === 0}
+        <p class="mono text-[12px]" style="color: var(--muted)">No GGUF hits</p>
+      {:else}
+        <ul class="flex flex-col gap-2 max-h-[60vh] overflow-auto">
+          {#each appStore.searchHits as row (row.source)}
+            <li class="flex items-center justify-between gap-2 panel p-2" style="border-color: var(--border)">
+              <div class="min-w-0">
+                <div class="mono text-[12px] truncate">{row.filename}</div>
+                <div class="mono text-[11px]" style="color: var(--muted)">{row.repo_id ?? row.source}</div>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <span class={`chip ${fitChip(row.fit)}`}>{fitLabel(row)}</span>
+                <button class="btn btn-accent" type="button" onclick={() => void downloadRow(row.source)}
+                  >Download</button
+                >
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
   </div>
 {/if}

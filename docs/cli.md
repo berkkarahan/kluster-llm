@@ -38,10 +38,10 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
-| `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard) |
-| `kllm model distribute <name>` | Master coordinates a LAN pull to workers; finished workers seed others (SHA-256 verified) |
-| `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`) |
-| `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` with mapped flags + `--rpc` workers |
+| `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. |
+| `kllm model delete <name>` | Delete a GGUF from the master model store |
+| `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`). RPC is used only when the model exceeds master-local capacity. |
+| `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` (adds `--rpc` only when the plan needs workers) |
 | `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
 | `kllm connect <agent>` | Launch Claude/OpenCode/Codex/… with kllm API baked in |
 
@@ -130,7 +130,7 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--remember` / `--no-remember` | remember on | Upserts `~/.kllm/model-settings.json` after successful plan/run |
 | `--vram-weight`, `--latency-weight` | 0.6 / 0.4 | Greedy placement score weights (VRAM capacity vs low latency); normalized by sum |
 
-No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement via scored greedy knapsack: VRAM sacks first, then RAM).
+No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement: prefer master-local, then single remote, then VRAM-proportional pool — see [layer-split-calculator.md](layer-split-calculator.md)).
 
 ## Dashboard
 
@@ -176,13 +176,11 @@ kllm model download 'TheBloke/Llama-3.1-8B-Instruct-GGUF:Q4_K_M'
 # equivalent: …:llama-3.1-8b-instruct.Q4_K_M.gguf
 # note the printed join key
 
-# Machine B (worker)
+# Machine B (worker) — no model copy; rpc-server only
 kllm join --key '<join-key>'
 # if mDNS fails: kllm join --key '<join-key>' --master 192.168.10.1
 
 # Machine A
-kllm model distribute llama-3.1-8b-instruct.Q4_K_M.gguf
-# master coordinates a LAN pull; finished workers seed others
 kllm plan --model llama-3.1-8b-instruct.Q4_K_M.gguf
 kllm run --model llama-3.1-8b-instruct.Q4_K_M.gguf
 
@@ -192,14 +190,15 @@ kllm cluster update
 
 ## Architecture notes
 
-- **Python** owns CLI, FastAPI agent, mDNS, membership, and model transfer.
-- **Rust (`kllm_native`)** owns HW capacity probe, layer-split planner, and process supervision (generalized from the old `.sh` / `.ps1` scripts).
-- Split mode is always **layer** (required for Metal + AMD mixed clusters).
+- **Python** owns CLI, FastAPI agent, mDNS, membership, and master-local model download.
+- **Rust (`kllm_native`)** owns HW capacity probe and process supervision.
+- Placement (`python/kllm/placement.py` + `tensor_split.py`) prefers master-local GPUs, then single-device RPC, then VRAM-proportional multi-node pooling. Split mode is always **layer**.
+- GGUF lives on the **master** only. Workers contribute memory/compute via `rpc-server -c` (tensor cache). See [plans/rpc-memory-pooling.md](../plans/rpc-memory-pooling.md).
 
 ## Manual two-machine checklist
 
-1. High-speed link up; firewall allows TCP 18765 and 50052.
+1. High-speed link up; firewall allows TCP 18765 and 50052 (keep 50052 private).
 2. `kllm start` on master; copy join key.
-3. `kllm join --key …` on worker; `kllm status` on master shows the member.
-4. Download + distribute model; confirm file under `~/.kllm/models` on both.
+3. `kllm join --key …` on worker; `kllm status` on master shows the member + device inventory.
+4. Download model on master only (`~/.kllm/models`); do **not** copy GGUF to workers.
 5. `kllm run --model …`; hit `http://<master>:8080` for inference.

@@ -25,7 +25,7 @@ After install on **this** machine:
 | 7 | WireGuard CLI present (for overlay) | `wg --version` or `C:\Program Files\WireGuard\wg.exe` |
 | 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK) |
 
-**Cluster smoke (needs 2+ machines):** master `kllm start` prints join key; worker `kllm join --key …` succeeds; master `kllm status` lists the worker; optional `kllm run --model …` after model distribute.
+**Cluster smoke (needs 2+ machines):** master `kllm start` prints join key; worker `kllm join --key …` succeeds; master `kllm status` lists the worker; optional `kllm run --model …` after master-local model download (no GGUF copy to workers).
 
 ---
 
@@ -230,7 +230,7 @@ Join uses the join key fingerprint over mDNS to find the master; `--master` is o
 ```bash
 kllm model download 'org/repo:Q4_K_M'
 # or 'org/repo:file.Q4_K_M.gguf' / a direct URL
-kllm model distribute <name>
+# GGUF stays on the master; workers receive tensors over RPC
 kllm run --model <name>
 kllm ui
 ```
@@ -308,7 +308,6 @@ kllm start
 kllm join --key KEY
 # if needed: kllm join --key KEY --master MASTER_IP
 kllm model download 'ORG/REPO:Q4_K_M'
-kllm model distribute file.gguf
 kllm run --model file.gguf
 ```
 

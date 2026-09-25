@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from kllm.tensor_split import select_routing_devices
+
 MIB = 1024**2
 WIDTHS = {"f32": 4, "f16": 2, "bf16": 2, "q8_0": 34 / 32,
           "q4_0": 18 / 32, "q4_1": 20 / 32, "q5_0": 22 / 32,
@@ -62,6 +64,39 @@ def memory_costs(layout, size, context, settings):
                 architecture=arch)
 
 
+def _allocate_contiguous(devices, costs, *, cpu_budget, cpu_base, overhead, master_node_id):
+    """Contiguous layer DP over ``devices``. Returns (cpu_count, cpu_bytes, allocations) or None."""
+    count = len(costs)
+    prefix = [0]
+    for cost in costs:
+        prefix.append(prefix[-1] + cost)
+    for cpu_count in range(count + 1):
+        cpu_bytes = cpu_base + prefix[cpu_count]
+        if cpu_bytes > cpu_budget:
+            continue
+        states = {cpu_count: []}
+        for d in devices:
+            next_states = dict(states)
+            for start, assignments in states.items():
+                budget = d["budget_bytes"]
+                if d["local"] and d["unified_memory"]:
+                    budget = max(0, budget - prefix[cpu_count])
+                if d["unified_memory"]:
+                    budget = max(0, budget - sum(a["estimated_bytes"] for a in assignments if a["node_id"] == d["node_id"]))
+                for end in range(start + 1, count + 1):
+                    used = prefix[end] - prefix[start] + overhead
+                    if used > budget:
+                        break
+                    if end not in next_states:
+                        next_states[end] = assignments + [dict(d, layer_start=start, layer_end=end,
+                                                              layers=end - start, output_layer=end == count,
+                                                              estimated_bytes=used)]
+            states = next_states
+        if count in states:
+            return cpu_count, cpu_bytes, states[count]
+    return None
+
+
 def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vram_weight, latency_weight):
     memory = memory_costs(layout, size, context, settings)
     costs = memory["costs"]
@@ -105,43 +140,35 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
     for d in devices:
         d["score"] = vram_weight * d["budget_bytes"] / max_cap + latency_weight * (1 - d["latency_ms"] / max_lat if max_lat else 1)
     devices.sort(key=lambda d: -d["score"])
-    # Avoid network execution when one local accelerator fits the entire model.
-    fitting_local = next((d for d in devices if d["local"] and d["budget_bytes"] >= sum(costs) + memory["overhead"] and cpu_base <= cpu_budget), None)
-    if fitting_local:
-        devices = [fitting_local]
+
+    model_bytes = sum(costs)
+    overhead = memory["overhead"]
+    locals_only = [d for d in devices if d.get("local")]
+    locals_fit = (
+        cpu_base <= cpu_budget
+        and bool(locals_only)
+        and _allocate_contiguous(
+            locals_only, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+            overhead=overhead, master_node_id=master["node_id"],
+        ) is not None
+    )
+    routing_mode, devices = select_routing_devices(
+        devices,
+        model_bytes=model_bytes,
+        overhead=overhead,
+        cpu_base=cpu_base,
+        cpu_budget=cpu_budget,
+        locals_fit=locals_fit,
+    )
+
     # For each possible CPU prefix, find contiguous device segments by dynamic programming.
     # Includes the output layer, so ngl and tensor_split describe the same allocation.
-    prefix = [0]
-    for cost in costs:
-        prefix.append(prefix[-1] + cost)
-    solution = None
-    for cpu_count in range(count + 1):
-        cpu_bytes = cpu_base + prefix[cpu_count]
-        if cpu_bytes > cpu_budget:
-            continue
-        states = {cpu_count: []}
-        for d in devices:
-            next_states = dict(states)
-            for start, assignments in states.items():
-                budget = d["budget_bytes"]
-                if d["local"] and d["unified_memory"]:
-                    budget = max(0, budget - prefix[cpu_count])
-                if d["unified_memory"]:
-                    budget = max(0, budget - sum(a["estimated_bytes"] for a in assignments if a["node_id"] == d["node_id"]))
-                for end in range(start + 1, count + 1):
-                    used = prefix[end] - prefix[start] + memory["overhead"]
-                    if used > budget:
-                        break
-                    if end not in next_states:
-                        next_states[end] = assignments + [dict(d, layer_start=start, layer_end=end,
-                                                              layers=end-start, output_layer=end == count,
-                                                              estimated_bytes=used)]
-            states = next_states
-        if count in states:
-            solution = (cpu_count, cpu_bytes, states[count])
-            break
+    solution = _allocate_contiguous(
+        devices, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+        overhead=overhead, master_node_id=master["node_id"],
+    )
     fits = solution is not None
-    cpu_count, cpu_bytes, allocations = solution or (count, cpu_base + prefix[-1], [])
+    cpu_count, cpu_bytes, allocations = solution or (count, cpu_base + sum(costs), [])
     ngl = count - cpu_count
     # Slightly bias interior boundaries downward to avoid float rounding assigning
     # a boundary layer to the previous device in upstream upper_bound(float).
@@ -164,6 +191,7 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
                 tensor_split=split, tensor_split_csv=",".join(f"{v:.6f}" for v in split) or "0",
                 device_allocations=allocations, device_order=[a["device"] for a in allocations],
                 rpc_endpoints=endpoints,
+                routing_mode=routing_mode,
                 cpu_layers=cpu_count, cpu_alloc_bytes=cpu_bytes, ngl=ngl,
                 estimated_layers=count-1, model_size_bytes=size, context_effective=context,
                 kv_estimate_bytes=memory["kv_bytes"], recurrent_state_bytes=memory["state_bytes"],

@@ -15,7 +15,6 @@ from kllm.run_planning import (
     ensure_rpc_peers_reachable,
     execute_plan,
     ordered_members,
-    rpc_server_endpoints,
 )
 from kllm.run_settings import RunBody
 from kllm.state import ClusterState, repo_root
@@ -178,7 +177,7 @@ def _stop_inference(state: ClusterState) -> None:
 
 def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, Any]) -> None:
     path = model_ops.resolve_local_model(body.model)
-    rpc_servers = plan_result.get("rpc_endpoints", rpc_server_endpoints(state.members))
+    rpc_servers = list(plan_result.get("rpc_endpoints") or [])
     ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
     if state.process_pid:

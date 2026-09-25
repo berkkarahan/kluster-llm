@@ -223,37 +223,7 @@ def test_delete_model_loaded_returns_409(client):
     assert gguf.exists()
 
 
-def test_delete_model_file_worker_auth(client):
-    c, agent, _ = client
-    import os
-
-    models = Path(os.environ["KLLM_HOME"]) / "models"
-    models.mkdir(parents=True, exist_ok=True)
-    gguf = models / "worker-toy.gguf"
-    gguf.write_bytes(b"gguf")
-    agent.STATE.join_key = "secret-key"
-
-    r = c.delete("/v1/models/file", headers={"X-Kllm-Filename": "worker-toy.gguf"})
-    assert r.status_code == 401
-    assert gguf.exists()
-
-    r = c.delete(
-        "/v1/models/file",
-        headers={"X-Kllm-Key": "wrong", "X-Kllm-Filename": "worker-toy.gguf"},
-    )
-    assert r.status_code == 401
-    assert gguf.exists()
-
-    r = c.delete(
-        "/v1/models/file",
-        headers={"X-Kllm-Key": "secret-key", "X-Kllm-Filename": "worker-toy.gguf"},
-    )
-    assert r.status_code == 200
-    assert r.json()["ok"] is True
-    assert not gguf.exists()
-
-
-def test_delete_model_master_fanout(client):
+def test_delete_model_master_local_only(client):
     c, agent, _ = client
     import os
 
@@ -273,15 +243,12 @@ def test_delete_model_master_fanout(client):
         }
     }
 
-    with patch("kllm.models.delete_model_on_worker", return_value={"ok": True}) as mocked:
-        r = c.post("/v1/models/delete", json={"name": "fanout.gguf"})
+    r = c.post("/v1/models/delete", json={"name": "fanout.gguf"})
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
     assert not gguf.exists()
-    assert len(body["results"]) == 1
-    assert body["results"][0]["ok"] is True
-    mocked.assert_called_once()
+    assert body["results"] == []
 
 
 def _clear_hf_env(monkeypatch):
@@ -382,213 +349,6 @@ def test_status_download_during_mocked_download(client, monkeypatch):
     r = c.get("/v1/status")
     assert r.status_code == 200
     assert r.json()["download"] is None
-
-
-def test_status_distribute_and_receive_fields(client):
-    c, agent, _ = client
-    from kllm import models as model_ops
-
-    r = c.get("/v1/status")
-    assert r.status_code == 200
-    body = r.json()
-    assert body.get("distribute") is None
-    assert body.get("receive") is None
-
-    model_ops._init_distribute_progress("toy.gguf", 100)
-    model_ops._set_distribute_workers(
-        [
-            {
-                "node_id": "w1",
-                "host": "10.0.0.2",
-                "phase": "pulling",
-                "bytes": 50,
-                "total": 100,
-                "pct": 50,
-                "error": None,
-            }
-        ]
-    )
-    try:
-        r = c.get("/v1/status")
-        dist = r.json()["distribute"]
-        assert dist["filename"] == "toy.gguf"
-        assert dist["pct"] == 50
-        assert len(dist["workers"]) == 1
-        assert dist["workers"][0]["host"] == "10.0.0.2"
-    finally:
-        model_ops._clear_distribute_progress()
-
-    model_ops._set_receive_progress("toy.gguf", 25, 100, phase="receiving")
-    try:
-        r = c.get("/v1/status")
-        recv = r.json()["receive"]
-        assert recv["filename"] == "toy.gguf"
-        assert recv["pct"] == 25
-        assert recv["phase"] == "receiving"
-    finally:
-        model_ops._clear_receive_progress()
-
-
-def test_distribute_requires_master(client):
-    c, agent, _ = client
-    agent.STATE.role = "worker"
-    agent.STATE.join_key = "secret-key"
-    r = c.post("/v1/models/distribute", json={"name": "toy.gguf"})
-    assert r.status_code == 400
-    assert "master" in r.json()["detail"]
-
-
-def test_distribute_returns_mixed_worker_results(client):
-    c, agent, _ = client
-    models = Path(os.environ["KLLM_HOME"]) / "models"
-    models.mkdir(parents=True, exist_ok=True)
-    (models / "toy.gguf").write_bytes(b"gguf")
-
-    agent.STATE.role = "master"
-    agent.STATE.join_key = "secret-key"
-    agent.STATE.members = {
-        "w1": {"node_id": "w1", "role": "worker", "lan_host": "10.0.0.2"},
-        "w2": {"node_id": "w2", "role": "worker", "lan_host": "10.0.0.3"},
-    }
-    mixed = [
-        {
-            "host": "10.0.0.2",
-            "node_id": "w1",
-            "ok": True,
-            "result": {"ok": True, "skipped": True},
-        },
-        {
-            "host": "10.0.0.3",
-            "node_id": "w2",
-            "ok": False,
-            "error": "seed dropped",
-        },
-    ]
-    with patch("kllm.models.distribute_to_workers", return_value=mixed) as mocked:
-        r = c.post("/v1/models/distribute", json={"name": "toy.gguf"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["results"] == mixed
-    mocked.assert_called_once()
-
-
-def test_receive_endpoint_progress_and_meta(client):
-    c, agent, _ = client
-    import hashlib
-
-    from kllm import models as model_ops
-    from kllm.state import models_dir
-
-    agent.STATE.role = "worker"
-    agent.STATE.join_key = "secret"
-    agent.STATE.save()
-
-    payload = b"worker-receive-bytes"
-    digest = hashlib.sha256(payload).hexdigest()
-
-    # Mid-receive status via begin_receive + finish chunk, then complete via API path
-    progress_seen = threading.Event()
-    release = threading.Event()
-    errors: list[BaseException] = []
-
-    def run_receive():
-        try:
-            tmp = model_ops.begin_receive("got.gguf", len(payload))
-            progress_seen.set()
-            assert release.wait(timeout=5)
-            with tmp.open("wb") as f:
-                f.write(payload)
-            dest = models_dir() / "got.gguf"
-            model_ops.complete_receive(tmp, dest, digest=digest, size=len(payload))
-        except BaseException as exc:
-            errors.append(exc)
-
-    t = threading.Thread(target=run_receive)
-    t.start()
-    try:
-        assert progress_seen.wait(timeout=5)
-        r = c.get("/v1/status")
-        assert r.json()["receive"] is not None
-        assert r.json()["receive"]["filename"] == "got.gguf"
-    finally:
-        release.set()
-        t.join(timeout=5)
-    assert errors == []
-
-    r = c.get(
-        "/v1/models/file",
-        headers={"X-Kllm-Key": "secret", "X-Kllm-Filename": "got.gguf"},
-    )
-    assert r.status_code == 200
-    meta = r.json()
-    assert meta["exists"] is True
-    assert meta["size_bytes"] == len(payload)
-    assert meta["sha256"] == digest
-
-    r = c.get("/v1/models/blob", headers={"X-Kllm-Filename": "got.gguf"})
-    assert r.status_code == 401
-
-    r = c.get(
-        "/v1/models/blob",
-        headers={
-            "X-Kllm-Key": "secret",
-            "X-Kllm-Filename": "got.gguf",
-            "Range": "bytes=1-4",
-        },
-    )
-    assert r.status_code == 206
-    assert r.content == payload[1:5]
-    assert r.headers["content-range"] == f"bytes 1-4/{len(payload)}"
-    assert r.headers["accept-ranges"] == "bytes"
-
-    r = c.get(
-        "/v1/models/blob",
-        headers={"X-Kllm-Key": "secret", "X-Kllm-Filename": "got.gguf"},
-    )
-    assert r.status_code == 200
-    assert r.content == payload
-
-    # Skip pull when local file already matches
-    r = c.post(
-        "/v1/models/pull",
-        json={
-            "filename": "got.gguf",
-            "sha256": digest,
-            "size": len(payload),
-            "source": {"host": "10.0.0.1", "port": 18765},
-        },
-        headers={"X-Kllm-Key": "secret"},
-    )
-    assert r.status_code == 200
-    assert r.json()["skipped"] is True
-
-    r = c.post(
-        "/v1/models/pull",
-        json={
-            "filename": "got.gguf",
-            "sha256": digest,
-            "size": len(payload),
-            "source": {"host": "10.0.0.1", "port": 18765},
-        },
-    )
-    assert r.status_code == 401
-
-    model_ops.begin_receive("busy.gguf", 10)
-    try:
-        r = c.post(
-            "/v1/models/pull",
-            json={
-                "filename": "other.gguf",
-                "sha256": "a" * 64,
-                "size": 10,
-                "source": {"host": "10.0.0.1", "port": 18765},
-            },
-            headers={"X-Kllm-Key": "secret"},
-        )
-        assert r.status_code == 409
-    finally:
-        model_ops.abort_receive()
 
 
 ORCA_REPO = "orcarouter/Qwen3.8-27B-Uncensored-GGUF"

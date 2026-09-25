@@ -19,17 +19,25 @@ Overlapping advanced batch/context/cache arguments are normalized before both st
 Device, layer-split, model, and tensor-placement overrides are rejected because they
 would invalidate the plan.
 
+## Memory-pooling routing
+
 GGUF metadata provides the block count, tensor spans, attention dimensions and Qwen
 hybrid recurrent state dimensions. Input tensors and CPU spill belong to the master;
-the output layer is included in GPU-layer counts. Device order, contiguous layer
-ranges, split values, and launch arguments are generated together. Unified RAM is a
-shared pool, independently of backend names. Measured RSS of the tracked process may
-be reclaimed when replacing it; unrelated RAM use is unavailable. Discrete GPU memory
-without an attributable allocation measurement is conservatively treated as occupied.
-Execution buffers and unknown architectures remain estimates, labeled in plan results.
+the output layer is included in GPU-layer counts.
 
-Workers must publish the new device inventory before a new placement can be launched.
-Legacy workers may keep serving an already running model while they await an update.
+Routing policy (`python/kllm/tensor_split.py` + `placement.py`):
+
+1. Prefer **master-local** devices when they can hold the model (no `--rpc`).
+2. Else prefer a **single remote** device that alone fits.
+3. Else **pool** across devices ordered by score/budget with contiguous DP allocation.
+
+`--tensor-split` values are layer counts from that allocation (with a tiny boundary
+bias). Unified RAM is a shared pool on the master. Measured RSS of the tracked process
+may be reclaimed when replacing it. Discrete GPU memory without an attributable
+allocation measurement is conservatively treated as occupied. Execution buffers and
+unknown architectures remain estimates, labeled in plan results.
+
+Workers must publish device inventory before a new placement can be launched.
 Control RTT uses pooled HTTP connections; it measures control-plane responsiveness,
 not RPC throughput or GPU performance.
 
@@ -38,44 +46,24 @@ pool. Connection failures return 503 before stream headers. Disconnects close th
 upstream response. Set `KLLM_DEBUG_HARDWARE=1` before starting the agent to retain
 the existing diagnostic sampling in a background task; it is off by default.
 
-Distribution uses a cached manifest with source identity, whole-file SHA-256 and
-8 MiB piece hashes. Identity includes size, nanosecond timestamps and file identity.
-Changes invalidate the cache, even with the same name and size. Worker partial files
-have an atomically saved `.resume.json` bound to this content. Recorded pieces are
-hashed again before reuse. Failed pieces get up to three retries and may use another
-completed, verified seed. Range, length and piece hashes are checked before recording
-completion; the whole file is verified before atomic publication.
+## Models and RPC cache
 
-Eight concurrent probes feed the existing tree scheduler as they complete. A worker
-uses up to four concurrent 8 MiB pieces. Completed workers become seeds. The
-authenticated `/v1/models/manifest` endpoint exposes the manifest. `/v1/models/pull`
-accepts optional `manifest` and `sources`; legacy `source` requests remain supported,
-with locally hashed resume pieces and final whole-file verification. Old unbound
-bitmap files are not trusted for resume.
-
-Worker GGUF replication is separate from **RPC tensor caching**. Inference needs the
-GGUF on the master; it does not require a complete GGUF on every worker. `rpc-server
--c` retains its tensor cache across restarts. Status reports `rpc_cache` including
-the actual platform default location (or `LLAMA_CACHE/rpc`). The cache is never cleared
-by model distribution or an ordinary restart.
+Inference needs the GGUF on the **master** only. Workers do not receive a physical
+`.gguf` copy. `rpc-server -c` retains its tensor cache across restarts. Status reports
+`rpc_cache` including the actual platform default location (or `LLAMA_CACHE/rpc`).
+Master downloads land in `~/.kllm/models/` (that directory may also cache llama.cpp
+**release archives** for install — not GGUF sync).
 
 ## Rollout and comparison
 
-Build with `uv run python scripts/build.py`, then restart the Windows agent. Save the
-previous runtime/configuration files before changing a running deployment. On the Mac,
-pull and build manually, use `python scripts/install.py --llama-only --backend metal`,
-and restart/rejoin to publish the device inventory. Preserve all saved model settings.
-Run Plan before Run, inspect device ranges and estimate confidence, then compare actual
-llama-server placement logs with the plan. Do not accept an overflowing plan.
-
-`python scripts/compare_inference.py --output before.json` makes five identical,
-64-token streamed requests without changing saved model, quantization, context,
-sampling or reasoning settings. Repeat after the controlled restart with `after.json`.
-It reports median/minimum/maximum TTFT and generation rate. Run clean and interrupted
-distribution comparisons, plus cold/warm loads, after both nodes are updated. Cache
-warmth, paging, and background load must be comparable before applying the 5% regression
-criterion. CUDA/ROCm combinations remain unverified until tested on that hardware.
+Build with `uv run python scripts/build.py`, then restart agents. On each node,
+`python scripts/install.py --llama-only` when the `llama-release` pin changes.
+Run Plan before Run, inspect `routing_mode`, device ranges, and estimate confidence,
+then compare actual llama-server placement logs with the plan. Do not accept an
+overflowing plan.
 
 Pinned upstream references: [server arguments](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/tools/server/README.md),
 [device assignment](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/src/llama-model.cpp),
 [RPC registration/cache](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/ggml/src/ggml-rpc/ggml-rpc.cpp).
+
+Design write-up: [plans/rpc-memory-pooling.md](../plans/rpc-memory-pooling.md).

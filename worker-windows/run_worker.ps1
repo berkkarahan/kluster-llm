@@ -1,10 +1,10 @@
 # run_worker.ps1 - Initialize and launch the RPC worker on Windows
 # Usage: .\run_worker.ps1 -IP "192.168.10.2" -Port 50052
+# Prefer: kllm join --key <join-key> (no GGUF on workers; tensors arrive via RPC).
 
 param(
     [string]$IP = "0.0.0.0",
     [int]$Port = 50052,
-    [string]$Model = "",
     [int]$Context = 4096,
     [int]$Ngpu = 0,
     [int]$Threads = 0,
@@ -13,12 +13,12 @@ param(
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 if ($Help) {
-    Write-Host "Usage: .\run_worker.ps1 [-IP <ip>] [-Port <port>] [-Model <path>] [-Context <tokens>]"
+    Write-Host "Usage: .\run_worker.ps1 [-IP <ip>] [-Port <port>] [-Context <tokens>]"
     Write-Host ""
+    Write-Host "  Prefer: kllm join --key <join-key> (no GGUF on workers; tensors arrive via RPC)."
     Write-Host "  -IP       Static IP for the dedicated network link (default: 0.0.0.0)"
     Write-Host "  -Port     RPC port to listen on (default: 50052)"
-    Write-Host "  -Model    Path to GGUF model (optional, can be passed via coordinator)"
-    Write-Host "  -Context  Context window in tokens (default: 4096)"
+    Write-Host "  -Context  Context size in tokens (default: 4096)"
     Write-Host "  -Ngpu     Number of GPU layers (0 = auto-detect)"
     Write-Host "  -Threads  CPU threads for non-GPU layers (0 = auto-detect)"
     exit 0
@@ -97,12 +97,8 @@ Write-Host "  CPU threads: $Threads"
 Write-Host "  Context: $Context tokens"
 Write-Host ""
 
-# Build argument list
-$args = @("--host", $IP, "--port", "$Port", "--ngpu", "$Ngpu", "--threads", "$Threads", "--ctx-size", "$Context")
-
-if ($Model -ne "") {
-    $args += @("--model", $Model)
-}
+# No --model: GGUF stays on master; rpc-server receives tensors over RPC (-c cache).
+$args = @("--host", $IP, "--port", "$Port", "-c", "--ngpu", "$Ngpu", "--threads", "$Threads", "--ctx-size", "$Context")
 
 # Launch with environment variables for Vulkan/ROCm
 $env:VK_ICD_FILE_NAMES = "C:\Vulkan\SDK\icd.ics"

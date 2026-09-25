@@ -131,7 +131,7 @@ After the fix, Start succeeds even with an empty local GPU inventory (CPU-only m
 
 ### macOS worker on a Vulkan master (Windows/Linux)
 
-**Cause:** Default macOS install uses **Metal** (`hw` probe + `install.py --backend auto`). A Vulkan master cluster expects workers to run **Vulkan** `rpc-server` binaries and to register `backend=vulkan` for layer split / distribute planning. Metal workers in a Vulkan-first cluster mis-report capacity and backend.
+**Cause:** Default macOS install uses **Metal** (`hw` probe + `install.py --backend auto`). A Vulkan master cluster expects workers to run **Vulkan** `rpc-server` binaries and to register `backend=vulkan` for layer-split planning. Metal workers in a Vulkan-first cluster mis-report capacity and backend.
 
 **Solution:**
 ```bash

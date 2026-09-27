@@ -355,6 +355,8 @@ def test_cmake_backend_flags_macos_multi(install, monkeypatch):
         assert "-DGGML_METAL=ON" in flags
         assert "-DGGML_VULKAN=ON" in flags
         assert "-DGGML_CUDA=OFF" in flags
+        # llama.cpp v0.5.0 statically registers Metal but not Vulkan on macOS.
+        assert "-DGGML_BACKEND_DL=ON" in flags
 
 
 def test_cmake_backend_flags_macos_cpu_only(install, monkeypatch):
@@ -364,6 +366,7 @@ def test_cmake_backend_flags_macos_cpu_only(install, monkeypatch):
     assert "-DGGML_VULKAN=OFF" in flags
     assert "-DGGML_METAL=ON" not in flags
     assert "-DGGML_VULKAN=ON" not in flags
+    assert "-DGGML_BACKEND_DL=ON" not in flags
 
 
 def test_cmake_backend_flags_non_macos_exclusive(install, monkeypatch):
@@ -373,6 +376,39 @@ def test_cmake_backend_flags_non_macos_exclusive(install, monkeypatch):
     assert "-DGGML_VULKAN=ON" in vulkan
     assert "-DGGML_METAL=OFF" in vulkan
     assert "-DGGML_METAL=ON" not in vulkan
+    assert "-DGGML_BACKEND_DL=ON" not in vulkan
+
+
+def test_discard_relocated_cmake_build(install, tmp_path):
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    old_source = tmp_path / "old-llama.cpp"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(old_source) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(old_source / "build") + "\n",
+        encoding="utf-8",
+    )
+
+    install._discard_relocated_cmake_build(source, build)
+
+    assert not build.exists()
+
+
+def test_keeps_current_cmake_build(install, tmp_path):
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    build.mkdir(parents=True)
+    cache = build / "CMakeCache.txt"
+    cache.write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n",
+        encoding="utf-8",
+    )
+
+    install._discard_relocated_cmake_build(source, build)
+
+    assert cache.exists()
 
 
 def test_pick_release_asset_macos_cpu_rejects_metal_pack(install, monkeypatch):

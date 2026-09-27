@@ -964,7 +964,10 @@ def _cmake_backend_flags(backend: str) -> list[str]:
         "-DGGML_VULKAN=OFF",
         "-DGGML_METAL=OFF",
     ]
-    # macOS: one binary with Metal + Vulkan (CPU always available). CPU-only escape hatch.
+    # llama.cpp v0.5.0's static backend registry on macOS registers Metal but
+    # not Vulkan. Build GPU backends as loadable modules so the same binary
+    # can discover both Metal and Vulkan/MoltenVK at runtime.
+    # CPU-only remains statically linked and needs no dynamic backend loader.
     if _is_macos():
         if backend == "cpu":
             return flags
@@ -977,6 +980,7 @@ def _cmake_backend_flags(backend: str) -> list[str]:
             "-DGGML_HIP=OFF",
             "-DGGML_VULKAN=ON",
             "-DGGML_METAL=ON",
+            "-DGGML_BACKEND_DL=ON",
         ]
     if backend == "metal":
         flags.append("-DGGML_METAL=ON")
@@ -1039,12 +1043,47 @@ def clone_or_update_llama(tag: str | None = None) -> None:
             raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
 
 
+def _discard_relocated_cmake_build(source_dir: Path, build_dir: Path) -> None:
+    """Remove an installer-owned CMake build after its checkout was moved.
+
+    CMake stores absolute source and build paths in CMakeCache.txt. Reusing a
+    cache from a moved repository makes configure fail before it can apply the
+    new backend flags. Only remove the generated build directory when either
+    recorded path disagrees with its current location.
+    """
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.is_file():
+        return
+    try:
+        entries = dict(
+            line.split("=", 1)
+            for line in cache.read_text(encoding="utf-8", errors="replace").splitlines()
+            if "=" in line
+        )
+    except OSError:
+        return
+
+    expected = {
+        "CMAKE_HOME_DIRECTORY:INTERNAL": source_dir.resolve(),
+        "CMAKE_CACHEFILE_DIR:INTERNAL": build_dir.resolve(),
+    }
+    for key, current in expected.items():
+        cached = entries.get(key)
+        if not cached:
+            continue
+        if Path(cached).resolve() != current:
+            print("Discarding stale llama.cpp CMake build after checkout relocation")
+            shutil.rmtree(build_dir)
+            return
+
+
 def build_llama_from_source(backend: str, tag: str | None = None) -> bool:
     if not ensure_cmake():
         return False
     tag = tag or read_pinned_release()
     clone_or_update_llama(tag)
     build_dir = VENDOR_LLAMA / "build"
+    _discard_relocated_cmake_build(VENDOR_LLAMA, build_dir)
     flags = _cmake_backend_flags(backend)
     cmake_env: dict[str, str] | None = None
     if _is_macos() and backend != "cpu":

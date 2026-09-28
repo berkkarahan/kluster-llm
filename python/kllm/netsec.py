@@ -330,6 +330,147 @@ def _collect_ifconfig_ipv4(found: set[str]) -> None:
         found.add(m.group(1))
 
 
+def _netmask_to_prefix(mask: str) -> int | None:
+    """Convert an ``ifconfig`` netmask (``0xfffffc00`` or dotted) to a prefix length."""
+    mask = mask.strip()
+    if mask.lower().startswith("0x"):
+        try:
+            mask = str(ipaddress.IPv4Address(int(mask, 16)))
+        except (ValueError, ipaddress.AddressValueError):
+            return None
+    try:
+        return ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+    except (ValueError, ipaddress.NetmaskValueError):
+        return None
+
+
+def _network_for_ip(ip: str, prefixlen: int | None) -> ipaddress.IPv4Network | None:
+    """Build an IPv4 network for ``ip``; unknown masks assume ``/24``."""
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except (ValueError, ipaddress.AddressValueError):
+        return None
+    if prefixlen is None:
+        prefixlen = 24
+    if not 0 <= prefixlen <= 32:
+        return None
+    try:
+        return ipaddress.IPv4Network(f"{addr}/{prefixlen}", strict=False)
+    except ValueError:
+        return None
+
+
+_IFCONFIG_INET_RE = re.compile(
+    r"\binet\s+(\d+\.\d+\.\d+\.\d+)\s+netmask\s+(0x[0-9a-fA-F]+|\d+\.\d+\.\d+\.\d+)"
+)
+
+
+def _collect_ipv4_networks_from_ifconfig(out: str) -> list[ipaddress.IPv4Network]:
+    """Parse ``ifconfig -a`` ``inet <ip> netmask <mask>`` pairs (macOS / BSD)."""
+    nets: list[ipaddress.IPv4Network] = []
+    for m in _IFCONFIG_INET_RE.finditer(out):
+        net = _network_for_ip(m.group(1), _netmask_to_prefix(m.group(2)))
+        if net is not None:
+            nets.append(net)
+    return nets
+
+
+def _list_ipv4_networks() -> list[ipaddress.IPv4Network]:
+    """IPv4 networks on local interfaces, using the real interface netmask.
+
+    Unlike :func:`_list_ipv4_addresses` this preserves the prefix length, so a
+    ``/22`` LAN (e.g. ``192.168.68.0/22``) is not silently treated as a single
+    ``/24``. Used by HTTP master discovery when mDNS is unavailable.
+    """
+    found: list[ipaddress.IPv4Network] = []
+    seen: set[str] = set()
+
+    def add(ip: str, prefixlen: int | None) -> None:
+        net = _network_for_ip(ip, prefixlen)
+        if net is not None and str(net) not in seen:
+            seen.add(str(net))
+            found.append(net)
+
+    system = platform.system()
+    via_os = False
+    try:
+        if system == "Windows":
+            out = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-NetIPAddress -AddressFamily IPv4 | "
+                    'ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" }',
+                ],
+                text=True,
+                timeout=10,
+                stderr=subprocess.DEVNULL,
+            )
+            for line in out.splitlines():
+                m = re.match(r"^(\d+\.\d+\.\d+\.\d+)/(\d+)$", line.strip())
+                if m:
+                    add(m.group(1), int(m.group(2)))
+                    via_os = True
+        elif system == "Darwin":
+            try:
+                out = subprocess.check_output(
+                    ["ifconfig", "-a"],
+                    text=True,
+                    timeout=5,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                out = ""
+            if out:
+                for net in _collect_ipv4_networks_from_ifconfig(out):
+                    if str(net) not in seen:
+                        seen.add(str(net))
+                        found.append(net)
+                        via_os = True
+        else:
+            try:
+                out = subprocess.check_output(
+                    ["ip", "-4", "-o", "addr", "show"],
+                    text=True,
+                    timeout=5,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                out = ""
+            if out:
+                for m in re.finditer(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", out):
+                    add(m.group(1), int(m.group(2)))
+                    via_os = True
+            else:
+                try:
+                    out = subprocess.check_output(
+                        ["ifconfig", "-a"],
+                        text=True,
+                        timeout=5,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    out = ""
+                for net in _collect_ipv4_networks_from_ifconfig(out):
+                    if str(net) not in seen:
+                        seen.add(str(net))
+                        found.append(net)
+                        via_os = True
+    except Exception:
+        pass
+
+    if not via_os:
+        # Last resort: hostname resolution has no mask — assume /24 per address.
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                add(info[4][0], 24)
+        except Exception:
+            pass
+
+    return [n for n in found if not n.network_address.is_loopback]
+
+
 def ensure_rpc_firewall(port: int, bind_host: str) -> dict[str, Any]:
     """Best-effort allow TCP ``port`` for RPC. Never raises for missing tooling."""
     system = platform.system()

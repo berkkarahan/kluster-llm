@@ -584,3 +584,79 @@ def test_register_assigns_wg_when_overlay_on(client):
     assert agent.STATE.members["w1"]["host"] == "10.66.87.2"
     assert agent.STATE.members["w1"]["lan_host"] == "192.168.10.2"
     assert data["wg_peers"][0]["public_key"] == "MASTERPUBKEY========"
+
+
+def test_netmask_to_prefix():
+    from kllm import netsec
+
+    assert netsec._netmask_to_prefix("0xfffffc00") == 22
+    assert netsec._netmask_to_prefix("255.255.255.0") == 24
+    assert netsec._netmask_to_prefix("0xff000000") == 8
+    assert netsec._netmask_to_prefix("0xffffffff") == 32
+    assert netsec._netmask_to_prefix("not-a-mask") is None
+
+
+def test_collect_ipv4_networks_from_ifconfig():
+    import ipaddress
+
+    from kllm import netsec
+
+    out = (
+        "en0: flags=8863<UP,BROADCAST> mtu 1500\n"
+        "\tinet 192.168.68.57 netmask 0xfffffc00 broadcast 192.168.71.255\n"
+        "en1: flags=8863<UP,BROADCAST> mtu 1500\n"
+        "\tinet 10.0.0.5 netmask 0xffffff00 broadcast 10.0.0.255\n"
+        "lo0: flags=8049<UP,LOOPBACK>\n"
+        "\tinet 127.0.0.1 netmask 0xff000000\n"
+        "\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1\n"
+    )
+    nets = netsec._collect_ipv4_networks_from_ifconfig(out)
+    assert ipaddress.ip_network("192.168.68.0/22") in nets
+    assert ipaddress.ip_network("10.0.0.0/24") in nets
+
+
+def test_list_ipv4_networks_parses_darwin_ifconfig(monkeypatch):
+    import ipaddress
+
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        netsec.subprocess,
+        "check_output",
+        lambda *a, **k: "inet 192.168.68.57 netmask 0xfffffc00 broadcast 192.168.71.255\n",
+    )
+    nets = netsec._list_ipv4_networks()
+    assert ipaddress.ip_network("192.168.68.0/22") in nets
+
+
+def test_list_ipv4_networks_parses_linux_ip(monkeypatch):
+    import ipaddress
+
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        netsec.subprocess,
+        "check_output",
+        lambda *a, **k: "2: eno1    inet 192.168.68.57/22 brd 192.168.71.255 scope global eno1\n",
+    )
+    nets = netsec._list_ipv4_networks()
+    assert ipaddress.ip_network("192.168.68.0/22") in nets
+
+
+def test_list_ipv4_networks_parses_windows(monkeypatch):
+    import ipaddress
+
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        netsec.subprocess,
+        "check_output",
+        lambda *a, **k: "192.168.68.57/22\r\n10.0.0.5/24\r\n",
+    )
+    nets = netsec._list_ipv4_networks()
+    assert ipaddress.ip_network("192.168.68.0/22") in nets
+    assert ipaddress.ip_network("10.0.0.0/24") in nets
+

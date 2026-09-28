@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 
+from kllm import discovery
 from kllm.discovery import DiscoveredMaster, browse_masters, join_key_id
 
 
@@ -113,3 +115,45 @@ def test_probe_http_master_matches_kid(monkeypatch):
 
     miss = _probe_http_master("192.168.68.100", 18765, join_key_id("other"), 0.2)
     assert miss is None
+
+
+def test_http_probe_hosts_covers_full_netmask(monkeypatch):
+    """/22 LAN is probed in full, not truncated to the caller's /24."""
+    from kllm import netsec
+
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_networks",
+        lambda: [ipaddress.ip_network("192.168.68.0/22")],
+    )
+    hosts = discovery._http_probe_hosts(18765)
+    assert "127.0.0.1" in hosts
+    assert "192.168.68.64" in hosts
+    assert "192.168.69.5" in hosts  # neighbouring /24 inside the /22
+    assert "192.168.71.254" in hosts
+    assert "192.168.72.1" not in hosts
+
+
+def test_http_probe_hosts_caps_scan(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_networks",
+        lambda: [ipaddress.ip_network("10.0.0.0/8")],
+    )
+    hosts = discovery._http_probe_hosts(18765)
+    assert len(hosts) <= discovery.MAX_PROBE_HOSTS
+
+
+def test_http_probe_hosts_falls_back_to_24(monkeypatch):
+    """No interface masks available -> historical /24-per-IP behaviour."""
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec, "_list_ipv4_networks", lambda: [])
+    monkeypatch.setattr(netsec, "_list_ipv4_addresses", lambda: ["192.168.68.57"])
+    hosts = discovery._http_probe_hosts(18765)
+    assert "127.0.0.1" in hosts
+    assert "192.168.68.64" in hosts
+    assert "192.168.69.1" not in hosts
+

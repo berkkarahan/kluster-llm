@@ -50,12 +50,17 @@ vendor/
 
 # Editor / agent
 .cursor/
+.vscode/
+.idea/
 
 # Dashboard
+node_modules/
+build/
+.svelte-kit/
+.vite/
 dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
 
 # Specify
 .specify/
-specs/

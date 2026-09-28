@@ -42,7 +42,9 @@ export class PollLoop {
   start(): void {
     if (this.running) return;
     this.running = true;
-    document.addEventListener('visibilitychange', this.onVisibility);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.onVisibility);
+    }
     void this.tick();
   }
 
@@ -52,7 +54,9 @@ export class PollLoop {
     this.epoch += 1;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    document.removeEventListener('visibilitychange', this.onVisibility);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.onVisibility);
+    }
   }
 
   private onVisibility = (): void => {

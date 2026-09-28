@@ -6,7 +6,7 @@
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import SliderField from '$lib/components/SliderField.svelte';
   import { appStore } from '$lib/store.svelte';
-  import { formatGb } from '$lib/format-transfer';
+  import { formatGib } from '$lib/format-memory';
   import { CONTEXT_STEP, KV_CACHE_TYPES, MIN_CONTEXT } from '$lib/types';
 
   function bumpEstimate() {
@@ -19,7 +19,14 @@
   );
   const maxContext = $derived(appStore.selectedModelMaxContext());
   const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
-  const estimateLabel = $derived(appStore.device === 'cpu' ? 'Estimated memory' : 'Estimated VRAM');
+  const estimateReady = $derived(
+    appStore.status?.role === 'master' &&
+    Object.keys(appStore.status?.members ?? {}).length > 0 &&
+    appStore.models.length > 0 && !!appStore.selectedModel
+  );
+  $effect(() => {
+    if (estimateReady) appStore.scheduleEstimate();
+  });
   const settingsDirty = $derived(appStore.settingsDirty());
   const maxThreads = $derived(
     typeof navigator !== 'undefined' && navigator.hardwareConcurrency
@@ -59,9 +66,14 @@
   <div class="panel p-3 flex flex-col gap-3" style="border-color: var(--border)">
     {#if !blocked && appStore.planResult?.estimated_bytes != null}
       <div class="mono text-[11px] p-2 rounded" style="background: var(--bg); border: 1px solid var(--border)">
-        {estimateLabel}:
-        {formatGb(Number(appStore.planResult.estimated_bytes), 1)}
-        / budget {formatGb(Number(appStore.planResult.budget_bytes), 1)}
+        Estimated total memory: {formatGib(appStore.planResult.estimated_bytes as number)}
+        / usable total memory budget {formatGib(appStore.planResult.budget_bytes as number)}
+        {#if appStore.device === 'gpu' && appStore.planResult.vram_alloc_bytes != null}
+          <div>Estimated GPU memory: {formatGib(appStore.planResult.vram_alloc_bytes as number)}</div>
+        {/if}
+        {#if appStore.planResult.cpu_alloc_bytes != null}
+          <div>Estimated CPU RAM: {formatGib(appStore.planResult.cpu_alloc_bytes as number)}</div>
+        {/if}
         {#if fitStatus}
           · <span style="color: var(--accent)">{fitStatus}</span>
         {/if}
@@ -473,7 +485,7 @@
     </label>
 
     <p class="mono text-[11px]" style="color: var(--muted)">
-      Automatic placement and RPC distribution are computed by kllm using the system split mode (no manual tensor split).
+      Automatic placement uses Layer split for RPC distribution.
     </p>
 
     <LoadProgressPanel />
@@ -522,22 +534,21 @@
       {/if}
       {#if appStore.planResult.estimate_confidence}
         <p class="mono text-[11px]" style="color: var(--muted)">Estimate: {String(appStore.planResult.estimate_confidence)}</p>
-        <p class="mono text-[11px]">Master CPU: {String(appStore.planResult.cpu_layers ?? 0)} layers, {formatGb(Number(appStore.planResult.cpu_alloc_bytes ?? 0), 1)}</p>
+        <p class="mono text-[11px]">Master CPU: {String(appStore.planResult.cpu_layers ?? 0)} layers, estimated RAM {formatGib(appStore.planResult.cpu_alloc_bytes as number)}</p>
         {#if appStore.planResult.resolved_launch_settings}
           {@const resolved = appStore.planResult.resolved_launch_settings as Record<string, unknown>}
           <p class="mono text-[11px]">Resolved: {String(resolved.parallel_slots)} slot(s), batch {String(resolved.batch_size)}, micro-batch {String(resolved.micro_batch)}, Flash Attention {String(resolved.flash_attention)}</p>
         {/if}
       {/if}
-      {#if Array.isArray(appStore.planResult.device_allocations)}
-        {@const splitMode = String(appStore.planResult.split_mode ?? 'layer')}
+      {#if Array.isArray(appStore.planResult.device_allocations) && (appStore.planResult.split_mode ?? 'layer') === 'layer'}
         <table class="w-full text-left mono text-[11px] mt-2">
-          <thead><tr><th>device</th><th>{splitMode === 'layer' ? 'layers (zero-based)' : 'parallel participation'}</th><th>memory</th></tr></thead>
+          <thead><tr><th>device</th><th>layers (zero-based)</th><th>estimated / usable budget</th></tr></thead>
           <tbody>
             {#each appStore.planResult.device_allocations as raw}
               {@const allocation = raw as DeviceAllocation}
               <tr><td>{allocation.node_id}: {allocation.device} ({allocation.backend})</td>
-                <td>{splitMode === 'layer' ? `${allocation.layer_start}–${allocation.layer_end - 1}${allocation.output_layer ? ' · includes output' : ''}` : 'selected device'}</td>
-                <td>{formatGb(allocation.estimated_bytes, 1)} / {formatGb(allocation.budget_bytes, 1)}</td></tr>
+                <td>{allocation.layer_start}–{allocation.layer_end - 1}{allocation.output_layer ? ' · includes output' : ''}</td>
+                <td>{formatGib(allocation.estimated_bytes)} / {formatGib(allocation.budget_bytes)}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -561,7 +572,7 @@
                   {(100 * Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0) / Math.max(1, Number(appStore.planResult.estimated_bytes ?? 1))).toFixed(1)}%
                 </td>
                 <td class="py-1 border-b" style="border-color: var(--border)">
-                  {formatGb(Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0), 1)}
+                  {formatGib((appStore.planResult.node_alloc_bytes as number[])?.[i])}
                 </td>
                 <td class="py-1 border-b" style="border-color: var(--border)">
                   {Number((appStore.planResult.node_scores as number[])?.[i] ?? 0).toFixed(3)}

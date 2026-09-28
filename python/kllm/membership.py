@@ -34,6 +34,8 @@ _SNAPSHOT_OPTIONAL = (
     "lan_host",
     "last_seen",
     "latency_ms",
+    "process_pid",
+    "process_role",
 )
 
 _UNREACHABLE_WARNING = "master heartbeat unreachable"
@@ -91,13 +93,17 @@ def reconcile_last_plan(state: ClusterState, *, persist: bool = True) -> bool:
     return True
 
 
-def snapshot_payload(state: ClusterState) -> dict[str, Any]:
+def snapshot_payload(
+    state: ClusterState,
+    inference_activity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fields shared by register/heartbeat success bodies (plus register's member count)."""
     return {
         "cluster_members": cluster_snapshot(state.members),
         "last_plan": public_last_plan(state),
         "apply_error": state.apply_error,
         "apply_warning": state.apply_warning,
+        "inference_activity": inference_activity or state.inference_activity,
     }
 
 

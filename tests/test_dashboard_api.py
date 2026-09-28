@@ -123,6 +123,73 @@ def test_anthropic_to_openai_mapping():
     assert oai["tool_choice"] == "auto"
 
 
+def test_inference_activity_distinguishes_prompt_and_generation(monkeypatch):
+    from kllm import inference_activity
+
+    class Response:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class Client:
+        def __init__(self, slots):
+            self.slots = slots
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def get(self, url):
+            return Response(200, self.slots) if url.endswith("/slots") else Response(200)
+
+    monkeypatch.setattr(
+        inference_activity.httpx,
+        "Client",
+        lambda **_: Client(
+            [{"is_processing": True, "n_prompt_tokens": 10, "n_prompt_tokens_processed": 4, "next_token": {"n_decoded": 0}}]
+        ),
+    )
+    prompt = inference_activity.sample(8080, running=True)
+    assert prompt["phase"] == "processing_input"
+    assert prompt["prompt_tokens_processed"] == 4
+
+    monkeypatch.setattr(
+        inference_activity.httpx,
+        "Client",
+        lambda **_: Client(
+            [{"is_processing": True, "n_prompt_tokens": 10, "n_prompt_tokens_processed": 10, "next_token": {"n_decoded": 3}}]
+        ),
+    )
+    generating = inference_activity.sample(8080, running=True)
+    assert generating["phase"] == "generating"
+    assert generating["output_tokens"] == 3
+
+
+def test_worker_status_uses_master_activity_snapshot(client):
+    c, agent, _ = client
+    agent.STATE.role = "worker"
+    agent._apply_cluster_snapshot(
+        {
+            "inference_activity": {
+                "phase": "processing_input",
+                "active_requests": 1,
+                "prompt_tokens": 10,
+                "prompt_tokens_processed": 4,
+                "output_tokens": 0,
+                "slots": 1,
+                "server_ready": True,
+            }
+        }
+    )
+    status = c.get("/v1/status").json()
+    assert status["inference_activity"]["phase"] == "processing_input"
+
+
 def test_connect_plan_claude_no_launch(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     from kllm.connect import plan_claude

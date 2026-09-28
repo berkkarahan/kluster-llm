@@ -136,6 +136,12 @@ textarea {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 
+.chip-info {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--border));
+}
+
 .chip-danger {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -166,9 +172,21 @@ textarea {
   animation: spin 800ms linear infinite;
 }
 
+.activity-spinner {
+  width: 11px;
+  height: 11px;
+  border-width: 1px;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
   }
 }
 

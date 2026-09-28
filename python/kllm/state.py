@@ -151,6 +151,8 @@ class ClusterState:
     last_settings: dict[str, Any] | None = None
     apply_error: str | None = None
     apply_warning: str | None = None
+    # Latest master inference state, mirrored to workers through heartbeats.
+    inference_activity: dict[str, Any] | None = None
 
     def save(self) -> None:
         ensure_home()

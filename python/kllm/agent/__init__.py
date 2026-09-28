@@ -150,6 +150,8 @@ ensure_api_token()
 _membership_lock = threading.Lock()
 _membership_thread_started = False
 _logs_thread_started = False
+_capacity_refresh_lock = threading.Lock()
+_capacity_refresh_inflight = False
 
 
 def _persist_last_settings(body: PlanBody | RunBody) -> None:
@@ -346,13 +348,42 @@ def _probe_worker_latencies() -> None:
 
 
 def _tick_membership() -> None:
-    _refresh_local_capacity()
     if STATE.role == "master":
         _sync_master_liveness(shrink=True)
         _probe_worker_latencies()
         STATE.save()
     elif STATE.role == "worker":
         _worker_post_heartbeat()
+    _schedule_local_capacity_refresh()
+
+
+def _schedule_local_capacity_refresh() -> None:
+    """Refresh capacity without delaying the liveness control plane.
+
+    ``llama-server --list-devices`` can stall while an accelerator initializes.
+    Membership heartbeats must remain on their two-second cadence while that
+    happens: a worker is evicted after 20 seconds without one. Only one probe
+    may run at a time because all it does is refresh the latest capacity data.
+    """
+    global _capacity_refresh_inflight
+    with _capacity_refresh_lock:
+        if _capacity_refresh_inflight:
+            return
+        _capacity_refresh_inflight = True
+
+    def refresh() -> None:
+        global _capacity_refresh_inflight
+        try:
+            _refresh_local_capacity()
+        finally:
+            with _capacity_refresh_lock:
+                _capacity_refresh_inflight = False
+
+    threading.Thread(
+        target=refresh,
+        name="kllm-capacity-refresh",
+        daemon=True,
+    ).start()
 
 
 def _membership_loop() -> None:

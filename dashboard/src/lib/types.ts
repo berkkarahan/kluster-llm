@@ -1,4 +1,5 @@
 export type AccelBackend = 'metal' | 'cuda' | 'rocm' | 'vulkan';
+export type SplitMode = 'layer' | 'row' | 'tensor';
 
 export type GpuInfo = {
   index: number;
@@ -142,6 +143,7 @@ export type Status = {
   ram_percent?: number;
   config_gpu_ids?: number[] | null;
   accel_backend?: AccelBackend | null;
+  split_mode?: SplitMode;
   gpu_ids?: number[] | null;
   rpc_bind?: string | null;
   overlay?: 'none' | 'wireguard' | string;

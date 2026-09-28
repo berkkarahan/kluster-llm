@@ -26,6 +26,7 @@ def test_default_config(kllm_home):
         "vram_percent": 80,
         "ram_percent": 80,
         "accel_backend": None,
+        "split_mode": "layer",
     }
     assert config.resolve_memory_fraction("gpu") == 0.80
     assert config.resolve_memory_fraction("cpu") == 0.80
@@ -50,6 +51,16 @@ def test_invalid_accel_backend_rejected(kllm_home):
         config.save_config({"accel_backend": "tpu"})
     with pytest.raises(ValueError):
         config.save_config({"accel_backend": "cpu"})
+
+
+def test_save_and_load_split_mode(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"split_mode": "tensor"})
+    assert out["split_mode"] == "tensor"
+    assert 'split_mode = "tensor"' in (home / "config.toml").read_text(encoding="utf-8")
+    assert config.get_split_mode() == "tensor"
+    with pytest.raises(ValueError):
+        config.save_config({"split_mode": "pipeline"})
 
 
 def test_save_and_load_full_config(kllm_home):

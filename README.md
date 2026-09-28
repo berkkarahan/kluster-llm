@@ -185,7 +185,7 @@ Halda scheduler automatically distributes layers across Mac CPU+GPU and Windows 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--split-mode layer` | enforced | Pipeline parallelism — prevents precision drift between Apple Silicon and AMD |
+| `--split-mode layer\|row\|tensor` | `layer` | System-configured split mode. Layer is required for mixed-backend or RPC clusters; row is legacy and tensor is experimental. |
 | `--tensor-split` | auto-calculated | Layer counts from VRAM-aware placement (see [docs/layer-split-calculator.md](docs/layer-split-calculator.md)) |
 | `--cache-type-k q8_0` | enforced | 8-bit KV cache key quantization — halves KV memory footprint |
 | `--cache-type-v q8_0` | enforced | 8-bit KV cache value quantization — halves KV memory footprint |

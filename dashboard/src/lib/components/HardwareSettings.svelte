@@ -38,6 +38,27 @@
     <option value="cpu">CPU</option>
   </select>
 
+  <label class="mono text-[11px]" style="color: var(--muted)" for="hw-split-mode">
+    Split mode
+  </label>
+  <select
+    id="hw-split-mode"
+    class="field mono"
+    value={appStore.splitMode}
+    disabled={!!appStore.busy}
+    onchange={(e) => {
+      const v = (e.currentTarget as HTMLSelectElement).value;
+      if (v === 'layer' || v === 'row' || v === 'tensor') void appStore.setSplitMode(v).then(afterChange);
+    }}
+  >
+    <option value="layer">Layer (pipeline)</option>
+    <option value="row">Row (legacy tensor parallel)</option>
+    <option value="tensor">Tensor (experimental)</option>
+  </select>
+  <p class="mono text-[10px]" style="color: var(--muted)">
+    Layer supports heterogeneous RPC clusters. Row requires local split-buffer support. Tensor requires local devices from one backend, Flash Attention, and non-quantized KV cache.
+  </p>
+
   {#if appStore.device === 'gpu'}
     {#if appStore.allowedBackends.length > 0}
       <label class="mono text-[11px]" style="color: var(--muted)" for="hw-backend">

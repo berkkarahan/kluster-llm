@@ -33,6 +33,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
 | `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
+| `kllm config [--split-mode layer\|row\|tensor]` | Show local system settings or set the persistent split-mode default |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
@@ -91,11 +92,12 @@ gpu_ids = [0, 1]      # optional; omitted = all local GPUs at Start/Join
 vram_percent = 80     # used when device = gpu (scales selected VRAM)
 ram_percent = 80      # used when device = cpu (scales total RAM)
 accel_backend = "vulkan"  # optional; Cluster Backend selector (metal|cuda|rocm|vulkan)
+split_mode = "layer"      # layer (pipeline), row (legacy), or tensor (experimental)
 ```
 
 Precedence for the local engine preference on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Omit `accel_backend` (or choose **auto** in the dashboard) to expose every device the installed llama.cpp binary lists. Each cluster node may use a different backend (Metal, Vulkan, CUDA, ROCm); RPC layer splits are designed for that mix. `kllm start --backend vulkan` and `kllm join --backend metal` write config before registering.
 
-Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`.
+Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`. Split mode follows request `--split-mode` → master `split_mode` config → `layer`.
 
 Memory budget for plan/run uses `vram_percent` or `ram_percent` from config (as planner `headroom`) unless the request passes an explicit `headroom` / `--vram-percent` / `--ram-percent`.
 
@@ -129,8 +131,15 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--extra-arg` (repeatable) | — | Sanitized; cannot override `--host` / `--port` / `--rpc` |
 | `--remember` / `--no-remember` | remember on | Upserts `~/.kllm/model-settings.json` after successful plan/run |
 | `--vram-weight`, `--latency-weight` | 0.6 / 0.4 | Greedy placement score weights (VRAM capacity vs low latency); normalized by sum |
+| `--split-mode` | system default | `layer`, `row`, or `tensor`; overrides the system setting for this plan/run |
 
 No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement: prefer master-local, then single remote, then VRAM-proportional pool — see [layer-split-calculator.md](layer-split-calculator.md)).
+
+### Split modes
+
+- `layer` is the default pipeline mode and is the only mode supported across mixed backends and all RPC clusters.
+- `row` is llama.cpp's legacy row-split path. It requires local backend split-buffer support and cannot use kllm RPC workers.
+- `tensor` is llama.cpp's experimental tensor-parallel path. It requires local devices from one backend, Flash Attention, and `f32`, `f16`, or `bf16` KV cache types. Validate a model and hardware combination before production use.
 
 ## Dashboard
 

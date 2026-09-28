@@ -68,6 +68,7 @@ def _fake_plan(**overrides):
         "hint": "",
         "context_effective": 4096,
         "warning": None,
+        "rpc_endpoints": ["127.0.0.1:50052"],
     }
     base.update(overrides)
     return base
@@ -239,6 +240,12 @@ def test_cli_remember_flags_in_payload():
     off = build_plan_run_payload(model="m.gguf", remember=False)
     assert on["remember"] is True
     assert off["remember"] is False
+
+
+def test_cli_split_mode_in_payload():
+    from kllm.cli_payload import build_plan_run_payload
+
+    assert build_plan_run_payload(model="m.gguf", split_mode="tensor")["split_mode"] == "tensor"
 
 
 def test_model_settings_file_location(client, tmp_path):

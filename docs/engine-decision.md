@@ -53,7 +53,7 @@ Do not double-bind one physical GPU (e.g. both CUDA and Vulkan for the same NVID
 
 ## Split policy
 
-Always use `--split-mode layer` when devices span different backends (Metal / CUDA / ROCm / Vulkan). Tensor/row splits risk precision drift across backends. See [layer-split-calculator.md](layer-split-calculator.md).
+Use `--split-mode layer` when devices span different backends (Metal / CUDA / ROCm / Vulkan). Tensor/row splits risk precision drift across backends. The system setting also exposes `row` for supported local split-buffer backends and experimental homogeneous-backend `tensor` mode; both are validated before launch. See [layer-split-calculator.md](layer-split-calculator.md).
 
 ## RPC operational rules
 
@@ -73,7 +73,7 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 
 ## Related code
 
-- Process argv / enforced layer split: `crates/kllm-native/src/process.rs`
+- Process argv / split-mode propagation: `crates/kllm-native/src/process.rs`
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
 - RPC bind / optional WireGuard overlay: `python/kllm/netsec.py`

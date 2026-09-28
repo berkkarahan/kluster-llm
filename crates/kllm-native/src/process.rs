@@ -213,6 +213,12 @@ impl LaunchConfig {
             .get_item("tensor_split")?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("tensor_split"))?
             .extract()?;
+        let split_mode = opt_string(dict, "split_mode")?.unwrap_or_else(|| "layer".into());
+        if !matches!(split_mode.as_str(), "layer" | "row" | "tensor") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "split_mode must be layer, row, or tensor; got {split_mode:?}"
+            )));
+        }
         let ngl: u32 = dict
             .get_item("ngl")?
             .map(|v| v.extract())
@@ -245,7 +251,7 @@ impl LaunchConfig {
             "--port".into(),
             port.to_string(),
             "--split-mode".into(),
-            "layer".into(),
+            split_mode,
             "--tensor-split".into(),
             tensor_split,
             "--cache-type-k".into(),

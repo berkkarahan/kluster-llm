@@ -54,6 +54,7 @@ class RunSettingsFields(BaseModel):
     remember: bool = True
     advanced_open: bool = False
     tensor_split: list[float] | None = None
+    split_mode: Literal["layer", "row", "tensor"] | None = None
 
     @field_validator("threads")
     @classmethod
@@ -115,6 +116,7 @@ class RunSettingsFields(BaseModel):
             "enable_thinking": self.enable_thinking,
             "remember": self.remember,
             "advanced_open": self.advanced_open,
+            "split_mode": self.split_mode,
         }
 
     def snapshot_for_remember(self) -> dict[str, Any]:

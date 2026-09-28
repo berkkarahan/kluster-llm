@@ -20,7 +20,7 @@ After install on **this** machine:
 | 3 | Native extension loads | `python -c "from kllm import native; print(native.native_available())"` → `True` |
 | 4 | Dashboard built | `dashboard/build/index.html` exists |
 | 5 | `llama-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
-| 6 | `rpc-server` found | same locations and/or `worker-windows/rpc-server.exe` |
+| 6 | `rpc-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
 | 6b | llama.cpp pin matches | `python scripts/install.py --check` exits 0; stamp `vendor/bin/llama-release.txt` equals committed [`llama-release`](../llama-release) |
 | 7 | WireGuard CLI present (for overlay) | `wg --version` or `C:\Program Files\WireGuard\wg.exe` |
 | 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK) |
@@ -159,7 +159,7 @@ ls vendor/bin/llama-server vendor/bin/rpc-server 2>/dev/null
 ls vendor/llama.cpp/build/bin/llama-server vendor/llama.cpp/build/bin/rpc-server 2>/dev/null
 
 # Windows PowerShell
-Get-ChildItem vendor\bin\llama-server.exe, vendor\bin\rpc-server.exe, worker-windows\rpc-server.exe -ErrorAction SilentlyContinue
+Get-ChildItem vendor\bin\llama-server.exe, vendor\bin\rpc-server.exe -ErrorAction SilentlyContinue
 ```
 
 WireGuard:
@@ -206,14 +206,6 @@ python scripts/install.py --llama-only --backend metal    # macOS: Metal+Vulkan 
 ```bash
 python scripts/build.py
 ```
-
-**Legacy wrappers** (they call `install.py`):
-
-- `coordinator-macos/setup_mac.sh` → `install.py --backend metal`  
-- `worker-windows/setup_windows.ps1` → partial install (`--skip-rust --skip-ui --skip-wireguard --prefer-prebuilt --backend vulkan`)  
-- Prefer `scripts/install.py` over these.
-
----
 
 ## 4. Post-install: bring up a cluster
 
@@ -289,7 +281,7 @@ Each worker runs `git pull --ff-only`, then `scripts/install.py` if `llama-relea
 | `npm` missing after install | PATH / winget needs new shell | New shell; re-run with `--skip-rust` if kllm already built |
 | maturin / Rust compile fails | Broken toolchain | Re-run rustup; `rustup default stable`; re-run install |
 | `llama-server` missing | Prebuilt miss or cmake fail | `python scripts/install.py --llama-only --force`; or `--from-source`; set `KLLM_LLAMA_SERVER` if you have a binary |
-| `rpc-server` missing | Some prebuilt packs omit it | `python scripts/install.py --llama-only --from-source` (`-DGGML_RPC=ON`); copy to `vendor/bin/` and `worker-windows/` |
+| `rpc-server` missing | Some prebuilt packs omit it | `python scripts/install.py --llama-only --from-source` (`-DGGML_RPC=ON`); verify it was staged in `vendor/bin/` |
 | `install.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/install.py --llama-only` on **every** node; do not mix HEAD source with a pinned nightly |
 | WireGuard warning | No admin / no package manager | Install WG manually from https://www.wireguard.com/install/ ; do **not** use `--overlay wireguard` until `wg` works |
 | `kllm` command not found | Venv not activated | Activate `.venv` (§2.4) |
@@ -343,7 +335,6 @@ kllm run --model file.gguf
 | `vendor/bin/` | Staged `llama-server` / `rpc-server` |
 | `vendor/bin/llama-release.txt` | Local stamp of the installed tag (gitignored under `vendor/`) |
 | `vendor/llama.cpp/` | Source + cmake build tree |
-| `worker-windows/rpc-server.exe` | Windows worker binary location |
 | `~/.kllm/` | Runtime state (`cluster.json`, models, WG keys, API token, `hf_token`) |
 
 ---

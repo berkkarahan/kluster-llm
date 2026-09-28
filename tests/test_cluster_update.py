@@ -46,6 +46,15 @@ def test_repo_root_respects_env(tmp_path, monkeypatch):
     assert state_mod.repo_root() == Path(str(repo))
 
 
+def test_legacy_orchestration_directories_do_not_mark_repo_root(tmp_path):
+    from kllm import state as state_mod
+
+    (tmp_path / "coordinator-macos").mkdir()
+    (tmp_path / "worker-windows").mkdir()
+
+    assert state_mod._looks_like_repo(tmp_path) is False
+
+
 def test_software_identity_reads_pin(tmp_path):
     from kllm.cluster_update import software_identity
 

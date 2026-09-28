@@ -1,9 +1,3 @@
-# Build artifacts
-coordinator-macos/llama-server
-worker-windows/rpc-server
-worker-windows/rpc-server.exe
-worker-windows/src/
-
 # Model files (download separately)
 *.gguf
 
@@ -50,12 +44,14 @@ vendor/
 
 # Editor / agent
 .cursor/
+.vscode/
+.idea/
 
 # Dashboard
+node_modules/
+build/
+.svelte-kit/
+.vite/
 dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
-
-# Specify
-.specify/
-specs/

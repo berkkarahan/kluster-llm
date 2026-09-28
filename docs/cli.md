@@ -97,7 +97,7 @@ split_mode = "layer"      # layer (pipeline), row (legacy), or tensor (experimen
 
 Precedence for the local engine preference on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Omit `accel_backend` (or choose **auto** in the dashboard) to expose every device the installed llama.cpp binary lists. Each cluster node may use a different backend (Metal, Vulkan, CUDA, ROCm); RPC layer splits are designed for that mix. `kllm start --backend vulkan` and `kllm join --backend metal` write config before registering.
 
-Precedence for `plan` / `run`: CLI/dashboard `--device` (or request body) → master config → `gpu`. Split mode follows request `--split-mode` → master `split_mode` config → `layer`.
+Precedence for `plan` / `run`: CLI `--device` (or dashboard/API request body) → master config → `gpu`. For local-only CLI/API clients, split mode follows explicit request `--split-mode` → master `split_mode` config → `layer`. The dashboard always requests `layer` for estimates, plans, and runs, even when an older config contains `row` or `tensor`; its next hardware-settings save also persists `layer`.
 
 Memory budget for plan/run uses `vram_percent` or `ram_percent` from config (as planner `headroom`) unless the request passes an explicit `headroom` / `--vram-percent` / `--ram-percent`.
 
@@ -105,7 +105,7 @@ Memory budget for plan/run uses `vram_percent` or `ram_percent` from config (as 
 - **CPU:** RAM-only budgets scaled by `ram_percent`; `-ngl 0` (GPU picker ignored).
 - **Fallback:** if GPU is preferred but a node has unknown/zero VRAM (and is not Metal), that node falls back to RAM/CPU silently. Plan responses include `device_requested`, `device_effective`, and per-node `node_devices`.
 
-Dashboard Plan & Run exposes device-gated controls (GPUs + VRAM % vs RAM %) and persists via `PUT /v1/config`.
+Dashboard Plan & Run exposes device-gated controls (GPUs + VRAM % vs RAM %) and persists via `PUT /v1/config`. System Settings reports measured local discrete GPU capacity in one-decimal GiB, counting each selected GPU once; missing measurements show as unavailable. Plans show usable per-device budgets limited by headroom and available memory, GPU-only and CPU RAM allocations separately, and explicitly labeled total-memory estimates/budgets. Unified GPU capacity is shared RAM, not extra VRAM.
 
 ```bash
 kllm plan --model NAME --device gpu --vram-percent 70

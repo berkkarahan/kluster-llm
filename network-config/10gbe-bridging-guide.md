@@ -185,13 +185,13 @@ Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Disabled
 
 ## Firewall Configuration
 
-### macOS (Coordinator)
+### macOS
 
-No firewall changes needed if both hosts are on the same subnet. The RPC server binds to `0.0.0.0`.
+`kllm` selects a private interface address for RPC and registers the installed binary with the application firewall when needed.
 
-### Windows (Worker)
+### Windows
 
-The `run_worker.ps1` script automatically opens TCP 50052. If you need to manually configure:
+`kllm join` attempts to open TCP 50052. If elevation is unavailable, configure the rule from an Administrator PowerShell session:
 
 ```powershell
 # Allow inbound RPC traffic

@@ -43,6 +43,7 @@ def pack(install, monkeypatch):
 
     monkeypatch.setattr(llama_pack, "_load_install", lambda root: install)
     monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
     return llama_pack
 
 
@@ -139,8 +140,6 @@ def test_non_macos_still_installs_cached_pack(pack, install, tmp_path, monkeypat
     monkeypatch.setattr(install, "BIN_DIR", bin_dir)
     monkeypatch.setattr(install, "VENDOR_LLAMA", tmp_path / "llama.cpp")
     monkeypatch.setattr(install, "STAMP_FILE", bin_dir / "llama-release.txt")
-    monkeypatch.setattr(install, "WORKER_WIN", tmp_path / "worker-windows")
-    monkeypatch.setattr(install, "WORKER_WIN_SRC", tmp_path / "worker-windows" / "src")
 
     archive = tmp_path / "llama-v0.5.0-bin-win-vulkan-x64.tar.gz"
     src = tmp_path / "llama-b1"

@@ -663,6 +663,43 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
     assert any("unreachable" in w for w in (agent.STATE.netsec_warnings or []))
 
 
+def test_worker_heartbeat_precedes_capacity_refresh(client):
+    _, agent = client
+    agent.STATE.role = "worker"
+    events: list[str] = []
+
+    with (
+        patch.object(agent, "_worker_post_heartbeat", side_effect=lambda: events.append("heartbeat")),
+        patch.object(agent, "_schedule_local_capacity_refresh", side_effect=lambda: events.append("refresh")),
+    ):
+        agent._tick_membership()
+
+    assert events == ["heartbeat", "refresh"]
+
+
+def test_capacity_refresh_allows_only_one_probe(client):
+    _, agent = client
+    started = []
+
+    class FakeThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            started.append(self.target)
+
+    agent._capacity_refresh_inflight = False
+    with patch.object(agent.threading, "Thread", FakeThread):
+        agent._schedule_local_capacity_refresh()
+        agent._schedule_local_capacity_refresh()
+
+    assert len(started) == 1
+    # Finish the captured background task so it resets module state for tests.
+    with patch.object(agent, "_refresh_local_capacity"):
+        started[0]()
+    assert not agent._capacity_refresh_inflight
+
+
 def test_worker_accepted_false_local_leave(client):
     c, agent = client
     agent.STATE.role = "worker"

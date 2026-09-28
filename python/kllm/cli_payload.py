@@ -40,6 +40,7 @@ def build_plan_run_payload(
     presence_penalty: float | None = None,
     repeat_penalty: float | None = None,
     enable_thinking: bool | None = None,
+    split_mode: str | None = None,
 ) -> dict[str, Any]:
     chat_text = None
     if chat_template_file:
@@ -93,4 +94,6 @@ def build_plan_run_payload(
         payload["repeat_penalty"] = repeat_penalty
     if enable_thinking is not None:
         payload["enable_thinking"] = enable_thinking
+    if split_mode is not None:
+        payload["split_mode"] = split_mode
     return payload

@@ -473,7 +473,7 @@
     </label>
 
     <p class="mono text-[11px]" style="color: var(--muted)">
-      Automatic placement — layer split and RPC distribution are computed by kllm (no manual tensor split).
+      Automatic placement and RPC distribution are computed by kllm using the system split mode (no manual tensor split).
     </p>
 
     <LoadProgressPanel />
@@ -517,7 +517,7 @@
       {/if}
       {#if appStore.planResult.device_requested}
         <p class="mono text-[12px]" style="color: var(--muted)">
-          Placement: {String(appStore.planResult.device_requested)} → {String(appStore.planResult.device_effective)}
+          Placement: {String(appStore.planResult.device_requested)} → {String(appStore.planResult.device_effective)} · {String(appStore.planResult.split_mode ?? 'layer')} split
         </p>
       {/if}
       {#if appStore.planResult.estimate_confidence}
@@ -529,13 +529,14 @@
         {/if}
       {/if}
       {#if Array.isArray(appStore.planResult.device_allocations)}
+        {@const splitMode = String(appStore.planResult.split_mode ?? 'layer')}
         <table class="w-full text-left mono text-[11px] mt-2">
-          <thead><tr><th>device</th><th>layers (zero-based)</th><th>memory</th></tr></thead>
+          <thead><tr><th>device</th><th>{splitMode === 'layer' ? 'layers (zero-based)' : 'parallel participation'}</th><th>memory</th></tr></thead>
           <tbody>
             {#each appStore.planResult.device_allocations as raw}
               {@const allocation = raw as DeviceAllocation}
               <tr><td>{allocation.node_id}: {allocation.device} ({allocation.backend})</td>
-                <td>{allocation.layer_start}–{allocation.layer_end - 1}{allocation.output_layer ? ' · includes output' : ''}</td>
+                <td>{splitMode === 'layer' ? `${allocation.layer_start}–${allocation.layer_end - 1}${allocation.output_layer ? ' · includes output' : ''}` : 'selected device'}</td>
                 <td>{formatGb(allocation.estimated_bytes, 1)} / {formatGb(allocation.budget_bytes, 1)}</td></tr>
             {/each}
           </tbody>

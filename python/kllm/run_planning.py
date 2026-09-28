@@ -123,6 +123,11 @@ def resolve_headroom(body: RunSettingsFields) -> float:
     return kllm_config.resolve_memory_fraction(device)
 
 
+def resolve_split_mode(body: RunSettingsFields) -> str:
+    """Request override takes precedence over the persistent system setting."""
+    return body.split_mode or kllm_config.get_split_mode()
+
+
 def _member_devices(member: dict[str, Any]) -> list[dict[str, Any]]:
     devices = list(member.get("devices") or [])
     if devices:
@@ -207,7 +212,8 @@ def resolve_launch_settings(body: RunSettingsFields) -> dict[str, Any]:
               "cache_type_v": body.cache_type_v, "flash_attention": "auto",
               "threads": body.threads,
               "checkpoints": 32 if body.checkpoints == "auto" else int(body.checkpoints),
-              "cache_ram": 8192 if body.cache_ram == "auto" else int(body.cache_ram)}
+               "cache_ram": 8192 if body.cache_ram == "auto" else int(body.cache_ram),
+               "split_mode": resolve_split_mode(body)}
     aliases = {"-b": "batch_size", "--batch-size": "batch_size", "-ub": "micro_batch",
                "--ubatch-size": "micro_batch", "-np": "parallel_slots", "--parallel": "parallel_slots",
                "-c": "context", "--ctx-size": "context", "-ctk": "cache_type_k",
@@ -245,6 +251,30 @@ def resolve_launch_settings(body: RunSettingsFields) -> dict[str, Any]:
     result["micro_batch"] = min(result["micro_batch"], result["batch_size"])
     result["extra_args"] = extra
     return result
+
+
+def validate_split_mode(settings: dict[str, Any], result: dict[str, Any]) -> None:
+    mode = settings["split_mode"]
+    backends = {str(a.get("backend")) for a in result.get("device_allocations") or []}
+    if mode in ("row", "tensor") and len(backends) > 1:
+        raise HTTPException(
+            400,
+            f"split_mode={mode} requires devices from one backend; use layer for mixed backends",
+        )
+    if mode in ("row", "tensor") and result.get("rpc_endpoints"):
+        raise HTTPException(
+            400,
+            f"split_mode={mode} is not supported with RPC workers; use layer",
+        )
+    if mode == "tensor":
+        cache_types = {settings["cache_type_k"], settings["cache_type_v"]}
+        if not cache_types <= {"f32", "f16", "bf16"}:
+            raise HTTPException(
+                400,
+                "split_mode=tensor requires f32, f16, or bf16 KV cache types",
+            )
+        if settings["flash_attention"] == "off":
+            raise HTTPException(400, "split_mode=tensor requires Flash Attention")
 
 
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
@@ -288,6 +318,8 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
         warning = result.get("hint") or "Plan is tight against cluster budget"
     result["warning"] = warning
     settings["context"] = result.get("context_effective", settings["context"])
+    result["split_mode"] = settings["split_mode"]
+    validate_split_mode(settings, result)
     result["resolved_launch_settings"] = settings
     return result
 
@@ -349,6 +381,7 @@ def build_master_launch(
     launch: dict[str, Any] = {
         "model": str(model_path),
         "tensor_split": plan_result["tensor_split_csv"],
+        "split_mode": settings["split_mode"],
         "ngl": plan_result["ngl"],
         "context": ctx,
         "threads": settings["threads"],

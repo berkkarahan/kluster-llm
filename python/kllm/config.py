@@ -10,6 +10,9 @@ from kllm.state import config_path, ensure_home
 Device = Literal["cpu", "gpu"]
 DEFAULT_DEVICE: Device = "gpu"
 VALID_DEVICES = frozenset({"cpu", "gpu"})
+SplitMode = Literal["layer", "row", "tensor"]
+DEFAULT_SPLIT_MODE: SplitMode = "layer"
+VALID_SPLIT_MODES = frozenset({"layer", "row", "tensor"})
 
 DEFAULT_VRAM_PERCENT = 80
 DEFAULT_RAM_PERCENT = 80
@@ -38,6 +41,15 @@ def _normalize_accel_backend(value: Any) -> str | None:
             f"accel_backend must be one of {sorted(SELECTABLE_ACCEL_BACKENDS)} or null, got {value!r}"
         )
     return s
+
+
+def _normalize_split_mode(value: Any) -> SplitMode:
+    if value is None:
+        return DEFAULT_SPLIT_MODE
+    s = str(value).strip().lower()
+    if s not in VALID_SPLIT_MODES:
+        raise ValueError(f"split_mode must be one of {sorted(VALID_SPLIT_MODES)}, got {value!r}")
+    return s  # type: ignore[return-value]
 
 
 def _normalize_percent(value: Any, *, field: str) -> int:
@@ -83,6 +95,7 @@ def default_config() -> dict[str, Any]:
         "vram_percent": DEFAULT_VRAM_PERCENT,
         "ram_percent": DEFAULT_RAM_PERCENT,
         "accel_backend": None,
+        "split_mode": DEFAULT_SPLIT_MODE,
     }
 
 
@@ -98,6 +111,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         cfg["ram_percent"] = _normalize_percent(raw["ram_percent"], field="ram_percent")
     if "accel_backend" in raw:
         cfg["accel_backend"] = _normalize_accel_backend(raw["accel_backend"])
+    if "split_mode" in raw:
+        cfg["split_mode"] = _normalize_split_mode(raw["split_mode"])
     return cfg
 
 
@@ -119,6 +134,7 @@ def _write_toml(cfg: dict[str, Any]) -> str:
     accel = cfg.get("accel_backend")
     if accel is not None:
         lines.append(f'accel_backend = "{accel}"')
+    lines.append(f'split_mode = "{cfg["split_mode"]}"')
     return "\n".join(lines) + "\n"
 
 
@@ -145,7 +161,7 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
     # Merge with existing so partial updates (e.g. device-only) keep percents / gpu_ids.
     current = load_config()
     merged = {**current}
-    for key in ("device", "vram_percent", "ram_percent", "gpu_ids", "accel_backend"):
+    for key in ("device", "vram_percent", "ram_percent", "gpu_ids", "accel_backend", "split_mode"):
         if key in cfg:
             merged[key] = cfg[key]
     out = _normalize_config(merged)
@@ -164,6 +180,10 @@ def get_gpu_ids() -> list[int] | None:
 
 def get_accel_backend() -> str | None:
     return _normalize_accel_backend(load_config().get("accel_backend"))
+
+
+def get_split_mode() -> SplitMode:
+    return _normalize_split_mode(load_config().get("split_mode"))
 
 
 def resolve_device(override: str | None = None) -> Device:

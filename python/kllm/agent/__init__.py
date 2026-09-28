@@ -716,6 +716,7 @@ class ConfigBody(BaseModel):
     vram_percent: int | None = Field(default=None, ge=10, le=100)
     ram_percent: int | None = Field(default=None, ge=10, le=100)
     accel_backend: str | None = None
+    split_mode: Literal["layer", "row", "tensor"] | None = None
 
 
 def _list_gpus_payload() -> dict[str, Any]:
@@ -1128,6 +1129,8 @@ def put_config(body: ConfigBody) -> dict[str, Any]:
             payload["ram_percent"] = body.ram_percent
         if "accel_backend" in body.model_fields_set:
             payload["accel_backend"] = body.accel_backend
+        if "split_mode" in body.model_fields_set:
+            payload["split_mode"] = body.split_mode
         return kllm_config.save_config(payload)
     except HTTPException:
         raise

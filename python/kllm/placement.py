@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from kllm.tensor_split import select_routing_devices
+from kllm.tensor_split import proportional_weights, select_routing_devices
 
 MIB = 1024**2
 WIDTHS = {"f32": 4, "f16": 2, "bf16": 2, "q8_0": 34 / 32,
@@ -161,6 +161,7 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
         locals_fit=locals_fit,
     )
 
+    split_mode = settings.get("split_mode", "layer")
     # For each possible CPU prefix, find contiguous device segments by dynamic programming.
     # Includes the output layer, so ngl and tensor_split describe the same allocation.
     solution = _allocate_contiguous(
@@ -183,13 +184,22 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
         for a in selected:
             a["device"] = f"RPC{rpc_offset + a['rpc_index']}"
         rpc_offset += selected[0]["rpc_device_count"]
+    if split_mode in ("row", "tensor"):
+        # These modes use every selected device for each offloaded layer. The
+        # layer DP remains the capacity estimate, while llama.cpp receives
+        # proportional shares for the selected devices.
+        split = proportional_weights(devices)
+        device_order = [d["device"] for d in devices]
+        endpoints = list(dict.fromkeys(d["rpc_endpoint"] for d in devices if d["rpc_endpoint"]))
+    else:
+        device_order = [a["device"] for a in allocations]
     node_ids = [n["node_id"] for n in nodes]
     node_alloc = [sum(a["estimated_bytes"] for a in allocations if a["node_id"] == nid) + (cpu_bytes if nid == master["node_id"] else 0) for nid in node_ids]
     budget = cpu_budget + sum(d["budget_bytes"] for d in devices if not (d["local"] and d["unified_memory"]))
     tight = fits and (cpu_bytes > cpu_budget * .9 or any(a["estimated_bytes"] > a["budget_bytes"] * .9 for a in allocations))
     return dict(node_ids=node_ids, node_alloc_bytes=node_alloc, budgets_bytes=[ram(n) if n["is_master"] else sum(d["budget_bytes"] for d in devices if d["node_id"] == n["node_id"]) for n in nodes],
                 tensor_split=split, tensor_split_csv=",".join(f"{v:.6f}" for v in split) or "0",
-                device_allocations=allocations, device_order=[a["device"] for a in allocations],
+                device_allocations=allocations, device_order=device_order,
                 rpc_endpoints=endpoints,
                 routing_mode=routing_mode,
                 cpu_layers=cpu_count, cpu_alloc_bytes=cpu_bytes, ngl=ngl,
@@ -199,7 +209,7 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
                 execution_overhead_bytes=memory["overhead"] * (len(allocations)+1),
                 estimated_bytes=sum(node_alloc), total_budget_bytes=budget, budget_bytes=budget,
                 estimate_confidence=memory["confidence"], architecture=memory["architecture"],
-                split_mode="layer", device_requested=device, device_effective="gpu" if ngl else "cpu",
+                split_mode=split_mode, device_requested=device, device_effective="gpu" if ngl else "cpu",
                 node_devices=[dict(node_id=nid, effective="gpu" if any(a["node_id"] == nid for a in allocations) else "cpu", fallback=False) for nid in node_ids],
                 node_scores=[max((d["score"] for d in devices if d["node_id"] == nid), default=0) for nid in node_ids],
                 node_latency_ms=[n.get("latency_ms") or 0 for n in nodes],

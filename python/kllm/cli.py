@@ -559,6 +559,7 @@ def _run_settings_options(
     presence_penalty: Optional[float],
     repeat_penalty: Optional[float],
     enable_thinking: Optional[bool],
+    split_mode: Optional[str] = None,
 ) -> dict:
     headroom = _headroom_override(device, vram_percent, ram_percent)
     return build_plan_run_payload(
@@ -595,7 +596,27 @@ def _run_settings_options(
         presence_penalty=presence_penalty,
         repeat_penalty=repeat_penalty,
         enable_thinking=enable_thinking,
+        split_mode=split_mode,
     )
+
+
+@app.command("config")
+def config_cmd(
+    split_mode: Optional[str] = typer.Option(
+        None,
+        "--split-mode",
+        help="Persistent system default: layer|row|tensor (omit to show config)",
+    ),
+) -> None:
+    """Show or update local system settings."""
+    try:
+        if split_mode is not None:
+            cfg = kllm_config.save_config({"split_mode": split_mode})
+            console.print(f"split_mode={cfg['split_mode']}")
+        else:
+            console.print(kllm_config.load_config())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--split-mode") from exc
 
 
 @app.command("plan")
@@ -656,6 +677,9 @@ def plan_cmd(
         "--enable-thinking/--no-enable-thinking",
         help="Force thinking on/off (omit = template default)",
     ),
+    split_mode: Optional[str] = typer.Option(
+        None, "--split-mode", help="Override system split mode: layer|row|tensor"
+    ),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -694,6 +718,7 @@ def plan_cmd(
         presence_penalty,
         repeat_penalty,
         enable_thinking,
+        split_mode,
     )
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
@@ -779,6 +804,9 @@ def run(
         "--enable-thinking/--no-enable-thinking",
         help="Force thinking on/off (omit = template default)",
     ),
+    split_mode: Optional[str] = typer.Option(
+        None, "--split-mode", help="Override system split mode: layer|row|tensor"
+    ),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -817,6 +845,7 @@ def run(
         presence_penalty,
         repeat_penalty,
         enable_thinking,
+        split_mode,
     )
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)

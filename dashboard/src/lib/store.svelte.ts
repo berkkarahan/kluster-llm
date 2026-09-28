@@ -11,6 +11,7 @@ import type {
     ModelInfo,
     ModelSearchHit,
     ModelSearchResponse,
+    SplitMode,
     Status
   } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
@@ -26,6 +27,10 @@ const ACCEL_LABELS: Record<AccelBackend, string> = {
 
 function isAccelBackend(v: unknown): v is AccelBackend {
   return v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan';
+}
+
+function isSplitMode(v: unknown): v is SplitMode {
+  return v === 'layer' || v === 'row' || v === 'tensor';
 }
 
 let fingerprint = '';
@@ -78,6 +83,7 @@ class AppStore {
   probedBackend = $state('cpu');
   allowedBackends = $state<AccelBackend[]>([]);
   accelBackend = $state<AccelBackend | null>(null);
+  splitMode = $state<SplitMode>('layer');
   selectedGpuIds = $state<number[]>([]);
   modelSource = $state('');
   searchResults = $state<ModelSearchHit[]>([]);
@@ -619,6 +625,7 @@ class AppStore {
       else if (data.accel_backend === null || data.accel_backend === undefined) {
         this.accelBackend = null;
       }
+      if (isSplitMode(data.split_mode)) this.splitMode = data.split_mode;
       this.hydrateGpuSelection();
     } catch {
       /* ignore */
@@ -710,6 +717,7 @@ class AppStore {
     vram_percent?: number;
     ram_percent?: number;
     accel_backend?: AccelBackend | null;
+    split_mode?: SplitMode;
   }) {
     const device = partial?.device ?? this.device;
     this.device = device;
@@ -729,6 +737,12 @@ class AppStore {
     } else if (this.accelBackend) {
       body.accel_backend = this.accelBackend;
     }
+    if (partial?.split_mode) {
+      body.split_mode = partial.split_mode;
+      this.splitMode = partial.split_mode;
+    } else {
+      body.split_mode = this.splitMode;
+    }
     this.busy = '/v1/config';
     try {
       const r = await fetch('/v1/config', {
@@ -747,6 +761,7 @@ class AppStore {
         if (typeof data.ram_percent === 'number') this.ramPercent = data.ram_percent;
         if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
         else if (data.accel_backend === null) this.accelBackend = null;
+        if (isSplitMode(data.split_mode)) this.splitMode = data.split_mode;
       } catch {
         /* ignore */
       }
@@ -769,6 +784,10 @@ class AppStore {
 
   async setAccelBackend(backend: AccelBackend | null) {
     await this.saveConfig({ accel_backend: backend });
+  }
+
+  async setSplitMode(mode: SplitMode) {
+    await this.saveConfig({ split_mode: mode });
   }
 
   async setVramPercent(value: number) {

@@ -192,11 +192,14 @@ def _browse_via_helper(timeout: float, key: str | None) -> list[DiscoveredMaster
     return None
 
 
-def _http_probe_hosts(port: int = DEFAULT_CONTROL_PORT) -> list[str]:
-    """Private /24 peers on local interfaces (plus loopback for same-host tests)."""
+MAX_PROBE_HOSTS = 4096
+
+
+def _fallback_http_probe_hosts() -> list[str]:
+    """Private /24 peers derived from raw interface IPs (no netmask available)."""
     from kllm import netsec
 
-    hosts: list[str] = ["127.0.0.1"]
+    hosts: list[str] = []
     seen: set[str] = {"127.0.0.1"}
     for ip in netsec._list_ipv4_addresses():
         try:
@@ -211,6 +214,50 @@ def _http_probe_hosts(port: int = DEFAULT_CONTROL_PORT) -> list[str]:
         prefix = ".".join(parts[:3])
         for last in range(1, 255):
             cand = f"{prefix}.{last}"
+            if cand not in seen:
+                seen.add(cand)
+                hosts.append(cand)
+    return hosts
+
+
+def _http_probe_hosts(port: int = DEFAULT_CONTROL_PORT) -> list[str]:
+    """Private peers on local interface subnets (plus loopback for same-host tests).
+
+    Uses the real interface netmask so a ``/22`` LAN (e.g. ``192.168.68.0/22``)
+    is fully covered, not truncated to the caller's ``/24`` — Join-by-key needs
+    this when mDNS is silent and the master sits in a neighbouring third octet.
+    Host count is capped at :data:`MAX_PROBE_HOSTS` to bound scan time.
+    """
+    from kllm import netsec
+
+    hosts: list[str] = ["127.0.0.1"]
+    seen: set[str] = {"127.0.0.1"}
+
+    try:
+        networks = netsec._list_ipv4_networks()
+    except Exception:
+        networks = []
+
+    capped = False
+    for net in networks:
+        addr = ipaddress.ip_address(str(net.network_address))
+        if not addr.is_private or addr.is_loopback or addr.is_link_local:
+            continue
+        for host in net.hosts():
+            cand = str(host)
+            if cand in seen:
+                continue
+            seen.add(cand)
+            hosts.append(cand)
+            if len(hosts) >= MAX_PROBE_HOSTS:
+                capped = True
+                break
+        if capped:
+            break
+
+    if len(hosts) == 1:
+        # No usable interface networks: keep the historical /24-per-IP fallback.
+        for cand in _fallback_http_probe_hosts():
             if cand not in seen:
                 seen.add(cand)
                 hosts.append(cand)
@@ -256,19 +303,24 @@ def _browse_via_http(
     key: str | None,
     port: int = DEFAULT_CONTROL_PORT,
 ) -> list[DiscoveredMaster]:
-    """Scan local private /24s for a master when mDNS is silent (e.g. Windows)."""
+    """Scan local private interface subnets for a master when mDNS is silent."""
     want = join_key_id(key) if key else None
     hosts = _http_probe_hosts(port)
     per_host = min(0.45, max(0.12, timeout / 10.0))
     found: list[DiscoveredMaster] = []
-    deadline = time.time() + max(timeout, 1.0) + 1.5
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+    # Scale workers/deadline with the subnet size (/24 → /22 etc.) while keeping
+    # join latency bounded. Keyed joins still stop at the first match.
+    max_workers = min(256, max(64, len(hosts)))
+    waves = len(hosts) / max_workers
+    budget = max(timeout, 1.0) + max(1.5, waves * per_host + 0.5)
+    deadline = time.time() + budget
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
         futs = [
             pool.submit(_probe_http_master, host, port, want, per_host) for host in hosts
         ]
         try:
-            for fut in concurrent.futures.as_completed(futs, timeout=max(timeout, 1.0) + 2.0):
+            for fut in concurrent.futures.as_completed(futs, timeout=budget + 0.5):
                 if time.time() > deadline:
                     break
                 try:
@@ -283,7 +335,7 @@ def _browse_via_http(
         except concurrent.futures.TimeoutError:
             pass
     finally:
-        # Do not wait for the rest of the /24 — join latency matters more.
+        # Do not wait for the rest of the scan — join latency matters more.
         pool.shutdown(wait=False, cancel_futures=True)
     # Deduplicate by host:port
     uniq: dict[tuple[str, int], DiscoveredMaster] = {}
@@ -297,12 +349,12 @@ def browse_masters(
     key: str | None = None,
     port: int = DEFAULT_CONTROL_PORT,
 ) -> list[DiscoveredMaster]:
-    """Discover masters on the LAN via mDNS, then HTTP /24 probe.
+    """Discover masters on the LAN via mDNS, then HTTP subnet probe.
 
     When this interpreter cannot see mDNS (macOS Local Network / Zscaler on
     uv-managed Python), fall back to the same helper-Python pattern used by
     ``cp_proxy``. If mDNS is still empty (common for Windows masters without
-    Bonjour), probe private LAN /24s for ``/health`` role=master matching
+    Bonjour), probe private LAN subnets for ``/health`` role=master matching
     the join-key fingerprint so Join-by-key works without ``master_host``.
     """
     found = _browse_inprocess(timeout, key)

@@ -162,7 +162,7 @@ Get-Process rpc-server | Select-Object CPU, WorkingSet
 
 ### OOM (Out of Memory)
 **Symptom:** Server crashes with "CUDA out of memory" or "Mach kernel reported"
-**Fix:** Reduce context length (`-c`), use smaller quantization, or increase tensor-split to move more layers to Mac.
+**Fix:** Reduce context length, use a smaller quantization, or adjust the node memory budgets and let `kllm plan` recompute placement.
 
 ### Slow Inference
 **Symptom:** Tokens/sec much lower than expected

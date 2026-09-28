@@ -26,6 +26,8 @@ export type Member = {
   rpc_port?: number;
   gpu_ids?: number[] | null;
   latency_ms?: number | null;
+  process_pid?: number | null;
+  process_role?: string | null;
 };
 
 export type DownloadProgress = {
@@ -58,6 +60,19 @@ export type LoadProgress = {
   rate_bps?: number | null;
   eta_seconds?: number | null;
   error?: string;
+};
+
+/** Live serving state sampled from llama-server slots on the master. */
+export type InferenceActivity = {
+  phase: 'idle' | 'starting' | 'loading_model' | 'processing_input' | 'generating' | 'ready' | 'error';
+  active_requests: number;
+  prompt_tokens: number;
+  prompt_tokens_processed: number;
+  output_tokens: number;
+  slots: number;
+  server_ready: boolean;
+  load_fraction?: number;
+  detail?: string | null;
 };
 
 /** Per-model run settings as stored by PUT /v1/model-settings/{model}. */
@@ -121,6 +136,7 @@ export type Status = {
   rpc_port?: number;
   infer_port?: number;
   inference_up?: boolean;
+  inference_activity?: InferenceActivity | null;
   device?: 'cpu' | 'gpu';
   vram_percent?: number;
   ram_percent?: number;

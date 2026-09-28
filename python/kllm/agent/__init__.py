@@ -26,6 +26,7 @@ from kllm import (
     cluster_update,
     discovery,
     gateway,
+    inference_activity,
     load_progress,
     models as model_ops,
     native,
@@ -188,6 +189,8 @@ def _heartbeat_payload() -> dict[str, Any]:
         "gpu_ids": STATE.gpu_ids,
         "git_head": identity.get("git_head"),
         "llama_release": identity.get("llama_release"),
+        "process_pid": STATE.process_pid,
+        "process_role": STATE.process_role,
     }
 
 
@@ -201,6 +204,20 @@ def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
         STATE.apply_error = data.get("apply_error")
     if "apply_warning" in data:
         STATE.apply_warning = data.get("apply_warning")
+    if "inference_activity" in data:
+        activity = data.get("inference_activity")
+        STATE.inference_activity = dict(activity) if isinstance(activity, dict) else None
+
+
+def _inference_activity() -> dict[str, Any]:
+    """Read local master activity or return the master's latest worker mirror."""
+    if STATE.role != "master":
+        return STATE.inference_activity or inference_activity.idle()
+    running = bool(STATE.process_pid and STATE.process_role == "master")
+    load = load_progress.sample(STATE.infer_port) if running else None
+    activity = inference_activity.sample(STATE.infer_port, running=running, load=load)
+    STATE.inference_activity = activity
+    return activity
 
 
 def _worker_local_leave() -> None:
@@ -538,6 +555,8 @@ class RegisterBody(BaseModel):
     gpu_ids: list[int] | None = None
     git_head: str | None = None
     llama_release: str | None = None
+    process_pid: int | None = None
+    process_role: str | None = None
 
 
 class UpdateProgressBody(BaseModel):
@@ -1136,6 +1155,7 @@ def status() -> dict[str, Any]:
     except Exception as exc:
         capacity = {"error": str(exc)}
     cfg = kllm_config.load_config()
+    activity = _inference_activity()
     return {
         "role": STATE.role,
         "node_id": STATE.node_id,
@@ -1156,7 +1176,8 @@ def status() -> dict[str, Any]:
         "control_port": STATE.control_port,
         "rpc_port": STATE.rpc_port,
         "infer_port": STATE.infer_port,
-        "inference_up": bool(STATE.process_pid and STATE.process_role == "master"),
+        "inference_up": bool(activity.get("server_ready")),
+        "inference_activity": activity,
         "device": cfg.get("device", kllm_config.DEFAULT_DEVICE),
         "vram_percent": cfg.get("vram_percent"),
         "ram_percent": cfg.get("ram_percent"),
@@ -1305,6 +1326,7 @@ def stop() -> dict[str, Any]:
         STATE.process_role = None
         runtime.clear_children()
         load_progress.end()
+        STATE.inference_activity = inference_activity.idle()
     if STATE.role == "master":
         if _advertiser:
             _advertiser.stop()
@@ -1678,7 +1700,7 @@ def register(
     STATE.save()
     membership_mod.on_membership_grow(STATE)
     response["members"] = len(STATE.members)
-    response.update(membership_mod.snapshot_payload(STATE))
+    response.update(membership_mod.snapshot_payload(STATE, _inference_activity()))
     return response
 
 
@@ -1755,7 +1777,7 @@ def heartbeat(
     return {
         "ok": True,
         "accepted": accepted,
-        **membership_mod.snapshot_payload(STATE),
+        **membership_mod.snapshot_payload(STATE, _inference_activity()),
     }
 
 
@@ -1986,6 +2008,7 @@ def run(body: RunBody) -> dict[str, Any]:
         native.stop_process(STATE.process_pid, force=True)
         runtime.clear_children()
         load_progress.end()
+        STATE.inference_activity = inference_activity.idle()
     gpu_env = _gpu_visibility_env(
         (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
         STATE.gpu_ids,

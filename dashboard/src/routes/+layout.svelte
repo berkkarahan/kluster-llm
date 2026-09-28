@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { appStore } from '$lib/store.svelte';
+  import InferenceActivity from '$lib/components/InferenceActivity.svelte';
   import { toasts } from '$lib/toast';
 
   let { children } = $props();
@@ -61,7 +62,9 @@
       {#if appStore.status?.update && appStore.status.update.phase && appStore.status.update.phase !== 'done'}
         <span class="chip chip-warn">upd {Math.round(appStore.status.update.pct ?? 0)}%</span>
       {/if}
-      {#if appStore.status?.inference_up}
+      {#if appStore.status?.inference_activity && appStore.status.inference_activity.phase !== 'idle'}
+        <InferenceActivity activity={appStore.status.inference_activity} />
+      {:else if appStore.status?.inference_up}
         <span class="chip chip-ok">infer</span>
       {/if}
     </div>

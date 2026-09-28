@@ -1,6 +1,7 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
+  import InferenceActivity from '$lib/components/InferenceActivity.svelte';
 
   function fmtBytes(n?: number | null) {
     if (n == null) return '—';
@@ -14,6 +15,21 @@
   const isMaster = $derived(appStore.status?.role === 'master');
   const isWorker = $derived(appStore.status?.role === 'worker');
   const startJoinDisabled = $derived(!idle || !!appStore.busy);
+  const inferenceActivity = $derived(appStore.status?.inference_activity);
+
+  function assignedToInference(nodeId: string): boolean {
+    const plan = appStore.status?.last_plan;
+    const allocations = plan?.device_allocations;
+    if (Array.isArray(allocations) && allocations.length) {
+      return allocations.some((allocation) => (
+        typeof allocation === 'object'
+        && allocation !== null
+        && (allocation as { node_id?: unknown }).node_id === nodeId
+      ));
+    }
+    const nodeIds = plan?.node_ids;
+    return Array.isArray(nodeIds) ? nodeIds.includes(nodeId) : nodeId === appStore.status?.node_id;
+  }
 </script>
 
 <div class="grid h-[calc(100vh-40px)] grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_360px]">
@@ -109,6 +125,12 @@
       Topology
     </div>
     <div class="p-3 overflow-auto flex-1">
+      {#if inferenceActivity && inferenceActivity.phase !== 'idle'}
+        <div class="mb-3 flex items-center gap-2 mono text-[11px]" style="color: var(--muted)">
+          cluster inference
+          <InferenceActivity activity={inferenceActivity} />
+        </div>
+      {/if}
       <table class="w-full text-left border-collapse">
         <thead>
           <tr class="mono text-[11px]" style="color: var(--muted)">
@@ -120,12 +142,13 @@
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">ram</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">vram</th>
             <th class="font-medium py-1 border-b" style="border-color: var(--border)">control RTT</th>
+            <th class="font-medium py-1 border-b" style="border-color: var(--border)">activity</th>
           </tr>
         </thead>
         <tbody>
           {#if view === 'loading'}
             <tr>
-              <td colspan="8" class="py-6 mono" style="color: var(--muted)">Loading cluster…</td>
+              <td colspan="9" class="py-6 mono" style="color: var(--muted)">Loading cluster…</td>
             </tr>
           {:else if members.length}
             {#each members as m}
@@ -142,15 +165,18 @@
                 <td class="py-1.5 border-b" style="border-color: var(--border)">
                   {m.latency_ms != null ? `${Number(m.latency_ms).toFixed(1)} ms` : '—'}
                 </td>
+                <td class="py-1.5 border-b" style="border-color: var(--border)">
+                  <InferenceActivity activity={inferenceActivity} assigned={assignedToInference(m.node_id)} />
+                </td>
               </tr>
             {/each}
           {:else if idle}
             <tr>
-              <td colspan="8" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
+              <td colspan="9" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
             </tr>
           {:else}
             <tr>
-              <td colspan="8" class="py-6 mono" style="color: var(--muted)">
+              <td colspan="9" class="py-6 mono" style="color: var(--muted)">
                 {view === 'offline' ? 'Disconnected — keeping last cluster view.' : 'Waiting for members…'}
               </td>
             </tr>

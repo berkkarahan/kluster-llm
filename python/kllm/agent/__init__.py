@@ -1384,6 +1384,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
     STATE.rpc_bind = lan_host
     STATE.overlay = overlay
     STATE.netsec_warnings = []
+    STATE.llama_warnings = []
     STATE.wg_address = None
     STATE.wg_public_key = None
     STATE.overlay_status = None
@@ -1501,11 +1502,15 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
             raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
 
     # Align llama.cpp with the committed llama-release pin when a pack is already
-    # in ~/.kllm/models (avoids GitHub SSL on some macOS venvs).
+    # in ~/.kllm/models (avoids GitHub SSL on some macOS venvs). A pack must
+    # never change which backends are installed, so a refusal is surfaced rather
+    # than silently swallowed on platforms with a multi-backend contract.
     try:
-        from kllm.llama_pack import install_cached_llama_pack
+        from kllm.llama_pack import PackNotInstallable, install_cached_llama_pack
 
         install_cached_llama_pack(backend=str(backend), force=False)
+    except PackNotInstallable as exc:
+        STATE.llama_warnings = [*STATE.llama_warnings, str(exc)]
     except Exception:
         pass
 
@@ -1545,6 +1550,7 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         "wg_address": STATE.wg_address,
         "overlay_status": STATE.overlay_status,
         "netsec_warnings": STATE.netsec_warnings,
+        "llama_warnings": list(STATE.llama_warnings or []),
         "gpu_ids": STATE.gpu_ids,
         "cp_proxy_port": STATE.cp_proxy_port,
     }

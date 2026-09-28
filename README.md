@@ -78,7 +78,7 @@ kllm connect claude
 # kllm start --overlay wireguard
 ```
 
-CLI/UI-only rebuild: `python scripts/build.py`. Flags: `--backend vulkan|cuda|metal|cpu`, `--skip-wireguard`, `--prefer-prebuilt`.
+CLI/UI-only rebuild: `python scripts/build.py`. Flags: `--backend vulkan|cuda|metal|cpu`, `--skip-wireguard`, `--prefer-prebuilt` (not on macOS, which must build Metal+Vulkan).
 
 Dashboard is built by `install.py`; or manually `cd dashboard && npm install && npm run build`, then `kllm ui` → `http://127.0.0.1:18765/`.
 

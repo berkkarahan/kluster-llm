@@ -53,7 +53,7 @@ After install on **this** machine:
 | Host OS | Default `--backend` | Notes |
 |---------|---------------------|--------|
 | Windows | `vulkan` (auto) | Prebuilt GitHub zip for the pin in `llama-release`. CUDA if `nvcc` / CUDA toolkit present → auto may pick `cuda`. |
-| macOS Apple Silicon | `metal` (auto) | Default install is a **source** build with **Metal + Vulkan** (MoltenVK via Homebrew). Stamp `backend=metal+vulkan`. Runtime preference defaults to Metal; set `KLLM_ACCEL_BACKEND=vulkan` for Vulkan-master clusters. `--prefer-prebuilt` = Metal-only GitHub pack. `--backend cpu` = CPU-only. |
+| macOS Apple Silicon | `metal` (auto) | Default install is a **source** build with **Metal + Vulkan** (MoltenVK via Homebrew). Stamp `backend=metal+vulkan`. Runtime preference defaults to Metal; set `KLLM_ACCEL_BACKEND=vulkan` for Vulkan-master clusters. The default **aborts** if it cannot produce both backends; `--prefer-prebuilt` is rejected on macOS, and `--backend cpu` is the only CPU-only opt-out. |
 | Linux | `cuda` with NVIDIA tooling, `rocm` with AMD HIP tooling, otherwise `vulkan` | Use `--backend rocm --from-source` on supported Linux AMD systems. Hardware validation remains required. |
 
 ---
@@ -88,17 +88,13 @@ python3 scripts/install.py
 python3 scripts/install.py --backend metal
 ```
 
-**macOS Metal-only prebuilt (no Vulkan):**
-
-```bash
-python3 scripts/install.py --prefer-prebuilt
-```
-
 **macOS CPU-only:**
 
 ```bash
 python3 scripts/install.py --backend cpu --from-source
 ```
+
+> `--prefer-prebuilt` is rejected on macOS: GitHub macOS packs are Metal-only, and macOS installs must provide Metal + Vulkan in one binary. `--backend cpu` is the only opt-out.
 
 **Windows Vulkan prebuilt explicit:**
 
@@ -119,6 +115,10 @@ python3 scripts/install.py --backend cuda --from-source
 3. Ensures **Node/npm**, runs `dashboard` `npm install` + `npm run build`.  
 4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
    The macOS Homebrew dependencies are `molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`. The Vulkan gate checks `glslc` (provided by `shaderc`) and the `SPIRV-Headers` CMake config alongside Vulkan headers and the MoltenVK ICD manifest.
+   The reusable `vendor/llama.cpp/build` tree is installer-owned: it is discarded when the pin, backend flags or a recorded OpenSSL package path changes, so a toolchain upgrade (`brew upgrade openssl@3`) cannot leave a cache that half-resolves a package. A dangling `-L` in an exported `LDFLAGS` is ignored rather than treated as stale, so it cannot force a rebuild every run.
+   On macOS the default install **aborts** when the Metal+Vulkan build fails; it never downgrades to a Metal-only pack, and `--prefer-prebuilt` is rejected outright. Verification probes the binary the runtime actually launches (`vendor/bin/llama-server`, which `kllm-native` resolves first), not the CMake build output, and `--check` exits non-zero on a backend mismatch.
+   llama-server's embedded HTTPS server is the expendable part: if `cmake` configure fails, the installer clears the cached OpenSSL entries and dangling linker flags and retries **with HTTPS enabled** (the real fix); only if that fails does it fall back to `-DLLAMA_OPENSSL=OFF`, recorded as `https=off` in the stamp. The fallback is never latched, so the next run restores HTTPS.
+   `kllm join` reuses a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot, reporting the refusal as a `llama:` warning in the join output rather than downgrading the node.
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).
@@ -179,7 +179,7 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 | Flag | When to use |
 |------|-------------|
 | `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
-| `--prefer-prebuilt` | Prefer GitHub release zips (default on Windows/Linux; Metal-only on macOS). |
+| `--prefer-prebuilt` | Prefer GitHub release zips (default on Windows/Linux; rejected on macOS, which must build Metal+Vulkan). |
 | `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp` (macOS default for Metal+Vulkan). |
 | `--tag TAG` | Override `llama-release` (keep every node on the same tag). |
 | `--force` | Reinstall llama.cpp even when `vendor/bin/llama-release.txt` matches. |

@@ -145,6 +145,9 @@ class ClusterState:
     wg_public_key: str | None = None
     overlay_status: str | None = None
     netsec_warnings: list[str] = field(default_factory=list)
+    # llama.cpp install warnings that must not be silent, e.g. a cached pack
+    # refused on macOS because it would not provide Metal + Vulkan.
+    llama_warnings: list[str] = field(default_factory=list)
     last_settings: dict[str, Any] | None = None
     apply_error: str | None = None
     apply_warning: str | None = None

@@ -68,39 +68,6 @@ def test_parse_args_defaults(install):
     assert args.skip_wireguard is False
 
 
-def test_migrate_worker_root_dlls(install, monkeypatch, tmp_path):
-    worker = tmp_path / "worker-windows"
-    worker.mkdir()
-    src_dir = worker / "src"
-    (worker / "a.dll").write_bytes(b"a")
-    (worker / "b.dll").write_bytes(b"b")
-
-    monkeypatch.setattr(install, "WORKER_WIN", worker)
-    monkeypatch.setattr(install, "WORKER_WIN_SRC", src_dir)
-
-    install._migrate_worker_root_dlls()
-
-    assert not list(worker.glob("*.dll"))
-    assert (src_dir / "a.dll").read_bytes() == b"a"
-    assert (src_dir / "b.dll").read_bytes() == b"b"
-
-
-def test_copy_dlls_to_worker_src(install, monkeypatch, tmp_path):
-    worker = tmp_path / "worker-windows"
-    worker.mkdir()
-    src_dir = worker / "src"
-    from_dir = tmp_path / "extract"
-    from_dir.mkdir()
-    (from_dir / "ggml.dll").write_bytes(b"ggml")
-
-    monkeypatch.setattr(install, "WORKER_WIN", worker)
-    monkeypatch.setattr(install, "WORKER_WIN_SRC", src_dir)
-
-    install._copy_dlls(from_dir, install._ensure_worker_src())
-
-    assert (src_dir / "ggml.dll").read_bytes() == b"ggml"
-
-
 def test_read_pinned_release_from_repo(install):
     assert install.read_pinned_release() == "v0.5.0"
     assert install.PIN_FILE.name == "llama-release"
@@ -138,11 +105,8 @@ def test_copy_llama_binaries_renames_ggml_rpc_and_copies_dylibs(install, monkeyp
     monkeypatch.setattr(install, "_is_windows", lambda: False)
     bin_dir = tmp_path / "bin"
     vendor = tmp_path / "llama.cpp"
-    worker = tmp_path / "worker-windows"
     monkeypatch.setattr(install, "BIN_DIR", bin_dir)
     monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
-    monkeypatch.setattr(install, "WORKER_WIN", worker)
-    monkeypatch.setattr(install, "WORKER_WIN_SRC", worker / "src")
 
     extract = tmp_path / "extract"
     extract.mkdir()
@@ -155,7 +119,6 @@ def test_copy_llama_binaries_renames_ggml_rpc_and_copies_dylibs(install, monkeyp
     assert (bin_dir / "rpc-server").read_bytes() == b"rpc"
     assert (bin_dir / "libggml.dylib").read_bytes() == b"lib"
     assert not (bin_dir / "ggml-rpc-server").exists()
-    assert (worker / "rpc-server").read_bytes() == b"rpc"
 
 
 def test_pick_release_asset_macos_vulkan_does_not_relabel_metal(install, monkeypatch):
@@ -679,6 +642,7 @@ def test_expected_stamp_for_default_never_raises(install, monkeypatch):
 
 def test_resolve_runtime_binary_prefers_vendor_bin(install, tmp_path, monkeypatch):
     """kllm-native launches vendor/bin first, so verification must probe it."""
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
     bin_dir = tmp_path / "vendor-bin"
     vendor = tmp_path / "llama.cpp"
     staged = bin_dir / "llama-server"
@@ -693,6 +657,7 @@ def test_resolve_runtime_binary_prefers_vendor_bin(install, tmp_path, monkeypatc
 
 
 def test_resolve_runtime_binary_falls_back_to_build_tree(install, tmp_path, monkeypatch):
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
     bin_dir = tmp_path / "vendor-bin"
     bin_dir.mkdir()
     vendor = tmp_path / "llama.cpp"
@@ -774,13 +739,11 @@ def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):
 
 
 def test_copy_llama_binaries_never_stages_into_build_tree(install, tmp_path, monkeypatch):
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
     bin_dir = tmp_path / "vendor-bin"
     vendor = tmp_path / "llama.cpp"
-    worker = tmp_path / "worker-windows"
     monkeypatch.setattr(install, "BIN_DIR", bin_dir)
     monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
-    monkeypatch.setattr(install, "WORKER_WIN", worker)
-    monkeypatch.setattr(install, "WORKER_WIN_SRC", worker / "src")
 
     src = tmp_path / "extract" / "llama-b1"
     src.mkdir(parents=True)
@@ -792,15 +755,16 @@ def test_copy_llama_binaries_never_stages_into_build_tree(install, tmp_path, mon
     assert (bin_dir / "llama-server").is_file()
     assert (bin_dir / "libggml.dylib").is_file()
     assert not (vendor / "build" / "bin").exists()
+    assert not (tmp_path / "worker-windows").exists()
 
 
 def test_install_llama_archive_stamps_normalized_backend(install, tmp_path, monkeypatch):
     import tarfile as _tarfile
 
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
     monkeypatch.setattr(install, "BIN_DIR", tmp_path / "bin")
     monkeypatch.setattr(install, "VENDOR_LLAMA", tmp_path / "llama.cpp")
-    monkeypatch.setattr(install, "WORKER_WIN", tmp_path / "worker-windows")
-    monkeypatch.setattr(install, "WORKER_WIN_SRC", tmp_path / "worker-windows" / "src")
 
     packdir = tmp_path / "llama-b1"
     packdir.mkdir()

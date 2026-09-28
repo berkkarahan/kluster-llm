@@ -364,7 +364,7 @@ impl LaunchConfig {
 
         let binary = resolve_rpc_server(repo_root.as_deref()).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
-                "rpc-server not found; set KLLM_RPC_SERVER or place rpc-server in worker-windows/",
+                "rpc-server not found; set KLLM_RPC_SERVER or run scripts/install.py",
             )
         })?;
 
@@ -438,7 +438,6 @@ pub fn resolve_rpc_server(repo_root: Option<&str>) -> Option<String> {
     let rels = [
         "vendor/bin/rpc-server",
         "vendor/bin/rpc-server.exe",
-        "worker-windows/rpc-server.exe",
         "vendor/llama.cpp/build/bin/rpc-server",
         "vendor/llama.cpp/build/bin/rpc-server.exe",
         "vendor/llama.cpp/build/bin/ggml-rpc-server",

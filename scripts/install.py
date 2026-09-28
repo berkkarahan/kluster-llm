@@ -58,8 +58,6 @@ VENV_DIR = ROOT / ".venv"
 DASHBOARD = ROOT / "dashboard"
 VENDOR_LLAMA = ROOT / "vendor" / "llama.cpp"
 BIN_DIR = ROOT / "vendor" / "bin"
-WORKER_WIN = ROOT / "worker-windows"
-WORKER_WIN_SRC = WORKER_WIN / "src"
 PIN_FILE = ROOT / "llama-release"
 STAMP_FILE = BIN_DIR / "llama-release.txt"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
@@ -1397,10 +1395,6 @@ def _resolve_runtime_binary(name: str) -> Path | None:
     staged = BIN_DIR / exe
     if staged.is_file():
         return staged
-    if name == "rpc-server":
-        worker = WORKER_WIN / exe
-        if worker.is_file():
-            return worker
     return _find_build_tree_binary(name)
 
 
@@ -1725,15 +1719,6 @@ def _install_llama_archive(
     return True
 
 
-def _ensure_worker_src() -> Path:
-    WORKER_WIN_SRC.mkdir(parents=True, exist_ok=True)
-    return WORKER_WIN_SRC
-
-
-def _copy_dlls(from_dir: Path, to_dir: Path) -> None:
-    _copy_shared_libs(from_dir, to_dir)
-
-
 def _copy_shared_libs(from_dir: Path, to_dir: Path) -> None:
     to_dir.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()
@@ -1749,22 +1734,6 @@ def _mark_executable(path: Path) -> None:
     if _is_windows() or not path.is_file():
         return
     path.chmod(path.stat().st_mode | 0o111)
-
-
-def _migrate_worker_root_dlls() -> None:
-    """Move legacy worker-windows/*.dll into worker-windows/src/."""
-    if not WORKER_WIN.is_dir():
-        return
-    dlls = list(WORKER_WIN.glob("*.dll"))
-    if not dlls:
-        return
-    dest = _ensure_worker_src()
-    for dll in dlls:
-        target = dest / dll.name
-        if target.exists():
-            dll.unlink()
-        else:
-            shutil.move(str(dll), str(target))
 
 
 def _copy_llama_binaries_from(root: Path) -> bool:
@@ -1787,21 +1756,14 @@ def _copy_llama_binaries_from(root: Path) -> bool:
         found_any = True
         print(f"  -> {dest}")
         _copy_shared_libs(src.parent, BIN_DIR)
-        if base == "rpc-server":
-            WORKER_WIN.mkdir(parents=True, exist_ok=True)
-            worker_dest = WORKER_WIN / exe
-            shutil.copy2(src, worker_dest)
-            _mark_executable(worker_dest)
-            _copy_shared_libs(src.parent, _ensure_worker_src())
     # Deliberately never stage into vendor/llama.cpp/build/bin: that is the
     # CMake output dir, and a prebuilt binary left there makes an unrelated,
     # failed source build look successful (and poisons the build cache).
-    _migrate_worker_root_dlls()
     return found_any
 
 
 def stage_built_binaries() -> None:
-    """If we built from source, also copy into vendor/bin and worker-windows."""
+    """If we built from source, copy runtime binaries into vendor/bin."""
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     for name in ("llama-server", "rpc-server"):
         src = _find_build_tree_binary(name)
@@ -1813,13 +1775,6 @@ def stage_built_binaries() -> None:
         _mark_executable(dest)
         print(f"  staged {dest}")
         _copy_shared_libs(src.parent, BIN_DIR)
-        if name == "rpc-server":
-            WORKER_WIN.mkdir(parents=True, exist_ok=True)
-            worker_dest = WORKER_WIN / staged
-            shutil.copy2(src, worker_dest)
-            _mark_executable(worker_dest)
-            _copy_shared_libs(src.parent, _ensure_worker_src())
-    _migrate_worker_root_dlls()
 
 
 def install_llama(

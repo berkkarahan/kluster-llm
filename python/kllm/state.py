@@ -59,11 +59,7 @@ def generate_join_key() -> str:
 
 
 def _looks_like_repo(path: Path) -> bool:
-    if (path / "crates" / "kllm-native").is_dir():
-        return True
-    if (path / "coordinator-macos").is_dir() and (path / "worker-windows").is_dir():
-        return True
-    return False
+    return (path / "crates" / "kllm-native").is_dir()
 
 
 def repo_root() -> Path | None:

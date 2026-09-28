@@ -31,7 +31,6 @@ SOCKETFILTERFW = Path("/usr/libexec/ApplicationFirewall/socketfilterfw")
 _RPC_SERVER_REL_PATHS = (
     "vendor/bin/rpc-server",
     "vendor/bin/rpc-server.exe",
-    "worker-windows/rpc-server.exe",
     "vendor/llama.cpp/build/bin/rpc-server",
     "vendor/llama.cpp/build/bin/rpc-server.exe",
     "vendor/llama.cpp/build/bin/ggml-rpc-server",

@@ -11,7 +11,6 @@ import type {
     ModelInfo,
     ModelSearchHit,
     ModelSearchResponse,
-    SplitMode,
     Status
   } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
@@ -27,10 +26,6 @@ const ACCEL_LABELS: Record<AccelBackend, string> = {
 
 function isAccelBackend(v: unknown): v is AccelBackend {
   return v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan';
-}
-
-function isSplitMode(v: unknown): v is SplitMode {
-  return v === 'layer' || v === 'row' || v === 'tensor';
 }
 
 let fingerprint = '';
@@ -80,10 +75,10 @@ class AppStore {
   gpuBackendWarning = $state('');
   installedBackends = $state<AccelBackend[]>([]);
   gpuBackend = $state('cpu');
+  gpuUnifiedMemory = $state<boolean | null>(null);
   probedBackend = $state('cpu');
   allowedBackends = $state<AccelBackend[]>([]);
   accelBackend = $state<AccelBackend | null>(null);
-  splitMode = $state<SplitMode>('layer');
   selectedGpuIds = $state<number[]>([]);
   modelSource = $state('');
   searchResults = $state<ModelSearchHit[]>([]);
@@ -584,6 +579,7 @@ class AppStore {
       vision: this.vision,
       mmproj: this.mmproj || null,
       device: this.device,
+      split_mode: 'layer',
       vram_percent: this.device === 'gpu' ? this.vramPercent : undefined,
       ram_percent: this.device === 'cpu' ? this.ramPercent : undefined,
       vram_weight: this.vramWeight,
@@ -625,7 +621,6 @@ class AppStore {
       else if (data.accel_backend === null || data.accel_backend === undefined) {
         this.accelBackend = null;
       }
-      if (isSplitMode(data.split_mode)) this.splitMode = data.split_mode;
       this.hydrateGpuSelection();
     } catch {
       /* ignore */
@@ -659,6 +654,7 @@ class AppStore {
     this.gpuBackendWarning =
       typeof data.backend_warning === 'string' ? data.backend_warning : '';
     this.gpuBackend = typeof data.backend === 'string' ? data.backend : 'cpu';
+    this.gpuUnifiedMemory = typeof data.unified_memory === 'boolean' ? data.unified_memory : null;
     this.probedBackend =
       typeof data.probed_backend === 'string' ? data.probed_backend : this.gpuBackend;
     const allowed = Array.isArray(data.allowed_backends)
@@ -692,10 +688,34 @@ class AppStore {
       if (!this.gpusLoaded) {
         this.gpusLoaded = true;
         this.hydrateGpuSelection();
+        return;
       }
+      await this.reconcileGpuSelection();
     } catch {
       /* ignore */
     }
+  }
+
+  /**
+   * After the first hydrate, keep checkbox selection aligned with live inventory:
+   * drop vanished indices; if none remain, select all current devices and persist.
+   */
+  private async reconcileGpuSelection() {
+    if (this.gpus.length === 0) {
+      if (this.selectedGpuIds.length > 0) this.selectedGpuIds = [];
+      return;
+    }
+    const available = new Set(this.gpus.map((g) => g.index));
+    const kept = this.selectedGpuIds.filter((i) => available.has(i));
+    if (kept.length > 0 && kept.length === this.selectedGpuIds.length) return;
+    if (kept.length > 0) {
+      this.selectedGpuIds = kept;
+      await this.saveConfig({ gpu_ids: kept });
+      return;
+    }
+    const all = this.gpus.map((g) => g.index);
+    this.selectedGpuIds = all;
+    await this.saveConfig({ gpu_ids: all });
   }
 
   toggleGpu(index: number) {
@@ -717,12 +737,12 @@ class AppStore {
     vram_percent?: number;
     ram_percent?: number;
     accel_backend?: AccelBackend | null;
-    split_mode?: SplitMode;
   }) {
     const device = partial?.device ?? this.device;
     this.device = device;
     const body: Record<string, unknown> = {
       device,
+      split_mode: 'layer',
       vram_percent: partial?.vram_percent ?? this.vramPercent,
       ram_percent: partial?.ram_percent ?? this.ramPercent
     };
@@ -736,12 +756,6 @@ class AppStore {
       this.accelBackend = partial.accel_backend ?? null;
     } else if (this.accelBackend) {
       body.accel_backend = this.accelBackend;
-    }
-    if (partial?.split_mode) {
-      body.split_mode = partial.split_mode;
-      this.splitMode = partial.split_mode;
-    } else {
-      body.split_mode = this.splitMode;
     }
     this.busy = '/v1/config';
     try {
@@ -761,13 +775,16 @@ class AppStore {
         if (typeof data.ram_percent === 'number') this.ramPercent = data.ram_percent;
         if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
         else if (data.accel_backend === null) this.accelBackend = null;
-        if (isSplitMode(data.split_mode)) this.splitMode = data.split_mode;
       } catch {
         /* ignore */
       }
       pushToast('ok', 'config saved');
       await this.refresh();
       await this.loadGpus();
+      ++this.estimateSeq;
+      this.estimating = false;
+      this.planResult = null;
+      this.scheduleEstimate();
     } finally {
       this.busy = '';
     }
@@ -784,10 +801,6 @@ class AppStore {
 
   async setAccelBackend(backend: AccelBackend | null) {
     await this.saveConfig({ accel_backend: backend });
-  }
-
-  async setSplitMode(mode: SplitMode) {
-    await this.saveConfig({ split_mode: mode });
   }
 
   async setVramPercent(value: number) {

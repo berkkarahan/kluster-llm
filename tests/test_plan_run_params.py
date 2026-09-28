@@ -115,6 +115,37 @@ def test_plan_response_contract_keys(client):
         assert key in data
 
 
+@pytest.mark.parametrize("legacy", ["row", "tensor"])
+def test_dashboard_layer_overrides_legacy_config_at_plan_and_run_boundary(client, legacy):
+    c, agent, tmp = client
+    _model_file(tmp)
+    assert c.put("/v1/config", json={"device": "gpu", "split_mode": legacy}).status_code == 200
+    payload = _payload(split_mode="layer")
+    with patch.object(agent.native, "plan_split", return_value=_fake_plan()) as planner, patch.object(
+        agent.native, "start_master",
+        return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
+    ) as launch, patch.object(agent.native, "process_alive", return_value=True), patch(
+        "kllm.agent.ensure_rpc_peers_reachable"
+    ):
+        planned = c.post("/v1/plan", json=payload)
+        assert planned.status_code == 200, planned.text
+        assert planned.json()["split_mode"] == "layer"
+        ran = c.post("/v1/run", json=payload)
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["plan"]["split_mode"] == "layer"
+    assert [call.kwargs["launch_settings"]["split_mode"] for call in planner.call_args_list] == ["layer", "layer"]
+    assert launch.call_args.kwargs["split_mode"] == "layer"
+    assert c.get("/v1/config").json()["split_mode"] == legacy
+
+    # Explicit local-only callers still retain their supported mode.
+    with patch.object(agent.native, "plan_split", return_value=_fake_plan(rpc_endpoints=[])):
+        local = c.post("/v1/plan", json=_payload(
+            split_mode=legacy, cache_type_k="f16", cache_type_v="f16"
+        ))
+    assert local.status_code == 200, local.text
+    assert local.json()["split_mode"] == legacy
+
+
 def test_plan_invalid_context_returns_400(client):
     c, agent, tmp = client
     _model_file(tmp)

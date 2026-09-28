@@ -6,7 +6,7 @@
    */
   import SliderField from '$lib/components/SliderField.svelte';
   import { appStore } from '$lib/store.svelte';
-  import { formatGb } from '$lib/format-transfer';
+  import { formatGib, selectedCapacity } from '$lib/format-memory';
 
   type Props = {
     /** When true, backend switch is locked (cluster already live). */
@@ -16,6 +16,12 @@
   };
 
   let { lockBackend = false, onChanged }: Props = $props();
+  const sharedMemory = $derived(
+    appStore.gpuUnifiedMemory ?? (
+      appStore.status?.capacity?.unified_memory === true ||
+      appStore.status?.members?.[appStore.status?.node_id ?? '']?.unified_memory === true
+    )
+  );
 
   function afterChange() {
     onChanged?.();
@@ -37,27 +43,6 @@
     <option value="gpu">GPU</option>
     <option value="cpu">CPU</option>
   </select>
-
-  <label class="mono text-[11px]" style="color: var(--muted)" for="hw-split-mode">
-    Split mode
-  </label>
-  <select
-    id="hw-split-mode"
-    class="field mono"
-    value={appStore.splitMode}
-    disabled={!!appStore.busy}
-    onchange={(e) => {
-      const v = (e.currentTarget as HTMLSelectElement).value;
-      if (v === 'layer' || v === 'row' || v === 'tensor') void appStore.setSplitMode(v).then(afterChange);
-    }}
-  >
-    <option value="layer">Layer (pipeline)</option>
-    <option value="row">Row (legacy tensor parallel)</option>
-    <option value="tensor">Tensor (experimental)</option>
-  </select>
-  <p class="mono text-[10px]" style="color: var(--muted)">
-    Layer supports heterogeneous RPC clusters. Row requires local split-buffer support. Tensor requires local devices from one backend, Flash Attention, and non-quantized KV cache.
-  </p>
 
   {#if appStore.device === 'gpu'}
     {#if appStore.allowedBackends.length > 0}
@@ -119,11 +104,22 @@
             />
             <span>
               [{g.index}] {g.name}
-              <span style="color: var(--muted)"> {formatGb(g.vram_bytes ?? null, 1)}</span>
+              <span style="color: var(--muted)">
+                · {sharedMemory ? 'shared capacity' : 'VRAM capacity'} {formatGib(selectedCapacity([g], [g.index]))}
+              </span>
             </span>
           </label>
         {/each}
       </div>
+      {#if sharedMemory}
+        <p class="mono text-[10px]" style="color: var(--muted)">
+          Shared GPU capacity uses system RAM; it is not additional VRAM.
+        </p>
+      {:else}
+        <p class="mono text-[11px]" style="color: var(--muted)">
+          Selected VRAM capacity: {formatGib(selectedCapacity(appStore.gpus, appStore.selectedGpuIds))}
+        </p>
+      {/if}
     {:else if !appStore.gpuBackendWarning}
       <p class="mono text-[11px]" style="color: var(--muted)">
         No local GPUs detected — inference will fall back to CPU layers.

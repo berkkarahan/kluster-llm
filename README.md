@@ -233,7 +233,7 @@ Layers are split by pipeline parallelism across mixed backends. KV cache is 8-bi
 
 ## Known Limitations
 
-- **Split-mode `layer` is required** across mixed backends (Metal / CUDA / ROCm / Vulkan) — do not use tensor split mode; precision handling differs between backends and can cause output drift.
+- **Dashboard split mode:** System Settings always requests `layer` for RPC estimates, plans, and runs; explicit local-only CLI/API requests may use `row` or `tensor` where supported. GPU capacity and planner budgets/estimates display in GiB, with GPU memory, CPU RAM, and total memory labeled separately.
 - **RPC is LAN-only by default** — upstream llama.cpp RPC has no auth; `kllm` binds a private interface IP and firewalls 50052. Optional `--overlay wireguard` (CLI/dashboard) for join-key gated mesh. Never expose 50052 publicly.
 - **Thunderbolt bridging requires `networksetup` privileges** — run coordinator scripts with `sudo` if your network interface is locked.
 - **Prima.cpp is experimental** — the Halda scheduler may not handle all model architectures; test with Q4_K_M or Q5_K_M quantizations first.

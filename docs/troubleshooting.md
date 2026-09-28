@@ -1,625 +1,247 @@
 # Troubleshooting Guide
 
-This guide covers common issues and their solutions for the Kluster LLM project.
+Use the Python installer and `kllm` CLI for every supported platform. Avoid manual binary copies or alternate launch scripts until the recovery steps in [agent-install.md](agent-install.md) are exhausted.
 
----
+## Installation
 
-## Setup Issues
+### Re-run the supported installer
 
-### Preferred installer
+From the repository root:
 
 ```bash
+uv run python scripts/install.py
+# If uv is not installed yet:
 python scripts/install.py
 ```
 
-Installs Rust/Node (if missing), `kllm`, dashboard, `llama-server` + `rpc-server` at the tag in `llama-release`, and WireGuard. Use `--backend vulkan|cuda|metal|cpu` as needed.
+The installer stages `llama-server`, `rpc-server`, and their shared libraries under `vendor/bin`.
 
-llama.cpp only (run on **every** node; pin is committed `llama-release`):
-
-```bash
-python scripts/install.py --llama-only
-python scripts/install.py --check
-```
-
-Agent-oriented checklist (success criteria, flags, recovery): [agent-install.md](agent-install.md).
-
-### "setup_mac.sh: command not found"
-
-**Solution:** Prefer `python scripts/install.py --backend metal`, or:
+### Verify an installation
 
 ```bash
-chmod +x coordinator-macos/setup_mac.sh
-./coordinator-macos/setup_mac.sh
+uv run python scripts/install.py --check
+uv run python -c "import kllm; from kllm import native; assert native.native_available()"
+uv run kllm status
 ```
 
-### "setup_windows.ps1: cannot be loaded because running scripts is disabled"
-
-**Solution:** Prefer `python scripts\install.py`, or:
+On Windows, verify the staged executables with:
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-powershell -ExecutionPolicy Bypass -File worker-windows\setup_windows.ps1
+Get-ChildItem vendor\bin\llama-server.exe, vendor\bin\rpc-server.exe
 ```
 
-### "Xcode Command Line Tools not installed"
+On Unix:
 
-**Cause:** Missing CLT on macOS.
+```bash
+ls -l vendor/bin/llama-server vendor/bin/rpc-server
+```
 
-**Solution:**
+### llama.cpp binary missing or wrong version
+
+Every node must use the tag committed in `llama-release`. Repair and recheck it on every node:
+
+```bash
+uv run python scripts/install.py --llama-only --force
+uv run python scripts/install.py --check
+```
+
+If a release archive omits `rpc-server`, build the pinned source with RPC enabled:
+
+```bash
+uv run python scripts/install.py --llama-only --from-source --force
+```
+
+Do not copy binaries between operating systems or mix tags. Override a deliberate external installation with `KLLM_LLAMA_SERVER` and `KLLM_RPC_SERVER`.
+
+### Build tools are missing
+
+Allow the installer to provision its supported toolchains. If a package manager requests a shell restart, open a new terminal and rerun the same installer command. Useful checks are:
+
+```bash
+cmake --version
+cargo --version
+node --version
+npm --version
+```
+
+On macOS, install Xcode Command Line Tools when prompted:
+
 ```bash
 xcode-select --install
-# Follow installer prompts, then: python scripts/install.py --backend metal
+uv run python scripts/install.py --backend metal
 ```
 
----
+### macOS Metal or Vulkan build failure
 
-## Compilation Issues
-
-### "cmake: command not found"
-
-**Cause:** CMake not installed or not in PATH.
-
-**Solution:**
-```bash
-brew install cmake
-# Re-run setup_mac.sh
-```
-
-### "LLAMA_METAL=1: unrecognized option"
-
-**Cause:** Outdated llama.cpp version.
-
-**Solution:**
-```bash
-cd coordinator-macos/../vendor/llama.cpp
-git pull --rebase
-cmake -B build -DGGML_METAL=1 -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target llama-server -j$(sysctl -n hw.ncpu)
-```
-
-### "clang: error: unsupported option '-fopenmp'"
-
-**Cause:** Incompatible compiler version.
-
-**Solution:**
-```bash
-brew install llvm
-export CC=/opt/homebrew/opt/llvm/bin/clang
-export CXX=/opt/homebrew/opt/llvm/bin/clang++
-# Re-run compilation
-```
-
----
-
-## Runtime Issues
-
-### "no GPUs available; cannot select [0]" on Start / Join
-
-**Cause:** The dashboard (or saved `~/.kllm/config.toml`) still references GPU index `0`, but `/v1/gpus` reports an empty inventory — usually because `llama-server` is missing, failed `--list-devices`, or the installed binary does not match the selected accel backend.
-
-**Solution:**
-```bash
-python scripts/install.py --backend metal   # macOS Apple Silicon
-python scripts/install.py --check
-```
-Confirm GPUs appear in the dashboard Cluster panel (System settings). llama.cpp **v0.5+** lists Apple GPUs as `MTL0:` in `llama-server --list-devices` (older builds used `Metal0:`). If you see a nameless `: (0 MiB, 0 MiB free)` line instead, Metal is linked but device creation failed — reinstall with `--backend metal` and confirm `--check` reports `metal` in `actual_backends`.
-
-If the panel shows "No local GPUs detected", check `/v1/gpus` for `backend_warning` — a saved `accel_backend` (e.g. `vulkan` from joining a Windows cluster) that is not installed on this node is ignored; the effective backend falls back to the hardware probe (Metal on any Apple Silicon Mac). Clear stale selection: set `gpu_ids = null` in `~/.kllm/config.toml` or re-save hardware settings after install. Restart the agent after `install.py` so it picks up the latest GPU probe logic.
-
-After the fix, Start succeeds even with an empty local GPU inventory (CPU-only master); explicit `gpu_ids` in the request still require a working `llama-server` GPU probe.
-
-### RPC must stay on a private LAN
-
-**Cause:** llama.cpp RPC is unauthenticated (upstream documents it as PoC / insecure on open networks; no in-app auth planned).
-
-**Solution:**
-- Default `kllm join` binds `rpc-server` to a **private interface IP** (check `kllm status` → `rpc_bind`), not `0.0.0.0`.
-- Prefer a dedicated 10GbE / Thunderbolt interface with **static IPs**.
-- Firewall TCP **50052** to cluster members only; never publish it to the internet. `kllm` best-effort creates/updates the `kllm-RPC` firewall rule.
-- Optional: `kllm start --overlay wireguard` / `kllm join --overlay wireguard` (WireGuard must be installed) so only join-key holders reach RPC on `10.66.87.0/24`.
-- Prefer the worker tensor cache (`-c`, enabled by `kllm` worker launch) so reconnects do not re-ship large tensors.
-- See [engine-decision.md](engine-decision.md).
-
-### WireGuard overlay fails on start/join
-
-**Cause:** `wg` / `wg-quick` (or WireGuard for Windows) not installed, or overlay mismatch (master `none`, worker `wireguard`).
-
-**Solution:**
-- Install WireGuard from https://www.wireguard.com/install/ and ensure `wg` is on `PATH` (or set `KLLM_WG`).
-- Use the same `--overlay` on master and workers.
-- Control plane stays on LAN — only RPC moves to the overlay. Verify with `kllm status` (`wg_address`, `overlay_status`).
-
-### macOS worker on a Vulkan master (Windows/Linux)
-
-**Cause:** Hardware probe and planner preference default to **Metal** on macOS. A Vulkan master cluster needs the Mac member to register `backend=vulkan` and expose Vulkan devices from `llama-server --list-devices`.
-
-**Solution:** The default macOS install builds a **Metal+Vulkan** binary (MoltenVK via Homebrew; stamp `backend=metal+vulkan`). Prefer Vulkan at runtime — no separate Vulkan-only rebuild:
+The default macOS build must provide Metal and Vulkan through MoltenVK. Run the installer without `--prefer-prebuilt`:
 
 ```bash
-uv run python scripts/install.py            # Metal+Vulkan source (default on macOS)
-# or: uv run python scripts/install.py --llama-only --force
-export KLLM_ACCEL_BACKEND=vulkan            # add to shell profile for kllm-agent
-uv run kllm join --key '<key>' --master <windows-lan-ip>
+uv run python scripts/install.py --llama-only --backend metal --from-source --force
 ```
 
-Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Confirm locally: `python scripts/install.py --check` and `vendor/bin/llama-server --list-devices` lists both `MTL`/`Metal` and `Vulkan` devices.
+If Homebrew upgraded OpenSSL, MoltenVK, glslc, or SPIR-V headers, rerun the command so the installer can invalidate stale CMake paths. Use `--backend cpu` only when a CPU-only installation is intentional.
 
-On macOS, Metal + Vulkan in one binary is a hard requirement. The install **aborts** if the source build does not produce it, and it verifies the binary the runtime will actually launch (`vendor/bin/llama-server`, which `kllm-native` resolves first) rather than the CMake build output. `--check` re-probes that binary and exits non-zero on a mismatch. `--prefer-prebuilt` is **rejected** on macOS because GitHub macOS packs are Metal-only and would silently drop Vulkan; the only opt-out is `--backend cpu` (stamp `backend=cpu`), which is not a cluster GPU member.
+## Cluster startup
 
-`kllm join` does not change the installed backends either. It reuses a cached pack from `~/.kllm/models` only when that pack satisfies the contract, and refuses one that cannot — surfacing the refusal instead of silently downgrading:
-
-```
-llama: cached llama.cpp pack 'llama-v0.5.0-bin-macos-arm64.tar.gz' is metal-only, but this
-platform requires 'metal+vulkan' (GitHub macOS packs have no Vulkan). Run
-`python scripts/install.py --llama-only --from-source --force` to build Metal+Vulkan, or
-`--backend cpu` for a CPU-only install.
-```
-
-A Mac that registers `backend=metal` while the master runs Vulkan means no Metal+Vulkan build is installed on it. Re-run the source install on that node. To have `join` reuse a pack instead of downloading one, the archive must be named `llama-<pin>-bin-*` (i.e. `llama-v0.5.0-bin-macos-arm64.tar.gz`, matching `llama-release`), not the nightly tag the installer downloads.
-
-### macOS: source build fails at generate with "Target cpp-httplib links to OpenSSL::SSL but the target was not found"
-
-**Cause:** llama.cpp's `find_package(OpenSSL)` ran against a **stale CMake cache**. `brew upgrade openssl@3` (e.g. 3.6.2 → 3.6.4) deletes the Cellar directory a previous configure pinned. The cached `OPENSSL_SSL_LIBRARY` / `OPENSSL_CRYPTO_LIBRARY` / `OPENSSL_INCLUDE_DIR` then point at deleted paths, and the cached `check_c_source_compiles` result still satisfies the `if (OpenSSL_FOUND)` guard — so `cpp-httplib/CMakeLists.txt` links an `OpenSSL::SSL` target that was never defined. The tell is `-- OpenSSL found:` printing an **empty** version.
-
-**Solution:** The installer now detects a stale build dir (a recorded signature of tag + backend flags + toolchain paths, plus any cached OpenSSL package path that no longer exists) and discards it before configuring, so re-running is usually enough:
+### Start a master and join a worker
 
 ```bash
-python3 scripts/install.py --llama-only --from-source --force
+# Master
+uv run kllm start
+
+# Worker
+uv run kllm join --key '<join-key>'
 ```
 
-If you need to clear it by hand: `rm -rf vendor/llama.cpp/build`. Reusing a deleted OpenSSL package path also discards the whole tree, so expect one full rebuild after a `brew upgrade openssl@3`. A dangling `-L` in an exported `LDFLAGS` does **not** discard anything — CMake ignores a missing `-L` directory, and treating it as stale would rebuild the whole tree on every run.
-
-A dangling `-L` is still scrubbed during repair: if `cmake` configure fails, the installer clears the cached `OPENSSL_*` entries and any dangling linker flag, then retries **with HTTPS still enabled** — that is the actual fix. Only if that also fails does it fall back to `-DLLAMA_OPENSSL=OFF`, because the Metal+Vulkan backend is mandatory while llama-server's embedded HTTPS server is not (Kluster serves plain HTTP on a LAN port).
-
-The HTTPS fallback is **never latched**: every run starts from upstream defaults, so the next run restores HTTPS. It is recorded in the stamp as `https=off` and shown by `--check`:
-
-```
-https:        off  (last-resort fallback - re-run --llama-only --from-source --force to restore)
-```
-
-Confirm the repair with `python3 scripts/install.py --check` (`https: on`) and `grep LLAMA_OPENSSL vendor/llama.cpp/build/CMakeCache.txt` (`LLAMA_OPENSSL:BOOL=ON`). `-- OpenSSL found: 3.x.y` in the build output means the cache is healthy; an empty version is the signature of this failure.
-
-### macOS: "error: Vulkan build deps still missing after install"
-
-**Cause:** The installer's gate checks everything llama.cpp's cmake configure needs: **Vulkan headers**, a **MoltenVK ICD manifest**, **`glslc`**, and the **`SPIRV-Headers` CMake config**. Three known gotchas:
-
-1. Homebrew puts MoltenVK's ICD manifest at `$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json`, **not** `share/vulkan/icd.d`. A check that only looks at `share/` fails even with everything installed.
-2. `glslc` comes from the separate **`shaderc`** formula — it is *not* pulled in by `molten-vk`, `vulkan-headers`, or `vulkan-loader`.
-3. llama.cpp also runs `find_package(SPIRV-Headers CONFIG REQUIRED)`, satisfied by the **`spirv-headers`** formula (`share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake`). Missing it fails with `Could not find a package configuration file provided by "SPIRV-Headers"`.
-
-**Solution:**
+If mDNS discovery fails, specify the private master address:
 
 ```bash
-brew install molten-vk vulkan-headers vulkan-loader shaderc spirv-headers
-python3 scripts/install.py --llama-only --from-source --force
+uv run kllm join --key '<join-key>' --master 192.168.10.1
 ```
 
-Confirm: `which glslc` (→ `/opt/homebrew/bin/glslc`), `ls $(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json`, `ls $(brew --prefix)/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake`, then `python3 scripts/install.py --check`. Alternatively set `VULKAN_SDK` to a LunarG SDK install. The error lists exactly which pieces are still missing.
+Run the full installer on every node before joining. A worker does not need a GGUF; it receives tensors over RPC.
 
-### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
+### No matching master or join returns 401
 
-**Cause:** Master and worker are on different llama.cpp builds. RPC HELLO (`RPC_CMD_HELLO`) is unversioned across builds; a Windows `v0.5.0` `llama-server` talking to a Mac HEAD/`git pull` `rpc-server` closes the socket.
+- Confirm the master is still running and copy its current join key.
+- Use `--master <private-ip>` to bypass mDNS.
+- Ensure the control port, normally 18765, is reachable between the nodes.
+- Do not reuse a key from a previous `kllm start` session.
 
-**Solution:**
-1. Confirm the committed pin: `cat llama-release` (must be the same git revision on every node).
-2. On **every** node: `python scripts/install.py --llama-only` then `python scripts/install.py --check`.
-3. Do not TCP-probe port 50052 (a connect+close can hang or kill `rpc-server`).
-4. After binaries match: `kllm leave` on the worker, then `kllm join --key … --rpc-bind 0.0.0.0` if the master's LAN IP cannot bind the worker interface.
-5. Re-run `kllm run`. If HELLO still fails, `--force` the setup on both sides and confirm `vendor/bin/llama-release.txt` shows the same `tag=`.
+### RPC server is unreachable
 
-Do **not** mix `vendor/llama.cpp` HEAD with a GitHub nightly on the other machine.
+Inspect the selected bind address and member state:
 
-### "rpc-server.exe not found"
+```bash
+uv run kllm status
+uv run python scripts/install.py --check
+```
 
-**Cause:** Worker setup not completed.
+RPC port 50052 must be reachable over a private LAN or WireGuard overlay. Test it from the master:
 
-**Solution:**
+```bash
+# Unix
+nc -vz <worker-ip> 50052
+```
+
 ```powershell
-.\worker-windows\setup_windows.ps1
+# Windows
+Test-NetConnection <worker-ip> -Port 50052
 ```
 
-### "llama-server not found"
+If Windows could not create the firewall rule automatically, run this once in an Administrator PowerShell session:
 
-**Cause:** Coordinator setup not completed.
-
-**Solution:**
-```bash
-cd coordinator-macos && ./setup_mac.sh
-```
-
-### "ERROR: --model <path> is required"
-
-**Cause:** Missing required argument.
-
-**Solution:**
-```bash
-./run_coordinator.sh --model /path/to/model.gguf --worker-ip 192.168.10.2
-```
-
-### "ERROR: Model file not found"
-
-**Cause:** Model path is incorrect or file doesn't exist.
-
-**Solution:**
-```bash
-# Verify model exists
-ls -lh /path/to/model.gguf
-
-# Use absolute path
-./run_coordinator.sh --model /absolute/path/to/model.gguf --worker-ip 192.168.10.2
-```
-
----
-
-## Network Issues
-
-### "Connection timed out"
-
-**Cause:** Worker not running, firewall blocking, or wrong IP.
-
-**Solution:**
-```bash
-# Check worker is running (Windows)
-netstat -an | findstr 50052
-
-# Check firewall (Windows)
-Get-NetFirewallRule -Name "kllm-RPC" | Format-Table DisplayName, Enabled
-
-# Test connectivity
-ping -S 192.168.10.1 192.168.10.2
-```
-
-### "Access is denied" creating `kllm-RPC` firewall rule
-
-**Cause:** `New-NetFirewallRule` requires an elevated (Administrator) PowerShell. The agent runs without elevation and only best-effort creates the rule.
-
-**Solution:** Open **PowerShell as Administrator** once and run:
 ```powershell
 New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
 ```
-Then restart/join again. After the rule exists, non-elevated starts reuse it without prompting.
-### "No route to host" / join fails but `curl` works (macOS + Zscaler)
 
-**Cause:** The uv-managed Python running `kllm-agent` cannot open LAN sockets (`errno 65`: Local Network TCC and/or Zscaler), while `curl` / Homebrew Python can. The same restriction also hides mDNS, so Join-by-key with an empty Master host used to 404 even when the master was advertising.
+Never open RPC port 50052 to the public internet.
 
-**Solution:** Join automatically (1) browses mDNS under a helper interpreter when the agent Python sees no masters, then (2) starts a localhost control-plane TCP proxy for register/heartbeat. Status shows `cp_proxy_port` and a `netsec_warnings` line. RPC still uses your real LAN `--rpc-bind`. Dashboard Join with only the join key should work; fill **Master host** only if discovery still fails.
+### RPC handshake or malformed-response errors
+
+This usually means nodes have different llama.cpp builds. On every node:
 
 ```bash
-uv run kllm join --key '<key>'
-# if discovery still fails:
-uv run kllm join --key '<key>' --master <windows-lan-ip>
-# optional override:
-export KLLM_CP_PROXY_PYTHON=/opt/homebrew/bin/python3
+uv run python scripts/install.py --llama-only --force
+uv run python scripts/install.py --check
 ```
 
-Also grant **System Settings → Privacy & Security → Local Network** to Python/Cursor when prompted. Use `--master-port` for the remote control port — `--port` is only the **local** agent.
+Restart the cluster only after every node reports the same tag.
 
-### "Connection reset by peer" / Errno 54 on Join
+### WireGuard overlay fails
 
-**Cause:** The worker opened TCP to the master control plane (`18765`) but the remote side reset the connection. This is different from macOS **errno 65** (Local Network / no route). Typical causes: master `kllm-agent` not running or crashed, wrong LAN IP, or firewall (e.g. Windows Defender) blocking inbound TCP **18765**.
-
-**Solution:**
-```bash
-# On the worker (same machine as the dashboard):
-curl -v http://<master-lan-ip>:18765/health
-
-# On the master: ensure the agent is up
-kllm status
-# Windows (PowerShell as Administrator, once):
-New-NetFirewallRule -Name "kllm-Control" -DisplayName "Kluster LLM Control Plane" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 18765 -Profile Any
-```
-Restart `kllm start --key …` on the master, then Join again.
-
-### Cluster members show mismatched backends (Metal vs Vulkan)
-
-**Cause:** Each node picks its own engine via probe, `accel_backend` in `~/.kllm/config.toml`, `KLLM_ACCEL_BACKEND`, or the dashboard **Engine backend** selector before Start/Join. Mixed Metal, Vulkan, CUDA, and ROCm across workers is normal for llama.cpp RPC layer splits.
-
-**Solution:** Only align backends when you intentionally want the same engine on one machine (e.g. Vulkan on Windows and Vulkan on a Mac for testing). Otherwise leave per-node settings as-is; planning uses each member's reported devices.
-
-### "No route to host" (wrong subnet)
-
-**Cause:** IPs not in same subnet or interface disabled.
-
-**Solution:**
-```bash
-# Verify IPs (macOS)
-ifconfig thunderbolt1 | grep "inet "
-
-# Verify IPs (Windows)
-Get-NetIPAddress -InterfaceAlias "Ethernet1" | Format-Table IPAddress
-```
-
-### "High latency (>1 ms)"
-
-**Cause:** Using wrong network interface (Wi-Fi instead of Thunderbolt).
-
-**Solution:**
-```bash
-# Disable other interfaces (macOS)
-sudo networksetup -setairportpower airport off
-
-# Verify you're using Thunderbolt interface
-ping -S 192.168.10.1 192.168.10.2
-```
-
-### "DHCP reassignment mid-inference"
-
-**Cause:** DHCP lease renewal changed IP.
-
-**Solution:**
-```bash
-# Set static IPs (macOS)
-sudo networksetup -setstaticnetworksetup thunderbolt1 192.168.10.1 255.255.255.0 "" ""
-sudo networksetup -setdhcp thunderbolt1 off
-
-# Set static IPs (Windows)
-New-NetIPAddress -IPAddress 192.168.10.2 -PrefixLength 24 -InterfaceAlias "Ethernet1"
-Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Disabled
-```
-
----
-
-## Memory Issues
-
-### "CUDA out of memory" or "Mach kernel reported"
-
-**Cause:** Model too large for available VRAM/RAM.
-
-**Solution:**
-```bash
-# Reduce context length
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --context 2048
-
-# Use smaller quantization (Q4_K_M instead of Q5_K_M)
-
-# Increase tensor-split to move more layers to Mac
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --tensor-split 0.75
-```
-
-### "OOM: Out of Memory"
-
-**Cause:** System RAM exceeded.
-
-**Solution:**
-```bash
-# Reduce micro-batch size
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --micro-batch 1
-
-# Close other applications to free RAM
-```
-
-### "Memory pressure exceeded threshold" (Prima.cpp)
-
-**Cause:** mmap threshold too low for model size.
-
-**Solution:**
-```bash
-# Increase mmap threshold
-./run_coordinator_prima.sh --model model.gguf --worker-ip 192.168.10.2 --mmap-threshold 0.15
-
-# Or switch to llama.cpp for manual control
-```
-
----
-
-## Performance Issues
-
-### "Slow inference"
-
-**Cause:** Layers spilling to CPU/RAM.
-
-**Solution:**
-```bash
-# Check layer placement (look for "→ CPU" in logs)
-kllm logs -f --source llama
-
-# Put more layers on GPU (cluster already up via kllm start / kllm join)
-kllm run --model model.gguf --device gpu --vram-percent 90
-# Or force a layer count: kllm run --model model.gguf --extra-arg "-ngl 40"
-
-# Use smaller model or smaller quantization
-```
-
-### "Tokens/sec much lower than expected"
-
-**Cause:** Not using GPU, or network bottleneck.
-
-**Solution:**
-```bash
-# Verify GPU utilization (Windows)
-# Task Manager → Performance → GPU
-
-# Verify network bandwidth
-iperf3 -c 192.168.10.1 -t 10
-
-# Check for other network traffic
-# Disable other interfaces
-```
-
-### "Inference speed drops after few minutes"
-
-**Cause:** Thermal throttling or memory pressure.
-
-**Solution:**
-```bash
-# Monitor temperature (macOS)
-sudo powermetrics -samplers thermal
-
-# Reduce context length
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --context 2048
-
-# Ensure adequate cooling
-```
-
----
-
-## Precision Issues
-
-### "Output quality degraded" or "precision drift"
-
-**Cause:** Using tensor-split mode instead of layer-split mode.
-
-**Solution:**
-```bash
-# Use layer-split mode (required for kllmgeneous hardware)
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --split-mode layer
-```
-
-### "Garbage output" or "nonsensical responses"
-
-**Cause:** Incorrect tensor-split ratio or model mismatch.
-
-**Solution:**
-```bash
-# Recalculate split ratio
-./calculate_split.sh --mac-memory 24 --worker-vram 12
-
-# Use calculated ratio
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --tensor-split 0.68
-```
-
----
-
-## Prima.cpp Issues
-
-### "Halda scheduler failed to initialize"
-
-**Cause:** Prima.cpp not compiled or worker unreachable.
-
-**Solution:**
-```bash
-# Recompile Prima.cpp
-cd coordinator-macos/../vendor/prima.cpp
-cmake -B build -DGGML_METAL=1 -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target prima-server -j$(sysctl -n hw.ncpu)
-
-# Verify worker is accessible
-ping 192.168.10.2
-```
-
-### "Variable performance" or "latency spikes"
-
-**Cause:** Automatic scheduling overhead.
-
-**Solution:**
-```bash
-# Enable verbose logging to see scheduler decisions
-./run_coordinator_prima.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
-
-# Consider switching to llama.cpp for predictable performance
-```
-
----
-
-## Windows-Specific Issues
-
-### "rpc-server.exe access denied"
-
-**Cause:** Antivirus or Windows Defender blocking execution.
-
-**Solution:**
-```powershell
-# Add exception to Windows Defender
-Add-MpPreference -ExclusionPath "C:\path\to\worker-windows"
-
-# Or temporarily disable real-time protection
-Set-MpPreference -MapSchedulerEnabled $false
-```
-
-### "Firewall rule already exists"
-
-**Cause:** Rule created previously.
-
-**Solution:**
-```powershell
-# Remove existing rule
-Remove-NetFirewallRule -Name "kllm-RPC"
-
-# Re-create
-New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
-```
-
----
-
-## macOS-Specific Issues
-
-### "Permission denied" on network setup
-
-**Cause:** Need sudo for network configuration.
-
-**Solution:**
-```bash
-sudo ./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2
-```
-
-### "Thunderbolt interface not found"
-
-**Cause:** Interface name different on your system.
-
-**Solution:**
-```bash
-# List all interfaces
-networksetup -listnetworkserviceorder
-
-# Use correct interface name
-sudo networksetup -setstaticnetworksetup thunderbolt2 192.168.10.1 255.255.255.0 "" ""
-```
-
----
-
-## General Debugging Tips
-
-### Enable verbose logging
+Confirm WireGuard is installed on every node:
 
 ```bash
-# On the master (or any joined node — workers proxy to the master)
-kllm logs -f
-kllm logs -n 200 --source rpc
+wg --version
 ```
 
-Logs are stored under `~/.kllm/logs/` (`agent.log`, `llama-server.log`, `rpc-server.log`, and `cluster.jsonl` on the master).
+On Windows, also check `C:\Program Files\WireGuard\wg.exe`. Start and join with `--overlay wireguard` consistently; do not mix overlay and plain-LAN nodes in the same session.
 
-### Check system logs
+## Planning and inference
+
+### Model not found
+
+List or download models through the CLI:
 
 ```bash
-# macOS
-log show --predicate 'process == "llama-server"' --last 10m
-
-# Windows
-Get-Content C:\Windows\System32\LogFiles\WMI\*.log | Select-String "rpc-server"
+uv run kllm model list
+uv run kllm model download 'ORG/REPO:Q4_K_M'
 ```
 
-### Verify hardware detection
+Pass a listed model name or an absolute GGUF path to both planning and execution:
 
 ```bash
-# macOS
-sysctl -n hw.memsize
-sysctl -n hw.ncpu
-sysctl -n hw.machine
-
-# Windows
-Get-WmiObject Win32_PnPEntity | Where-Object { $_.Name -match "AMD" } | ForEach-Object { $_.Name }
-Get-WmiObject Win32_Processor | Select-Object Name, NumberOfLogicalProcessors
+uv run kllm plan --model /absolute/path/model.gguf
+uv run kllm run --model /absolute/path/model.gguf
 ```
 
-### Test network independently
+### Out of memory
+
+Inspect the plan before launching:
 
 ```bash
-# From macOS
-iperf3 -s -B 192.168.10.1
-
-# From Windows (another terminal)
-iperf3 -c 192.168.10.1 -t 10
+uv run kllm plan --model model.gguf --context 2048 --micro-batch 1
 ```
 
----
+Then apply the same safe settings to the run:
 
-## Getting Help
+```bash
+uv run kllm run --model model.gguf --context 2048 --micro-batch 1
+```
 
-If issues persist:
+If the model still does not fit, use a smaller quantization or model, free memory on participating nodes, or lower the configured memory headroom. Placement and layer allocation are automatic; do not supply a manual `--tensor-split` override.
 
-1. **Check logs**: Run `kllm logs -f` on the master (or any joined node) and review output
-2. **Verify prerequisites**: Ensure all hardware and software requirements are met
-3. **Test components separately**: Run worker and coordinator independently
-4. **Check documentation**: Review [docs/layer-split-calculator.md](layer-split-calculator.md) and [docs/memory-constraints.md](memory-constraints.md)
-5. **File an issue**: Provide full error output and system info
+### No GPU is available
+
+Check what the installed llama.cpp binary reports:
+
+```bash
+vendor/bin/llama-server --list-devices
+```
+
+On Windows use `vendor\bin\llama-server.exe`. A saved backend preference cannot add a backend that was not compiled into the binary. Reinstall with the required backend, then restart the node.
+
+### Slow inference
+
+- Run `kllm plan` and inspect CPU spill, selected devices, and warnings.
+- Confirm the high-speed interface is carrying RPC traffic.
+- Check GPU utilization and thermal throttling on every node.
+- Reduce context or choose a smaller quantization when memory pressure causes spill.
+- Prefer the default `layer` split for heterogeneous clusters.
+
+### Output quality or precision drift
+
+Use `layer` split mode across mixed Metal, CUDA, ROCm, or Vulkan backends:
+
+```bash
+uv run kllm config --split-mode layer
+uv run kllm run --model model.gguf
+```
+
+Row and tensor modes are only appropriate where the planner accepts the selected homogeneous/local backend combination.
+
+## Network diagnosis
+
+Use stable private addresses on dedicated links. Verify both directions with `ping`, then verify the control and RPC ports separately. High latency, packet loss, or DHCP address changes can interrupt inference even when cluster discovery succeeds.
+
+For 10GbE and Thunderbolt IP setup, see [../network-config/10gbe-bridging-guide.md](../network-config/10gbe-bridging-guide.md).
+
+## Logs and support
+
+Use the cluster log command rather than launching child processes manually:
+
+```bash
+uv run kllm logs
+uv run kllm status
+```
+
+Runtime logs live under `~/.kllm/logs`. When reporting a problem, include:
+
+- Operating system, CPU, GPU, RAM, and VRAM for each node
+- The committed `llama-release` value and `install.py --check` output
+- `kllm status` and the relevant log excerpt
+- Network type, addresses, latency, and whether WireGuard is enabled
+- Model filename, quantization, context, and the `kllm plan` result
+
+See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-constraints.md](memory-constraints.md) for supported behavior.

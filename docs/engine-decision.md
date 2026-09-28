@@ -28,7 +28,6 @@ llama.cpp is the only mainstream stack that exposes those backends as GGML devic
 | ExLlamaV2/V3 | CUDA-only |
 | exo | macOS/MLX-first; Windows unsupported |
 | mesh-llm | Same llama.cpp-family kernels; control-plane product swap, not a speed upgrade |
-| Prima.cpp | Remains Experimental (Halda / mmap) |
 
 ## OS × backend support matrix
 

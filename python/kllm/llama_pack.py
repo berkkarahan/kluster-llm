@@ -13,6 +13,10 @@ from typing import Any
 from kllm.state import models_dir, repo_root
 
 
+class PackNotInstallable(RuntimeError):
+    """The cached pack cannot satisfy this platform's llama.cpp contract."""
+
+
 def _load_install(root: Path):
     path = root / "scripts" / "install.py"
     spec = importlib.util.spec_from_file_location("kllm_install_script", path)
@@ -53,16 +57,31 @@ def install_cached_llama_pack(
     backend: str = "auto",
     force: bool = False,
 ) -> dict[str, Any]:
-    """Extract llama-{tag}-bin-* from ~/.kllm/models into vendor/bin."""
+    """Extract llama-{tag}-bin-* from ~/.kllm/models into vendor/bin.
+
+    The pack is only a convenience for reusing a local download. It must never
+    change which backends are installed, so the "already installed" check is
+    judged against the platform contract (macOS: Metal+Vulkan) rather than the
+    raw resolved backend, and a pack that cannot satisfy that contract is
+    refused instead of silently downgrading the install.
+    """
     root = repo_root()
     if root is None:
         raise RuntimeError("kllm repo root not found; set KLLM_REPO_ROOT")
     install = _load_install(root)
     pin = install.read_pinned_release(tag)
     backend = install.detect_backend(backend)
-    llama = install._find_built_binary("llama-server")
-    rpc = install._find_built_binary("rpc-server")
-    if llama and rpc and not force and install.stamp_matches(pin, backend):
+    # macOS requires Metal+Vulkan; everywhere else a single backend is the
+    # contract, so `contract` is None and the stamp stays authoritative.
+    contract = install.expected_stamp_for_default(backend)
+    llama = install._resolve_runtime_binary("llama-server")
+    rpc = install._resolve_runtime_binary("rpc-server")
+    if (
+        llama
+        and rpc
+        and not force
+        and install.stamp_matches(pin, contract or backend)
+    ):
         return {
             "ok": True,
             "skipped": True,
@@ -76,6 +95,15 @@ def install_cached_llama_pack(
             f"no llama-{pin}-bin-* archive in {models_dir()}; "
             "run python scripts/install.py --llama-only or pull the GitHub pack"
         )
+    if contract and not install.backends_satisfied(
+        contract, install.parse_stamp_backends(backend)
+    ):
+        raise PackNotInstallable(
+            f"cached llama.cpp pack {archive.name!r} is {backend}-only, but this "
+            f"platform requires {contract!r} (GitHub macOS packs have no Vulkan). "
+            "Run `python scripts/install.py --llama-only --from-source --force` to "
+            "build Metal+Vulkan, or `--backend cpu` for a CPU-only install."
+        )
     with tempfile.TemporaryDirectory() as td:
         extract_dir = Path(td) / "out"
         extract_dir.mkdir()
@@ -85,11 +113,12 @@ def install_cached_llama_pack(
                 zf.extractall(extract_dir)
         else:
             with tarfile.open(archive, "r:*") as tf:
-                tf.extractall(extract_dir)
+                tf.extractall(extract_dir, filter="data")
         copied = install._copy_llama_binaries_from(extract_dir)
         if not copied:
             raise RuntimeError(f"archive {name} had no llama-server/rpc-server")
-    install.write_install_stamp(tag=pin, backend=backend, asset=name)
+    # Stamp what the pack actually provides, never the platform contract.
+    install.write_install_stamp(tag=pin, backend=backend, asset=name, https="on")
     status = install.llama_install_status(pin)
     return {
         "ok": bool(status.get("ok")),

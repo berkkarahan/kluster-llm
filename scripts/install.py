@@ -13,7 +13,22 @@ Usage:
 
 On macOS (non-CPU), the default llama.cpp install is a Metal+Vulkan source
 build (MoltenVK via Homebrew). Use ``--prefer-prebuilt`` for Metal-only
-GitHub packs, or ``--backend cpu`` for a CPU-only build.
+GitHub packs, or ``--backend cpu`` for a CPU-only build. The default install
+fails loudly rather than silently downgrading to a Metal-only pack, and
+``--check`` judges the result against that default contract.
+
+The llama.cpp build dir is installer-owned and reused between runs. It is
+discarded when the tag, backend flags or recorded toolchain paths change, so a
+toolchain upgrade (e.g. ``brew upgrade openssl@3``) cannot leave a cache that
+half-resolves a package.
+
+On macOS, Metal + Vulkan in one binary is the contract: install verifies the
+backend list of the binary the runtime will actually launch, and
+``--prefer-prebuilt`` is rejected because GitHub macOS packs are Metal-only.
+llama-server's embedded HTTPS server is the expendable part: when ``cmake``
+configure fails, the installer first clears the stale OpenSSL cache and retries
+with HTTPS still enabled, and only disables HTTPS (stamped ``https=off``) as a
+last resort. That fallback is never latched, so the next run restores it.
 
 This is the one-shot installer. ``scripts/build.py`` remains a thinner
 CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
@@ -60,6 +75,32 @@ _ZIP_MAGIC = b"PK\x03\x04"
 _GZIP_MAGIC = b"\x1f\x8b"
 _TAR_MAGIC_OFFSET = 257
 _TAR_MAGIC = b"ustar"
+# CMake build dirs are installer-owned. The recorded signature (llama tag +
+# backend flags + toolchain paths) lets us discard a cache that would
+# misconfigure, e.g. after ``brew upgrade openssl@3`` deletes the Cellar
+# directory a previous configure pinned.
+_BUILD_SIGNATURE_FILE = ".kllm-config"
+# Cached package paths that CMake will happily reuse after a toolchain upgrade
+# deleted them, producing a half-resolved package (the OpenSSL::SSL failure).
+# Strictly package paths: a dangling `-L` in the linker flags is harmless -
+# CMake ignores it - and treating it as stale would discard and rebuild the
+# whole tree on every run whenever the shell exports a dead LDFLAGS entry.
+_CACHE_PACKAGE_PATH_KEYS = (
+    "OPENSSL_CRYPTO_LIBRARY:FILEPATH",
+    "OPENSSL_SSL_LIBRARY:FILEPATH",
+    "OPENSSL_INCLUDE_DIR:PATH",
+)
+_CACHE_LINKER_FLAGS = (
+    "CMAKE_EXE_LINKER_FLAGS",
+    "CMAKE_MODULE_LINKER_FLAGS",
+    "CMAKE_SHARED_LINKER_FLAGS",
+)
+_CACHE_LINKER_KEYS = tuple(f"{flag}:STRING" for flag in _CACHE_LINKER_FLAGS)
+# Cache entries cleared when repairing a half-resolved OpenSSL package.
+_OPENSSL_CACHE_RESET = ("-UOPENSSL_*", "-U_OPENSSL_*")
+# llama-server's embedded HTTPS server is optional for Kluster; the Metal+Vulkan
+# backend is not. The ladder disables HTTPS only after the real fix is tried.
+_HTTPS_OFF_FLAG = "-DLLAMA_OPENSSL=OFF"
 
 
 # ── shared helpers (also used by build.py) ───────────────────────────────────
@@ -379,12 +420,25 @@ def read_pinned_release(override: str | None = None) -> str:
     raise SystemExit(f"error: {PIN_FILE} has no llama.cpp tag")
 
 
-def write_install_stamp(*, tag: str, backend: str, asset: str) -> None:
+def write_install_stamp(
+    *,
+    tag: str,
+    backend: str,
+    asset: str,
+    https: str | None = None,
+) -> None:
+    """Write the install stamp.
+
+    ``https`` records whether llama-server's embedded HTTPS server was built
+    (``on``) or left out by the configure ladder's last-resort fallback
+    (``off``), so a degraded install stays visible to ``--check`` instead of
+    silently latching.
+    """
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    STAMP_FILE.write_text(
-        f"tag={tag}\nbackend={backend}\nasset={asset}\n",
-        encoding="utf-8",
-    )
+    lines = [f"tag={tag}", f"backend={backend}", f"asset={asset}"]
+    if https:
+        lines.append(f"https={https}")
+    STAMP_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def read_install_stamp() -> dict[str, str]:
@@ -453,33 +507,37 @@ def parse_list_devices_backends(text: str) -> list[str]:
     return found
 
 
-def llama_install_status(tag: str | None = None) -> dict[str, Any]:
+def llama_install_status(tag: str | None = None, *, expected: str | None = None) -> dict[str, Any]:
+    """Pin/stamp state plus the backends the installed binary actually reports.
+
+    ``expected`` is the stamp string the install was asked to produce. It
+    defaults to the recorded stamp, so ``--prefer-prebuilt`` installs are judged
+    by what they asked for; callers wanting the platform-default contract pass
+    it explicitly.
+    """
     pin = tag or read_pinned_release()
-    llama = _find_built_binary("llama-server")
-    rpc = _find_built_binary("rpc-server")
+    llama = _resolve_runtime_binary("llama-server")
+    rpc = _resolve_runtime_binary("rpc-server")
     stamp = read_install_stamp()
-    actual_backends = []
-    if llama:
-        try:
-            probe = subprocess.run([str(llama), "--list-devices"], capture_output=True, text=True, timeout=15)
-            actual_backends = parse_list_devices_backends(probe.stdout + probe.stderr)
-            if probe.returncode == 0 and not actual_backends:
-                actual_backends = ["cpu"]
-        except (OSError, subprocess.SubprocessError):
-            pass
     requested = stamp.get("backend")
+    wanted = expected or requested
+    actual_backends = _probe_llama_backends(llama)
     return {
         "pin": pin,
         "stamp": stamp.get("tag"),
         "llama_server": str(llama) if llama else None,
         "rpc_server": str(rpc) if rpc else None,
         "requested_backend": requested,
+        "expected_backend": wanted,
         "actual_backends": actual_backends,
+        # "off" means the configure ladder had to disable llama-server's embedded
+        # HTTPS server to get the mandatory Metal+Vulkan build through.
+        "https": stamp.get("https"),
         "ok": bool(
             llama
             and rpc
             and stamp.get("tag") == pin
-            and backends_satisfied(requested, actual_backends)
+            and backends_satisfied(wanted, actual_backends)
         ),
     }
 
@@ -1043,54 +1101,201 @@ def clone_or_update_llama(tag: str | None = None) -> None:
             raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
 
 
-def _discard_relocated_cmake_build(source_dir: Path, build_dir: Path) -> None:
-    """Remove an installer-owned CMake build after its checkout was moved.
-
-    CMake stores absolute source and build paths in CMakeCache.txt. Reusing a
-    cache from a moved repository makes configure fail before it can apply the
-    new backend flags. Only remove the generated build directory when either
-    recorded path disagrees with its current location.
-    """
+def _read_cmake_cache(build_dir: Path) -> dict[str, str]:
     cache = build_dir / "CMakeCache.txt"
     if not cache.is_file():
-        return
+        return {}
     try:
-        entries = dict(
+        return dict(
             line.split("=", 1)
             for line in cache.read_text(encoding="utf-8", errors="replace").splitlines()
             if "=" in line
         )
     except OSError:
+        return {}
+
+
+def _build_signature(tag: str, flags: list[str], env: dict[str, str] | None) -> str:
+    """Identity of a build dir: tag, backend flags and toolchain paths."""
+    parts = [f"tag={tag}"]
+    for flag in sorted(flags):
+        # The HTTPS ladder is a recovery path, not part of the requested flavor;
+        # keep it (and its cache-reset flags) out so trying it does not
+        # invalidate an otherwise good cache. Without this, a run that had to
+        # disable HTTPS would be treated as a different target and then keep
+        # re-disabling it instead of restoring it.
+        if flag.startswith("-DLLAMA_OPENSSL=") or flag.startswith("-U"):
+            continue
+        parts.append(flag)
+    for key in ("CMAKE_PREFIX_PATH", "VULKAN_SDK", "VK_ICD_FILENAMES"):
+        if env and env.get(key):
+            parts.append(f"{key}={env[key]}")
+    return "\n".join(parts)
+
+
+def _read_build_signature(build_dir: Path) -> str | None:
+    try:
+        return (build_dir / _BUILD_SIGNATURE_FILE).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _write_build_signature(build_dir: Path, signature: str) -> None:
+    try:
+        (build_dir / _BUILD_SIGNATURE_FILE).write_text(signature + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _dangling_cached_paths(
+    entries: dict[str, str], keys: tuple[str, ...] = _CACHE_PACKAGE_PATH_KEYS
+) -> list[str]:
+    """Absolute paths recorded in CMakeCache.txt that no longer exist.
+
+    A toolchain upgrade (``brew upgrade openssl@3``) deletes the directory a
+    previous configure pinned. Reusing that cache half-resolves the package:
+    ``find_package(OpenSSL)`` restores a cached ``check_c_source_compiles``
+    success while never defining ``OpenSSL::SSL``, so CMake generate fails.
+    """
+    dangling: list[str] = []
+    for key in keys:
+        raw = entries.get(key)
+        if not raw:
+            continue
+        for token in re.split(r"[\s;]+", raw.strip()):
+            if not token:
+                continue
+            is_linker_dir = token.startswith("-L")
+            candidate = token[2:] if is_linker_dir else token
+            if not candidate.startswith("/"):
+                continue
+            probe = Path(candidate)
+            exists = probe.is_dir() if is_linker_dir else probe.exists()
+            if not exists:
+                dangling.append(f"{key}={token}")
+    return dangling
+
+
+def _cache_reset_flags(entries: dict[str, str]) -> list[str]:
+    """``-U`` flags that clear a half-resolved OpenSSL cache.
+
+    ``OPENSSL_*`` entries are always cleared: their presence is what lets CMake
+    restore a cached package check while never defining ``OpenSSL::SSL``, which
+    is the failure being repaired. Linker flags are cleared only when they point
+    at a directory that no longer exists, so a legitimate custom flag survives.
+    """
+    flags = list(_OPENSSL_CACHE_RESET)
+    dangling = _dangling_cached_paths(entries, _CACHE_LINKER_KEYS)
+    for name in _CACHE_LINKER_FLAGS:
+        if any(entry.startswith(f"{name}:") for entry in dangling):
+            flags.append(f"-U{name}")
+    return flags
+
+
+def _discard_stale_cmake_build(
+    source_dir: Path,
+    build_dir: Path,
+    signature: str | None = None,
+) -> None:
+    """Remove an installer-owned CMake build dir that would misconfigure.
+
+    CMake stores absolute source, build and toolchain paths. Reusing such a
+    cache after the checkout moved, after the backend flags changed, or after
+    the recorded paths were deleted makes configure or generate fail before it
+    can apply the new request. Only installer-owned build dirs are removed.
+    """
+    entries = _read_cmake_cache(build_dir)
+    if not entries:
         return
 
+    reason = ""
     expected = {
         "CMAKE_HOME_DIRECTORY:INTERNAL": source_dir.resolve(),
         "CMAKE_CACHEFILE_DIR:INTERNAL": build_dir.resolve(),
     }
     for key, current in expected.items():
         cached = entries.get(key)
-        if not cached:
-            continue
-        if Path(cached).resolve() != current:
-            print("Discarding stale llama.cpp CMake build after checkout relocation")
-            shutil.rmtree(build_dir)
-            return
+        if cached and Path(cached).resolve() != current:
+            reason = "checkout relocation"
+            break
+    if not reason and signature is not None:
+        recorded = _read_build_signature(build_dir)
+        if recorded != signature:
+            reason = "backend flag or toolchain change"
+    if not reason:
+        dangling = _dangling_cached_paths(entries)
+        if dangling:
+            reason = "stale cached path(s): " + ", ".join(dangling[:3])
+    if not reason:
+        return
+
+    print(f"Discarding llama.cpp CMake build ({reason})")
+    shutil.rmtree(build_dir, ignore_errors=True)
 
 
-def build_llama_from_source(backend: str, tag: str | None = None) -> bool:
+def build_llama_from_source(backend: str, tag: str | None = None) -> tuple[bool, str]:
+    """Compile the pinned llama.cpp.
+
+    Returns ``(ok, https)`` where ``https`` is ``"on"`` normally and ``"off"``
+    when the last-resort configure fallback had to drop llama-server's embedded
+    HTTPS server. The fallback is never latched: every run starts from upstream
+    defaults, so the next run re-attempts HTTPS and restores it.
+    """
     if not ensure_cmake():
-        return False
+        return False, "on"
     tag = tag or read_pinned_release()
     clone_or_update_llama(tag)
     build_dir = VENDOR_LLAMA / "build"
-    _discard_relocated_cmake_build(VENDOR_LLAMA, build_dir)
     flags = _cmake_backend_flags(backend)
     cmake_env: dict[str, str] | None = None
     if _is_macos() and backend != "cpu":
         cmake_env = ensure_vulkan_macos()
         print("macOS source build: enabling Metal + Vulkan (CPU always available)")
+
+    # Keep the signature independent of the HTTPS ladder so a run that had to
+    # disable HTTPS still reuses this cache and re-attempts HTTPS next time.
+    signature = _build_signature(tag, flags, cmake_env)
+    _discard_stale_cmake_build(VENDOR_LLAMA, build_dir, signature)
+    reset_flags = _cache_reset_flags(_read_cmake_cache(build_dir))
+    https = "on"
     try:
-        _run(["cmake", "-B", str(build_dir), *flags], cwd=VENDOR_LLAMA, env=cmake_env)
+        def configure(extra: list[str]) -> subprocess.CompletedProcess[str]:
+            return _run(
+                ["cmake", "-B", str(build_dir), *flags, *extra],
+                cwd=VENDOR_LLAMA,
+                env=cmake_env,
+                check=False,
+            )
+
+        # 1) Upstream defaults, HTTPS included.
+        result = configure([])
+        if result.returncode != 0:
+            # 2) The real fix: a cache left half-resolved by a toolchain upgrade
+            # restores a cached OpenSSL check without defining OpenSSL::SSL.
+            # Clear those entries and retry with HTTPS still enabled.
+            _warn(
+                "llama.cpp cmake configure failed; clearing cached OpenSSL/linker "
+                f"paths ({' '.join(reset_flags)}) and retrying with HTTPS still enabled"
+            )
+            result = configure(reset_flags)
+        if result.returncode != 0:
+            # 3) Last resort, so the mandatory Metal+Vulkan backend still ships.
+            # Kluster serves llama-server over plain HTTP on a LAN port, so the
+            # embedded HTTPS server is the expendable part.
+            _warn(
+                "llama.cpp cmake configure failed again; disabling llama-server's "
+                f"embedded HTTPS as a last resort ({_HTTPS_OFF_FLAG}); Kluster does not use it"
+            )
+            result = configure([*reset_flags, _HTTPS_OFF_FLAG])
+            https = "off"
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"llama.cpp cmake configure failed (exit {result.returncode}); "
+                "see the cmake output above"
+            )
+        _write_build_signature(build_dir, signature)
+        _remove_stale_build_binaries(build_dir)
+
         jobs = str(os.cpu_count() or 4)
         # llama-server + RPC worker (target name varies by upstream revision).
         rpc_target_ok = False
@@ -1107,10 +1312,72 @@ def build_llama_from_source(backend: str, tag: str | None = None) -> bool:
                 rpc_target_ok = True
             elif result.returncode != 0:
                 _warn(f"cmake target {t} failed (exit {result.returncode})")
-        return _find_built_binary("llama-server") is not None
+
+        # Only the build tree counts as this build's output; a prebuilt binary in
+        # vendor/bin must never make a failed compile look successful.
+        llama = _find_build_tree_binary("llama-server")
+        if llama is None:
+            _warn("llama-server was not produced by the source build")
+            return False, https
+        expected = stamp_backend_for_install(backend)
+        probed = _probe_llama_backends(llama)
+        if not backends_satisfied(expected, probed):
+            _warn(
+                f"source build reports backends {probed!r}, "
+                f"expected {parse_stamp_backends(expected)!r}"
+            )
+            return False, https
+        if https == "off":
+            _warn(
+                "build succeeded with llama-server's embedded HTTPS disabled; "
+                "re-run to restore it once the OpenSSL cache issue is resolved"
+            )
+        return True, https
     except Exception as exc:
         _warn(f"llama.cpp source build failed ({exc})")
-        return False
+        return False, https
+
+
+def _remove_stale_build_binaries(build_dir: Path) -> None:
+    """Drop previously built/prebuilt binaries so the next probe is honest."""
+    for name in ("llama-server", *_RPC_UPSTREAM_NAMES):
+        exe = f"{name}.exe" if _is_windows() else name
+        for parent in (build_dir / "bin", build_dir / "bin" / "Release", build_dir):
+            (parent / exe).unlink(missing_ok=True)
+
+
+def _find_build_tree_binary(name: str) -> Path | None:
+    """Locate a binary produced by the CMake build tree (never vendor/bin)."""
+    for base in _upstream_binary_names(name):
+        exe = f"{base}.exe" if _is_windows() else base
+        for candidate in (
+            VENDOR_LLAMA / "build" / "bin" / exe,
+            VENDOR_LLAMA / "build" / "bin" / "Release" / exe,
+            VENDOR_LLAMA / "build" / "Release" / "bin" / exe,
+            VENDOR_LLAMA / "build" / exe,
+        ):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _probe_llama_backends(binary: Path | None) -> list[str]:
+    """Backends a llama-server reports via ``--list-devices``."""
+    if binary is None:
+        return []
+    try:
+        probe = subprocess.run(
+            [str(binary), "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = parse_list_devices_backends(probe.stdout + probe.stderr)
+    if probe.returncode == 0 and not found:
+        return ["cpu"]
+    return found
 
 
 def _upstream_binary_names(logical: str) -> tuple[str, ...]:
@@ -1119,21 +1386,22 @@ def _upstream_binary_names(logical: str) -> tuple[str, ...]:
     return (logical,)
 
 
-def _find_built_binary(name: str) -> Path | None:
-    for base in _upstream_binary_names(name):
-        exe = f"{base}.exe" if _is_windows() else base
-        candidates = [
-            VENDOR_LLAMA / "build" / "bin" / exe,
-            VENDOR_LLAMA / "build" / "bin" / "Release" / exe,
-            VENDOR_LLAMA / "build" / "Release" / "bin" / exe,
-            VENDOR_LLAMA / "build" / exe,
-            BIN_DIR / exe,
-            WORKER_WIN / exe if name == "rpc-server" else Path(),
-        ]
-        for p in candidates:
-            if p and p.is_file():
-                return p
-    return None
+def _resolve_runtime_binary(name: str) -> Path | None:
+    """Resolve a binary the way kllm-native does when it launches one.
+
+    Mirrors ``crates/kllm-native/src/process.rs``: ``vendor/bin`` wins over the
+    CMake build tree. Verification has to probe this path, otherwise ``--check``
+    can pass on a build-tree binary while the runtime launches a different one.
+    """
+    exe = f"{name}.exe" if _is_windows() else name
+    staged = BIN_DIR / exe
+    if staged.is_file():
+        return staged
+    if name == "rpc-server":
+        worker = WORKER_WIN / exe
+        if worker.is_file():
+            return worker
+    return _find_build_tree_binary(name)
 
 
 def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, Any] | None:
@@ -1337,11 +1605,24 @@ def assert_stable_llama_pin(tag: str) -> None:
     _refuse_unstable_pin(tag, rel)
 
 
-def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
+def install_llama_prebuilt(
+    backend: str,
+    tag: str | None = None,
+    *,
+    stamp_backend: str | None = None,
+) -> bool:
+    """Install a GitHub release pack.
+
+    ``stamp_backend`` records what the pack actually provides. macOS packs are
+    Metal-only, so they must stamp ``metal`` and not the resolved
+    ``metal+vulkan`` default.
+    """
     tag = tag or read_pinned_release()
     local = _cached_llama_archive(tag, backend)
     if local is not None:
-        return _install_llama_archive(local, tag=tag, backend=backend)
+        return _install_llama_archive(
+            local, tag=tag, backend=backend, stamp_backend=stamp_backend
+        )
 
     rel = fetch_release_by_tag(tag)
     if not rel:
@@ -1372,7 +1653,9 @@ def install_llama_prebuilt(backend: str, tag: str | None = None) -> bool:
             expected_size=expected_size,
             expected_kind=_expected_archive_kind(name),
         )
-        return _install_llama_archive(archive, tag=tag, backend=backend, asset_name=name)
+        return _install_llama_archive(
+            archive, tag=tag, backend=backend, asset_name=name, stamp_backend=stamp_backend
+        )
 
 
 def _cached_llama_archive(tag: str, backend: str) -> Path | None:
@@ -1395,6 +1678,7 @@ def _install_llama_archive(
     tag: str,
     backend: str,
     asset_name: str | None = None,
+    stamp_backend: str | None = None,
 ) -> bool:
     name = asset_name or archive.name
     kind = _expected_archive_kind(name)
@@ -1416,7 +1700,9 @@ def _install_llama_archive(
                     zf.extractall(extract_dir)
             else:
                 with tarfile.open(archive, "r:*") as tf:
-                    tf.extractall(extract_dir)
+                    # ``data`` is the safe default and what Python 3.14 will
+                    # require; packs only contain relative in-tree links.
+                    tf.extractall(extract_dir, filter="data")
         except (zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
             preview = archive.read_bytes()[:120] if archive.is_file() else b""
             _warn(
@@ -1428,7 +1714,13 @@ def _install_llama_archive(
         if not copied:
             _warn(f"archive {name} extracted but llama-server/rpc-server not found inside")
             return False
-    write_install_stamp(tag=tag, backend=backend, asset=name)
+    write_install_stamp(
+        tag=tag,
+        backend=stamp_backend or stamp_backend_for_install(backend),
+        asset=name,
+        # GitHub release packs are upstream builds with HTTPS support compiled in.
+        https="on",
+    )
     print(f"Installed llama.cpp {tag} from {name}")
     return True
 
@@ -1501,15 +1793,9 @@ def _copy_llama_binaries_from(root: Path) -> bool:
             shutil.copy2(src, worker_dest)
             _mark_executable(worker_dest)
             _copy_shared_libs(src.parent, _ensure_worker_src())
-    # Also stage under vendor/llama.cpp/build/bin for resolve_llama_server paths
-    staged = VENDOR_LLAMA / "build" / "bin"
-    if found_any:
-        staged.mkdir(parents=True, exist_ok=True)
-        for p in BIN_DIR.iterdir():
-            if p.is_file():
-                shutil.copy2(p, staged / p.name)
-                if p.suffix.lower() not in {".dll", ".dylib", ".txt"} and ".so" not in p.name:
-                    _mark_executable(staged / p.name)
+    # Deliberately never stage into vendor/llama.cpp/build/bin: that is the
+    # CMake output dir, and a prebuilt binary left there makes an unrelated,
+    # failed source build look successful (and poisons the build cache).
     _migrate_worker_root_dlls()
     return found_any
 
@@ -1518,7 +1804,7 @@ def stage_built_binaries() -> None:
     """If we built from source, also copy into vendor/bin and worker-windows."""
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     for name in ("llama-server", "rpc-server"):
-        src = _find_built_binary(name)
+        src = _find_build_tree_binary(name)
         if not src:
             continue
         staged = f"{name}.exe" if _is_windows() else name
@@ -1542,17 +1828,24 @@ def install_llama(
     prefer_prebuilt: bool,
     force: bool = False,
     tag: str | None = None,
+    expected: str | None = None,
 ) -> None:
     backend = detect_backend(backend)
-    stamp_be = stamp_backend_for_install(backend)
+    stamp_be = expected or stamp_backend_for_install(backend)
     tag = tag or read_pinned_release()
     assert_stable_llama_pin(tag)
     print(f"llama.cpp backend: {backend}" + (f" (stamp {stamp_be})" if stamp_be != backend else ""))
     print(f"llama.cpp pin:     {tag}")
 
-    llama = _find_built_binary("llama-server")
-    rpc = _find_built_binary("rpc-server")
-    if llama and rpc and not force and stamp_matches(tag, stamp_be) and llama_install_status(tag)["ok"]:
+    llama = _resolve_runtime_binary("llama-server")
+    rpc = _resolve_runtime_binary("rpc-server")
+    if (
+        llama
+        and rpc
+        and not force
+        and stamp_matches(tag, stamp_be)
+        and llama_install_status(tag, expected=stamp_be)["ok"]
+    ):
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
         print(f"Already at pinned {tag}")
@@ -1564,49 +1857,51 @@ def install_llama(
 
     ok = False
     built_from_source = False
+    https_state = "on"
     macos_multi = _is_macos() and backend != "cpu"
 
     if macos_multi:
-        # GitHub macOS packs are Metal-only; default is source Metal+Vulkan.
-        if prefer_prebuilt:
-            ok = install_llama_prebuilt("metal", tag=tag)
-            if ok:
-                _warn(
-                    "GitHub macOS packs are Metal-only; Vulkan is not included. "
-                    "Omit --prefer-prebuilt (macOS default) for a Metal+Vulkan source build."
-                )
-            else:
-                ok = build_llama_from_source(backend, tag=tag)
-                built_from_source = ok
-        else:
-            ok = build_llama_from_source(backend, tag=tag)
-            built_from_source = ok
-            if not ok:
-                ok = install_llama_prebuilt("metal", tag=tag)
-                if ok:
-                    _warn(
-                        "Metal+Vulkan source build failed; fell back to Metal-only prebuilt. "
-                        "Fix MoltenVK / cmake and re-run without --prefer-prebuilt."
-                    )
-    elif prefer_prebuilt:
-        ok = install_llama_prebuilt(backend, tag=tag)
-        if not ok:
-            ok = build_llama_from_source(backend, tag=tag)
-            built_from_source = ok
-    else:
-        ok = build_llama_from_source(backend, tag=tag)
+        # macOS must ship Metal + Vulkan in one binary, so there is no prebuilt
+        # path: --prefer-prebuilt is rejected before reaching here.
+        ok, https_state = build_llama_from_source(backend, tag=tag)
         built_from_source = ok
         if not ok:
-            ok = install_llama_prebuilt(backend, tag=tag)
+            # Never downgrade the advertised Metal+Vulkan contract to a
+            # Metal-only pack; that is how a broken Vulkan build went unnoticed
+            # while --check reported "ok".
+            raise SystemExit(
+                "error: macOS Metal+Vulkan source build failed (see the cmake output "
+                "above). Fix the build, or use --backend cpu for a CPU-only install."
+            )
+    elif prefer_prebuilt:
+        ok = install_llama_prebuilt(backend, tag=tag, stamp_backend=stamp_be)
+        if not ok:
+            ok, https_state = build_llama_from_source(backend, tag=tag)
+            built_from_source = ok
+    else:
+        ok, https_state = build_llama_from_source(backend, tag=tag)
+        built_from_source = ok
+        if not ok:
+            ok = install_llama_prebuilt(backend, tag=tag, stamp_backend=stamp_be)
 
     stage_built_binaries()
-    llama = _find_built_binary("llama-server")
-    rpc = _find_built_binary("rpc-server")
+    llama = _resolve_runtime_binary("llama-server")
+    rpc = _resolve_runtime_binary("rpc-server")
     if not llama:
         raise SystemExit(
             "error: llama-server not available after install. "
             "Build manually with -DGGML_RPC=ON or set KLLM_LLAMA_SERVER."
         )
+    # Enforce the macOS contract on the binary the runtime will actually launch
+    # (vendor/bin first), not on the build tree.
+    if macos_multi:
+        probed = _probe_llama_backends(llama)
+        if not backends_satisfied(stamp_be, probed):
+            raise SystemExit(
+                f"error: {llama} reports backends {probed!r}, expected "
+                f"{parse_stamp_backends(stamp_be)!r}. macOS must provide Metal and "
+                "Vulkan in one binary."
+            )
     if not rpc:
         _warn(
             "rpc-server binary missing. Workers need it — rebuild with -DGGML_RPC=ON "
@@ -1615,36 +1910,93 @@ def install_llama(
     else:
         print(f"llama-server: {llama}")
         print(f"rpc-server:   {rpc}")
-    if llama and rpc and built_from_source and not stamp_matches(tag, stamp_be):
-        write_install_stamp(tag=tag, backend=stamp_be, asset="source")
+    if built_from_source and llama and rpc:
+        stamp = read_install_stamp()
+        if not stamp_matches(tag, stamp_be) or stamp.get("https") != https_state:
+            write_install_stamp(tag=tag, backend=stamp_be, asset="source", https=https_state)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
-def print_llama_check(tag: str) -> int:
-    status = llama_install_status(tag)
+def expected_stamp_for_default(backend: str = "auto") -> str | None:
+    """Stamp the platform-default install should produce (None = trust stamp).
+
+    Only macOS has a default stronger than its stamp: the default install
+    promises Metal *and* Vulkan in one binary. Everywhere else the pinned
+    release is a single backend, so the recorded stamp is authoritative.
+
+    This is a query, not a validation: it must never raise, because callers
+    (e.g. the join-time pack check) run inside request handlers where an
+    escaping ``SystemExit`` would take the agent down. A backend that macOS
+    cannot install simply has no contract to assert.
+    """
+    if not _is_macos():
+        return None
+    resolved = detect_backend(backend)
+    if resolved in ("cuda", "rocm"):
+        return None
+    return stamp_backend_for_install(resolved)
+
+
+def _print_llama_mismatch_hint(status: dict[str, Any]) -> None:
+    wanted = parse_stamp_backends(status["expected_backend"])
+    probed = status["actual_backends"]
+    if status["stamp"] != status["pin"]:
+        print("hint:         stamp/pin differ - run python scripts/install.py --llama-only --force")
+        return
+    if not backends_satisfied(status["expected_backend"], probed):
+        missing = [b for b in wanted if b not in probed]
+        print(f"hint:         binary is missing {missing!r} (probed {probed!r})")
+        if _is_macos() and "vulkan" in wanted:
+            print(
+                "hint:         Vulkan needs MoltenVK - check "
+                "`brew install molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`, "
+                "then re-run python scripts/install.py --llama-only --from-source --force"
+            )
+        return
+    print("hint:         run python scripts/install.py --llama-only --force")
+
+
+def print_llama_check(tag: str, *, expected: str | None = None) -> int:
+    status = llama_install_status(tag, expected=expected)
     print(f"pin:          {status['pin']}")
     print(f"installed:    {status['stamp'] or '(no stamp)'}")
     print(f"llama-server: {status['llama_server'] or 'MISSING'}")
     print(f"rpc-server:   {status['rpc_server'] or 'MISSING'}")
+    print(
+        "backends:     "
+        f"requested={status['requested_backend'] or '(none)'} "
+        f"probed={','.join(status['actual_backends']) or '(none)'}"
+    )
+    if expected and expected != status["requested_backend"]:
+        print(f"expected:     {expected}")
+    https = status.get("https")
+    if https:
+        suffix = (
+            ""
+            if https == "on"
+            else "  (last-resort fallback - re-run --llama-only --from-source --force to restore)"
+        )
+        print(f"https:        {https}{suffix}")
     if status["ok"]:
         print("status:       ok")
         return 0
-    print("status:       mismatch - run python scripts/install.py --llama-only")
+    print("status:       mismatch")
+    _print_llama_mismatch_hint(status)
     return 1
 
 
-def verify_llama_installed(tag: str) -> None:
-    status = llama_install_status(tag)
+def verify_llama_installed(tag: str, *, expected: str | None = None) -> None:
+    status = llama_install_status(tag, expected=expected)
     if status["ok"]:
         return
-    requested = status["requested_backend"]
-    actual = status["actual_backends"]
-    if status["stamp"] == tag and requested and actual and not backends_satisfied(requested, actual):
+    if status["stamp"] == tag and not backends_satisfied(
+        status["expected_backend"], status["actual_backends"]
+    ):
         raise SystemExit(
             f"error: llama.cpp {tag} stamp ok but backend mismatch "
-            f"(requested={requested!r}, probed={actual!r}). "
+            f"(expected={status['expected_backend']!r}, probed={status['actual_backends']!r}). "
             "Retry with --force or --from-source."
         )
     raise SystemExit(
@@ -1671,7 +2023,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--prefer-prebuilt",
         action="store_true",
-        help="Prefer GitHub release binaries (default on non-macOS; Metal-only on macOS)",
+        help=(
+            "Prefer GitHub release binaries (default on non-macOS). Rejected on macOS, "
+            "where the install must build Metal+Vulkan in one binary"
+        ),
     )
     p.add_argument(
         "--from-source",
@@ -1712,7 +2067,7 @@ def main(argv: list[str] | None = None) -> int:
         args.skip_toolchains = True
 
     if args.check:
-        return print_llama_check(tag)
+        return print_llama_check(tag, expected=expected_stamp_for_default(args.backend))
 
     print(f"Repo root: {ROOT}")
     print(f"Python:    {sys.version.split()[0]} ({sys.executable})")
@@ -1738,23 +2093,37 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=== llama.cpp (llama-server + rpc-server) ===")
         if args.llama_only:
             print(f"Pin file:  {PIN_FILE} ({tag})")
-        # macOS Metal+Vulkan needs a source build; GitHub packs are Metal-only.
-        # Prefer prebuilt only when explicitly requested (or for CPU / non-macOS).
+        # macOS GPU installs must source-build Metal+Vulkan; there is no prebuilt
+        # path for them (see the rejection above). Elsewhere prefer prebuilt
+        # unless --from-source was asked for.
+        # (--prefer-prebuilt still applies to `--backend cpu` on macOS.)
+        resolved_backend = detect_backend(args.backend)
+        macos_gpu = _is_macos() and resolved_backend != "cpu"
+        if macos_gpu and args.prefer_prebuilt:
+            # GitHub macOS packs are Metal-only, and macOS installs must provide
+            # Metal + Vulkan in one binary, so there is nothing to prefer.
+            raise SystemExit(
+                "error: --prefer-prebuilt is not available on macOS: GitHub macOS packs "
+                "are Metal-only and macOS installs must provide Metal+Vulkan. Drop "
+                "--prefer-prebuilt, or use --backend cpu for a CPU-only install."
+            )
         if args.from_source:
             prefer_prebuilt = False
         elif args.prefer_prebuilt:
             prefer_prebuilt = True
-        elif _is_macos() and detect_backend(args.backend) != "cpu":
+        elif macos_gpu:
             prefer_prebuilt = False
         else:
             prefer_prebuilt = True
+        expected_stamp = stamp_backend_for_install(resolved_backend)
         install_llama(
             args.backend,
             prefer_prebuilt=prefer_prebuilt,
             force=args.force,
             tag=tag,
+            expected=expected_stamp,
         )
-        verify_llama_installed(tag)
+        verify_llama_installed(tag, expected=expected_stamp)
         if args.llama_only:
             print(f"llama.cpp {tag} ready.")
 

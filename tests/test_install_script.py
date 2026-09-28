@@ -189,11 +189,14 @@ def test_print_llama_check_ok(install, monkeypatch):
     monkeypatch.setattr(
         install,
         "llama_install_status",
-        lambda tag: {
+        lambda tag, **kwargs: {
             "pin": tag,
             "stamp": tag,
             "llama_server": "/bin/llama-server",
             "rpc_server": "/bin/rpc-server",
+            "requested_backend": "metal+vulkan",
+            "expected_backend": kwargs.get("expected") or "metal+vulkan",
+            "actual_backends": ["metal", "vulkan"],
             "ok": True,
         },
     )
@@ -204,11 +207,14 @@ def test_print_llama_check_mismatch(install, monkeypatch):
     monkeypatch.setattr(
         install,
         "llama_install_status",
-        lambda tag: {
+        lambda tag, **kwargs: {
             "pin": tag,
             "stamp": None,
             "llama_server": None,
             "rpc_server": None,
+            "requested_backend": None,
+            "expected_backend": kwargs.get("expected"),
+            "actual_backends": [],
             "ok": False,
         },
     )
@@ -390,7 +396,7 @@ def test_discard_relocated_cmake_build(install, tmp_path):
         encoding="utf-8",
     )
 
-    install._discard_relocated_cmake_build(source, build)
+    install._discard_stale_cmake_build(source, build)
 
     assert not build.exists()
 
@@ -406,9 +412,441 @@ def test_keeps_current_cmake_build(install, tmp_path):
         encoding="utf-8",
     )
 
-    install._discard_relocated_cmake_build(source, build)
+    install._discard_stale_cmake_build(source, build)
 
     assert cache.exists()
+
+
+def test_discards_cmake_build_when_signature_changes(install, tmp_path):
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n",
+        encoding="utf-8",
+    )
+    install._write_build_signature(build, "tag=v0.5.0\n-DGGML_METAL=ON")
+
+    install._discard_stale_cmake_build(source, build, "tag=v0.5.0\n-DGGML_VULKAN=ON")
+
+    assert not build.exists()
+
+
+def test_keeps_cmake_build_when_signature_matches(install, tmp_path):
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n",
+        encoding="utf-8",
+    )
+    install._write_build_signature(build, "tag=v0.5.0\n-DGGML_VULKAN=ON")
+
+    install._discard_stale_cmake_build(source, build, "tag=v0.5.0\n-DGGML_VULKAN=ON")
+
+    assert (build / "CMakeCache.txt").exists()
+
+
+def test_discards_cmake_build_with_dangling_openssl_path(install, tmp_path):
+    """`brew upgrade openssl@3` deletes the Cellar dir the cache pinned."""
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n"
+        "OPENSSL_SSL_LIBRARY:FILEPATH=" + str(tmp_path / "gone" / "libssl.dylib") + "\n"
+        "CMAKE_EXE_LINKER_FLAGS:STRING=-L" + str(tmp_path / "gone" / "lib") + "\n",
+        encoding="utf-8",
+    )
+
+    install._discard_stale_cmake_build(source, build)
+
+    assert not build.exists()
+
+
+def test_dangling_linker_flag_alone_does_not_discard_build(install, tmp_path, monkeypatch):
+    """A dead `-L` (e.g. an exported LDFLAGS) is harmless and must not loop.
+
+    It is re-injected by the environment on every configure, so treating it as
+    stale would discard and fully rebuild the tree on every run.
+    """
+    monkeypatch.setenv("LDFLAGS", f"-L{tmp_path / 'gone' / 'lib'}")
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n"
+        "CMAKE_EXE_LINKER_FLAGS:STRING=-L" + str(tmp_path / "gone" / "lib") + "\n",
+        encoding="utf-8",
+    )
+
+    install._discard_stale_cmake_build(source, build)
+
+    assert (build / "CMakeCache.txt").exists()
+    # The repair step still scrubs the dead flag.
+    assert "-UCMAKE_EXE_LINKER_FLAGS" in install._cache_reset_flags(
+        install._read_cmake_cache(build)
+    )
+
+
+def test_keeps_cmake_build_when_cached_paths_exist(install, tmp_path):
+    source = tmp_path / "llama.cpp"
+    build = source / "build"
+    build.mkdir(parents=True)
+    lib = tmp_path / "live" / "libssl.dylib"
+    lib.parent.mkdir(parents=True)
+    lib.write_bytes(b"x")
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(source.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n"
+        "OPENSSL_SSL_LIBRARY:FILEPATH=" + str(lib) + "\n"
+        "CMAKE_EXE_LINKER_FLAGS:STRING=-L" + str(tmp_path / "live") + "\n",
+        encoding="utf-8",
+    )
+
+    install._discard_stale_cmake_build(source, build)
+
+    assert (build / "CMakeCache.txt").exists()
+
+
+def test_source_build_rejects_binary_missing_expected_backend(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "ensure_cmake", lambda: True)
+    monkeypatch.setattr(install, "clone_or_update_llama", lambda tag=None: None)
+    monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
+    monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal"])
+    built = vendor / "build" / "bin" / "llama-server"
+    built.parent.mkdir(parents=True)
+    built.write_bytes(b"x")
+    monkeypatch.setattr(install, "_find_build_tree_binary", lambda name: built)
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(install, "_run", lambda cmd, **kwargs: Result())
+
+    assert install.build_llama_from_source("metal", tag="v0.5.0") == (False, "on")
+
+
+def test_configure_ladder_scrubs_cache_before_disabling_https(install, tmp_path, monkeypatch):
+    """Step 2 is the real fix and keeps HTTPS; -DLLAMA_OPENSSL=OFF is step 3."""
+    vendor = tmp_path / "llama.cpp"
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "ensure_cmake", lambda: True)
+    monkeypatch.setattr(install, "clone_or_update_llama", lambda tag=None: None)
+    monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
+    monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal", "vulkan"])
+    built = vendor / "build" / "bin" / "llama-server"
+    built.parent.mkdir(parents=True)
+    built.write_bytes(b"x")
+    monkeypatch.setattr(install, "_find_build_tree_binary", lambda name: built)
+
+    calls: list[list[str]] = []
+
+    class Result:
+        def __init__(self, rc: int) -> None:
+            self.returncode = rc
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        # Only the third configure (last resort) succeeds.
+        return Result(0 if len(calls) >= 3 else 1)
+
+    monkeypatch.setattr(install, "_run", fake_run)
+
+    ok, https = install.build_llama_from_source("metal", tag="v0.5.0")
+    assert (ok, https) == (True, "off")
+
+    first, second, third = calls[0], calls[1], calls[2]
+    assert install._HTTPS_OFF_FLAG not in first
+    assert install._HTTPS_OFF_FLAG not in second, "step 2 must keep HTTPS enabled"
+    assert any(flag.startswith("-UOPENSSL") for flag in second), "step 2 must scrub OpenSSL"
+    assert install._HTTPS_OFF_FLAG in third
+
+
+def test_configure_ladder_keeps_https_after_scrub_succeeds(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "ensure_cmake", lambda: True)
+    monkeypatch.setattr(install, "clone_or_update_llama", lambda tag=None: None)
+    monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
+    monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal", "vulkan"])
+    built = vendor / "build" / "bin" / "llama-server"
+    built.parent.mkdir(parents=True)
+    built.write_bytes(b"x")
+    monkeypatch.setattr(install, "_find_build_tree_binary", lambda name: built)
+
+    calls: list[list[str]] = []
+
+    class Result:
+        def __init__(self, rc: int) -> None:
+            self.returncode = rc
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return Result(0 if len(calls) >= 2 else 1)
+
+    monkeypatch.setattr(install, "_run", fake_run)
+
+    ok, https = install.build_llama_from_source("metal", tag="v0.5.0")
+    assert (ok, https) == (True, "on")
+    assert all(install._HTTPS_OFF_FLAG not in cmd for cmd in calls)
+
+
+def test_https_fallback_is_not_latched_from_cache(install, tmp_path, monkeypatch):
+    """A cache recorded as LLAMA_OPENSSL=OFF must not seed the flag again."""
+    vendor = tmp_path / "llama.cpp"
+    build = vendor / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(vendor.resolve()) + "\n"
+        "CMAKE_CACHEFILE_DIR:INTERNAL=" + str(build.resolve()) + "\n"
+        "LLAMA_OPENSSL:BOOL=OFF\n"
+        "OPENSSL_SSL_LIBRARY:FILEPATH=/opt/homebrew/lib/libssl.dylib\n",
+        encoding="utf-8",
+    )
+    install._write_build_signature(
+        build,
+        install._build_signature("v0.5.0", install._cmake_backend_flags("vulkan"), {}),
+    )
+
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "ensure_cmake", lambda: True)
+    monkeypatch.setattr(install, "clone_or_update_llama", lambda tag=None: None)
+    monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
+    monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal", "vulkan"])
+    monkeypatch.setattr(install, "_find_build_tree_binary", lambda name: build / "bin" / "llama-server")
+
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+
+    ok, https = install.build_llama_from_source("metal", tag="v0.5.0")
+    assert (ok, https) == (True, "on")
+    assert all(install._HTTPS_OFF_FLAG not in cmd for cmd in calls)
+
+
+def test_cache_reset_flags_only_scrub_dangling_linker_flags(install, tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    dangling_entries = {
+        "OPENSSL_SSL_LIBRARY:FILEPATH": str(tmp_path / "gone" / "libssl.dylib"),
+        "CMAKE_EXE_LINKER_FLAGS:STRING": f"-L{tmp_path / 'gone' / 'lib'}",
+    }
+    flags = install._cache_reset_flags(dangling_entries)
+    assert any(flag.startswith("-UOPENSSL") for flag in flags)
+    assert "-UCMAKE_EXE_LINKER_FLAGS" in flags
+
+    live_entries = {
+        "OPENSSL_SSL_LIBRARY:FILEPATH": str(tmp_path / "gone" / "libssl.dylib"),
+        "CMAKE_EXE_LINKER_FLAGS:STRING": f"-L{live}",
+    }
+    flags = install._cache_reset_flags(live_entries)
+    assert "-UCMAKE_EXE_LINKER_FLAGS" not in flags, "a live linker flag must survive"
+
+
+def test_expected_stamp_for_default_never_raises(install, monkeypatch):
+    """Callers run inside request handlers; an escaping SystemExit kills the agent."""
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    assert install.expected_stamp_for_default("auto") == "metal+vulkan"
+    assert install.expected_stamp_for_default("metal") == "metal+vulkan"
+    assert install.expected_stamp_for_default("vulkan") == "metal+vulkan"
+    assert install.expected_stamp_for_default("cpu") == "cpu"
+    # Not installable on macOS, so there is no contract to assert.
+    assert install.expected_stamp_for_default("cuda") is None
+    assert install.expected_stamp_for_default("rocm") is None
+
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    assert install.expected_stamp_for_default("cuda") is None
+    assert install.expected_stamp_for_default("auto") is None
+
+
+def test_resolve_runtime_binary_prefers_vendor_bin(install, tmp_path, monkeypatch):
+    """kllm-native launches vendor/bin first, so verification must probe it."""
+    bin_dir = tmp_path / "vendor-bin"
+    vendor = tmp_path / "llama.cpp"
+    staged = bin_dir / "llama-server"
+    built = vendor / "build" / "bin" / "llama-server"
+    for path in (staged, built):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    monkeypatch.setattr(install, "BIN_DIR", bin_dir)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+
+    assert install._resolve_runtime_binary("llama-server") == staged
+
+
+def test_resolve_runtime_binary_falls_back_to_build_tree(install, tmp_path, monkeypatch):
+    bin_dir = tmp_path / "vendor-bin"
+    bin_dir.mkdir()
+    vendor = tmp_path / "llama.cpp"
+    built = vendor / "build" / "bin" / "llama-server"
+    built.parent.mkdir(parents=True, exist_ok=True)
+    built.write_bytes(b"x")
+    monkeypatch.setattr(install, "BIN_DIR", bin_dir)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+
+    assert install._resolve_runtime_binary("llama-server") == built
+
+
+def test_install_llama_gates_on_runtime_binary_backends(install, tmp_path, monkeypatch):
+    """macOS must not accept a runtime binary that only reports Metal."""
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(install, "VENDOR_LLAMA", tmp_path / "llama.cpp")
+    monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
+    monkeypatch.setattr(install, "assert_stable_llama_pin", lambda tag: None)
+    monkeypatch.setattr(install, "stamp_matches", lambda *a, **k: False)
+    monkeypatch.setattr(install, "stage_built_binaries", lambda: None)
+
+    staged = tmp_path / "bin" / "llama-server"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"x")
+    monkeypatch.setattr(install, "_resolve_runtime_binary", lambda name: staged)
+    monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal"])
+    monkeypatch.setattr(
+        install, "build_llama_from_source", lambda backend, tag=None: (True, "on")
+    )
+
+    with pytest.raises(SystemExit, match="macOS must provide Metal and Vulkan"):
+        install.install_llama("metal", prefer_prebuilt=False, force=True)
+
+
+def test_prefer_prebuilt_rejected_on_macos_gpu(install, monkeypatch):
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
+    with pytest.raises(SystemExit, match="not available on macOS"):
+        install.main(["--llama-only", "--prefer-prebuilt"])
+
+
+def test_prefer_prebuilt_allowed_on_macos_cpu(install, monkeypatch, tmp_path):
+    """--backend cpu is the sanctioned macOS opt-out."""
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
+    monkeypatch.setattr(install, "assert_stable_llama_pin", lambda tag: None)
+    monkeypatch.setattr(install, "install_llama", lambda *a, **k: None)
+    monkeypatch.setattr(install, "verify_llama_installed", lambda *a, **k: None)
+
+    assert install.main(["--llama-only", "--prefer-prebuilt", "--backend", "cpu"]) == 0
+
+
+def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(install, "BIN_DIR", tmp_path)
+    monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
+    install.write_install_stamp(
+        tag="v0.5.0", backend="metal+vulkan", asset="source", https="off"
+    )
+    llama = tmp_path / "llama-server"
+    rpc = tmp_path / "rpc-server"
+    llama.write_bytes(b"x")
+    rpc.write_bytes(b"x")
+    monkeypatch.setattr(
+        install, "_resolve_runtime_binary", lambda name: llama if name == "llama-server" else rpc
+    )
+
+    class Both:
+        returncode = 0
+        stdout = "MTL0: Apple M1\nVulkan0: Apple M1\n"
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: Both())
+
+    # Backends are the contract, so a visible HTTPS fallback still passes...
+    assert install.print_llama_check("v0.5.0", expected="metal+vulkan") == 0
+    # ...but it must not be silent.
+    assert "https:        off" in capsys.readouterr().out
+
+
+def test_copy_llama_binaries_never_stages_into_build_tree(install, tmp_path, monkeypatch):
+    bin_dir = tmp_path / "vendor-bin"
+    vendor = tmp_path / "llama.cpp"
+    worker = tmp_path / "worker-windows"
+    monkeypatch.setattr(install, "BIN_DIR", bin_dir)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "WORKER_WIN", worker)
+    monkeypatch.setattr(install, "WORKER_WIN_SRC", worker / "src")
+
+    src = tmp_path / "extract" / "llama-b1"
+    src.mkdir(parents=True)
+    (src / "llama-server").write_bytes(b"x")
+    (src / "rpc-server").write_bytes(b"x")
+    (src / "libggml.dylib").write_bytes(b"x")
+
+    assert install._copy_llama_binaries_from(tmp_path / "extract")
+    assert (bin_dir / "llama-server").is_file()
+    assert (bin_dir / "libggml.dylib").is_file()
+    assert not (vendor / "build" / "bin").exists()
+
+
+def test_install_llama_archive_stamps_normalized_backend(install, tmp_path, monkeypatch):
+    import tarfile as _tarfile
+
+    monkeypatch.setattr(install, "BIN_DIR", tmp_path / "bin")
+    monkeypatch.setattr(install, "VENDOR_LLAMA", tmp_path / "llama.cpp")
+    monkeypatch.setattr(install, "WORKER_WIN", tmp_path / "worker-windows")
+    monkeypatch.setattr(install, "WORKER_WIN_SRC", tmp_path / "worker-windows" / "src")
+
+    packdir = tmp_path / "llama-b1"
+    packdir.mkdir()
+    (packdir / "llama-server").write_bytes(b"x")
+    (packdir / "rpc-server").write_bytes(b"x")
+    archive = tmp_path / "llama-b1-bin-macos-arm64.tar.gz"
+    with _tarfile.open(archive, "w:gz") as tf:
+        tf.add(packdir, arcname="llama-b1")
+
+    captured: dict = {}
+    monkeypatch.setattr(install, "write_install_stamp", lambda **kw: captured.update(kw))
+
+    # A Metal-only macOS pack must not be stamped as the Metal+Vulkan default.
+    assert install._install_llama_archive(
+        archive, tag="v0.5.0", backend="vulkan", stamp_backend="metal"
+    )
+    assert captured["backend"] == "metal"
+
+    assert install._install_llama_archive(archive, tag="v0.5.0", backend="vulkan")
+    assert captured["backend"] == "metal+vulkan"
+
+
+def test_check_rejects_metal_only_for_default_macos(install, monkeypatch, tmp_path):
+    monkeypatch.setattr(install, "BIN_DIR", tmp_path)
+    monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
+    install.write_install_stamp(
+        tag="v0.5.0", backend="metal", asset="llama-b1-bin-macos-arm64.tar.gz"
+    )
+    llama = tmp_path / "llama-server"
+    rpc = tmp_path / "rpc-server"
+    llama.write_bytes(b"x")
+    rpc.write_bytes(b"x")
+    monkeypatch.setattr(
+        install, "_resolve_runtime_binary", lambda name: llama if name == "llama-server" else rpc
+    )
+
+    class MetalOnly:
+        returncode = 0
+        stdout = "Available devices:\n  MTL0: Apple M1\n"
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: MetalOnly())
+
+    assert install.print_llama_check("v0.5.0", expected="metal+vulkan") == 1
+    # An explicitly requested Metal-only install is still valid.
+    assert install.print_llama_check("v0.5.0", expected="metal") == 0
 
 
 def test_pick_release_asset_macos_cpu_rejects_metal_pack(install, monkeypatch):
@@ -462,7 +900,7 @@ def test_llama_install_status_ok_requires_all_stamped_backends(install, monkeypa
 
     monkeypatch.setattr(
         install,
-        "_find_built_binary",
+        "_resolve_runtime_binary",
         lambda name: llama if name == "llama-server" else rpc,
     )
 

@@ -339,6 +339,8 @@ def join(
         console.print(f"WireGuard: {data.get('wg_address')} ({data.get('overlay_status')})")
     for w in data.get("netsec_warnings") or []:
         console.print(f"[yellow]netsec:[/yellow] {w}")
+    for w in data.get("llama_warnings") or []:
+        console.print(f"[yellow]llama:[/yellow] {w}")
     if data.get("launch", {}).get("error"):
         console.print(f"[yellow]RPC launch warning:[/yellow] {data['launch']['error']}")
 

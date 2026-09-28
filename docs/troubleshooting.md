@@ -142,7 +142,42 @@ export KLLM_ACCEL_BACKEND=vulkan            # add to shell profile for kllm-agen
 uv run kllm join --key '<key>' --master <windows-lan-ip>
 ```
 
-Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Confirm locally: `python scripts/install.py --check` and `vendor/bin/llama-server --list-devices` lists both `MTL`/`Metal` and `Vulkan` devices. `--prefer-prebuilt` installs Metal-only GitHub packs (no Vulkan).
+Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. Confirm locally: `python scripts/install.py --check` and `vendor/bin/llama-server --list-devices` lists both `MTL`/`Metal` and `Vulkan` devices.
+
+On macOS, Metal + Vulkan in one binary is a hard requirement. The install **aborts** if the source build does not produce it, and it verifies the binary the runtime will actually launch (`vendor/bin/llama-server`, which `kllm-native` resolves first) rather than the CMake build output. `--check` re-probes that binary and exits non-zero on a mismatch. `--prefer-prebuilt` is **rejected** on macOS because GitHub macOS packs are Metal-only and would silently drop Vulkan; the only opt-out is `--backend cpu` (stamp `backend=cpu`), which is not a cluster GPU member.
+
+`kllm join` does not change the installed backends either. It reuses a cached pack from `~/.kllm/models` only when that pack satisfies the contract, and refuses one that cannot — surfacing the refusal instead of silently downgrading:
+
+```
+llama: cached llama.cpp pack 'llama-v0.5.0-bin-macos-arm64.tar.gz' is metal-only, but this
+platform requires 'metal+vulkan' (GitHub macOS packs have no Vulkan). Run
+`python scripts/install.py --llama-only --from-source --force` to build Metal+Vulkan, or
+`--backend cpu` for a CPU-only install.
+```
+
+A Mac that registers `backend=metal` while the master runs Vulkan means no Metal+Vulkan build is installed on it. Re-run the source install on that node. To have `join` reuse a pack instead of downloading one, the archive must be named `llama-<pin>-bin-*` (i.e. `llama-v0.5.0-bin-macos-arm64.tar.gz`, matching `llama-release`), not the nightly tag the installer downloads.
+
+### macOS: source build fails at generate with "Target cpp-httplib links to OpenSSL::SSL but the target was not found"
+
+**Cause:** llama.cpp's `find_package(OpenSSL)` ran against a **stale CMake cache**. `brew upgrade openssl@3` (e.g. 3.6.2 → 3.6.4) deletes the Cellar directory a previous configure pinned. The cached `OPENSSL_SSL_LIBRARY` / `OPENSSL_CRYPTO_LIBRARY` / `OPENSSL_INCLUDE_DIR` then point at deleted paths, and the cached `check_c_source_compiles` result still satisfies the `if (OpenSSL_FOUND)` guard — so `cpp-httplib/CMakeLists.txt` links an `OpenSSL::SSL` target that was never defined. The tell is `-- OpenSSL found:` printing an **empty** version.
+
+**Solution:** The installer now detects a stale build dir (a recorded signature of tag + backend flags + toolchain paths, plus any cached OpenSSL package path that no longer exists) and discards it before configuring, so re-running is usually enough:
+
+```bash
+python3 scripts/install.py --llama-only --from-source --force
+```
+
+If you need to clear it by hand: `rm -rf vendor/llama.cpp/build`. Reusing a deleted OpenSSL package path also discards the whole tree, so expect one full rebuild after a `brew upgrade openssl@3`. A dangling `-L` in an exported `LDFLAGS` does **not** discard anything — CMake ignores a missing `-L` directory, and treating it as stale would rebuild the whole tree on every run.
+
+A dangling `-L` is still scrubbed during repair: if `cmake` configure fails, the installer clears the cached `OPENSSL_*` entries and any dangling linker flag, then retries **with HTTPS still enabled** — that is the actual fix. Only if that also fails does it fall back to `-DLLAMA_OPENSSL=OFF`, because the Metal+Vulkan backend is mandatory while llama-server's embedded HTTPS server is not (Kluster serves plain HTTP on a LAN port).
+
+The HTTPS fallback is **never latched**: every run starts from upstream defaults, so the next run restores HTTPS. It is recorded in the stamp as `https=off` and shown by `--check`:
+
+```
+https:        off  (last-resort fallback - re-run --llama-only --from-source --force to restore)
+```
+
+Confirm the repair with `python3 scripts/install.py --check` (`https: on`) and `grep LLAMA_OPENSSL vendor/llama.cpp/build/CMakeCache.txt` (`LLAMA_OPENSSL:BOOL=ON`). `-- OpenSSL found: 3.x.y` in the build output means the cache is healthy; an empty version is the signature of this failure.
 
 ### macOS: "error: Vulkan build deps still missing after install"
 

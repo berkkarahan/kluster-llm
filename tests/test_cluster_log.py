@@ -526,3 +526,92 @@ def test_build_master_launch_includes_log_path(tmp_path, monkeypatch):
     )
     assert launch["log_path"].endswith("llama-server.log")
     assert str(tmp_path) in launch["log_path"]
+
+
+def test_producer_tag_follows_source_and_legacy_journal(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    reset_for_tests()
+    from kllm.cluster_log import (
+        agent_log_path,
+        cluster_journal_path,
+        llama_server_log_path,
+        rpc_server_log_path,
+    )
+
+    for path, source, text in (
+        (agent_log_path(), "agent", "starting inference\n"),
+        (llama_server_log_path(), "llama", "dashboard asked for a slot\n"),
+        (rpc_server_log_path(), "rpc", "worker connected\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    tailed = {event["source"]: event for event in HUB.tail_new_events("n1")}
+    assert tailed["agent"]["tag"] == "ui"
+    assert tailed["agent"]["line"] == "starting inference"
+    assert tailed["llama"]["tag"] == "inference"
+    assert tailed["llama"]["line"] == "dashboard asked for a slot"
+    assert tailed["rpc"]["tag"] == "inference"
+
+    reset_for_tests()
+    hub = LogHub()
+    assert hub.ingest(
+        [
+            {"node_id": "n", "source": "agent", "line": "starting inference", "tag": "inference"},
+            {"node_id": "n", "line": "missing"},
+            {"node_id": "n", "source": "", "line": "empty"},
+            {"node_id": "n", "source": "bogus", "line": "bogus", "tag": "ui"},
+        ],
+        persist=True,
+    ) == 4
+    by_line = {event["line"]: event for event in hub.recent(10)}
+    assert by_line["starting inference"]["source"] == "agent"
+    assert by_line["starting inference"]["tag"] == "ui"
+    for line in ("missing", "empty", "bogus"):
+        assert by_line[line]["source"] == "unknown"
+        assert by_line[line]["tag"] == "unclassified"
+    assert [event["line"] for event in hub.recent(10, source="agent")] == ["starting inference"]
+
+    reloaded = LogHub()
+    reloaded.ensure_journal_loaded()
+    again = {event["line"]: event for event in reloaded.recent(10)}
+    assert again["starting inference"]["tag"] == "ui"
+    assert again["bogus"]["source"] == "unknown"
+    assert again["bogus"]["tag"] == "unclassified"
+
+    reset_for_tests()
+    legacy_id = str(uuid.uuid4())
+    missing_id = str(uuid.uuid4())
+    journal = cluster_journal_path()
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        "\n".join(
+            [
+                json.dumps({"event_id": legacy_id, "ts": 1, "node_id": "n", "source": "agent", "line": "legacy"}),
+                json.dumps({"event_id": missing_id, "ts": 2, "node_id": "n", "line": "nosource"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    HUB.ensure_journal_loaded()
+    loaded = {event["line"]: event for event in HUB.recent(10)}
+    assert loaded["legacy"]["event_id"] == legacy_id
+    assert loaded["legacy"]["tag"] == "ui"
+    assert loaded["nosource"]["source"] == "unknown"
+    assert loaded["nosource"]["tag"] == "unclassified"
+
+
+def test_cli_log_line_ignores_tag_and_rejects_other_source_flags():
+    from typer import BadParameter
+
+    from kllm.cli import _format_log_event, logs_cmd
+
+    plain = _format_log_event(
+        {"ts": 0, "node_id": "n1", "source": "agent", "tag": "ui", "line": "hello"}
+    ).plain
+    assert "n1" in plain
+    assert "agent" in plain
+    assert "hello" in plain
+    assert "ui" not in plain
+    with pytest.raises(BadParameter, match="agent, llama, or rpc"):
+        logs_cmd(source="unclassified")

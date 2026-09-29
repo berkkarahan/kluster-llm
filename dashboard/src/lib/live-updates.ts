@@ -104,6 +104,14 @@ function validSnapshot(value: unknown): value is LiveSnapshot {
     && (data.logs === null || validLogs(data.logs) && bytes(JSON.stringify(data.logs)) <= 256 * 1024);
 }
 
+function tagMatchesSource(source: string, tag: unknown): boolean {
+  const expected = source === 'agent' ? 'ui'
+    : source === 'llama' || source === 'rpc' ? 'inference'
+      : source === 'unknown' ? 'unclassified'
+        : null;
+  return expected !== null && (tag === undefined || tag === expected);
+}
+
 function validLogs(value: unknown): value is LiveLogs {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const logs = value as Record<string, unknown>;
@@ -134,7 +142,7 @@ function validLogs(value: unknown): value is LiveLogs {
       return typeof entry.event_id !== 'string' || !UUID.test(entry.event_id)
         || typeof entry.ts !== 'number' || !Number.isFinite(entry.ts)
         || typeof entry.node_id !== 'string' || !entry.node_id
-        || !['agent', 'llama', 'rpc'].includes(String(entry.source))
+        || !tagMatchesSource(String(entry.source), entry.tag)
         || typeof entry.line !== 'string';
     })) return false;
   } else if (logs.snapshot !== null) return false;

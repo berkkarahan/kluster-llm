@@ -262,3 +262,128 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     }
   }
 });
+
+test('model search keeps one in-flight request and forwards the selected source', async () => {
+  const cwd = process.cwd();
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let releaseSearch = () => {};
+  let searchGate = new Promise((resolve) => { releaseSearch = resolve; });
+  let mode = 'held';
+  const mockFetch = async (path, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({ path, body });
+    if (path === '/v1/models/search') {
+      if (mode === 'held') await searchGate;
+      if (mode === 'error') {
+        return new Response(JSON.stringify({ detail: 'Supply a supported model repository, tree, or file link.' }), { status: 400 });
+      }
+      if (mode === 'legacy') {
+        return new Response(JSON.stringify({
+          query: body.query,
+          total_vram_bytes: 1024,
+          results: [{ repo_id: 'org/old', filename: 'old.gguf', quant: null, size_bytes: 10,
+            gated: false, source: 'org/old:old.gguf', fit: 'unknown' }]
+        }), { status: 200 });
+      }
+      if (mode === 'partial') {
+        return new Response(JSON.stringify({
+          query: body.query,
+          total_vram_bytes: null,
+          results: [{ repo_id: 'org/good', filename: 'good.gguf', quant: 'Q4_K_M', size_bytes: 10,
+            gated: false, source: 'org/good:good.gguf', fit: 'fits' }],
+          warnings: ['org/bad could not be searched']
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        query: body.query,
+        total_vram_bytes: 8,
+        results: [{
+          repo_id: 'demo/model-GGUF', filename: 'model.Q4_K_M.gguf',
+          path: 'gguf/model.Q4_K_M.gguf', revision: 'release/v2', quant: 'Q4_K_M',
+          size_bytes: 0, gated: false, fit: 'unknown',
+          source: 'https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/gguf/model.Q4_K_M.gguf'
+        }],
+        warnings: []
+      }), { status: 200 });
+    }
+    if (path === '/v1/models/download') {
+      return new Response(JSON.stringify({ ok: true, accepted: true, source: body.source }), { status: 200 });
+    }
+    return new Response('{}', { status: 200 });
+  };
+  let server;
+  let appStore;
+  try {
+    process.chdir(fileURLToPath(new URL('..', import.meta.url)));
+    server = await createServer({
+      server: { middlewareMode: true, hmr: false, watch: null },
+      appType: 'custom'
+    });
+    globalThis.fetch = mockFetch;
+    ({ appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts'));
+    appStore.modelSource = '  https://huggingface.co/demo/model-GGUF/tree/main  ';
+    const first = appStore.searchModels();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(appStore.searching, true);
+    assert.deepEqual(appStore.searchResults, []);
+    assert.deepEqual(appStore.searchWarnings, []);
+    assert.equal(appStore.searchError, '');
+    appStore.modelSource = 'unsubmitted edit';
+    assert.equal(appStore.searchQuery, 'https://huggingface.co/demo/model-GGUF/tree/main');
+    assert.equal(await appStore.searchModels(), null);
+    assert.equal(requests.filter(({ path }) => path === '/v1/models/search').length, 1);
+    assert.equal(requests[0].body.query, 'https://huggingface.co/demo/model-GGUF/tree/main');
+    releaseSearch();
+    const accepted = await first;
+    assert.equal(accepted.results[0].revision, 'release/v2');
+    assert.equal(appStore.searchResults[0].path, 'gguf/model.Q4_K_M.gguf');
+    assert.equal(appStore.searching, false);
+    assert.equal(appStore.searchQuery, 'https://huggingface.co/demo/model-GGUF/tree/main');
+    appStore.modelSource = 'edited after results';
+    assert.equal(appStore.searchQuery, 'https://huggingface.co/demo/model-GGUF/tree/main');
+    assert.equal(requests.filter(({ path }) => path === '/v1/models/download').length, 0);
+
+    mode = 'legacy';
+    appStore.modelSource = 'legacy keyword';
+    await appStore.searchModels();
+    assert.equal(appStore.searchResults[0].filename, 'old.gguf');
+    assert.deepEqual(appStore.searchWarnings, []);
+    assert.equal(appStore.searchError, '');
+    assert.equal(appStore.searchQuery, 'legacy keyword');
+
+    mode = 'error';
+    appStore.modelSource = 'https://huggingface.co/datasets/demo/set';
+    await assert.rejects(() => appStore.searchModels());
+    assert.equal(appStore.searchResults.length, 0);
+    assert.equal(appStore.searchTotalVram, null);
+    assert.deepEqual(appStore.searchWarnings, []);
+    assert.match(appStore.searchError, /supported model repository/);
+    assert.equal(appStore.searchQuery, 'https://huggingface.co/datasets/demo/set');
+    appStore.modelSource = 'edited during error';
+    assert.equal(appStore.searchQuery, 'https://huggingface.co/datasets/demo/set');
+    assert.equal(requests.filter(({ path }) => path === '/v1/models/download').length, 0);
+
+    mode = 'partial';
+    appStore.modelSource = 'qwen partial';
+    await appStore.searchModels();
+    assert.equal(appStore.searchError, '');
+    assert.equal(appStore.searchResults.length, 1);
+    assert.deepEqual(appStore.searchWarnings, ['org/bad could not be searched']);
+    assert.equal(appStore.searchQuery, 'qwen partial');
+    appStore.modelSource = 'edited during partial results';
+    assert.equal(appStore.searchQuery, 'qwen partial');
+
+    const source = 'https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/gguf/model.Q4_K_M.gguf';
+    await appStore.downloadModel(source);
+    const download = requests.filter(({ path }) => path === '/v1/models/download');
+    assert.equal(download.length, 1);
+    assert.equal(download[0].body.source, source);
+  } finally {
+    appStore?.stop();
+    globalThis.fetch = originalFetch;
+    try { await server?.watcher?.close(); } catch { /* ignore */ }
+    await server?.close();
+    process.chdir(cwd);
+  }
+});

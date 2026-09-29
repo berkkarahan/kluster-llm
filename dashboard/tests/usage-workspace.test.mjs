@@ -112,6 +112,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       let logsFailure = false;
       let logsWarning = '';
       let logsBulk = false;
+      let logsEmpty = false;
       let liveIncrementalReads = 0;
       const json = (res, payload, status = 200) =>
         res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
@@ -137,7 +138,9 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
           relationships: mode === 'empty' ? [] : relationships, recording: recorder };
         if (path === '/v1/dashboard/live') {
           const after = new URL(req.url, 'http://x').searchParams.get('after');
-          const lines = after && ++liveIncrementalReads === 1
+          const lines = logsEmpty
+            ? []
+            : after && ++liveIncrementalReads === 1
             ? []
             : after
             ? [{ event_id: '00000000-0000-4000-8000-000000000003', ts: 3, node_id: 'w1', source: 'rpc', line: '<b>three</b>' }]
@@ -204,6 +207,11 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         if (path === '/v1/logs') {
           if (req.method !== 'GET') logsWrites++;
           if (logsFailure) { json(res, { detail: 'logs unavailable' }, 503); return; }
+          if (logsEmpty) {
+            json(res, { lines: [], source: 'cluster', cursor: '00000000-0000-4000-8000-000000000001:0',
+              reset: null, gap: false, gap_reason: null });
+            return;
+          }
           const after = new URL(req.url, 'http://x').searchParams.get('after');
           if (logsBulk) {
             const epoch = '00000000-0000-4000-8000-000000000001';
@@ -613,6 +621,23 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       assert.match(logsText, /rpc/);
       assert.match(logsText, /master/);
       assert.match(await evaluate("document.querySelector('.logs-ts').textContent"), /Z$/);
+      assert.deepEqual(await evaluate("[...document.querySelectorAll('.logs-tag')].map((el) => el.textContent)"),
+        ['Inference', 'UI']);
+      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
+        'desktop logs must not overflow horizontally');
+      await evaluate("document.querySelector('select[aria-label=\"Filter by tag\"]').focus()");
+      assert.equal(await evaluate("document.activeElement === document.querySelector('select[aria-label=\"Filter by tag\"]')"), true);
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = 'inference'; s.dispatchEvent(new Event('change')); })()");
+      await wait("document.querySelectorAll('.logs-row').length === 1");
+      assert.match(await evaluate("document.querySelector('.logs-row').textContent"), /worker ready/);
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = ''; s.dispatchEvent(new Event('change')); })()");
+      await wait("document.querySelectorAll('.logs-row').length === 2");
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = 'unclassified'; s.dispatchEvent(new Event('change')); })()");
+      await wait("document.body.textContent.includes('No entries for the selected tag')");
+      assert.equal(await evaluate("document.body.textContent.includes('history gap')"), false);
+      assert.equal(await evaluate("document.body.textContent.includes('trimmed')"), false);
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = ''; s.dispatchEvent(new Event('change')); })()");
+      await wait("document.querySelectorAll('.logs-row').length === 2");
       assert.equal(await evaluate("document.querySelectorAll('input[name=refresh]').length"), 4);
       assert.equal(await evaluate("document.querySelector('input[name=refresh]:checked').value"), 'live');
 
@@ -638,6 +663,9 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       // Display-only Clear: back to Live so the next read is prompt.
       await evaluate("document.querySelector('input[name=refresh][value=\"live\"]').click()");
       await wait("document.querySelector('input[name=refresh]:checked').value === 'live'");
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = 'ui'; s.dispatchEvent(new Event('change')); })()");
+      await wait("document.querySelectorAll('.logs-row').length === 1");
+      assert.match(await evaluate("document.querySelector('.logs-row').textContent"), /boot ok/);
       await evaluate("[...document.querySelectorAll('button.btn')].find((b) => b.textContent.trim() === 'Clear').focus()");
       await enter();
       await wait("document.querySelectorAll('.logs-row').length === 0");
@@ -646,6 +674,9 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         'display-only Clear must not affect another browsing context');
       assert.equal(await evaluate("document.querySelector('input[name=refresh]:checked').value"), 'live');
       assert.match(await evaluate("document.querySelector('[role=status]').textContent"), /cleared/i);
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = ''; s.dispatchEvent(new Event('change')); })()");
+      assert.equal(await evaluate("document.body.textContent.includes('boot ok')"), false,
+        'Clear removes rows that were hidden by the tag filter');
 
       // New entries resume after Clear; the message renders as inert text.
       await wait("document.querySelectorAll('.logs-row').length === 1");
@@ -668,7 +699,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
       await wait('innerWidth === 390');
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      assert.ok(await evaluate("document.querySelector('select') && document.querySelector('input[name=refresh]:checked') && [...document.querySelectorAll('button.btn')].some((b) => b.textContent.trim() === 'Clear')"));
+      assert.ok(await evaluate("document.querySelector('select') && document.querySelector('select[aria-label=\"Filter by tag\"]') && document.querySelector('input[name=refresh]:checked') && [...document.querySelectorAll('button.btn')].some((b) => b.textContent.trim() === 'Clear')"));
       await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
       await wait('innerWidth === 1280');
 
@@ -695,6 +726,20 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         'when the anchor is trimmed, oldest retained row must become the visible anchor');
       assert.match(anchorAfterTrim.text, /trimmed 200/);
       logsBulk = false;
+
+      // An empty visit stays the empty visit when a tag, or a tag and a node, is selected.
+      logsEmpty = true;
+      await call('Page.navigate', { url: base + '/logs' });
+      await wait("document.querySelector('.logs-scroll')?.textContent?.includes('No log entries yet.')");
+      await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = 'inference'; s.dispatchEvent(new Event('change')); })()");
+      await wait("document.querySelector('.logs-scroll')?.textContent?.includes('No log entries yet.')");
+      assert.equal(await evaluate("document.querySelector('.logs-scroll').textContent.includes('No entries for the selected tag')"), false,
+        'an empty visit must not use the tag filter-empty copy');
+      await evaluate("(() => { const node = document.querySelector('select'); node.value = 'w1'; node.dispatchEvent(new Event('change')); })()");
+      assert.equal(await evaluate("document.querySelector('.logs-scroll').textContent.includes('No log entries yet.')"), true);
+      assert.equal(await evaluate("document.querySelector('.logs-scroll').textContent.includes('No entries match the selected node and tag')"), false,
+        'an empty visit must not use the combined filter-empty copy');
+      logsEmpty = false;
 
       // --- US1: empty and offline workspace states ------------------------------------------
       mode = 'empty';

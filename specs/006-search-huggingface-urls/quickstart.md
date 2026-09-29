@@ -1,7 +1,7 @@
 # Validation Guide: Search Hugging Face URLs
 
 **Created**: 2026-09-29
-**Status**: Production implementation checks not yet run; prototype review recorded in design.md
+**Status**: Production checks recorded below on 2026-09-29. Prototype review remains in design.md.
 **Specification**: [spec.md](spec.md)
 **Contract**: [models-search.md](contracts/models-search.md)
 
@@ -182,3 +182,36 @@ OS and result without recording credentials. Live availability is not a determin
 - Actual design artifact and review results: Local Codex generation/refinement and the
   separate desktop/mobile browser review are recorded in [design.md](design.md).
 - Documentation link/contract checks during planning are not runtime validation results.
+
+## Recorded validation (2026-09-29)
+
+OS: Windows 10 (win32 10.0.26200). Python 3.12.13 via the repo virtualenv. Browser: headless Chrome discovered by the existing CDP harness (`CHROME_BIN` unset). No live Hugging Face lookup, GPU, or model transfer was used.
+
+```text
+uv run pytest -q tests/test_models.py tests/test_dashboard_api.py tests/test_model_management_api.py
+node --test --test-concurrency=1 dashboard/tests/store.test.mjs dashboard/tests/models.test.mjs
+node --test --test-concurrency=1 dashboard/tests/*.test.mjs
+npm --prefix dashboard run check
+npm --prefix dashboard run build
+uv run pytest -q
+```
+
+Outcomes:
+
+- Targeted Python: 86 passed.
+- Models browser and store tests: passed, including the full dashboard Node suite (43 passed).
+- `svelte-check`: 0 errors, 0 warnings.
+- Dashboard production build: succeeded.
+- Full `uv run pytest -q`: 422 passed, 3 failed in `tests/test_install_script.py` (`test_discards_cmake_build_with_dangling_openssl_path`, `test_dangling_linker_flag_alone_does_not_discard_build`, `test_cache_reset_flags_only_scrub_dangling_linker_flags`). Those failures are the existing CMake/OpenSSL cache checks and were not changed by this feature.
+
+Coverage against the scenarios:
+
+- SC-001 / SC-005: repository, tree, and folder lookups return every eligible standalone GGUF without the keyword 20/8/40 caps; keyword search keeps those caps and ranking. Encoded revision `release/v2`, default ports, and one-time path decoding are covered in `tests/test_models.py`.
+- SC-002: `tests/test_dashboard_api.py` posts the search handler's returned `source` through the real download route and asserts the streamed Hub URL keeps the revision and full path.
+- SC-003: missing file, folder, revision, unsupported GGUF, gated/unavailable repository, timeout, and rate-limit cases raise before any synthetic row. Empty and docs-only folders return HTTP 200 with `results: []`.
+- SC-004: the Models browser test pastes a tree URL, submits with Enter, opens the existing modal, and sends a download only after the explicit Download control.
+- SC-006: the same test compares the search bar, Search label, placeholder, navigation, and `gap-2` spacing before and after a keyword search at 1280x720, and checks 390x844 for page-wide overflow.
+
+OpenDesign Cloud was not connected during implementation, so the reviewed handoff in design.md was the design source. The browser test checks the retained bar and the modal states from that handoff; it does not open a live design preview.
+
+This work does not update the active feature pointer. Optional live Hub smoke was not run.

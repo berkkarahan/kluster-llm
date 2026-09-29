@@ -23,6 +23,13 @@ BATCH_MAX_BYTES = 64 * 1024
 FLUSH_INTERVAL_S = 0.5
 JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 VALID_SOURCES = frozenset({"agent", "llama", "rpc"})
+STORED_SOURCES = VALID_SOURCES | {"unknown"}
+_TAG_BY_SOURCE = {
+    "agent": "ui",
+    "llama": "inference",
+    "rpc": "inference",
+    "unknown": "unclassified",
+}
 LOCAL_SOURCES: tuple[tuple[str, str], ...] = (
     ("agent", "agent.log"),
     ("llama", "llama-server.log"),
@@ -82,6 +89,22 @@ def parse_cursor(value: Any) -> tuple[str, int]:
     return epoch, int(seq)
 
 
+def classify_source(source: Any) -> tuple[str, str]:
+    """Return the stored source and its single producer tag.
+
+    ``agent`` is the control application. ``llama`` and ``rpc`` are inference.
+    Any other value, including a missing source, is ``unknown`` / ``unclassified``.
+    """
+    if source in ("agent", "llama", "rpc"):
+        src = str(source)
+        return src, _TAG_BY_SOURCE[src]
+    return "unknown", _TAG_BY_SOURCE["unknown"]
+
+
+def _source_text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def make_event(
     node_id: str,
     source: str,
@@ -95,12 +118,13 @@ def make_event(
         stamp = time.time()
     if not math.isfinite(stamp):
         stamp = time.time()
-    src = source if source in VALID_SOURCES else "agent"
+    src, tag = classify_source(source)
     return {
         "event_id": normalize_event_id(event_id) or str(uuid.uuid4()),
         "ts": stamp,
         "node_id": str(node_id),
         "source": src,
+        "tag": tag,
         "line": str(line).rstrip("\r\n"),
     }
 
@@ -224,7 +248,7 @@ class LogHub:
                 self._append_locked(
                     make_event(
                         str(event.get("node_id") or ""),
-                        str(event.get("source") or "agent"),
+                        _source_text(event.get("source")),
                         str(event.get("line") or ""),
                         ts=event.get("ts"),
                         event_id=event.get("event_id"),
@@ -244,7 +268,7 @@ class LogHub:
             cleaned.append(
                 make_event(
                     str(raw.get("node_id") or ""),
-                    str(raw.get("source") or "agent"),
+                    _source_text(raw.get("source")),
                     str(line),
                     ts=raw.get("ts"),
                     event_id=raw.get("event_id"),

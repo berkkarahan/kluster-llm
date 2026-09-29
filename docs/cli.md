@@ -39,7 +39,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
-| `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. |
+| `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. A Hugging Face file URL keeps its revision and full path. Repository and tree page URLs are not downloads. |
 | `kllm model delete <name>` | Delete a GGUF from the master model store |
 | `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`). RPC is used only when the model exceeds master-local capacity. |
 | `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` (adds `--rpc` only when the plan needs workers) |
@@ -167,7 +167,7 @@ Download and load operations carry source-assigned IDs. Completion effects are d
 
 ### Logs page
 
-`/logs` shows one combined master + worker trail over the same log events as `kllm logs`. Choose **All nodes**, the master, or an individual worker; entries carry a UTC timestamp, node, source, and message. The refresh control offers **Live**, **5s**, **30s**, and **1m** and defaults to Live. Live uses the dashboard feed; timed modes use snapshot reads at the selected interval. **Clear** empties only this page's displayed buffer (including rows hidden by the node filter) — it never deletes stored logs, does not affect other viewers, and keeps the selected node and refresh interval. Before the first successful load, Clear is a no-op so an in-flight result is not discarded.
+`/logs` shows one combined master + worker trail over the same log events as `kllm logs`. Choose **All nodes**, the master, or an individual worker. Entries carry a UTC timestamp, node, source, tag, and message. The tag is **UI** for kllm control-application logs, **Inference** for model serving and the activity that spreads that serving across machines, or **Unclassified** when the producer is unknown. Filter with **All tags**, **UI**, **Inference**, or **Unclassified**. A new visit starts on **All tags**. The filter changes only this visit's display and does not request a different log feed. `kllm logs --source` remains `agent`, `llama`, or `rpc`. There is no `--tag` flag. The refresh control offers **Live**, **5s**, **30s**, and **1m** and defaults to Live. Live uses the dashboard feed; timed modes use snapshot reads at the selected interval. **Clear** empties only this page's displayed buffer (including rows hidden by the node or tag filter) — it never deletes stored logs, does not affect other viewers, and keeps the selected node, tag, and refresh interval. Before the first successful load, Clear is a no-op so an in-flight result is not discarded.
 
 The page reads a bounded recent tail (initially 200 rows, then incremental checkpoints) and renders at most 2,000 rows, disclosing older-row omissions. Each timed read has a five-second total deadline; a stalled read reports a timeout and retries on the next selected interval. If the master is unreachable from a worker-served dashboard the page labels the trail **local only**, and known retention/batch/reconnect gaps are labeled rather than presented as complete history. `follow` remains on `kllm logs -f`; the dashboard feed does not change the CLI stream contract.
 
@@ -194,6 +194,8 @@ kllm connect claude --no-launch   # print env + argv only
 Flags: `--model`, `--api-key` / `KLLM_API_KEY`, `--launch`/`--no-launch`, `--serve`/`--no-serve`, `--persist`, `--yolo`, `--context`. Extra args after the agent name are passed through to the harness.
 
 Session-scoped env points agents at `http://127.0.0.1:18765` (token in `~/.kllm/api_token`). Hugging Face downloads use `~/.kllm/hf_token` (or `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`) for gated repos and quant-tag listing.
+
+The dashboard MODELS search accepts the same CLI sources plus keywords. It also accepts `huggingface.co` and `hf.co` repository, tree, and file links (`blob`, `resolve`, `raw`, and `show_file_info`). A revision that contains `/` must be percent-encoded in the URL (`release%2Fv2`); an unencoded `/tree/release/v2` means revision `release` and folder `v2`. Search lists standalone GGUF files and does not start a transfer. Download stays an explicit action in the results modal and stores the file under its basename. Unknown size stays unknown. Keyword search is dashboard-only; it is not a CLI source.
 
 ## Typical flow
 

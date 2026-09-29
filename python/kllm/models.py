@@ -12,11 +12,17 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import unquote, unquote_plus, urlparse
 
 import httpx
 from huggingface_hub import hf_hub_url, list_models, list_repo_files, model_info
-from huggingface_hub.utils import build_hf_headers
+from huggingface_hub.errors import (
+    GatedRepoError,
+    HfHubHTTPError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
+from huggingface_hub.utils import HFValidationError, build_hf_headers, validate_repo_id
 
 from kllm.gguf_meta import read_context_length
 from kllm.hf_token import resolve_hf_token
@@ -52,12 +58,38 @@ _TRANSFER_CHUNK = 1024 * 1024
 SEARCH_HUB_LIMIT = 20
 SEARCH_REPO_CAP = 8
 SEARCH_FILE_CAP = 40
+_METADATA_TIMEOUT = 15.0
+
+_HF_WEBSITE_HOSTS = frozenset({
+    "huggingface.co",
+    "www.huggingface.co",
+    "hf.co",
+    "www.hf.co",
+})
+_NON_MODEL_ROOTS = frozenset({
+    "datasets",
+    "dataset",
+    "spaces",
+    "space",
+    "collections",
+    "collection",
+})
+_FILE_ROUTES = frozenset({"blob", "resolve", "raw"})
+_UNSUPPORTED_LINK = (
+    "Supply a supported model repository, tree, or file link on huggingface.co or hf.co."
+)
+_REVISION_QUERY = (
+    "Use a /tree/, /blob/, /resolve/, or /raw/ link for the revision. " + _UNSUPPORTED_LINK
+)
 
 class DownloadInProgressError(RuntimeError):
     """Raised when a second download is requested while one is active."""
 
 class DownloadCancelledError(RuntimeError):
     """Raised inside the download loop when a cancel event is set."""
+
+class ModelLookupError(ValueError):
+    """Actionable search or explicit-target failure with secrets removed."""
 
 def sha256_file(path: Path, chunk: int = _TRANSFER_CHUNK) -> str:
     h = hashlib.sha256()
@@ -422,23 +454,217 @@ def resolve_hf_filename(repo_id: str, suffix: str, *, token: str | None = None) 
     files = list_repo_files(repo_id, token=token if token else False)
     return select_gguf_for_quant(files, suffix, repo_id=repo_id)
 
+def _search_target(**fields: Any) -> dict[str, Any]:
+    target = {
+        "raw": "",
+        "kind": "search",
+        "url": None,
+        "repo_id": None,
+        "search_term": None,
+        "suffix": None,
+        "revision": None,
+        "folder": None,
+        "filename": None,
+    }
+    target.update(fields)
+    return target
+
+
+def _is_http_url(value: str) -> bool:
+    lowered = value.lower()
+    return lowered.startswith("http://") or lowered.startswith("https://")
+
+
+def _malformed_percent(text: str) -> bool:
+    index = 0
+    while index < len(text):
+        if text[index] != "%":
+            index += 1
+            continue
+        pair = text[index + 1:index + 3]
+        if len(pair) < 2 or any(ch not in "0123456789abcdefABCDEF" for ch in pair):
+            return True
+        index += 3
+    return False
+
+
+def _has_controls(text: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
+
+
+def _decode_segment(segment: str) -> str:
+    if _malformed_percent(segment):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    return unquote(segment)
+
+
+def _validate_revision(revision: str) -> str:
+    if not revision or "\\" in revision or _has_controls(revision):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    if any(part in {"", ".", ".."} for part in revision.split("/")):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    return revision
+
+
+def _validate_repo_path(path: str) -> str:
+    if not path or path.startswith("/") or "\\" in path or _has_controls(path):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    if any(part in {"", ".", ".."} for part in path.split("/")):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    return path
+
+
+def _validate_model_repo(org: str, name: str) -> str:
+    if (
+        not org
+        or not name
+        or "/" in org
+        or "/" in name
+        or "\\" in org
+        or "\\" in name
+        or _has_controls(org)
+        or _has_controls(name)
+    ):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    repo_id = f"{org}/{name}"
+    try:
+        validate_repo_id(repo_id)
+    except HFValidationError as exc:
+        raise ModelLookupError(_UNSUPPORTED_LINK) from exc
+    return repo_id
+
+
+def _query_items(query: str) -> list[tuple[str, str]]:
+    if not query:
+        return []
+    items: list[tuple[str, str]] = []
+    for part in query.split("&"):
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        if _malformed_percent(key) or _malformed_percent(value):
+            raise ModelLookupError(_UNSUPPORTED_LINK)
+        decoded_key = unquote_plus(key)
+        decoded_value = unquote_plus(value) if sep else ""
+        items.append((decoded_key, decoded_value))
+    return items
+
+
+def _encoded_segments(path: str) -> tuple[list[str], bool]:
+    pieces = path.split("/")
+    if pieces and pieces[0] == "":
+        pieces = pieces[1:]
+    trailing = bool(pieces) and pieces[-1] == ""
+    if trailing:
+        pieces = pieces[:-1]
+    if any(piece == "" for piece in pieces):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    return [_decode_segment(piece) for piece in pieces], trailing
+
+
+def _hf_show_file_info(query: str) -> str | None:
+    """Return one decoded show_file_info path, or None when the parameter is absent."""
+    values = [value for key, value in _query_items(query) if key == "show_file_info"]
+    if not values:
+        return None
+    if len(values) != 1 or not values[0].strip():
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    return _validate_repo_path(values[0].strip())
+
+
+def _is_hf_website(url: str) -> bool:
+    """True for the Hugging Face model website, not CDN or other subdomains."""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if (parsed.scheme or "").lower() not in {"http", "https"}:
+        return False
+    return host in _HF_WEBSITE_HOSTS
+
+
+def _is_hf_host(url: str) -> bool:
+    return _is_hf_website(url)
+
+
+def _parse_hf_url(url: str) -> dict[str, Any]:
+    """Parse a Hugging Face website URL into repo, revision, folder, and file selectors."""
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise ModelLookupError(_UNSUPPORTED_LINK) from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    scheme = (parsed.scheme or "").lower()
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ModelLookupError(_UNSUPPORTED_LINK) from exc
+    if port is not None and not (
+        (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    ):
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    if any(key == "revision" for key, _value in _query_items(parsed.query)):
+        raise ModelLookupError(_REVISION_QUERY)
+    show_file = _hf_show_file_info(parsed.query)
+    segments, trailing = _encoded_segments(parsed.path)
+    if segments and segments[0] in {"models", "model"}:
+        segments = segments[1:]
+    if not segments or segments[0] in _NON_MODEL_ROOTS:
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    if len(segments) < 2:
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    repo_id = _validate_model_repo(segments[0], segments[1])
+    rest = segments[2:]
+    revision = None
+    folder = None
+    filename = None
+    if not rest:
+        if trailing:
+            pass
+    elif rest[0] in _FILE_ROUTES:
+        if trailing or len(rest) < 3:
+            raise ModelLookupError(_UNSUPPORTED_LINK)
+        revision = _validate_revision(rest[1])
+        filename = _validate_repo_path("/".join(rest[2:]))
+    elif rest[0] == "tree":
+        if len(rest) < 2:
+            raise ModelLookupError(_UNSUPPORTED_LINK)
+        revision = _validate_revision(rest[1])
+        if len(rest) > 2:
+            folder = _validate_repo_path("/".join(rest[2:]))
+    else:
+        raise ModelLookupError(_UNSUPPORTED_LINK)
+    if filename is None and show_file is not None:
+        filename = show_file
+        folder = None
+    return {
+        "repo_id": repo_id,
+        "revision": revision,
+        "folder": folder,
+        "filename": filename,
+    }
+
+
 def parse_model_search_query(query: str) -> dict[str, Any]:
     """Split a Models search box into url / repo / Hub-search parts."""
     raw = query.strip()
     if not raw:
         raise ValueError("query is empty")
-    if raw.startswith("http://") or raw.startswith("https://"):
-        repo_id, filename = (None, None)
-        if _is_hf_host(raw):
-            repo_id, filename = _parse_hf_url(raw)
-        return {
-            "raw": raw,
-            "kind": "url",
-            "url": raw,
-            "repo_id": repo_id,
-            "search_term": None,
-            "suffix": filename,
-        }
+    if _is_http_url(raw):
+        if _is_hf_website(raw):
+            selected = _parse_hf_url(raw)
+            return _search_target(
+                raw=raw,
+                kind="url",
+                url=raw,
+                repo_id=selected["repo_id"],
+                revision=selected["revision"],
+                folder=selected["folder"],
+                filename=selected["filename"],
+            )
+        return _search_target(raw=raw, kind="url", url=raw)
     suffix = None
     left = raw
     if ":" in raw:
@@ -448,22 +674,8 @@ def parse_model_search_query(query: str) -> dict[str, Any]:
     if not left:
         raise ValueError("query is empty")
     if "/" in left:
-        return {
-            "raw": raw,
-            "kind": "repo",
-            "url": None,
-            "repo_id": left,
-            "search_term": None,
-            "suffix": suffix,
-        }
-    return {
-        "raw": raw,
-        "kind": "search",
-        "url": None,
-        "repo_id": None,
-        "search_term": left,
-        "suffix": suffix,
-    }
+        return _search_target(raw=raw, kind="repo", repo_id=left, suffix=suffix)
+    return _search_target(raw=raw, kind="search", search_term=left, suffix=suffix)
 
 def rank_hub_repo_ids(repo_ids: list[str], search_term: str) -> list[str]:
     """Exact repo-name matches first (case-insensitive), preserving relative order."""
@@ -512,30 +724,6 @@ def vram_fit(size_bytes: int | None, total_vram_bytes: int | None) -> str:
         return "unknown"
     return "fits" if size_bytes <= total_vram_bytes else "overflow"
 
-def _hf_show_file_info(query: str) -> str | None:
-    values = parse_qs(query, keep_blank_values=False).get("show_file_info") or []
-    if not values:
-        return None
-    name = unquote(values[0]).strip()
-    return name or None
-
-def _parse_hf_url(url: str) -> tuple[str | None, str | None]:
-    parsed = urlparse(url)
-    parts = [unquote(p) for p in parsed.path.strip("/").split("/") if p]
-    if parts and parts[0] in {"models", "model"}:
-        parts = parts[1:]
-    if len(parts) < 2:
-        return None, None
-    repo_id = f"{parts[0]}/{parts[1]}"
-    rest = parts[2:]
-    filename = None
-    if rest and rest[0] in {"blob", "resolve", "raw"}:
-        file_parts = rest[2:] if len(rest) > 2 else []
-        filename = "/".join(file_parts) if file_parts else None
-    if not filename:
-        filename = _hf_show_file_info(parsed.query)
-    return repo_id, filename
-
 def _quant_label(filename: str, suffix: str | None) -> str | None:
     tokens = quant_tokens_in_name(filename)
     if suffix and looks_like_quant_tag(suffix):
@@ -545,15 +733,97 @@ def _quant_label(filename: str, suffix: str | None) -> str | None:
                 return token
     return tokens[-1] if tokens else None
 
-def _files_for_suffix(files: list[str], suffix: str | None) -> list[str]:
+def _basename(path: str) -> str:
+    return path.rsplit("/", 1)[-1]
+
+
+def _is_standalone_gguf(name: str) -> bool:
+    return bool(name) and name.lower().endswith(".gguf") and not _is_skipped_gguf(name)
+
+
+def _redact_lookup_text(text: str) -> str:
+    cleaned = " ".join((text or "").split())
+    lowered = cleaned.lower()
+    if (
+        not cleaned
+        or "://" in cleaned
+        or "hf_" in lowered
+        or "bearer " in lowered
+        or "authorization" in lowered
+        or "token=" in lowered
+        or len(cleaned) > 180
+    ):
+        return "Lookup failed. Retry or check connectivity and access."
+    return cleaned
+
+
+def _lookup_error(
+    exc: Exception,
+    *,
+    repo_id: str | None = None,
+    revision: str | None = None,
+) -> ModelLookupError:
+    """Map a metadata failure to a safe category. Gated errors win over their superclass."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(exc, GatedRepoError):
+        return ModelLookupError(
+            f"Repository {repo_id} needs access. Check the configured Hugging Face token."
+        )
+    if isinstance(exc, RevisionNotFoundError):
+        return ModelLookupError(f"Revision {revision} is unavailable in {repo_id}.")
+    if isinstance(exc, RepositoryNotFoundError):
+        return ModelLookupError(
+            f"Repository {repo_id} is unavailable or access is required."
+        )
+    if isinstance(exc, HfHubHTTPError) and status == 429:
+        return ModelLookupError("Lookup was rate limited. Retry or check connectivity and access.")
+    if status in {401, 403}:
+        return ModelLookupError(
+            f"Repository {repo_id} needs access. Check the configured Hugging Face token."
+        )
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+        return ModelLookupError("Lookup timed out. Retry or check connectivity and access.")
+    if isinstance(exc, (httpx.RequestError, ConnectionError)):
+        return ModelLookupError("Lookup failed. Retry or check connectivity and access.")
+    if isinstance(exc, HfHubHTTPError):
+        return ModelLookupError("Lookup failed. Retry or check connectivity and access.")
+    text = _redact_lookup_text(str(exc))
+    if text.startswith("Lookup failed. Retry"):
+        return ModelLookupError(text)
+    return ModelLookupError(f"Lookup failed: {text}")
+
+
+def _missing_file(repo_id: str, revision: str, path: str) -> ModelLookupError:
+    return ModelLookupError(f"File {path} is unavailable in {repo_id} at revision {revision}.")
+
+
+def _unsupported_file(path: str) -> ModelLookupError:
+    return ModelLookupError(f"File {path} is not a supported standalone GGUF model.")
+
+
+def _files_for_suffix(
+    files: list[str],
+    suffix: str | None,
+    *,
+    repo_id: str,
+    revision: str,
+) -> list[str]:
     if not suffix:
         return _candidate_ggufs(files)
     if is_exact_hf_filename(suffix):
+        if "\\" in suffix or _has_controls(suffix):
+            raise ModelLookupError(_UNSUPPORTED_LINK)
         if suffix in files:
+            if not _is_standalone_gguf(suffix):
+                raise _unsupported_file(suffix)
             return [suffix]
-        base = Path(suffix).name.lower()
-        matches = [rel for rel in files if Path(rel).name.lower() == base]
-        return matches or [suffix]
+        if "/" in suffix:
+            raise _missing_file(repo_id, revision, suffix)
+        base = suffix.rsplit("/", 1)[-1].lower()
+        matches = [rel for rel in _candidate_ggufs(files) if _basename(rel).lower() == base]
+        if not matches:
+            raise _missing_file(repo_id, revision, suffix)
+        return matches
     return match_gguf_for_quant(files, suffix)
 
 def _sibling_size(sibling: Any) -> int:
@@ -565,6 +835,12 @@ def _sibling_size(sibling: Any) -> int:
     except (TypeError, ValueError):
         return 0
 
+def _option_source(repo_id: str, rel: str, revision: str, *, canonical: bool) -> str:
+    if canonical or not is_exact_hf_filename(rel):
+        return hf_hub_url(repo_id, rel, revision=revision)
+    return f"{repo_id}:{rel}"
+
+
 def _hit_row(
     repo_id: str,
     filename: str,
@@ -573,41 +849,76 @@ def _hit_row(
     gated: bool,
     suffix: str | None,
     source: str | None = None,
+    path: str | None = None,
+    revision: str | None = None,
 ) -> dict[str, Any]:
     rel = filename
     return {
         "repo_id": repo_id,
-        "filename": Path(rel).name,
+        "filename": _basename(rel),
+        "path": path,
+        "revision": revision,
         "quant": _quant_label(rel, suffix),
         "size_bytes": size_bytes,
         "gated": gated,
         "source": source or f"{repo_id}:{rel}",
     }
 
-def _inspect_repo_ggufs(
-    repo_id: str,
-    *,
-    suffix: str | None,
-    token: str | None,
-) -> list[dict[str, Any]]:
-    try:
-        info = model_info(repo_id, files_metadata=True, token=token if token else False)
-    except Exception:
-        return []
-    gated = bool(getattr(info, "gated", False))
-    siblings = list(getattr(info, "siblings", None) or [])
+def _sibling_names(info: Any) -> tuple[list[str], dict[str, int]]:
     files: list[str] = []
     sizes: dict[str, int] = {}
-    for sibling in siblings:
+    for sibling in list(getattr(info, "siblings", None) or []):
         rel = getattr(sibling, "rfilename", None)
         if not rel and isinstance(sibling, dict):
             rel = sibling.get("rfilename")
         if not rel:
             continue
-        files.append(rel)
-        sizes[rel] = _sibling_size(sibling)
+        files.append(str(rel))
+        sizes[str(rel)] = _sibling_size(sibling)
+    return files, sizes
+
+
+def _inspect_repo_ggufs(
+    repo_id: str,
+    *,
+    suffix: str | None,
+    token: str | None,
+    filename: str | None = None,
+    folder: str | None = None,
+    revision: str = "main",
+    canonical: bool = False,
+) -> list[dict[str, Any]]:
+    try:
+        info = model_info(
+            repo_id,
+            revision=revision,
+            files_metadata=True,
+            timeout=_METADATA_TIMEOUT,
+            token=token if token else False,
+        )
+    except ModelLookupError:
+        raise
+    except Exception as exc:
+        raise _lookup_error(exc, repo_id=repo_id, revision=revision) from exc
+    gated = bool(getattr(info, "gated", False))
+    files, sizes = _sibling_names(info)
+    if filename:
+        if filename not in files:
+            raise _missing_file(repo_id, revision, filename)
+        if not _is_standalone_gguf(filename):
+            raise _unsupported_file(filename)
+        selected = [filename]
+    elif folder:
+        prefix = folder.rstrip("/") + "/"
+        if not any(rel.startswith(prefix) for rel in files):
+            raise ModelLookupError(
+                f"Folder {folder} is unavailable in {repo_id} at revision {revision}."
+            )
+        selected = _candidate_ggufs([rel for rel in files if rel.startswith(prefix)])
+    else:
+        selected = _files_for_suffix(files, suffix, repo_id=repo_id, revision=revision)
     rows: list[dict[str, Any]] = []
-    for rel in _files_for_suffix(files, suffix):
+    for rel in selected:
         rows.append(
             _hit_row(
                 repo_id,
@@ -615,6 +926,9 @@ def _inspect_repo_ggufs(
                 size_bytes=sizes.get(rel, 0),
                 gated=gated,
                 suffix=suffix,
+                path=rel,
+                revision=revision,
+                source=_option_source(repo_id, rel, revision, canonical=canonical),
             )
         )
     return rows
@@ -629,19 +943,18 @@ def _url_size_bytes(url: str, *, headers: dict[str, str] | None = None) -> int |
         return None
 
 def _synthetic_url_hit(url: str, *, token: str | None, parsed: dict[str, Any]) -> dict[str, Any]:
-    headers = _hub_headers(token) if _is_hf_host(url) else {}
-    size = _url_size_bytes(url, headers=headers) or 0
-    repo_id = parsed.get("repo_id") or urlparse(url).netloc
-    suffix = parsed.get("suffix")
-    filename = Path(suffix).name if suffix else (Path(urlparse(url).path).name or "model.gguf")
-    source = f"{parsed['repo_id']}:{suffix}" if parsed.get("repo_id") and suffix else url
+    del token  # Direct URLs never receive configured Hub credentials.
+    size = _url_size_bytes(url, headers={}) or 0
+    filename = _basename(urlparse(url).path) or "model.gguf"
     return _hit_row(
-        str(repo_id),
-        suffix or filename,
+        urlparse(url).netloc,
+        filename,
         size_bytes=size,
         gated=False,
-        suffix=suffix,
-        source=source,
+        suffix=parsed.get("suffix"),
+        source=url,
+        path=None,
+        revision=None,
     )
 
 def _hub_search_repo_ids(search_term: str, *, token: str | None) -> list[str]:
@@ -673,48 +986,52 @@ def search_hub_ggufs(
     if token is None:
         token = resolve_hf_token()
     results: list[dict[str, Any]] = []
+    warnings: list[str] = []
     kind = parsed["kind"]
-    if kind == "url":
-        if parsed.get("repo_id") and not parsed.get("suffix"):
-            results = _inspect_repo_ggufs(parsed["repo_id"], suffix=None, token=token)
-        elif parsed.get("repo_id") and parsed.get("suffix"):
-            results = _inspect_repo_ggufs(
-                parsed["repo_id"], suffix=parsed.get("suffix"), token=token
-            )
-            if not results:
-                results = [_synthetic_url_hit(parsed["url"], token=token, parsed=parsed)]
-        else:
-            results = [_synthetic_url_hit(parsed["url"], token=token, parsed=parsed)]
-    elif kind == "repo":
+    if kind == "url" and not parsed.get("repo_id"):
+        results = [_synthetic_url_hit(parsed["url"], token=token, parsed=parsed)]
+    elif kind in {"url", "repo"}:
+        revision = parsed.get("revision") or "main"
         results = _inspect_repo_ggufs(
-            parsed["repo_id"], suffix=parsed.get("suffix"), token=token
+            parsed["repo_id"],
+            suffix=None if kind == "url" else parsed.get("suffix"),
+            filename=parsed.get("filename") if kind == "url" else None,
+            folder=parsed.get("folder") if kind == "url" else None,
+            revision=revision,
+            token=token,
+            canonical=kind == "url",
         )
     else:
-        repo_ids = _hub_search_repo_ids(parsed["search_term"], token=token)
+        try:
+            repo_ids = _hub_search_repo_ids(parsed["search_term"], token=token)
+        except ModelLookupError:
+            raise
+        except Exception as exc:
+            raise _lookup_error(exc) from exc
+        failures = 0
         for repo_id in repo_ids[:SEARCH_REPO_CAP]:
-            rows = _inspect_repo_ggufs(
-                repo_id, suffix=parsed.get("suffix"), token=token
-            )
+            try:
+                rows = _inspect_repo_ggufs(
+                    repo_id, suffix=parsed.get("suffix"), token=token, revision="main"
+                )
+            except ModelLookupError as exc:
+                failures += 1
+                warnings.append(str(exc))
+                continue
             results.extend(rows)
             if len(results) >= SEARCH_FILE_CAP:
                 break
         results = results[:SEARCH_FILE_CAP]
+        if not results and failures:
+            raise ModelLookupError(warnings[0])
     for row in results:
         row["fit"] = vram_fit(row.get("size_bytes"), total_vram_bytes)
     return {
         "query": parsed["raw"],
         "total_vram_bytes": total_vram_bytes,
         "results": results,
+        "warnings": warnings,
     }
-
-def _is_hf_host(url: str) -> bool:
-    host = urlparse(url).netloc.lower()
-    return (
-        host == "huggingface.co"
-        or host.endswith(".huggingface.co")
-        or host == "hf.co"
-        or host.endswith(".hf.co")
-    )
 
 def _hub_headers(token: str | None) -> dict[str, str]:
     return build_hf_headers(token=token if token else False)
@@ -810,24 +1127,31 @@ def download_model(
         models_dir().mkdir(parents=True, exist_ok=True)
         token = resolve_hf_token()
 
-        if source.startswith("http://") or source.startswith("https://"):
-            if _is_hf_host(source):
-                repo_id, filename = _parse_hf_url(source)
-                if repo_id and filename:
-                    url = hf_hub_url(repo_id, filename)
-                    name = dest_name or Path(filename).name
-                    return _stream_to_models(
-                        url,
-                        name,
-                        headers=_hub_headers(token),
-                        on_progress=on_progress,
-                        cancel_event=cancel_event,
+        if _is_http_url(source):
+            if _is_hf_website(source):
+                parsed = parse_model_search_query(source)
+                repo_id = parsed.get("repo_id")
+                filename = parsed.get("filename")
+                if not repo_id or not filename:
+                    raise ValueError(
+                        "Repository and tree links are not file downloads. "
+                        "Search for a supported file, then download that result."
                     )
-                headers = _hub_headers(token)
-            else:
-                headers = {}
+                revision = parsed.get("revision") or "main"
+                url = hf_hub_url(repo_id, filename, revision=revision)
+                name = dest_name or _basename(filename)
+                return _stream_to_models(
+                    url,
+                    name,
+                    headers=_hub_headers(token),
+                    on_progress=on_progress,
+                    cancel_event=cancel_event,
+                )
             return _stream_to_models(
-                source, dest_name, headers=headers, on_progress=on_progress,
+                source,
+                dest_name,
+                headers={},
+                on_progress=on_progress,
                 cancel_event=cancel_event,
             )
 

@@ -7,6 +7,7 @@
   import type { ModelSearchFit, ModelSearchHit } from '$lib/types';
 
   let modalOpen = $state(false);
+  let searchDialog = $state<HTMLDivElement | null>(null);
 
   function fitChip(fit: ModelSearchFit) {
     if (fit === 'fits') return 'chip-ok';
@@ -14,23 +15,64 @@
     return 'chip-muted';
   }
 
-  function fitLabel(row: ModelSearchHit) {
-    const size = row.size_bytes ? formatGb(row.size_bytes, 1) : '—';
-    const vram = appStore.searchTotalVram != null ? formatGb(appStore.searchTotalVram, 1) : '—';
-    return `${size} / ${vram}`;
+  function sizeLabel(row: ModelSearchHit) {
+    if (!row.size_bytes) return 'unknown size';
+    return formatGb(row.size_bytes, 1);
+  }
+
+  function fitText(fit: ModelSearchFit) {
+    if (fit === 'fits') return 'fits (weight-size heuristic)';
+    if (fit === 'overflow') return 'overflow (weight-size heuristic)';
+    return 'unknown fit';
+  }
+
+  function displayPath(row: ModelSearchHit) {
+    return row.path || row.filename;
+  }
+
+  function closeSearch() {
+    modalOpen = false;
   }
 
   $effect(() => {
     if (!modalOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') modalOpen = false;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const node = searchDialog;
+    queueMicrotask(() => {
+      const first = node?.querySelector<HTMLElement>('button, [href], input, select, textarea');
+      (first ?? node)?.focus();
+    });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        modalOpen = false;
+        return;
+      }
+      if (event.key !== 'Tab' || !searchDialog) return;
+      const focusable = [...searchDialog.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea'
+      )].filter((el) => !el.hasAttribute('disabled'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !searchDialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      previous?.focus();
+    };
   });
 
   async function runSearch() {
-    if (!appStore.modelSource.trim() || appStore.busy) return;
+    if (!appStore.modelSource.trim() || appStore.busy || appStore.searching) return;
     modalOpen = true;
     try {
       await appStore.searchModels();
@@ -182,29 +224,64 @@
       if (e.target === e.currentTarget) modalOpen = false;
     }}
   >
-    <div class="panel modal p-4 max-w-2xl w-full mx-4" role="dialog" aria-modal="true">
+    <div
+      bind:this={searchDialog}
+      class="panel modal p-4 max-w-2xl w-full mx-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="model-search-title"
+      tabindex="-1"
+    >
       <div class="flex items-center justify-between mb-3">
-        <h2 class="mono text-[12px] uppercase tracking-wider" style="color: var(--muted)">Search results</h2>
-        <button class="btn" type="button" onclick={() => (modalOpen = false)}>Close</button>
+        <h2 id="model-search-title" class="mono text-[12px] uppercase tracking-wider" style="color: var(--muted)">Search results</h2>
+        <button class="btn" type="button" onclick={closeSearch}>Close</button>
       </div>
-      {#if appStore.searchError}
-        <p class="mono text-[12px]" style="color: var(--danger)">{appStore.searchError}</p>
-      {:else if appStore.busy === '/v1/models/search'}
-        <p class="mono text-[12px]" style="color: var(--muted)">searching…</p>
-      {:else if appStore.searchResults.length === 0}
-        <p class="mono text-[12px]" style="color: var(--muted)">No GGUF hits</p>
-      {:else}
+      {#if appStore.searchQuery}
+        <dl class="mono text-[11px] mb-3 grid gap-x-2" style="grid-template-columns: auto minmax(0, 1fr)">
+          <dt style="color: var(--muted)">Latest search</dt>
+          <dd class="min-w-0" style="overflow-wrap:anywhere">{appStore.searchQuery}</dd>
+        </dl>
+      {/if}
+      <div role="status" aria-live="polite">
+        {#if appStore.searching}
+          <p class="mono text-[12px]" style="color: var(--muted)">Searching…</p>
+        {:else if appStore.searchError}
+          <p class="mono text-[12px]" style="color: var(--danger)">{appStore.searchError}</p>
+        {:else if appStore.searchResults.length === 0}
+          <p class="mono text-[12px]" style="color: var(--muted)">No supported downloadable options were found.</p>
+        {/if}
+      </div>
+      {#if !appStore.searching && !appStore.searchError && appStore.searchWarnings.length}
+        <ul class="mono text-[11px] mb-3" style="color: var(--warn)" aria-label="Partial search warnings">
+          {#each appStore.searchWarnings as warning}
+            <li style="overflow-wrap:anywhere">{warning}</li>
+          {/each}
+        </ul>
+      {/if}
+      {#if !appStore.searching && !appStore.searchError && appStore.searchResults.length}
         <ul class="flex flex-col gap-2 max-h-[60vh] overflow-auto">
           {#each appStore.searchResults as row (row.source)}
-            <li class="flex items-center justify-between gap-2 panel p-2" style="border-color: var(--border)">
+            <li class="flex items-start justify-between gap-2 panel p-2" style="border-color: var(--border)">
               <div class="min-w-0">
-                <div class="mono text-[12px] truncate">{row.filename}</div>
-                <div class="mono text-[11px]" style="color: var(--muted)">{row.repo_id ?? row.source}</div>
+                <div class="mono text-[12px]" style="overflow-wrap:anywhere">{displayPath(row)}</div>
+                <div class="mono text-[11px]" style="color: var(--muted); overflow-wrap:anywhere">
+                  {row.repo_id ?? row.source}
+                  {#if row.revision}
+                    · revision {row.revision}
+                  {/if}
+                  {#if row.quant}
+                    · {row.quant}
+                  {/if}
+                  · {sizeLabel(row)}
+                </div>
               </div>
               <div class="flex items-center gap-2 shrink-0">
-                <span class={`chip ${fitChip(row.fit)}`}>{fitLabel(row)}</span>
-                <button class="btn btn-accent" type="button" onclick={() => void downloadRow(row.source)}
-                  >Download</button
+                <span class={`chip ${fitChip(row.fit)}`}>{fitText(row.fit)}</span>
+                <button
+                  class="btn btn-accent"
+                  type="button"
+                  aria-label={`Download ${displayPath(row)}`}
+                  onclick={() => void downloadRow(row.source)}>Download</button
                 >
               </div>
             </li>

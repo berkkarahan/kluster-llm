@@ -435,3 +435,75 @@ test('silent socket switches to a labeled two-second snapshot fallback', async (
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(reads, 2);
 });
+
+test('live log lines accept a missing tag and reject a tag that disagrees with source', async (t) => {
+  const { sockets } = await setup(t);
+  const socket = sockets[0];
+  const frame = (batch, initial, entry) => ({
+    type: 'data', generation: 1, batch, initial, epoch, server_time: stamp,
+    areas: snapshot().areas,
+    logs: {
+      availability: 'available',
+      sampled_at: stamp,
+      snapshot: {
+        lines: [entry],
+        source: 'cluster',
+        cursor: `${epoch}:${batch}`,
+        reset: null,
+        gap: false,
+        gap_reason: null,
+        continuity_id: epoch,
+        discontinuity: null
+      },
+      error: null
+    }
+  });
+  const entry = (id, source, tag) => ({
+    event_id: `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`,
+    ts: 1,
+    node_id: 'master',
+    source,
+    line: 'starting the dashboard',
+    ...(tag === undefined ? {} : { tag })
+  });
+
+  socket.receive(frame(1, true, entry(1, 'llama')));
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 1), true);
+  socket.receive(frame(2, false, entry(2, 'unknown')));
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 2), true);
+  socket.receive(frame(3, false, entry(3, 'llama', 'ui')));
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 3), false);
+  assert.equal(socket.readyState, 3);
+});
+
+test('live log lines reject a source outside the stored set', async (t) => {
+  const { sockets } = await setup(t);
+  const socket = sockets[0];
+  socket.receive({
+    type: 'data', generation: 1, batch: 1, initial: true, epoch, server_time: stamp,
+    areas: snapshot().areas,
+    logs: {
+      availability: 'available',
+      sampled_at: stamp,
+      snapshot: {
+        lines: [{
+          event_id: '00000000-0000-4000-8000-000000000099',
+          ts: 1,
+          node_id: 'master',
+          source: 'not-a-source',
+          line: 'nope'
+        }],
+        source: 'cluster',
+        cursor: `${epoch}:1`,
+        reset: null,
+        gap: false,
+        gap_reason: null,
+        continuity_id: epoch,
+        discontinuity: null
+      },
+      error: null
+    }
+  });
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 1), false);
+  assert.equal(socket.readyState, 3);
+});

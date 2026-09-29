@@ -15,6 +15,16 @@
   }
 
   const blocked = $derived(appStore.planRunBlockedReason());
+  const loadPhase = $derived(appStore.loadProgress?.phase);
+  const inferenceStoppable = $derived(
+    appStore.status?.role === 'master' && (
+      appStore.status?.process_role === 'master'
+      || !!appStore.status?.inference_up
+      || !!appStore.status?.model_name
+      || loadPhase === 'starting'
+      || loadPhase === 'loading'
+    )
+  );
   const fitStatus = $derived(
     appStore.planResult?.fit_status ? String(appStore.planResult.fit_status) : null
   );
@@ -498,6 +508,12 @@
         class="btn btn-accent"
         disabled={!!blocked || !appStore.selectedModel || !!appStore.busy || !!appStore.estimateError || fitStatus === 'overflow'}
         onclick={() => appStore.run()}>Run</button
+      >
+      <button
+        class="btn btn-danger"
+        type="button"
+        disabled={!!appStore.busy || !inferenceStoppable}
+        onclick={() => appStore.stopInference()}>Stop</button
       >
     </div>
 

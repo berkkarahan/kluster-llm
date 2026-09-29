@@ -1197,6 +1197,18 @@ class AppStore {
 
   async leaveCluster() {
     await this.post('/v1/leave');
+    if (this.status) {
+      this.status = {
+        ...this.status,
+        role: 'idle',
+        members: {},
+        join_key: null,
+        master_host: null,
+      };
+    }
+    if (this.liveUsage) {
+      this.liveUsage = { ...this.liveUsage, nodes: {}, relationships: [] };
+    }
   }
 
   async updateWorkers() {
@@ -1416,6 +1428,11 @@ class AppStore {
     this.abort?.abort();
     this.abort = null;
     this.chatStreaming = false;
+  }
+
+  async stopInference() {
+    this.stopChat();
+    await this.post('/v1/inference/stop');
   }
 
   async sendChat() {

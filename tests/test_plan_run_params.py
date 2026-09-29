@@ -345,6 +345,57 @@ def test_cli_split_mode_in_payload():
     assert build_plan_run_payload(model="m.gguf", split_mode="tensor")["split_mode"] == "tensor"
 
 
+def test_inference_stop_unloads_model_and_keeps_cluster(client, monkeypatch):
+    from kllm import load_progress
+
+    c, agent, _tmp = client
+    stopped: list[tuple[int, bool]] = []
+
+    def _stop(pid: int, force: bool = False) -> bool:
+        stopped.append((pid, force))
+        return True
+
+    monkeypatch.setattr(agent.native, "stop_process", _stop)
+    previous = (load_progress._active, load_progress._latest_terminal)
+    agent.STATE.process_pid = 4242
+    agent.STATE.process_role = "master"
+    agent.STATE.model_name = "toy.gguf"
+    agent.STATE.join_key = "secret"
+    agent.STATE.last_plan = {"fit_status": "fits"}
+    agent.STATE.members["master"] = {"node_id": "master", "role": "master", "host": "127.0.0.1"}
+    try:
+        load_progress._active = load_progress._latest_terminal = None
+        load_progress.begin("toy.gguf", 4242, 1024)
+        first = c.post("/v1/inference/stop")
+        assert first.status_code == 200
+        assert first.json()["role"] == "master"
+        assert agent.STATE.role == "master"
+        assert agent.STATE.process_pid is None
+        assert agent.STATE.process_role is None
+        assert agent.STATE.model_name is None
+        assert agent.STATE.join_key == "secret"
+        assert agent.STATE.last_plan == {"fit_status": "fits"}
+        assert set(agent.STATE.members) == {"w1", "master"}
+        assert stopped == [(4242, True)]
+        progress = load_progress.records(agent.STATE.infer_port)
+        assert progress["current"] is None
+        assert progress["last_terminal"]["phase"] == "cancelled"
+
+        again = c.post("/v1/inference/stop")
+        assert again.status_code == 200
+        assert agent.STATE.role == "master"
+        assert agent.STATE.model_name is None
+        assert stopped == [(4242, True)]
+
+        agent.STATE.role = "worker"
+        agent.STATE.model_name = "toy.gguf"
+        denied = c.post("/v1/inference/stop")
+        assert denied.status_code == 400
+        assert agent.STATE.model_name == "toy.gguf"
+    finally:
+        load_progress._active, load_progress._latest_terminal = previous
+
+
 def test_model_settings_file_location(client, tmp_path):
     c, agent, tmp = client
     _model_file(tmp)

@@ -24,8 +24,12 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
     appStore.status = { role: 'master', node_id: 'master', members: {
       master: { node_id: 'master', host: 'example', role: 'master' }
     }, inference_up: false };
-    appStore.liveUsage = { nodes: { master: { node_id: 'master', host: 'example', role: 'master',
-      connected: true, freshness: 'unavailable', reading: null } }, relationships: [],
+    appStore.liveUsage = { nodes: {
+      master: { node_id: 'master', host: 'example', role: 'master',
+        connected: true, freshness: 'unavailable', reading: null },
+      gone: { node_id: 'gone', host: 'departed-host', role: 'worker',
+        connected: false, freshness: 'stale', reading: null },
+    }, relationships: [{ from_node_id: 'master', to_node_id: 'gone', kind: 'master-worker' }],
       recording: { recording: 'failed', last_successful_save: null } };
     appStore.selectedNodeId = 'master';
     const live = render(Home).body;
@@ -37,6 +41,7 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
     assert.match(live, /recording.*failed/is);
     assert.match(live, /unavailable/);
     assert.match(live, /example.*master/s);
+    assert.doesNotMatch(live, /departed-host/);
     assert.match(live, /No known assignment/);
     assert.doesNotMatch(live, /Row \(legacy\)|Tensor \(experimental\)/);
     // No permanent inspector and no eager history content.
@@ -47,8 +52,9 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
     appStore.connected = true;
     appStore.status = { role: 'idle', node_id: 'master', members: {} };
     const stopped = render(Home).body;
-    assert.match(stopped, /No members.*Start as master.*Retained history/is);
-    assert.match(stopped, /example.*disconnected/is);
+    assert.match(stopped, /No members — Start as master or Join a cluster\./);
+    assert.doesNotMatch(stopped, /example/);
+    assert.doesNotMatch(stopped, /departed-host/);
   } finally {
     try { await server?.watcher?.close(); } catch { /* no watcher */ }
     await server?.close();

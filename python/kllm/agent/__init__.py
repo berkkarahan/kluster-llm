@@ -3184,6 +3184,18 @@ def run(body: RunBody) -> dict[str, Any]:
     return out
 
 
+@app.post("/v1/inference/stop")
+def stop_inference() -> dict[str, Any]:
+    """Stop llama-server and drop the loaded model. The cluster stays up."""
+    if STATE.role != "master":
+        raise HTTPException(400, "stop inference requires master role")
+    membership_mod._stop_inference(STATE)
+    STATE.model_name = None
+    STATE.inference_activity = inference_activity.idle()
+    STATE.save()
+    return {"ok": True, "role": STATE.role, "model_name": None}
+
+
 def _mount_dashboard() -> None:
     dash = _dashboard_dir()
     if not dash:

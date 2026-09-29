@@ -37,6 +37,7 @@ CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import platform
@@ -52,6 +53,13 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import install_http
+import install_llama_release
+import install_llama_source
 
 ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = ROOT / ".venv"
@@ -198,98 +206,39 @@ def _warn(msg: str) -> None:
 
 
 def _ssl_contexts() -> list[ssl.SSLContext]:
-    ctxs = [ssl.create_default_context()]
-    try:
-        import certifi
-
-        ctxs.append(ssl.create_default_context(cafile=certifi.where()))
-    except Exception:
-        pass
-    return ctxs
+    return install_http.ssl_contexts()
 
 
 def _curl_bytes(url: str) -> bytes:
-    curl = _which("curl")
-    if not curl:
-        raise RuntimeError("curl not found")
-    result = subprocess.run(
-        [
-            curl,
-            "-fsSL",
-            "-A",
-            GITHUB_HEADERS["User-Agent"],
-            "-H",
-            f"Accept: {GITHUB_HEADERS['Accept']}",
-            url,
-        ],
-        check=True,
-        capture_output=True,
+    return install_http.curl_bytes(
+        url,
+        which=_which,
+        user_agent=GITHUB_HEADERS["User-Agent"],
+        accept=GITHUB_HEADERS["Accept"],
     )
-    return result.stdout
 
 
 def _curl_download(url: str, dest: Path) -> None:
-    curl = _which("curl")
-    if not curl:
-        raise RuntimeError("curl not found")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            curl,
-            "-fsSL",
-            "-A",
-            DOWNLOAD_HEADERS["User-Agent"],
-            "-H",
-            f"Accept: {DOWNLOAD_HEADERS['Accept']}",
-            "-o",
-            str(dest),
-            url,
-        ],
-        check=True,
+    install_http.curl_download(
+        url,
+        dest,
+        which=_which,
+        user_agent=DOWNLOAD_HEADERS["User-Agent"],
+        accept=DOWNLOAD_HEADERS["Accept"],
     )
 
 
 def _http_json(url: str) -> Any:
-    req = urllib.request.Request(url, headers=GITHUB_HEADERS)
-    errors: list[BaseException] = []
-    for ctx in _ssl_contexts():
-        try:
-            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            errors.append(exc)
-    try:
-        return json.loads(_curl_bytes(url).decode("utf-8"))
-    except Exception as exc:
-        errors.append(exc)
-    raise errors[-1]
+    return install_http.http_json(url, headers=GITHUB_HEADERS, contexts=_ssl_contexts, curl=_curl_bytes)
 
 
 def _sniff_archive_kind(path: Path) -> str | None:
     """Return 'zip', 'gzip', or 'tar' when magic bytes look like an archive."""
-    try:
-        with path.open("rb") as f:
-            head = f.read(512)
-    except OSError:
-        return None
-    if head.startswith(_ZIP_MAGIC):
-        return "zip"
-    if head.startswith(_GZIP_MAGIC):
-        return "gzip"
-    if len(head) > _TAR_MAGIC_OFFSET + 5 and head[_TAR_MAGIC_OFFSET : _TAR_MAGIC_OFFSET + 5] == _TAR_MAGIC:
-        return "tar"
-    return None
+    return install_http.sniff_archive_kind(path)
 
 
 def _expected_archive_kind(name: str) -> str | None:
-    lower = name.lower()
-    if lower.endswith(".zip"):
-        return "zip"
-    if lower.endswith(".tar.gz") or lower.endswith(".tgz"):
-        return "gzip"
-    if lower.endswith(".tar"):
-        return "tar"
-    return None
+    return install_http.expected_archive_kind(name)
 
 
 def _validate_downloaded_file(
@@ -299,28 +248,13 @@ def _validate_downloaded_file(
     expected_kind: str | None = None,
     content_length: int | None = None,
 ) -> None:
-    if not dest.is_file():
-        raise RuntimeError(f"download missing: {dest}")
-    size = dest.stat().st_size
-    if size <= 0:
-        raise RuntimeError(f"download empty: {dest}")
-    if content_length is not None and content_length > 0 and size != content_length:
-        raise RuntimeError(
-            f"download truncated: got {size} bytes, Content-Length was {content_length}"
-        )
-    if expected_size is not None and expected_size > 0 and size != expected_size:
-        raise RuntimeError(
-            f"download size mismatch: got {size} bytes, expected {expected_size}"
-        )
-    if expected_kind is None:
-        return
-    kind = _sniff_archive_kind(dest)
-    if kind != expected_kind:
-        preview = dest.read_bytes()[:120]
-        raise RuntimeError(
-            f"download is not a valid {expected_kind} archive "
-            f"(got {size} bytes, magic={preview!r})"
-        )
+    install_http.validate_downloaded_file(
+        dest,
+        expected_size=expected_size,
+        expected_kind=expected_kind,
+        content_length=content_length,
+        sniff=_sniff_archive_kind,
+    )
 
 
 def _download_once(
@@ -330,39 +264,16 @@ def _download_once(
     expected_size: int | None = None,
     expected_kind: str | None = None,
 ) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers=DOWNLOAD_HEADERS)
-    errors: list[BaseException] = []
-    for ctx in _ssl_contexts():
-        try:
-            with urllib.request.urlopen(req, context=ctx, timeout=600) as resp, dest.open("wb") as out:
-                cl_raw = resp.headers.get("Content-Length")
-                content_length = int(cl_raw) if cl_raw and cl_raw.isdigit() else None
-                shutil.copyfileobj(resp, out)
-            _validate_downloaded_file(
-                dest,
-                expected_size=expected_size,
-                expected_kind=expected_kind,
-                content_length=content_length,
-            )
-            return
-        except Exception as exc:
-            errors.append(exc)
-            if dest.exists():
-                dest.unlink()
-    try:
-        _curl_download(url, dest)
-        _validate_downloaded_file(
-            dest,
-            expected_size=expected_size,
-            expected_kind=expected_kind,
-        )
-        return
-    except Exception as exc:
-        errors.append(exc)
-        if dest.exists():
-            dest.unlink()
-    raise errors[-1]
+    install_http.download_once(
+        url,
+        dest,
+        headers=DOWNLOAD_HEADERS,
+        contexts=_ssl_contexts,
+        curl=_curl_download,
+        validate=_validate_downloaded_file,
+        expected_size=expected_size,
+        expected_kind=expected_kind,
+    )
 
 
 def _download(
@@ -372,26 +283,16 @@ def _download(
     expected_size: int | None = None,
     expected_kind: str | None = None,
 ) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  downloading {url}", flush=True)
-    kind = expected_kind or _expected_archive_kind(dest.name) or _expected_archive_kind(url)
-    errors: list[BaseException] = []
-    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
-        try:
-            _download_once(
-                url,
-                dest,
-                expected_size=expected_size,
-                expected_kind=kind,
-            )
-            return
-        except Exception as exc:
-            errors.append(exc)
-            if dest.exists():
-                dest.unlink()
-            if attempt < _DOWNLOAD_ATTEMPTS:
-                _warn(f"download attempt {attempt}/{_DOWNLOAD_ATTEMPTS} failed ({exc}); retrying")
-    raise errors[-1]
+    install_http.download_with_retries(
+        url,
+        dest,
+        attempts=_DOWNLOAD_ATTEMPTS,
+        once=_download_once,
+        warn=_warn,
+        kind_for=_expected_archive_kind,
+        expected_size=expected_size,
+        expected_kind=expected_kind,
+    )
 
 
 def normalize_llama_tag(raw: str) -> str:
@@ -1012,47 +913,7 @@ def detect_backend(preferred: str) -> str:
 
 
 def _cmake_backend_flags(backend: str) -> list[str]:
-    flags = [
-        "-DGGML_RPC=ON",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DGGML_CUDA=OFF",
-        "-DGGML_HIP=OFF",
-        "-DGGML_VULKAN=OFF",
-        "-DGGML_METAL=OFF",
-    ]
-    # llama.cpp v0.5.0's static backend registry on macOS registers Metal but
-    # not Vulkan. Build GPU backends as loadable modules so the same binary
-    # can discover both Metal and Vulkan/MoltenVK at runtime.
-    # CPU-only remains statically linked and needs no dynamic backend loader.
-    if _is_macos():
-        if backend == "cpu":
-            return flags
-        if backend in ("cuda", "rocm"):
-            raise SystemExit(f"error: {backend} is not supported on macOS")
-        return [
-            "-DGGML_RPC=ON",
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DGGML_CUDA=OFF",
-            "-DGGML_HIP=OFF",
-            "-DGGML_VULKAN=ON",
-            "-DGGML_METAL=ON",
-            "-DGGML_BACKEND_DL=ON",
-        ]
-    if backend == "metal":
-        flags.append("-DGGML_METAL=ON")
-    elif backend == "cuda":
-        flags.append("-DGGML_CUDA=ON")
-    elif backend == "rocm":
-        if not _is_linux():
-            raise SystemExit("ROCm installation is supported on Linux")
-        flags.extend(["-DGGML_HIP=ON", "-DCMAKE_C_COMPILER=hipcc", "-DCMAKE_CXX_COMPILER=hipcc"])
-    elif backend == "vulkan":
-        flags.append("-DGGML_VULKAN=ON")
-    elif backend == "cpu":
-        pass
-    else:
-        raise SystemExit(f"error: unknown backend {backend!r}")
-    return flags
+    return install_llama_source.cmake_backend_flags(backend, macos=_is_macos(), linux=_is_linux())
 
 
 def clone_or_update_llama(tag: str | None = None) -> None:
@@ -1100,94 +961,32 @@ def clone_or_update_llama(tag: str | None = None) -> None:
 
 
 def _read_cmake_cache(build_dir: Path) -> dict[str, str]:
-    cache = build_dir / "CMakeCache.txt"
-    if not cache.is_file():
-        return {}
-    try:
-        return dict(
-            line.split("=", 1)
-            for line in cache.read_text(encoding="utf-8", errors="replace").splitlines()
-            if "=" in line
-        )
-    except OSError:
-        return {}
+    return install_llama_source.read_cmake_cache(build_dir)
 
 
 def _build_signature(tag: str, flags: list[str], env: dict[str, str] | None) -> str:
     """Identity of a build dir: tag, backend flags and toolchain paths."""
-    parts = [f"tag={tag}"]
-    for flag in sorted(flags):
-        # The HTTPS ladder is a recovery path, not part of the requested flavor;
-        # keep it (and its cache-reset flags) out so trying it does not
-        # invalidate an otherwise good cache. Without this, a run that had to
-        # disable HTTPS would be treated as a different target and then keep
-        # re-disabling it instead of restoring it.
-        if flag.startswith("-DLLAMA_OPENSSL=") or flag.startswith("-U"):
-            continue
-        parts.append(flag)
-    for key in ("CMAKE_PREFIX_PATH", "VULKAN_SDK", "VK_ICD_FILENAMES"):
-        if env and env.get(key):
-            parts.append(f"{key}={env[key]}")
-    return "\n".join(parts)
+    return install_llama_source.build_signature(tag, flags, env)
 
 
 def _read_build_signature(build_dir: Path) -> str | None:
-    try:
-        return (build_dir / _BUILD_SIGNATURE_FILE).read_text(encoding="utf-8").strip() or None
-    except OSError:
-        return None
+    return install_llama_source.read_build_signature(build_dir)
 
 
 def _write_build_signature(build_dir: Path, signature: str) -> None:
-    try:
-        (build_dir / _BUILD_SIGNATURE_FILE).write_text(signature + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    install_llama_source.write_build_signature(build_dir, signature)
 
 
 def _dangling_cached_paths(
-    entries: dict[str, str], keys: tuple[str, ...] = _CACHE_PACKAGE_PATH_KEYS
+    entries: dict[str, str], keys: tuple[str, ...] = install_llama_source._CACHE_PACKAGE_PATH_KEYS
 ) -> list[str]:
-    """Absolute paths recorded in CMakeCache.txt that no longer exist.
-
-    A toolchain upgrade (``brew upgrade openssl@3``) deletes the directory a
-    previous configure pinned. Reusing that cache half-resolves the package:
-    ``find_package(OpenSSL)`` restores a cached ``check_c_source_compiles``
-    success while never defining ``OpenSSL::SSL``, so CMake generate fails.
-    """
-    dangling: list[str] = []
-    for key in keys:
-        raw = entries.get(key)
-        if not raw:
-            continue
-        for token in re.split(r"[\s;]+", raw.strip()):
-            if not token:
-                continue
-            is_linker_dir = token.startswith("-L")
-            candidate = token[2:] if is_linker_dir else token
-            if not candidate.startswith("/"):
-                continue
-            probe = Path(candidate)
-            exists = probe.is_dir() if is_linker_dir else probe.exists()
-            if not exists:
-                dangling.append(f"{key}={token}")
-    return dangling
+    """Absolute paths recorded in CMakeCache.txt that no longer exist."""
+    return install_llama_source.dangling_cached_paths(entries, keys)
 
 
 def _cache_reset_flags(entries: dict[str, str]) -> list[str]:
-    """``-U`` flags that clear a half-resolved OpenSSL cache.
-
-    ``OPENSSL_*`` entries are always cleared: their presence is what lets CMake
-    restore a cached package check while never defining ``OpenSSL::SSL``, which
-    is the failure being repaired. Linker flags are cleared only when they point
-    at a directory that no longer exists, so a legitimate custom flag survives.
-    """
-    flags = list(_OPENSSL_CACHE_RESET)
-    dangling = _dangling_cached_paths(entries, _CACHE_LINKER_KEYS)
-    for name in _CACHE_LINKER_FLAGS:
-        if any(entry.startswith(f"{name}:") for entry in dangling):
-            flags.append(f"-U{name}")
-    return flags
+    """``-U`` flags that clear a half-resolved OpenSSL cache."""
+    return install_llama_source.cache_reset_flags(entries)
 
 
 def _discard_stale_cmake_build(
@@ -1195,40 +994,8 @@ def _discard_stale_cmake_build(
     build_dir: Path,
     signature: str | None = None,
 ) -> None:
-    """Remove an installer-owned CMake build dir that would misconfigure.
-
-    CMake stores absolute source, build and toolchain paths. Reusing such a
-    cache after the checkout moved, after the backend flags changed, or after
-    the recorded paths were deleted makes configure or generate fail before it
-    can apply the new request. Only installer-owned build dirs are removed.
-    """
-    entries = _read_cmake_cache(build_dir)
-    if not entries:
-        return
-
-    reason = ""
-    expected = {
-        "CMAKE_HOME_DIRECTORY:INTERNAL": source_dir.resolve(),
-        "CMAKE_CACHEFILE_DIR:INTERNAL": build_dir.resolve(),
-    }
-    for key, current in expected.items():
-        cached = entries.get(key)
-        if cached and Path(cached).resolve() != current:
-            reason = "checkout relocation"
-            break
-    if not reason and signature is not None:
-        recorded = _read_build_signature(build_dir)
-        if recorded != signature:
-            reason = "backend flag or toolchain change"
-    if not reason:
-        dangling = _dangling_cached_paths(entries)
-        if dangling:
-            reason = "stale cached path(s): " + ", ".join(dangling[:3])
-    if not reason:
-        return
-
-    print(f"Discarding llama.cpp CMake build ({reason})")
-    shutil.rmtree(build_dir, ignore_errors=True)
+    """Remove an installer-owned CMake build dir that would misconfigure."""
+    install_llama_source.discard_stale_cmake_build(source_dir, build_dir, signature)
 
 
 def build_llama_from_source(backend: str, tag: str | None = None) -> tuple[bool, str]:
@@ -1255,85 +1022,25 @@ def build_llama_from_source(backend: str, tag: str | None = None) -> tuple[bool,
     signature = _build_signature(tag, flags, cmake_env)
     _discard_stale_cmake_build(VENDOR_LLAMA, build_dir, signature)
     reset_flags = _cache_reset_flags(_read_cmake_cache(build_dir))
-    https = "on"
-    try:
-        def configure(extra: list[str]) -> subprocess.CompletedProcess[str]:
-            return _run(
-                ["cmake", "-B", str(build_dir), *flags, *extra],
-                cwd=VENDOR_LLAMA,
-                env=cmake_env,
-                check=False,
-            )
-
-        # 1) Upstream defaults, HTTPS included.
-        result = configure([])
-        if result.returncode != 0:
-            # 2) The real fix: a cache left half-resolved by a toolchain upgrade
-            # restores a cached OpenSSL check without defining OpenSSL::SSL.
-            # Clear those entries and retry with HTTPS still enabled.
-            _warn(
-                "llama.cpp cmake configure failed; clearing cached OpenSSL/linker "
-                f"paths ({' '.join(reset_flags)}) and retrying with HTTPS still enabled"
-            )
-            result = configure(reset_flags)
-        if result.returncode != 0:
-            # 3) Last resort, so the mandatory Metal+Vulkan backend still ships.
-            # Kluster serves llama-server over plain HTTP on a LAN port, so the
-            # embedded HTTPS server is the expendable part.
-            _warn(
-                "llama.cpp cmake configure failed again; disabling llama-server's "
-                f"embedded HTTPS as a last resort ({_HTTPS_OFF_FLAG}); Kluster does not use it"
-            )
-            result = configure([*reset_flags, _HTTPS_OFF_FLAG])
-            https = "off"
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"llama.cpp cmake configure failed (exit {result.returncode}); "
-                "see the cmake output above"
-            )
-        _write_build_signature(build_dir, signature)
-        _remove_stale_build_binaries(build_dir)
-
-        jobs = str(os.cpu_count() or 4)
-        # llama-server + RPC worker (target name varies by upstream revision).
-        rpc_target_ok = False
-        for t in ["llama-server", *_RPC_UPSTREAM_NAMES]:
-            if t in _RPC_UPSTREAM_NAMES and rpc_target_ok:
-                continue
-            result = _run(
-                ["cmake", "--build", str(build_dir), "--config", "Release", "--target", t, "-j", jobs],
-                cwd=VENDOR_LLAMA,
-                check=False,
-                env=cmake_env,
-            )
-            if result.returncode == 0 and t in _RPC_UPSTREAM_NAMES:
-                rpc_target_ok = True
-            elif result.returncode != 0:
-                _warn(f"cmake target {t} failed (exit {result.returncode})")
-
-        # Only the build tree counts as this build's output; a prebuilt binary in
-        # vendor/bin must never make a failed compile look successful.
-        llama = _find_build_tree_binary("llama-server")
-        if llama is None:
-            _warn("llama-server was not produced by the source build")
-            return False, https
-        expected = stamp_backend_for_install(backend)
-        probed = _probe_llama_backends(llama)
-        if not backends_satisfied(expected, probed):
-            _warn(
-                f"source build reports backends {probed!r}, "
-                f"expected {parse_stamp_backends(expected)!r}"
-            )
-            return False, https
-        if https == "off":
-            _warn(
-                "build succeeded with llama-server's embedded HTTPS disabled; "
-                "re-run to restore it once the OpenSSL cache issue is resolved"
-            )
-        return True, https
-    except Exception as exc:
-        _warn(f"llama.cpp source build failed ({exc})")
-        return False, https
+    return install_llama_source.compile_configured_tree(
+        build_dir=build_dir,
+        vendor=VENDOR_LLAMA,
+        flags=flags,
+        cmake_env=cmake_env,
+        signature=signature,
+        reset_flags=reset_flags,
+        https_off_flag=_HTTPS_OFF_FLAG,
+        rpc_names=_RPC_UPSTREAM_NAMES,
+        run=_run,
+        warn=_warn,
+        write_signature=_write_build_signature,
+        remove_binaries=_remove_stale_build_binaries,
+        find_binary=_find_build_tree_binary,
+        probe_backends=_probe_llama_backends,
+        expected_stamp=stamp_backend_for_install(backend),
+        backends_ok=backends_satisfied,
+        parse_backends=parse_stamp_backends,
+    )
 
 
 def _remove_stale_build_binaries(build_dir: Path) -> None:
@@ -1401,76 +1108,14 @@ def _resolve_runtime_binary(name: str) -> Path | None:
 def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, Any] | None:
     """Pick the best llama.cpp release asset for this OS/arch/backend."""
     machine = platform.machine().lower()
-    arm = machine in ("arm64", "aarch64")
-    names = [a.get("name", "") for a in assets]
-
-    def score(name: str) -> int:
-        n = name.lower()
-        s = 0
-        if not (n.endswith(".zip") or n.endswith(".tar.gz")):
-            return -1
-        if "bin" not in n:
-            return -1
-        if _is_windows():
-            if "win" not in n:
-                return -1
-            if arm and "arm64" not in n:
-                return -1
-            if not arm and "x64" not in n and "amd64" not in n:
-                return -1
-        elif _is_macos():
-            if "macos" not in n:
-                return -1
-            if arm and "arm64" not in n:
-                return -1
-            if not arm and "x64" not in n and "x86_64" not in n:
-                return -1
-        elif _is_linux():
-            if "ubuntu" not in n and "linux" not in n:
-                return -1
-            if arm and "arm64" not in n:
-                return -1
-            if not arm and "x64" not in n and "amd64" not in n:
-                return -1
-        else:
-            return -1
-
-        # Backend preference
-        if backend == "cuda" and "cuda" in n:
-            s += 50
-        elif backend == "vulkan" and "vulkan" in n:
-            s += 50
-        elif backend == "rocm" and ("rocm" in n or "hip" in n):
-            s += 50
-        elif backend == "metal" and "macos" in n:
-            s += 50
-        elif backend == "cpu" and "cpu" in n:
-            s += 50
-        elif (
-            backend == "cpu"
-            and not _is_macos()
-            and ("cuda" not in n and "vulkan" not in n and "rocm" not in n)
-        ):
-            # Non-macOS: unnamed packs without a GPU tag may be CPU. macOS
-            # ``bin-macos-*`` packs are Metal — never treat them as CPU.
-            s += 40
-        else:
-            return -1
-
-        # Prefer smaller / more common packs slightly when tied
-        if "cudart" in n:
-            return -1
-        return s
-
-    ranked = sorted(
-        ((score(a.get("name", "")), a) for a in assets),
-        key=lambda t: t[0],
-        reverse=True,
+    return install_llama_release.pick_best_asset(
+        assets,
+        backend=backend,
+        windows=_is_windows(),
+        macos=_is_macos(),
+        linux=_is_linux(),
+        arm=machine in ("arm64", "aarch64"),
     )
-    for sc, asset in ranked:
-        if sc > 0:
-            return asset
-    return None
 
 
 def _asset_looks_like_bin_pack(name: str) -> bool:
@@ -2011,6 +1656,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _prefer_llama_prebuilt(args: argparse.Namespace, resolved_backend: str) -> bool:
+    """Whether this install should download a GitHub pack instead of compiling."""
+    macos_gpu = _is_macos() and resolved_backend != "cpu"
+    if macos_gpu and args.prefer_prebuilt:
+        raise SystemExit(
+            "error: --prefer-prebuilt is not available on macOS: GitHub macOS packs "
+            "are Metal-only and macOS installs must provide Metal+Vulkan. Drop "
+            "--prefer-prebuilt, or use --backend cpu for a CPU-only install."
+        )
+    if args.from_source:
+        return False
+    if args.prefer_prebuilt:
+        return True
+    if macos_gpu:
+        return False
+    return True
+
+
+def _run_stages(stages: list[tuple[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=len(stages) or 1) as pool:
+        futures = {pool.submit(stage): name for name, stage in stages}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except (Exception, SystemExit) as exc:
+                detail = str(exc) or type(exc).__name__
+                errors.append(f"{name}: {detail}")
+                _warn(f"{name} failed ({detail})")
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     tag = read_pinned_release(args.tag)
@@ -2031,18 +1709,30 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_toolchains:
         ensure_git()
 
+    python: Path | None = None
     if not args.skip_rust:
         python = ensure_venv()
         if not args.skip_toolchains:
             ensure_rust()
-        print("\n=== kllm (Rust + Python) ===")
-        build_rust(python, release=args.release)
 
     if not args.skip_ui:
-        print("\n=== Dashboard (Svelte) ===")
         if not args.skip_toolchains:
             ensure_node()
-        build_ui(skip_install=args.skip_npm_install)
+
+    # Keep system package installs out of worker threads so package managers
+    # (brew/apt/winget) cannot contend with each other.
+    if not args.skip_wireguard:
+        print("\n=== WireGuard ===")
+        install_wireguard()
+
+    stages: list[tuple[str, Any]] = []
+    if not args.skip_rust:
+        assert python is not None
+        print("\n=== kllm (Rust + Python) ===")
+        stages.append(("kllm (Rust + Python)", lambda: build_rust(python, release=args.release)))
+    if not args.skip_ui:
+        print("\n=== Dashboard (Svelte) ===")
+        stages.append(("Dashboard (Svelte)", lambda: build_ui(skip_install=args.skip_npm_install)))
 
     if not args.skip_llama:
         print("\n=== llama.cpp (llama-server + rpc-server) ===")
@@ -2053,38 +1743,32 @@ def main(argv: list[str] | None = None) -> int:
         # unless --from-source was asked for.
         # (--prefer-prebuilt still applies to `--backend cpu` on macOS.)
         resolved_backend = detect_backend(args.backend)
-        macos_gpu = _is_macos() and resolved_backend != "cpu"
-        if macos_gpu and args.prefer_prebuilt:
-            # GitHub macOS packs are Metal-only, and macOS installs must provide
-            # Metal + Vulkan in one binary, so there is nothing to prefer.
-            raise SystemExit(
-                "error: --prefer-prebuilt is not available on macOS: GitHub macOS packs "
-                "are Metal-only and macOS installs must provide Metal+Vulkan. Drop "
-                "--prefer-prebuilt, or use --backend cpu for a CPU-only install."
-            )
-        if args.from_source:
-            prefer_prebuilt = False
-        elif args.prefer_prebuilt:
-            prefer_prebuilt = True
-        elif macos_gpu:
-            prefer_prebuilt = False
-        else:
-            prefer_prebuilt = True
+        prefer_prebuilt = _prefer_llama_prebuilt(args, resolved_backend)
         expected_stamp = stamp_backend_for_install(resolved_backend)
-        install_llama(
-            args.backend,
-            prefer_prebuilt=prefer_prebuilt,
-            force=args.force,
-            tag=tag,
-            expected=expected_stamp,
-        )
+
+        def install_llama_stage() -> None:
+            install_llama(
+                args.backend,
+                prefer_prebuilt=prefer_prebuilt,
+                force=args.force,
+                tag=tag,
+                expected=expected_stamp,
+            )
+
+        stages.append(("llama.cpp (llama-server + rpc-server)", install_llama_stage))
+
+    errors = _run_stages(stages)
+
+    if errors:
+        print("\nInstall failed:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 1
+
+    if not args.skip_llama:
         verify_llama_installed(tag, expected=expected_stamp)
         if args.llama_only:
             print(f"llama.cpp {tag} ready.")
-
-    if not args.skip_wireguard:
-        print("\n=== WireGuard ===")
-        install_wireguard()
 
     print("\nInstall complete.")
     if not args.skip_rust:

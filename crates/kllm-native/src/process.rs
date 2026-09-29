@@ -156,6 +156,88 @@ fn push_auto_i32(argv: &mut Vec<String>, flag: &str, value: Option<String>, fall
     argv.push(n.to_string());
 }
 
+fn push_load_and_template(
+    argv: &mut Vec<String>,
+    load_mode: Option<String>,
+    ctx_checkpoints: Option<String>,
+    cache_ram: Option<String>,
+    chat_template_file: Option<String>,
+    chat_template: Option<String>,
+    mmproj_auto: bool,
+    mmproj: Option<String>,
+    draft_model: Option<String>,
+) {
+    if let Some(mode) = load_mode {
+        if mode != "auto" {
+            argv.push("--load-mode".into());
+            argv.push(mode);
+        }
+    }
+    push_auto_i32(argv, "--ctx-checkpoints", ctx_checkpoints, -1);
+    push_auto_i32(argv, "--cache-ram", cache_ram, -1);
+    if let Some(path) = chat_template_file {
+        argv.push("--chat-template-file".into());
+        argv.push(path);
+    } else if let Some(tmpl) = chat_template {
+        if tmpl != "default" && !tmpl.is_empty() {
+            argv.push("--chat-template".into());
+            argv.push(tmpl);
+        }
+    }
+    if mmproj_auto {
+        argv.push("--mmproj-auto".into());
+    } else if let Some(path) = mmproj {
+        argv.push("--mmproj".into());
+        argv.push(path);
+    }
+    if let Some(draft) = draft_model {
+        argv.push("--model-draft".into());
+        argv.push(draft);
+    }
+}
+
+fn push_sampling_flags(
+    argv: &mut Vec<String>,
+    extra: &[String],
+    temperature: Option<String>,
+    top_k: Option<String>,
+    top_p: Option<String>,
+    min_p: Option<String>,
+    presence_penalty: Option<String>,
+    repeat_penalty: Option<String>,
+    jinja: bool,
+    chat_template_kwargs: Option<String>,
+    reasoning_format: Option<String>,
+) {
+    if let Some(v) = temperature {
+        push_flag_value(argv, extra, "--temp", v);
+    }
+    if let Some(v) = top_k {
+        push_flag_value(argv, extra, "--top-k", v);
+    }
+    if let Some(v) = top_p {
+        push_flag_value(argv, extra, "--top-p", v);
+    }
+    if let Some(v) = min_p {
+        push_flag_value(argv, extra, "--min-p", v);
+    }
+    if let Some(v) = presence_penalty {
+        push_flag_value(argv, extra, "--presence-penalty", v);
+    }
+    if let Some(v) = repeat_penalty {
+        push_flag_value(argv, extra, "--repeat-penalty", v);
+    }
+    if jinja {
+        push_flag_only(argv, extra, "--jinja");
+    }
+    if let Some(v) = chat_template_kwargs {
+        push_flag_value(argv, extra, "--chat-template-kwargs", v);
+    }
+    if let Some(v) = reasoning_format {
+        push_flag_value(argv, extra, "--reasoning-format", v);
+    }
+}
+
 impl LaunchConfig {
     pub fn master_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         let model: String = dict
@@ -268,61 +350,30 @@ impl LaunchConfig {
         push_auto_i32(&mut argv, "--ubatch-size", micro_batch, 128);
         push_auto_i32(&mut argv, "--parallel", parallel, 1);
         push_auto_i32(&mut argv, "--batch-size", batch_size, 512);
-        if let Some(mode) = load_mode {
-            if mode != "auto" {
-                argv.push("--load-mode".into());
-                argv.push(mode);
-            }
-        }
-        push_auto_i32(&mut argv, "--ctx-checkpoints", ctx_checkpoints, -1);
-        push_auto_i32(&mut argv, "--cache-ram", cache_ram, -1);
-        if let Some(path) = chat_template_file {
-            argv.push("--chat-template-file".into());
-            argv.push(path);
-        } else if let Some(tmpl) = chat_template {
-            if tmpl != "default" && !tmpl.is_empty() {
-                argv.push("--chat-template".into());
-                argv.push(tmpl);
-            }
-        }
-        if mmproj_auto {
-            argv.push("--mmproj-auto".into());
-        } else if let Some(path) = mmproj {
-            argv.push("--mmproj".into());
-            argv.push(path);
-        }
-        if let Some(draft) = draft_model {
-            argv.push("--model-draft".into());
-            argv.push(draft);
-        }
-
-        if let Some(v) = temperature {
-            push_flag_value(&mut argv, &extra_args, "--temp", v);
-        }
-        if let Some(v) = top_k {
-            push_flag_value(&mut argv, &extra_args, "--top-k", v);
-        }
-        if let Some(v) = top_p {
-            push_flag_value(&mut argv, &extra_args, "--top-p", v);
-        }
-        if let Some(v) = min_p {
-            push_flag_value(&mut argv, &extra_args, "--min-p", v);
-        }
-        if let Some(v) = presence_penalty {
-            push_flag_value(&mut argv, &extra_args, "--presence-penalty", v);
-        }
-        if let Some(v) = repeat_penalty {
-            push_flag_value(&mut argv, &extra_args, "--repeat-penalty", v);
-        }
-        if jinja {
-            push_flag_only(&mut argv, &extra_args, "--jinja");
-        }
-        if let Some(v) = chat_template_kwargs {
-            push_flag_value(&mut argv, &extra_args, "--chat-template-kwargs", v);
-        }
-        if let Some(v) = reasoning_format {
-            push_flag_value(&mut argv, &extra_args, "--reasoning-format", v);
-        }
+        push_load_and_template(
+            &mut argv,
+            load_mode,
+            ctx_checkpoints,
+            cache_ram,
+            chat_template_file,
+            chat_template,
+            mmproj_auto,
+            mmproj,
+            draft_model,
+        );
+        push_sampling_flags(
+            &mut argv,
+            &extra_args,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            presence_penalty,
+            repeat_penalty,
+            jinja,
+            chat_template_kwargs,
+            reasoning_format,
+        );
 
         if !rpc_servers.is_empty() {
             argv.push("--rpc".into());

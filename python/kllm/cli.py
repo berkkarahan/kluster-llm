@@ -630,6 +630,37 @@ def config_cmd(
         raise typer.BadParameter(str(exc), param_hint="--split-mode") from exc
 
 
+def _print_plan_result(data: dict) -> None:
+    """Print a dry-run plan the way ``kllm plan`` always has."""
+    console.print(
+        f"[bold]fit[/bold]={data.get('fit_status')} "
+        f"estimated={data.get('estimated_bytes')} budget={data.get('budget_bytes')}"
+    )
+    console.print(
+        f"[bold]placement[/bold] device {data.get('device_requested')}→{data.get('device_effective')} "
+        f"split={data.get('tensor_split')}"
+    )
+    node_ids = data.get("node_ids") or []
+    for i, nid in enumerate(node_ids):
+        console.print(
+            f"  {nid}: alloc={data.get('node_alloc_bytes', [None] * len(node_ids))[i]} "
+            f"score={data.get('node_scores', [None] * len(node_ids))[i]} "
+            f"latency_ms={data.get('node_latency_ms', [None] * len(node_ids))[i]}"
+        )
+    if data.get("warning"):
+        console.print(f"[yellow]{data['warning']}[/yellow]")
+    console.print(data)
+
+
+def _print_run_result(data: dict) -> None:
+    """Print a successful ``kllm run`` response."""
+    plan = data.get("plan") or {}
+    if plan.get("fit_status") == "tight" or data.get("warning"):
+        console.print(f"[yellow]warning:[/yellow] {data.get('warning') or plan.get('hint')}")
+    console.print("[green]Inference started[/green]")
+    console.print(data)
+
+
 @app.command("plan")
 def plan_cmd(
     model: str = typer.Option(..., "--model"),
@@ -741,24 +772,7 @@ def plan_cmd(
             console.print(f"[red]{r.text}[/red]")
             raise typer.Exit(1)
         data = r.json()
-    console.print(
-        f"[bold]fit[/bold]={data.get('fit_status')} "
-        f"estimated={data.get('estimated_bytes')} budget={data.get('budget_bytes')}"
-    )
-    console.print(
-        f"[bold]placement[/bold] device {data.get('device_requested')}→{data.get('device_effective')} "
-        f"split={data.get('tensor_split')}"
-    )
-    node_ids = data.get("node_ids") or []
-    for i, nid in enumerate(node_ids):
-        console.print(
-            f"  {nid}: alloc={data.get('node_alloc_bytes', [None] * len(node_ids))[i]} "
-            f"score={data.get('node_scores', [None] * len(node_ids))[i]} "
-            f"latency_ms={data.get('node_latency_ms', [None] * len(node_ids))[i]}"
-        )
-    if data.get("warning"):
-        console.print(f"[yellow]{data['warning']}[/yellow]")
-    console.print(data)
+    _print_plan_result(data)
 
 
 @app.command()
@@ -874,11 +888,7 @@ def run(
                 raise typer.Exit(1)
             raise typer.Exit(1)
         data = r.json()
-    plan = data.get("plan") or {}
-    if plan.get("fit_status") == "tight" or data.get("warning"):
-        console.print(f"[yellow]warning:[/yellow] {data.get('warning') or plan.get('hint')}")
-    console.print("[green]Inference started[/green]")
-    console.print(data)
+    _print_run_result(data)
 
 
 @app.command("ui")

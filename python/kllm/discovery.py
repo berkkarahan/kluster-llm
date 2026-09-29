@@ -99,6 +99,7 @@ def _package_import_paths() -> list[str]:
 
 def _mdns_helper_candidates() -> list[str]:
     """Prefer Homebrew / newer Pythons; Apple ``/usr/bin/python3`` is often 3.9."""
+    # Deferred import: cp_proxy is optional helper tooling, not needed to import discovery.
     from kllm import cp_proxy
 
     me = Path(sys.executable).resolve()
@@ -197,6 +198,7 @@ MAX_PROBE_HOSTS = 4096
 
 def _fallback_http_probe_hosts() -> list[str]:
     """Private /24 peers derived from raw interface IPs (no netmask available)."""
+    # Deferred import: netsec imports discovery (cycle).
     from kllm import netsec
 
     hosts: list[str] = []
@@ -228,6 +230,7 @@ def _http_probe_hosts(port: int = DEFAULT_CONTROL_PORT) -> list[str]:
     this when mDNS is silent and the master sits in a neighbouring third octet.
     Host count is capped at :data:`MAX_PROBE_HOSTS` to bound scan time.
     """
+    # Deferred import: netsec imports discovery (cycle).
     from kllm import netsec
 
     hosts: list[str] = ["127.0.0.1"]

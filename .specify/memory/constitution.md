@@ -85,6 +85,10 @@ maintainer reproduce both expected behavior and failures.
   verification via `python scripts/install.py --check`.
 - Upstream RPC is unauthenticated. Port **50052** MUST remain on a private LAN or WireGuard overlay
   and MUST NOT be exposed publicly.
+- Specifications, plans, tasks, and reviews MUST comply with
+  `.specify/memory/architecture_constitution.md`. That file is the structural coding
+  standard: how modules, imports, and test patch surfaces are shaped. It does not add
+  product behavior.
 
 ## Development Workflow and Quality Gates
 
@@ -128,4 +132,4 @@ Any temporary exception MUST record its rationale, bounded scope, maintainer app
 follow-up action with a review date in the change record. Exceptions MUST NOT permit public RPC
 exposure, secret disclosure, or removal of safeguards against data loss.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-28 | **Last Amended**: 2026-09-28
+**Version**: 1.1.0 | **Ratified**: 2026-09-28 | **Last Amended**: 2026-09-29

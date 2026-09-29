@@ -236,6 +236,18 @@ uv run kllm logs
 uv run kllm status
 ```
 
+The dashboard **Logs** page (`/logs`) reads the same stream for master and workers. Interpret its status text before assuming a problem:
+
+- **Connected — no log entries** is a healthy empty poll, not an outage.
+- **Local only — master unreachable** means the page is showing only the serving worker's buffered records; the journal on the master is not being read. Confirm the control connection on port 18765.
+- **Disconnected / cached rows** keeps the last received rows readable after a failure; they are not fresh.
+- **Read error / timed out** keeps prior rows visible and reports the last successful read; a timed-out snapshot retries at the next selected interval. A stale warning clears when a later snapshot confirms recovery.
+- **Master log request returned HTTP …** means the master responded but rejected or failed the request; this is not treated as network unreachability. Check the master version, authorization, and control service before relying on local-only fallback.
+- **Cluster log journal is temporarily unavailable** means retained history could not be read. The master retries initialization; the logs endpoint reports 503 until the saved journal is readable. Check filesystem access and free disk space, then retry.
+- **history gap — older entries omitted** or **trimmed N** means bounded retention or the 2,000-row display cap dropped older rows. Nothing was deleted from `~/.kllm/logs/cluster.jsonl`.
+- **Log read timed out; retrying** means one snapshot read exceeded its five-second deadline; the page retries on the next selected interval. Repeated timeouts point at the control plane or an overloaded node.
+- Clearing the display ("Display cleared — waiting for a new entry") is display-only. Stored logs and other dashboards are unaffected. After a service restart or a switch between cluster and local-only coverage, the page reports the recovery window it cannot backfill; entries generated during that window may not appear.
+
 Runtime logs live under `~/.kllm/logs`. When reporting a problem, include:
 
 - Operating system, CPU, GPU, RAM, and VRAM for each node

@@ -170,13 +170,15 @@ def plan_split(
     vision: bool = False,
     model_layout: dict | None = None,
     launch_settings: dict | None = None,
+    node_shares: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     if launch_settings is not None:
         from kllm.placement import plan_devices
         settings = dict(launch_settings, auxiliary_bytes=int(mmproj_size_bytes) + int(draft_model_size_bytes) + (512 * 1024**2 if vision and not mmproj_size_bytes else 0))
         def compute(ctx):
             return plan_devices(nodes, model_size_bytes, model_layout, settings, context=ctx,
-                                headroom=headroom, device=device, vram_weight=vram_weight, latency_weight=latency_weight)
+                                headroom=headroom, device=device, vram_weight=vram_weight, latency_weight=latency_weight,
+                                node_shares=node_shares)
         if context_auto:
             maximum = min(131072, int((model_layout or {}).get("metadata", {}).get(f"{(model_layout or {}).get('architecture')}.context_length", 131072)))
             low, high = 1, maximum // 512

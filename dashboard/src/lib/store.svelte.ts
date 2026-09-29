@@ -11,7 +11,12 @@ import type {
     ModelInfo,
     ModelSearchHit,
     ModelSearchResponse,
-    Status
+    Status,
+    Member,
+    UsageLive,
+    UsageLifetimes,
+    UsageSeries,
+    UsagePage
   } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { pushToast } from './toast';
@@ -38,11 +43,41 @@ function apiErrorMessage(data: unknown, text: string, status: number, fallback: 
   return text || `${fallback} ${status}`;
 }
 
+/**
+ * Plan-relevant projection of a member. Deliberately excludes liveness/telemetry
+ * (`last_seen`, `latency_ms`, `available_ram_bytes`) that changes on every 1–2 s
+ * heartbeat; including it made status polling re-plan and blank the Plan & Run
+ * panel once per poll. Identity/capacity/backend changes still trip it.
+ */
+function memberFingerprint(m: Member): unknown {
+  return {
+    role: m.role,
+    backend: m.backend,
+    actual_backend: m.actual_backend,
+    requested_backend: m.requested_backend,
+    unified_memory: m.unified_memory,
+    total_ram_bytes: m.total_ram_bytes,
+    vram_bytes: m.vram_bytes,
+    gpu_ids: m.gpu_ids,
+    host: m.host,
+    rpc_port: m.rpc_port,
+    devices: (m.devices ?? []).map((d) => ({
+      index: d.index,
+      name: d.name,
+      device: d.device,
+      backend: d.backend,
+      vram_bytes: d.vram_bytes
+    }))
+  };
+}
+
 function fp(s: Status | null): string {
   if (!s) return '';
   return JSON.stringify({
     role: s.role,
-    members: s.members,
+    members: Object.fromEntries(
+      Object.entries(s.members ?? {}).map(([id, m]) => [id, memberFingerprint(m)])
+    ),
     model_name: s.model_name,
     inference_up: s.inference_up,
     last_plan: s.last_plan,
@@ -60,6 +95,16 @@ function fp(s: Status | null): string {
 
 class AppStore {
   status = $state<Status | null>(null);
+  liveUsage = $state<UsageLive | null>(null);
+  usageError = $state('');
+  selectedNodeId = $state('');
+  selectedLifetimeId = $state('');
+  usageWindow = $state<'15m' | '1h' | '24h'>('15m');
+  usageLifetimes = $state<UsageLifetimes | null>(null);
+  usageSeries = $state<UsageSeries | null>(null);
+  usagePage = $state<UsagePage | null>(null);
+  historyError = $state('');
+  private historySeq = 0;
   connected = $state(false);
   statusSeen = $state(false);
   models = $state<ModelInfo[]>([]);
@@ -96,6 +141,14 @@ class AppStore {
   parallelSlots = $state<number | 'auto'>('auto');
   batchSize = $state<number | 'auto'>('auto');
   microBatch = $state<number | 'auto'>('auto');
+  flashAttention = $state<'auto' | 'on' | 'off'>('auto');
+  nodeShares = $state<Record<string, number> | null>(null);
+  threadsMax = $state(8);
+  templateEmbedded = $state(false);
+  modelTemplateText = $state<string | null>(null);
+  templatePresets = $state<{ id: string; label: string }[]>([]);
+  estimateError = $state('');
+  distributableBytes = $state(0);
   speculative = $state('auto');
   draftModel = $state('');
   vision = $state(false);
@@ -180,6 +233,7 @@ class AppStore {
   chatInput = $state('');
   chatStreaming = $state(false);
   private timer: ReturnType<typeof setInterval> | null = null;
+  private usageTimer: ReturnType<typeof setInterval> | null = null;
   private abort: AbortController | null = null;
   private gpusLoaded = false;
   private configGpuIds: number[] | null = null;
@@ -197,12 +251,14 @@ class AppStore {
 
   start() {
     void this.refresh();
+    void this.refreshUsage();
     void this.loadToken();
     void this.loadHfToken();
     void this.loadModels();
     void this.loadConfig();
     void this.loadGpus();
     this.timer = setInterval(() => void this.refresh(), 1000);
+    this.usageTimer = setInterval(() => void this.refreshUsage(), 2000);
     this.loadLoop.start();
     this.downloadLoop.start();
   }
@@ -210,6 +266,8 @@ class AppStore {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.usageTimer) clearInterval(this.usageTimer);
+    this.usageTimer = null;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     this.loadLoop.stop();
@@ -237,11 +295,10 @@ class AppStore {
       if (next !== fingerprint) {
         fingerprint = next;
         if (data.model_name && !this.selectedModel) this.selectedModel = data.model_name;
-        if (data.role === 'master' && data.last_plan) {
+        if (!this.selectedModel && data.role === 'master' && data.last_plan) {
           this.planResult = data.last_plan as Record<string, unknown>;
-        } else {
-          this.planResult = null;
         }
+        if (this.selectedModel && data.role === 'master') this.scheduleEstimate();
         const err = data.apply_error ?? null;
         const warn = data.apply_warning ?? null;
         if (err && err !== this.lastApplyError) pushToast('danger', err);
@@ -251,7 +308,103 @@ class AppStore {
         if (!this.selectionHydrated) this.hydrateGpuSelection();
       }
     } catch {
+      this.statusSeen = true;
       this.connected = false;
+    }
+  }
+
+  async refreshUsage() {
+    try {
+      const r = await fetch('/v1/usage/live');
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => null))?.detail;
+        const message = detail && typeof detail === 'object'
+          ? `${detail.message ?? `usage ${r.status}`} · last saved ${detail.last_successful_save ?? 'never'}`
+          : typeof detail === 'string' ? detail : `usage ${r.status}`;
+        throw new Error(message);
+      }
+      this.liveUsage = (await r.json()) as UsageLive;
+      this.usageError = '';
+      if (!this.selectedNodeId || !this.liveUsage.nodes[this.selectedNodeId]) {
+        this.selectedNodeId = Object.keys(this.liveUsage.nodes)[0] ?? '';
+      }
+    } catch (error) {
+      this.usageError = String(error);
+      if (this.liveUsage) this.liveUsage = { ...this.liveUsage, nodes: Object.fromEntries(
+        Object.entries(this.liveUsage.nodes).map(([id, node]) => [id, {
+          ...node, freshness: node.reading ? 'stale' as const : 'unavailable' as const
+        }])
+      ) };
+    }
+  }
+
+  async selectUsageNode(nodeId: string) {
+    this.selectedNodeId = nodeId;
+    this.selectedLifetimeId = '';
+    this.usageLifetimes = null;
+    this.usageSeries = null;
+    this.usagePage = null;
+    const seq = ++this.historySeq;
+    if (!nodeId) return;
+    try {
+      const r = await fetch(`/v1/usage/lifetimes?node_id=${encodeURIComponent(nodeId)}`);
+      if (!r.ok) throw new Error(`history ${r.status}`);
+      if (seq !== this.historySeq) return;
+      this.usageLifetimes = (await r.json()) as UsageLifetimes;
+      this.selectedLifetimeId = this.usageLifetimes.lifetimes[0]?.lifetime_id ?? '';
+      this.historyError = '';
+      if (this.selectedLifetimeId) await this.loadUsageHistory();
+    } catch (error) {
+      if (seq === this.historySeq) this.historyError = String(error);
+    }
+  }
+
+  async selectUsageLifetime(id: string) {
+    this.selectedLifetimeId = id;
+    await this.loadUsageHistory();
+  }
+
+  async selectUsageWindow(window: '15m' | '1h' | '24h') {
+    this.usageWindow = window;
+    await this.loadUsageHistory();
+  }
+
+  async loadUsageHistory() {
+    const nodeId = this.selectedNodeId;
+    const lifeId = this.selectedLifetimeId;
+    const seq = ++this.historySeq;
+    this.usageSeries = null;
+    this.usagePage = null;
+    if (!nodeId || !lifeId) return;
+    const params = new URLSearchParams({ node_id: nodeId, lifetime_id: lifeId, window: this.usageWindow });
+    try {
+      const [series, page] = await Promise.all([
+        fetch(`/v1/usage/series?${params}`), fetch(`/v1/usage/readings?${params}`)
+      ]);
+      if (!series.ok || !page.ok) throw new Error(`history ${series.status}/${page.status}`);
+      if (seq !== this.historySeq) return;
+      this.usageSeries = (await series.json()) as UsageSeries;
+      this.usagePage = (await page.json()) as UsagePage;
+      this.historyError = '';
+    } catch (error) {
+      if (seq === this.historySeq) this.historyError = String(error);
+    }
+  }
+
+  async nextUsagePage() {
+    const cursor = this.usagePage?.next_cursor;
+    if (!cursor) return;
+    const seq = this.historySeq;
+    const params = new URLSearchParams({ node_id: this.selectedNodeId, lifetime_id: this.selectedLifetimeId,
+      window: this.usageWindow, cursor });
+    try {
+      const r = await fetch(`/v1/usage/readings?${params}`);
+      if (!r.ok) throw new Error(`history ${r.status}`);
+      const page = (await r.json()) as UsagePage;
+      if (seq !== this.historySeq || this.usagePage?.next_cursor !== cursor) return;
+      this.usagePage = { ...page, readings: [...(this.usagePage?.readings ?? []), ...page.readings] };
+    } catch (error) {
+      if (seq === this.historySeq) this.historyError = String(error);
     }
   }
 
@@ -399,6 +552,11 @@ class AppStore {
       this.batchSize = ps.batch_size as number | 'auto';
     if (ps.micro_batch === 'auto' || typeof ps.micro_batch === 'number')
       this.microBatch = ps.micro_batch as number | 'auto';
+    if (ps.flash_attention === 'auto' || ps.flash_attention === 'on' || ps.flash_attention === 'off')
+      this.flashAttention = ps.flash_attention;
+    if (ps.node_shares && typeof ps.node_shares === 'object' && !Array.isArray(ps.node_shares))
+      this.nodeShares = ps.node_shares as Record<string, number>;
+    else this.nodeShares = null;
     if (typeof ps.speculative === 'string') this.speculative = ps.speculative;
     if (typeof ps.draft_model === 'string') this.draftModel = ps.draft_model;
     if (typeof ps.vision === 'boolean') this.vision = ps.vision;
@@ -410,7 +568,7 @@ class AppStore {
       this.checkpoints = ps.checkpoints as number | 'auto';
     if (ps.cache_ram === 'auto' || typeof ps.cache_ram === 'number')
       this.cacheRam = ps.cache_ram as number | 'auto';
-    if (typeof ps.threads === 'number') this.threads = ps.threads;
+    if (typeof ps.threads === 'number') this.threads = Math.min(this.threadsMax, ps.threads);
     if (Array.isArray(ps.extra_args)) this.extraArgsText = (ps.extra_args as string[]).join(' ');
     if (typeof ps.remember === 'boolean') this.remember = ps.remember;
     if (typeof ps.advanced_open === 'boolean') this.advancedOpen = ps.advanced_open;
@@ -435,6 +593,8 @@ class AppStore {
 
   async selectModel(id: string) {
     this.selectedModel = id;
+    this.distributableBytes = 0;
+    await this.loadRunCapabilities();
     try {
       const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
       if (!r.ok) {
@@ -455,6 +615,36 @@ class AppStore {
       this.seedSamplingDefaults();
     }
     this.markSettingsClean();
+    this.scheduleEstimate();
+  }
+
+  async loadRunCapabilities() {
+    try {
+      const model = this.selectedModel;
+      const r = await fetch(`/v1/run-capabilities?model=${encodeURIComponent(model)}`);
+      if (!r.ok) return;
+      const info = await r.json();
+      if (model !== this.selectedModel) return;
+      if (typeof info.threads_max === 'number' && info.threads_max > 0) {
+        this.threadsMax = info.threads_max;
+        this.threads = Math.min(this.threads, this.threadsMax);
+      }
+      this.templateEmbedded = !!info.template_embedded;
+      this.modelTemplateText = typeof info.template_text === 'string' ? info.template_text : null;
+      this.templatePresets = Array.isArray(info.templates) ? info.templates : [];
+    } catch { /* keep last known capabilities */ }
+  }
+
+  setNodeShare(node: string, share: number) {
+    const ids = Object.keys(this.status?.members ?? {});
+    if (!ids.includes(node) || !ids.length) return;
+    const prev = this.nodeShares ?? Object.fromEntries(ids.map((id) => [id, 1 / ids.length]));
+    const others = ids.filter((id) => id !== node);
+    const value = others.length ? Math.max(0, Math.min(1, share)) : 1;
+    const total = others.reduce((n, id) => n + (prev[id] ?? 0), 0);
+    const next = Object.fromEntries(ids.map((id) => [id, id === node ? value :
+      (1 - value) * (total ? (prev[id] ?? 0) / total : 1 / others.length)]));
+    this.nodeShares = next;
     this.scheduleEstimate();
   }
 
@@ -513,6 +703,8 @@ class AppStore {
     this.parallelSlots = 'auto';
     this.batchSize = 'auto';
     this.microBatch = 'auto';
+    this.flashAttention = 'auto';
+    this.nodeShares = null;
     this.speculative = 'auto';
     this.draftModel = '';
     this.vision = false;
@@ -522,7 +714,7 @@ class AppStore {
     this.mmapMlock = 'auto';
     this.checkpoints = 'auto';
     this.cacheRam = 'auto';
-    this.threads = 8;
+    this.threads = Math.min(8, this.threadsMax);
     this.extraArgsText = '';
     this.seedSamplingDefaults();
     this.enableThinking = null;
@@ -531,6 +723,7 @@ class AppStore {
     this.vramWeight = 0.6;
     this.latencyWeight = 0.4;
     this.planResult = null;
+    this.distributableBytes = 0;
     this.markSettingsClean();
   }
 
@@ -550,6 +743,7 @@ class AppStore {
     else if (!this.contextAuto && this.context > maxCtx)
       err.context = `Context must be ≤ ${maxCtx} for this model.`;
     if (this.threads < 1) err.threads = 'Threads must be at least 1.';
+    if (this.threads > this.threadsMax) err.threads = `Threads must be at most ${this.threadsMax} on the master.`;
     if (this.vramPercent < 10 || this.vramPercent > 100) err.vramPercent = 'GPU memory % must be 10–100.';
     if (this.ramPercent < 10 || this.ramPercent > 100) err.ramPercent = 'RAM % must be 10–100.';
     if (this.vramWeight < 0 || this.vramWeight > 1) err.vramWeight = 'VRAM weight must be 0–1.';
@@ -557,6 +751,7 @@ class AppStore {
     if (this.vramWeight + this.latencyWeight <= 0)
       err.placementWeights = 'VRAM and latency weights cannot both be zero.';
     this.fieldErrors = err;
+    if (Object.keys(err).some((key) => key !== 'context')) this.advancedOpen = true;
     return Object.keys(err).length === 0;
   }
 
@@ -576,6 +771,8 @@ class AppStore {
       parallel_slots: this.parallelSlots,
       batch_size: this.batchSize,
       micro_batch: this.microBatch,
+      flash_attention: this.flashAttention,
+      node_shares: this.nodeShares,
       vision: this.vision,
       mmproj: this.mmproj || null,
       device: this.device,
@@ -796,6 +993,8 @@ class AppStore {
       await this.saveConfig({ device, vram_percent: this.vramPercent });
     } else {
       await this.saveConfig({ device, ram_percent: this.ramPercent });
+      this.nodeShares = null;
+      this.scheduleEstimate();
     }
   }
 
@@ -1012,11 +1211,17 @@ class AppStore {
   async plan() {
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings()) return;
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.estimateTimer = null;
+    ++this.estimateSeq;
     this.planResult = (await this.post('/v1/plan', this.planPayload())) as Record<string, unknown>;
   }
 
   /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
   scheduleEstimate(delayMs = 300) {
+    this.planResult = null;
+    this.estimateError = '';
+    ++this.estimateSeq;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = setTimeout(() => {
       this.estimateTimer = null;
@@ -1032,7 +1237,7 @@ class AppStore {
     const seq = ++this.estimateSeq;
     this.estimating = true;
     try {
-      const r = await fetch('/v1/plan', {
+      const r = await fetch('/v1/plan?preview=true', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(this.planPayload())
@@ -1045,10 +1250,18 @@ class AppStore {
         data = text;
       }
       if (seq !== this.estimateSeq) return;
-      if (!r.ok) return;
+      if (!r.ok) {
+        this.planResult = null;
+        this.estimateError = typeof data === 'object' && data !== null && 'detail' in data
+          ? String((data as { detail: unknown }).detail) : text || `Estimate ${r.status}`;
+        return;
+      }
+      this.estimateError = '';
       this.planResult = data as Record<string, unknown>;
+      if (typeof (data as Record<string, unknown>).distributable_bytes === 'number')
+        this.distributableBytes = (data as Record<string, number>).distributable_bytes;
     } catch {
-      /* ignore transient estimate errors */
+      if (seq === this.estimateSeq) { this.planResult = null; this.estimateError = 'Estimate unavailable'; }
     } finally {
       if (seq === this.estimateSeq) this.estimating = false;
     }
@@ -1056,18 +1269,19 @@ class AppStore {
 
   setAutoInt(field: 'parallelSlots' | 'batchSize' | 'microBatch' | 'checkpoints' | 'cacheRam', mode: 'auto' | 'edit') {
     const defaults: Record<typeof field, number> = {
-      parallelSlots: 2,
+      parallelSlots: 1,
       batchSize: 512,
-      microBatch: 2,
+      microBatch: 128,
       checkpoints: 0,
       cacheRam: 0
     };
     if (mode === 'auto') {
       this[field] = 'auto';
     } else if (this[field] === 'auto') {
-      this[field] = defaults[field];
+      this[field] = field === 'microBatch' && typeof this.batchSize === 'number'
+        ? Math.min(defaults[field], this.batchSize) : defaults[field];
     }
-    if (field === 'parallelSlots') this.scheduleEstimate();
+    this.scheduleEstimate();
   }
 
   setSpeculativeMode(mode: 'auto' | 'edit') {
@@ -1083,6 +1297,9 @@ class AppStore {
       pushToast('danger', String(this.planResult.hint ?? 'overflow — adjust context and re-plan'));
       return;
     }
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.estimateTimer = null;
+    ++this.estimateSeq;
     const data = (await this.post('/v1/run', this.planPayload())) as Record<string, unknown>;
     const plan = (data.plan ?? {}) as Record<string, unknown>;
     if (Object.keys(plan).length) {

@@ -97,7 +97,62 @@ def _allocate_contiguous(devices, costs, *, cpu_budget, cpu_base, overhead, mast
     return None
 
 
-def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vram_weight, latency_weight):
+def _allocate_manual(nodes, devices, costs, shares, *, cpu_budget, cpu_base, overhead, master_node_id):
+    """Round node byte targets to contiguous whole layers; never spill onto CPU."""
+    if cpu_base > cpu_budget:
+        return None, "master CPU base exceeds available RAM"
+    prefix = [0]
+    for cost in costs:
+        prefix.append(prefix[-1] + cost)
+    tolerance = max(costs) / 2 + 1
+    targets = []
+    target = 0.0
+    for node in nodes:
+        target += shares[node["node_id"]] * prefix[-1]
+        targets.append(target)
+
+    from functools import lru_cache
+
+    @lru_cache(None)
+    def assign(index, start):
+        if index == len(nodes):
+            return [] if start == len(costs) else None
+        nid = nodes[index]["node_id"]
+        eligible = [d for d in devices if d["node_id"] == nid]
+        ends = ([len(costs)] if index == len(nodes) - 1 else
+                [start] if shares[nid] == 0 else
+                sorted(range(start, len(costs) + 1), key=lambda end: abs(prefix[end] - targets[index])))
+        for end in ends:
+            # ponytail: targets are rounded within half the largest indivisible
+            # layer; a true byte-accurate split needs tensor (not layer) placement.
+            if abs(prefix[end] - prefix[start] - shares[nid] * prefix[-1]) > tolerance:
+                continue
+            if end == start:
+                here = []
+            elif eligible:
+                solved = _allocate_contiguous(eligible, costs[start:end], cpu_budget=0, cpu_base=0,
+                                              overhead=overhead, master_node_id=master_node_id)
+                if solved is None or solved[0] != 0:
+                    continue
+                here = [dict(a, layer_start=a["layer_start"] + start,
+                             layer_end=a["layer_end"] + start,
+                             output_layer=a["layer_end"] + start == len(costs)) for a in solved[2]]
+            else:
+                continue
+            rest = assign(index + 1, end)
+            if rest is not None:
+                return here + rest
+        return None
+
+    allocations = assign(0, 0)
+    if allocations is None:
+        selected = ", ".join(n["node_id"] for n in nodes if shares[n["node_id"]] > 0)
+        return None, f"requested node shares cannot fit GPU capacities with contiguous layers ({selected})"
+    return (0, cpu_base, allocations), ""
+
+
+def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vram_weight, latency_weight,
+                 node_shares=None):
     memory = memory_costs(layout, size, context, settings)
     costs = memory["costs"]
     count = len(costs)
@@ -139,6 +194,9 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
     max_lat = max((d["latency_ms"] for d in devices), default=0)
     for d in devices:
         d["score"] = vram_weight * d["budget_bytes"] / max_cap + latency_weight * (1 - d["latency_ms"] / max_lat if max_lat else 1)
+    gpu_budgets = {n["node_id"]: (min(ram(n), sum(d["budget_bytes"] for d in devices if d["node_id"] == n["node_id"]))
+                              if n.get("unified_memory") else sum(d["budget_bytes"] for d in devices if d["node_id"] == n["node_id"]))
+                   for n in nodes}
     devices.sort(key=lambda d: -d["score"])
 
     model_bytes = sum(costs)
@@ -152,22 +210,31 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
             overhead=overhead, master_node_id=master["node_id"],
         ) is not None
     )
-    routing_mode, devices = select_routing_devices(
-        devices,
-        model_bytes=model_bytes,
-        overhead=overhead,
-        cpu_base=cpu_base,
-        cpu_budget=cpu_budget,
-        locals_fit=locals_fit,
-    )
+    if node_shares is not None:
+        if device != "gpu" or settings.get("split_mode", "layer") != "layer":
+            raise ValueError("manual node shares require GPU layer placement")
+        active = {n["node_id"] for n in nodes}
+        if any(share > 0 for nid, share in node_shares.items() if nid not in active):
+            raise ValueError("manual node shares must match current cluster members")
+        node_shares = {nid: node_shares.get(nid, 0) for nid in active}
+        routing_mode = "manual"
+    else:
+        routing_mode, devices = select_routing_devices(
+            devices, model_bytes=model_bytes, overhead=overhead,
+            cpu_base=cpu_base, cpu_budget=cpu_budget, locals_fit=locals_fit,
+        )
 
     split_mode = settings.get("split_mode", "layer")
     # For each possible CPU prefix, find contiguous device segments by dynamic programming.
     # Includes the output layer, so ngl and tensor_split describe the same allocation.
-    solution = _allocate_contiguous(
-        devices, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
-        overhead=overhead, master_node_id=master["node_id"],
-    )
+    failure = ""
+    if node_shares is not None:
+        solution, failure = _allocate_manual(nodes, devices, costs, node_shares,
+                                            cpu_budget=cpu_budget, cpu_base=cpu_base,
+                                            overhead=overhead, master_node_id=master["node_id"])
+    else:
+        solution = _allocate_contiguous(devices, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+                                        overhead=overhead, master_node_id=master["node_id"])
     fits = solution is not None
     cpu_count, cpu_bytes, allocations = solution or (count, cpu_base + sum(costs), [])
     ngl = count - cpu_count
@@ -195,9 +262,13 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
         device_order = [a["device"] for a in allocations]
     node_ids = [n["node_id"] for n in nodes]
     node_alloc = [sum(a["estimated_bytes"] for a in allocations if a["node_id"] == nid) + (cpu_bytes if nid == master["node_id"] else 0) for nid in node_ids]
+    node_workload = {nid: sum(sum(costs[a["layer_start"]:a["layer_end"]]) for a in allocations if a["node_id"] == nid) for nid in node_ids}
     budget = cpu_budget + sum(d["budget_bytes"] for d in devices if not (d["local"] and d["unified_memory"]))
     tight = fits and (cpu_bytes > cpu_budget * .9 or any(a["estimated_bytes"] > a["budget_bytes"] * .9 for a in allocations))
-    return dict(node_ids=node_ids, node_alloc_bytes=node_alloc, budgets_bytes=[ram(n) if n["is_master"] else sum(d["budget_bytes"] for d in devices if d["node_id"] == n["node_id"]) for n in nodes],
+    return dict(node_ids=node_ids, node_alloc_bytes=node_alloc, distributable_bytes=model_bytes,
+                node_workload_bytes=node_workload, node_gpu_budget_bytes=gpu_budgets,
+                node_target_bytes={nid: round(node_shares[nid] * model_bytes) for nid in node_ids} if node_shares is not None else None,
+                budgets_bytes=[ram(n) if n["is_master"] else sum(d["budget_bytes"] for d in devices if d["node_id"] == n["node_id"]) for n in nodes],
                 tensor_split=split, tensor_split_csv=",".join(f"{v:.6f}" for v in split) or "0",
                 device_allocations=allocations, device_order=device_order,
                 rpc_endpoints=endpoints,
@@ -215,4 +286,4 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
                 node_latency_ms=[n.get("latency_ms") or 0 for n in nodes],
                 vram_alloc_bytes=sum(a["estimated_bytes"] for a in allocations), ram_alloc_bytes=cpu_bytes,
                 fit_status="overflow" if not fits else "tight" if tight else "fits",
-                hint="no contiguous device allocation fits available memory" if not fits else "allocation exceeds 90% of a memory budget" if tight else "")
+                hint=(failure or "no contiguous device allocation fits available memory") if not fits else "allocation exceeds 90% of a memory budget" if tight else "")

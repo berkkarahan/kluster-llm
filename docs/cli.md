@@ -121,10 +121,13 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--context` / `--context-auto` | 4096 / off | Auto picks largest viable context under budget |
 | `--cache-type-k`, `--cache-type-v` | `q8_0` | KV cache dtype |
 | `--parallel`, `--batch-size`, `--micro-batch` | `auto` | Maps to llama-server parallel / batch / ubatch |
+| `--flash-attention` | `auto` | `auto`, `on`, or `off` |
+| `--node-share NODE=FRACTION` (repeatable) | automatic | Manual GPU layer workload shares; give every current node, fractions totaling 1. Example: `--node-share worker=0.4 --node-share master=0.6`. No CPU spill in manual mode. |
+| `--chat-template` / `--chat-template-file` | `default` / — | Auto embedded GGUF, `chatml`, or a `preset:…` ID; file uploads custom Jinja text to the master. `kllm model templates --model NAME` lists choices. |
 | `--vision`, `--mmproj` | off / — | Vision requires a usable mmproj on run |
 | `--load-mode` | `auto` | mmap / mlock mapping |
 | `--ctx-checkpoints`, `--cache-ram` | `auto` | Checkpoint / cache-RAM controls |
-| `--threads` | 8 | CPU threads for llama-server |
+| `--threads` | min(8, available CPUs) | Bounded by the master's available logical CPUs |
 | `--temperature` / `--top-p` / `--top-k` / `--min-p` | model default | Sampling overrides (omit = GGUF / Unsloth auto) |
 | `--presence-penalty` / `--repeat-penalty` | model default | Penalty overrides |
 | `--enable-thinking` / `--no-enable-thinking` | template default | Force thinking on/off for hybrid models |
@@ -134,6 +137,8 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--split-mode` | system default | `layer`, `row`, or `tensor`; overrides the system setting for this plan/run |
 
 No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement: prefer master-local, then single remote, then VRAM-proportional pool — see [layer-split-calculator.md](layer-split-calculator.md)).
+
+Manual node shares are rounded to contiguous full layers; Plan reports requested and actual bytes per node and blocks Run if the requested distribution cannot fit. Pinned preset assets come from [llama.cpp v0.5.0](https://github.com/ggml-org/llama.cpp/tree/v0.5.0/models/templates); select the version that matches your model, rather than guessing from its family name. Custom Jinja can be smoke-checked in the dashboard editor, but that check does not establish model compatibility.
 
 ### Split modes
 
@@ -151,6 +156,12 @@ kllm ui
 ```
 
 The dashboard mirrors CLI actions (start/join/leave/stop, models, plan/run, chat) plus a Connect page for harness commands. Design tokens live in [`dashboard/DESIGN.md`](../dashboard/DESIGN.md).
+
+### Logs page
+
+`/logs` shows one combined master + worker trail over the same `GET /v1/logs` data as `kllm logs`. Choose **All nodes**, the master, or an individual worker; entries carry a UTC timestamp, node, source, and message. The refresh control offers **Live** (one-second reads), **5s**, **30s**, and **1m** and defaults to Live. **Clear** empties only this page's displayed buffer (including rows hidden by the node filter) — it never deletes stored logs, does not affect other viewers, and keeps the selected node and refresh interval. Before the first successful load, Clear is a no-op so an in-flight result is not discarded.
+
+The page reads a bounded recent tail (initially 200 rows, then incremental reads) and renders at most 2,000 rows, disclosing older-row omissions. Each read has a five-second total deadline; a stalled read reports a timeout and retries on the next selected interval. If the master is unreachable from a worker-served dashboard the page labels the trail **local only**, and known retention/batch/reconnect gaps are labeled rather than presented as complete history. `follow` (SSE) stays on `kllm logs -f`; the page uses snapshot reads.
 
 ## Connect harnesses (Unsloth-style)
 

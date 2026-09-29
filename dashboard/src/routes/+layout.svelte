@@ -18,19 +18,20 @@
     { href: '/models', label: 'Models' },
     { href: '/run', label: 'Plan & Run' },
     { href: '/integrations', label: 'Connect' },
+    { href: '/logs', label: 'Logs' },
     { href: '/settings', label: 'Settings' }
   ];
 </script>
 
-<div class="min-h-screen flex flex-col">
+<div class="app-shell">
   <header
-    class="h-10 shrink-0 flex items-center gap-4 px-3 border-b panel"
+    class="dashboard-header min-h-10 shrink-0 flex items-center gap-4 px-3 border-b panel"
     style="border-color: var(--border); background: var(--surface)"
   >
     <a href="/" class="mono font-semibold tracking-wide" style="color: var(--accent); text-decoration: none"
       >kllm</a
     >
-    <nav class="flex gap-3">
+    <nav class="flex gap-3 min-w-0 overflow-x-auto">
       {#each nav as item}
         <a
           href={item.href}
@@ -70,7 +71,7 @@
     </div>
   </header>
 
-  <main class="flex-1 min-h-0">
+  <main class="app-main">
     {@render children()}
   </main>
 

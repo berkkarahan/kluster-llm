@@ -68,6 +68,38 @@ def plan(nodes, model=None, **kw):
                         headroom=1, device="gpu", vram_weight=.6, latency_weight=.4, **kw)
 
 
+def test_manual_node_shares_resolve_to_contiguous_layers_and_launch():
+    nodes = [node("worker", 4000*MIB), node("master", 4000*MIB, master=True)]
+    result = plan(nodes, node_shares={"worker": .4, "master": .6})
+    assert result["routing_mode"] == "manual"
+    assert result["fit_status"] != "overflow"
+    assert result["cpu_layers"] == 0
+    assert result["device_order"] == ["RPC0", "Vulkan0"]
+    assert result["rpc_endpoints"] == ["worker:50052"]
+    assert sum(a["layers"] for a in result["device_allocations"]) == result["ngl"]
+    assert result["device_allocations"][0]["layer_end"] == result["device_allocations"][1]["layer_start"]
+    assert sum(result["node_target_bytes"].values()) == result["distributable_bytes"]
+    launch = build_master_launch(RunBody(model="test.gguf"), result, model_path=Path("missing.gguf"),
+                                 rpc_servers=[], infer_port=8080, repo_root=None, gpu_env={}, extra_args=[])
+    assert launch["rpc_servers"] == result["rpc_endpoints"]
+    assert launch["tensor_split"] == result["tensor_split_csv"]
+
+
+def test_manual_share_rejects_over_capacity_without_cpu_spill():
+    nodes = [node("worker", 100*MIB), node("master", 4000*MIB, master=True)]
+    result = plan(nodes, node_shares={"worker": .8, "master": .2})
+    assert result["fit_status"] == "overflow"
+    assert "worker" in result["hint"]
+    assert not result["device_allocations"]
+    with pytest.raises(ValueError, match="members"):
+        plan(nodes, node_shares={"former-worker": .5, "master": .5})
+    joined = [node("new", 4000*MIB), node("worker", 4000*MIB), node("master", 4000*MIB, master=True)]
+    added = plan(joined, node_shares={"worker": .4, "master": .6})
+    assert added["fit_status"] != "overflow"
+    assert added["node_target_bytes"]["new"] == 0
+    assert not any(a["node_id"] == "new" for a in added["device_allocations"])
+
+
 def test_fitting_local_device_avoids_rpc_and_offloads_output():
     result = plan([node("remote", 4000*MIB, backend="metal"), node("master", 2000*MIB, master=True)])
     assert result["device_order"] == ["Vulkan0"]

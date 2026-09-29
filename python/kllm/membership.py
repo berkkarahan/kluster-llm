@@ -36,6 +36,7 @@ _SNAPSHOT_OPTIONAL = (
     "latency_ms",
     "process_pid",
     "process_role",
+    "process_started_at",
 )
 
 _UNREACHABLE_WARNING = "master heartbeat unreachable"
@@ -259,6 +260,8 @@ def on_membership_shrink(state: ClusterState) -> None:
     except Exception as exc:
         plan_error = _exc_text(exc)
         plan = dict(state.last_plan or {})
+        for key in ("device_allocations", "device_order", "rpc_endpoints", "node_alloc_bytes", "tensor_split", "tensor_split_csv"):
+            plan.pop(key, None)
         plan["fit_status"] = "overflow"
         plan["hint"] = plan_error
         plan["node_ids"] = [

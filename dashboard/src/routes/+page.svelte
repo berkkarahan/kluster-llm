@@ -2,12 +2,10 @@
   import { appStore } from '$lib/store.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import InferenceActivity from '$lib/components/InferenceActivity.svelte';
-
-  function fmtBytes(n?: number | null) {
-    if (n == null) return '—';
-    const gb = n / 1e9;
-    return `${gb.toFixed(1)} GB`;
-  }
+  import NodeMap from '$lib/components/NodeMap.svelte';
+  import NodeUsageDetails from '$lib/components/NodeUsageDetails.svelte';
+  import UsageHistory from '$lib/components/UsageHistory.svelte';
+  import { tick } from 'svelte';
 
   const members = $derived(Object.values(appStore.status?.members ?? {}));
   const view = $derived(appStore.viewState());
@@ -16,6 +14,81 @@
   const isWorker = $derived(appStore.status?.role === 'worker');
   const startJoinDisabled = $derived(!idle || !!appStore.busy);
   const inferenceActivity = $derived(appStore.status?.inference_activity);
+  const displayNodes = $derived.by(() => Object.fromEntries(
+    Object.entries(appStore.liveUsage?.nodes ?? {}).map(([id, node]) =>
+      [id, view !== 'live' ? { ...node, connected: false, freshness: node.reading ? 'stale' as const : 'unavailable' as const } : node]
+    )
+  ));
+  const selectedNode = $derived(displayNodes[appStore.selectedNodeId] ?? null);
+  const nodeCount = $derived(Object.keys(displayNodes).length);
+  const recording = $derived(appStore.liveUsage?.recording ?? null);
+  const updateError = $derived(
+    (appStore.status?.update?.workers ?? []).filter((w) => w.error)
+      .map((w) => `${w.host ?? w.node_id ?? '?'}: ${w.error}`)
+  );
+  const netsecWarnings = $derived(appStore.status?.netsec_warnings ?? []);
+  const overlayStatus = $derived(appStore.status?.overlay_status ?? '');
+
+  let chatOpen = $state(false);
+  let chatTrigger = $state<HTMLButtonElement | undefined>(undefined);
+  let chatClose = $state<HTMLButtonElement | undefined>(undefined);
+  let inspectorDialog = $state<HTMLDialogElement | undefined>(undefined);
+  let inspectorMode = $state<'details' | 'history' | null>(null);
+  let loadedHistoryNode = '';
+
+  async function openChat() {
+    chatOpen = true;
+    await tick();
+    chatClose?.focus();
+  }
+
+  function closeChat() {
+    chatOpen = false;
+    chatTrigger?.focus();
+  }
+
+  async function openInspector(mode: 'details' | 'history') {
+    inspectorMode = mode;
+    if (mode === 'history') await ensureHistory();
+    await tick();
+    const dialog = inspectorDialog;
+    if (dialog && !dialog.open) dialog.showModal();
+  }
+
+  function closeInspector() {
+    inspectorDialog?.close();
+  }
+
+  // Native modal dialogs restore focus to their trigger on close; the dialog only owns content state.
+  function handleDialogClose() {
+    inspectorMode = null;
+  }
+
+  // History is fetched only when requested (and re-fetched when the selected node changes while open).
+  async function ensureHistory() {
+    const nodeId = appStore.selectedNodeId;
+    if (!nodeId) return;
+    if (loadedHistoryNode === nodeId && appStore.selectedLifetimeId && !appStore.historyError) {
+      await appStore.loadUsageHistory();
+      return;
+    }
+    loadedHistoryNode = nodeId;
+    await appStore.selectUsageNode(nodeId);
+  }
+
+  $effect(() => {
+    const nodeId = appStore.selectedNodeId;
+    if (inspectorMode !== 'history' || !nodeId || loadedHistoryNode === nodeId) return;
+    loadedHistoryNode = nodeId;
+    void appStore.selectUsageNode(nodeId);
+  });
+
+  function onWindowKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    // Capture phase: the dialog is still open here, so it owns Escape and Chat stays untouched.
+    if (inspectorMode || inspectorDialog?.open) return;
+    if (chatOpen) closeChat();
+  }
 
   function assignedToInference(nodeId: string): boolean {
     const plan = appStore.status?.last_plan;
@@ -28,182 +101,197 @@
       ));
     }
     const nodeIds = plan?.node_ids;
-    return Array.isArray(nodeIds) ? nodeIds.includes(nodeId) : nodeId === appStore.status?.node_id;
+    return Array.isArray(nodeIds) ? nodeIds.includes(nodeId) : false;
   }
 </script>
 
-<div class="grid h-[calc(100vh-40px)] grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_360px]">
-  <!-- Cluster controls -->
-  <aside class="panel border-r flex flex-col min-h-0" style="border-color: var(--border)">
-    <div class="px-3 py-2 border-b mono text-[11px] uppercase tracking-wider shrink-0" style="border-color: var(--border); color: var(--muted)">
-      Cluster
-    </div>
-    <div class="p-3 flex flex-col gap-2 overflow-y-auto flex-1 min-h-0">
-      <div class="grid grid-cols-2 gap-2 mt-1">
-        <button class="btn btn-accent" disabled={startJoinDisabled} onclick={() => appStore.startMaster()}
-          >Start</button
-        >
-        <button class="btn btn-danger" disabled={!!appStore.busy || !isMaster} onclick={() => appStore.stopCluster()}
-          >Stop</button
-        >
-        <button
-          class="btn"
-          disabled={startJoinDisabled || !appStore.joinKeyInput}
-          onclick={() => appStore.joinCluster()}>Join</button
-        >
-        <button class="btn" disabled={!!appStore.busy || !isWorker} onclick={() => appStore.leaveCluster()}
-          >Leave</button
-        >
-        <button
-          class="btn col-span-2"
-          disabled={!!appStore.busy || !isMaster || members.filter((m) => m.role === 'worker').length === 0}
-          onclick={() => void appStore.updateWorkers()}
-          >Update workers</button
-        >
-      </div>
-      {#if isMaster && appStore.status?.update}
-        <p class="mono text-[11px] mt-1" style="color: var(--muted)">
-          update
-          <span style="color: var(--fg)">{appStore.status.update.phase ?? '—'}</span>
-          {#if (appStore.status.update.pct ?? 0) > 0}
-            · {Math.round(appStore.status.update.pct ?? 0)}%
-          {/if}
-        </p>
-        {#each appStore.status.update.workers ?? [] as w}
-          <p class="mono text-[11px]" style="color: var(--muted)">
-            {w.host ?? w.node_id ?? '?'}
-            <span style="color: var(--fg)"> {w.phase}</span>
-            {#if w.error}
-              <span style="color: var(--danger, #c44)"> {w.error}</span>
-            {/if}
-          </p>
-        {/each}
-      {/if}
-      <LoadProgressPanel />
-      {#if appStore.status?.join_key}
-        <p class="mono text-[11px] mt-2 break-all" style="color: var(--muted)">
-          key <span style="color: var(--accent)">{appStore.status.join_key}</span>
-        </p>
-      {/if}
-      <p class="mono text-[11px]" style="color: var(--muted)">
-        node <span style="color: var(--fg)">{appStore.status?.node_id ?? '—'}</span>
-      </p>
-      <p class="mono text-[11px]" style="color: var(--muted)">
-        rpc <span style="color: var(--fg)">{appStore.status?.rpc_bind ?? '—'}</span>
-      </p>
-      <p class="mono text-[11px]" style="color: var(--muted)">
-        overlay <span style="color: var(--fg)">{appStore.status?.overlay ?? 'none'}</span>
-        {#if appStore.status?.wg_address}
-          <span style="color: var(--accent)"> {appStore.status.wg_address}</span>
-        {/if}
-      </p>
-      {#if appStore.status?.gpu_ids?.length}
-        <p class="mono text-[11px]" style="color: var(--muted)">
-          active GPUs
-          <span style="color: var(--fg)">
-            {appStore.status.gpu_ids
-              .map((id) => {
-                const g = appStore.gpus.find((x) => x.index === id);
-                return g ? `${id}:${g.name}` : String(id);
-              })
-              .join(' · ')}
-          </span>
-        </p>
-      {/if}
-      {#if appStore.status?.overlay_status}
-        <p class="mono text-[11px]" style="color: var(--muted)">{appStore.status.overlay_status}</p>
-      {/if}
-      {#each appStore.status?.netsec_warnings ?? [] as w}
-        <p class="mono text-[11px]" style="color: var(--danger, #c44)">{w}</p>
-      {/each}
-    </div>
-  </aside>
+<svelte:window onkeydowncapture={onWindowKeydown} />
 
-  <!-- Topology / status -->
-  <section class="flex flex-col min-h-0 border-r" style="border-color: var(--border)">
-    <div class="px-3 py-2 border-b mono text-[11px] uppercase tracking-wider" style="border-color: var(--border); color: var(--muted)">
-      Topology
-    </div>
-    <div class="p-3 overflow-auto flex-1">
-      {#if inferenceActivity && inferenceActivity.phase !== 'idle'}
-        <div class="mb-3 flex items-center gap-2 mono text-[11px]" style="color: var(--muted)">
-          cluster inference
-          <InferenceActivity activity={inferenceActivity} />
+<div class="usage-workspace">
+  <div class="usage-toolbar">
+    <details class="cluster-controls">
+      <summary class="btn">Cluster · {appStore.status?.role ?? 'idle'}</summary>
+      <div class="cluster-controls-body panel">
+        <div class="grid grid-cols-2 gap-2">
+          <button class="btn btn-accent" disabled={startJoinDisabled} onclick={() => appStore.startMaster()}
+            >Start</button
+          >
+          <button class="btn btn-danger" disabled={!!appStore.busy || !isMaster} onclick={() => appStore.stopCluster()}
+            >Stop</button
+          >
+          <button class="btn" disabled={startJoinDisabled || !appStore.joinKeyInput} onclick={() => appStore.joinCluster()}
+            >Join</button
+          >
+          <button class="btn" disabled={!!appStore.busy || !isWorker} onclick={() => appStore.leaveCluster()}
+            >Leave</button
+          >
+          <button
+            class="btn col-span-2"
+            disabled={!!appStore.busy || !isMaster || members.filter((m) => m.role === 'worker').length === 0}
+            onclick={() => void appStore.updateWorkers()}>Update workers</button
+          >
         </div>
-      {/if}
-      <table class="w-full text-left border-collapse">
-        <thead>
-          <tr class="mono text-[11px]" style="color: var(--muted)">
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">id</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">host</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">role</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">backend</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">gpus</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">ram</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">vram</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">control RTT</th>
-            <th class="font-medium py-1 border-b" style="border-color: var(--border)">activity</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#if view === 'loading'}
-            <tr>
-              <td colspan="9" class="py-6 mono" style="color: var(--muted)">Loading cluster…</td>
-            </tr>
-          {:else if members.length}
-            {#each members as m}
-              <tr class="mono">
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.node_id}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.host}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.role}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{m.actual_backend ?? m.backend}{m.unified_memory ? ' · shared RAM' : ''}{m.requested_backend && m.requested_backend !== (m.actual_backend ?? m.backend) ? ` (requested ${m.requested_backend})` : ''}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)"
-                  >{m.gpu_ids?.length ? m.gpu_ids.join(',') : '—'}</td
-                >
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.total_ram_bytes)}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">{fmtBytes(m.vram_bytes)}</td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">
-                  {m.latency_ms != null ? `${Number(m.latency_ms).toFixed(1)} ms` : '—'}
-                </td>
-                <td class="py-1.5 border-b" style="border-color: var(--border)">
-                  <InferenceActivity activity={inferenceActivity} assigned={assignedToInference(m.node_id)} />
-                </td>
-              </tr>
-            {/each}
-          {:else if idle}
-            <tr>
-              <td colspan="9" class="py-6 mono" style="color: var(--muted)">No members — Start as master or Join a cluster.</td>
-            </tr>
-          {:else}
-            <tr>
-              <td colspan="9" class="py-6 mono" style="color: var(--muted)">
-                {view === 'offline' ? 'Disconnected — keeping last cluster view.' : 'Waiting for members…'}
-              </td>
-            </tr>
-          {/if}
-        </tbody>
-      </table>
+        <a class="btn" href="/run">Plan &amp; Run →</a>
+        {#if isMaster && appStore.status?.update}
+          <p class="mono text-[11px]" style="color: var(--muted)">
+            update <span style="color: var(--fg)">{appStore.status.update.phase ?? '—'}</span>
+            {#if (appStore.status.update.pct ?? 0) > 0}· {Math.round(appStore.status.update.pct ?? 0)}%{/if}
+          </p>
+          {#each appStore.status.update.workers ?? [] as w}
+            <p class="mono text-[11px]" style="color: var(--muted)">
+              {w.host ?? w.node_id ?? '?'}
+              <span style="color: var(--fg)"> {w.phase}</span>
+              {#if w.error}<span style="color: var(--danger, #c44)"> {w.error}</span>{/if}
+            </p>
+          {/each}
+        {/if}
+        <LoadProgressPanel />
+        {#if appStore.status?.join_key}
+          <p class="mono text-[11px] break-all" style="color: var(--muted)">
+            key <span style="color: var(--accent)">{appStore.status.join_key}</span>
+          </p>
+        {/if}
+        <p class="mono text-[11px]" style="color: var(--muted)">
+          node <span style="color: var(--fg)">{appStore.status?.node_id ?? '—'}</span>
+        </p>
+        <p class="mono text-[11px]" style="color: var(--muted)">
+          rpc <span style="color: var(--fg)">{appStore.status?.rpc_bind ?? '—'}</span>
+        </p>
+        <p class="mono text-[11px]" style="color: var(--muted)">
+          overlay <span style="color: var(--fg)">{appStore.status?.overlay ?? 'none'}</span>
+          {#if appStore.status?.wg_address}<span style="color: var(--accent)"> {appStore.status.wg_address}</span>{/if}
+        </p>
+        {#if appStore.status?.gpu_ids?.length}
+          <p class="mono text-[11px]" style="color: var(--muted)">
+            active GPUs
+            <span style="color: var(--fg)">
+              {appStore.status.gpu_ids
+                .map((id) => {
+                  const g = appStore.gpus.find((x) => x.index === id);
+                  return g ? `${id}:${g.name}` : String(id);
+                })
+                .join(' · ')}
+            </span>
+          </p>
+        {/if}
+        {#if appStore.status?.overlay_status}
+          <p class="mono text-[11px]" style="color: var(--muted)">{appStore.status.overlay_status}</p>
+        {/if}
+        {#each appStore.status?.netsec_warnings ?? [] as w}
+          <p class="mono text-[11px]" style="color: var(--danger, #c44)">{w}</p>
+        {/each}
+      </div>
+    </details>
 
+    <div class="usage-toolbar-main">
+      <span class="mono uppercase tracking-wider text-[11px]">Live topology</span>
+      <span class="mono text-[11px]" style="color: var(--muted)">{nodeCount} node{nodeCount === 1 ? '' : 's'}</span>
+      <span class="mono text-[11px]" role="status" style="color: var(--muted)">
+        Recording: {recording?.recording ?? 'unavailable'} · last saved {recording?.last_successful_save ?? 'never'}
+      </span>
+      {#if appStore.usageError}
+        <span class="mono text-[11px]" role="alert" style="color: var(--danger)">{appStore.usageError}</span>
+      {/if}
       {#if appStore.status?.apply_error}
-        <p class="mono text-[11px] mt-3" style="color: var(--danger, #c44)">{appStore.status.apply_error}</p>
+        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">{appStore.status.apply_error}</span>
       {/if}
       {#if appStore.status?.apply_warning}
-        <p class="mono text-[11px] mt-2" style="color: var(--warn, #b80)">{appStore.status.apply_warning}</p>
+        <span class="mono text-[11px]" style="color: var(--warn, #b80)">{appStore.status.apply_warning}</span>
       {/if}
-      {#if appStore.status?.last_plan}
-        <pre
-          class="mt-4 p-3 panel mono text-[11px] overflow-auto max-h-48"
-          style="border-color: var(--border)">{JSON.stringify(appStore.status.last_plan, null, 2)}</pre
-        >
+      {#if appStore.status?.update?.error}
+        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">{appStore.status.update.error}</span>
+      {/if}
+      {#each updateError as error}
+        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">update {error}</span>
+      {/each}
+      {#each netsecWarnings as warning}
+        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">{warning}</span>
+      {/each}
+      {#if overlayStatus}
+        <span class="usage-overlay-status mono text-[11px]" style="color: var(--muted)">{overlayStatus}</span>
       {/if}
     </div>
-  </section>
 
-  <!-- Chat -->
-  <aside class="flex flex-col min-h-0 panel" style="border-color: var(--border)">
+    <div class="usage-toolbar-actions">
+      <button class="btn" disabled={!appStore.selectedNodeId} onclick={() => openInspector('details')}>Details</button>
+      <button class="btn" disabled={!appStore.selectedNodeId} onclick={() => openInspector('history')}>History</button>
+      <button bind:this={chatTrigger} class="btn" aria-label="Open chat" aria-controls="cluster-chat"
+        aria-expanded={chatOpen} onclick={openChat}>Chat</button>
+    </div>
+  </div>
+
+  <div class="usage-topology" data-od-id="topology-workspace">
+    {#if inferenceActivity && inferenceActivity.phase !== 'idle'}
+      <div class="usage-activity mono text-[11px]">
+        cluster inference <InferenceActivity activity={inferenceActivity} />
+      </div>
+    {/if}
+    {#if view === 'offline'}
+      <p class="mono text-[11px]" role="status" style="padding: 6px 10px; color: var(--muted)">
+        Disconnected — keeping last cluster view; readings are not live.
+      </p>
+    {/if}
+    <div class="usage-topology-body">
+      {#if view === 'loading'}
+        <p class="mono" style="padding: 8px 10px">Loading cluster…</p>
+      {:else if idle && !nodeCount}
+        <p class="mono" style="padding: 8px 10px">No members — Start as master or Join a cluster.</p>
+      {:else if appStore.liveUsage && nodeCount}
+        {#if idle}
+          <p class="mono text-[11px]" style="padding: 6px 10px; color: var(--muted)">
+            No members — Start as master or Join a cluster. Retained history is available from the History action.
+          </p>
+        {/if}
+        <NodeMap nodes={displayNodes} relationships={view === 'live' ? appStore.liveUsage.relationships : []}
+          selectedId={appStore.selectedNodeId} onselect={(id) => appStore.selectedNodeId = id} />
+      {:else}
+        <p class="mono" style="padding: 8px 10px">Waiting for measured nodes…</p>
+      {/if}
+    </div>
+  </div>
+
+  <dialog bind:this={inspectorDialog} class="usage-dialog panel"
+    aria-label={inspectorMode === 'history' ? 'Recorded usage' : 'Node details'}
+    onclose={handleDialogClose}>
+    <div class="usage-dialog-head">
+      <h2 class="mono uppercase tracking-wider text-xs" style="color: var(--muted)">
+        {inspectorMode === 'history' ? 'Recorded usage' : 'Selected node'} · {appStore.selectedNodeId || '—'}
+      </h2>
+      <button class="btn" aria-label="Close inspector" onclick={closeInspector}>×</button>
+    </div>
+    <div class="usage-dialog-body">
+      {#if inspectorMode === 'history'}
+        {#if appStore.selectedNodeId}
+          {#key `${appStore.selectedNodeId}:${appStore.selectedLifetimeId}:${appStore.usageWindow}`}
+            <UsageHistory nodeId={appStore.selectedNodeId}
+              lifetimes={appStore.usageLifetimes?.lifetimes ?? []}
+              selectedLifetimeId={appStore.selectedLifetimeId} window={appStore.usageWindow}
+              series={appStore.usageSeries} page={appStore.usagePage}
+              recorder={appStore.usageLifetimes ?? appStore.liveUsage?.recording ?? null}
+              error={appStore.historyError}
+              onlifetime={(id) => void appStore.selectUsageLifetime(id)}
+              onwindow={(window) => void appStore.selectUsageWindow(window)}
+              onnext={() => void appStore.nextUsagePage()} />
+          {/key}
+        {/if}
+      {:else if inspectorMode === 'details'}
+        <NodeUsageDetails node={selectedNode}
+          assignment={assignedToInference(appStore.selectedNodeId) || !!selectedNode?.assignment}
+          activity={inferenceActivity ?? null} />
+        {#if appStore.status?.last_plan}
+          <h3 class="mono text-xs mt-3">Planning estimate · not measured usage</h3>
+          <pre class="mt-2 p-3 panel mono text-[11px] overflow-auto max-h-48">{JSON.stringify(appStore.status.last_plan, null, 2)}</pre>
+        {/if}
+      {/if}
+    </div>
+  </dialog>
+
+  <aside id="cluster-chat" class="usage-chat-drawer flex flex-col panel" class:open={chatOpen}
+    aria-label="Cluster chat" inert={!chatOpen} style="border-color: var(--border)">
     <div class="px-3 py-2 border-b mono text-[11px] uppercase tracking-wider flex items-center" style="border-color: var(--border); color: var(--muted)">
       Chat
       <span class="ml-auto" style="color: var(--fg)">{appStore.status?.model_name ?? 'no model'}</span>
+      <button bind:this={chatClose} class="btn ml-2" aria-label="Close chat" onclick={closeChat}>×</button>
     </div>
     <div class="flex-1 overflow-auto p-3 flex flex-col gap-3">
       {#each appStore.chat as msg}

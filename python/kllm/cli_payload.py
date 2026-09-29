@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from kllm.run_settings import available_threads
+
 
 def build_plan_run_payload(
     *,
@@ -23,6 +25,8 @@ def build_plan_run_payload(
     parallel: str = "auto",
     batch_size: str = "auto",
     micro_batch: str = "auto",
+    flash_attention: str = "auto",
+    node_shares: dict[str, float] | None = None,
     vision: bool = False,
     mmproj: str | None = None,
     chat_template: str = "default",
@@ -30,7 +34,7 @@ def build_plan_run_payload(
     load_mode: str = "auto",
     ctx_checkpoints: str = "auto",
     cache_ram: str = "auto",
-    threads: int = 8,
+    threads: int | None = None,
     extra_args: list[str] | None = None,
     remember: bool = True,
     temperature: float | None = None,
@@ -58,6 +62,8 @@ def build_plan_run_payload(
         "parallel_slots": parallel,
         "batch_size": batch_size,
         "micro_batch": micro_batch,
+        "flash_attention": flash_attention,
+        "node_shares": node_shares,
         "vision": vision,
         "mmproj": mmproj,
         "chat_template": chat_template,
@@ -65,7 +71,7 @@ def build_plan_run_payload(
         "mmap_mlock": load_mode,
         "checkpoints": ctx_checkpoints,
         "cache_ram": cache_ram,
-        "threads": threads,
+        "threads": threads if threads is not None else min(8, available_threads()),
         "extra_args": list(extra_args or []),
         "remember": remember,
         "advanced_open": False,

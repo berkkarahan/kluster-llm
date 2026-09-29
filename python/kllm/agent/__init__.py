@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
+import math
+import sqlite3
 from contextlib import asynccontextmanager
 import httpx
 from kllm import http_clients, rpc_cache
@@ -9,11 +12,13 @@ import secrets
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -32,6 +37,7 @@ from kllm import (
     native,
     netsec,
     runtime,
+    usage,
 )
 from kllm.accel import allowed_accel_backends
 from kllm.auth import ensure_api_token, verify_api_token
@@ -62,6 +68,109 @@ from kllm.state import (
 )
 
 _background_stop = threading.Event()
+_usage_lock = threading.Lock()
+_worker_usage_error: str | None = None
+_worker_usage_last_save: str | None = None
+
+
+def _usage_store() -> usage.UsageStore:
+    with _usage_lock:
+        path = home_dir() / "usage.sqlite3"
+        store = getattr(app.state, "usage_store", None)
+        if store is None or store.path != path:
+            if store is not None:
+                store.close()
+            store = usage.UsageStore(path)
+            app.state.usage_store = store
+        return store
+
+
+def _usage_assignment(node_id: str) -> str | None:
+    if node_id == STATE.node_id and STATE.process_pid and STATE.process_role == "master":
+        return STATE.model_name
+    plan = membership_mod.public_last_plan(STATE) or {}
+    if (node_id in (plan.get("node_ids") or []) or any(
+            allocation.get("node_id") == node_id for allocation in (plan.get("device_allocations") or [])
+            if isinstance(allocation, dict))):
+        return STATE.model_name
+    return None
+
+
+def _usage_node_context(member: dict[str, Any], model: str | None) -> dict[str, Any]:
+    devices = []
+    for device in (member.get("devices") or [])[:32]:
+        if isinstance(device, dict):
+            devices.append({"index": device.get("index") if isinstance(device.get("index"), int) else len(devices),
+                            "name": str(device.get("name") or "device")[:80],
+                            "vram_bytes": device.get("vram_bytes") if isinstance(device.get("vram_bytes"), int) else None})
+    return {"backend": str(member.get("actual_backend") or member.get("backend") or "unknown")[:80],
+            "devices": devices, "unified_memory": bool(member.get("unified_memory")),
+            "total_ram_bytes": member.get("total_ram_bytes"), "vram_bytes": member.get("vram_bytes"),
+            "assignment": model[:160] if model else None}
+
+
+def _usage_loop() -> None:
+    global _worker_usage_error, _worker_usage_last_save
+    sampler = usage.Sampler()
+    needs_end = True
+    while not _background_stop.wait(2):
+        pid = STATE.process_pid
+        try:
+            point = sampler.sample(STATE)
+            if point is None:
+                if STATE.role == "worker":
+                    _worker_usage_error = None
+                if needs_end and STATE.role == "master":
+                    _usage_store().end_node(STATE.node_id)
+                    needs_end = False
+                continue
+            needs_end = True
+            if STATE.role == "master":
+                member = STATE.members.get(STATE.node_id)
+                if member is not None:
+                    member.update(process_pid=point["pid"], process_role=point["process_role"],
+                                  process_started_at=point["process_started_at"])
+                _usage_store().record(STATE.node_id, (member or {}).get("host") or STATE.node_id,
+                                      point, expected_pid=STATE.process_pid,
+                                      expected_start=point["process_started_at"], expected_role="master",
+                                      model=STATE.model_name,
+                                      context=_usage_node_context(member or {}, _usage_assignment(STATE.node_id)))
+            elif STATE.role == "worker" and STATE.master_host and STATE.join_key:
+                resp = http_clients.control_client().post(
+                    f"{_master_control_base()}/v1/usage/ingest",
+                    json={"node_id": STATE.node_id, "readings": [point]},
+                    headers={"X-Kllm-Key": STATE.join_key}, timeout=1.5)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"usage ingest {resp.status_code}")
+                try:
+                    _worker_usage_last_save = resp.json().get("last_successful_save") or _worker_usage_last_save
+                except (ValueError, AttributeError):
+                    pass
+                _worker_usage_error = None
+        except Exception as exc:
+            if isinstance(exc, (usage.psutil.NoSuchProcess, usage.psutil.ZombieProcess)) and STATE.process_pid == pid:
+                if STATE.role == "master":
+                    try:
+                        _usage_store().end_node(STATE.node_id)
+                    except (OSError, sqlite3.Error):
+                        pass
+                STATE.process_pid = None
+                STATE.process_role = None
+                member = STATE.members.get(STATE.node_id)
+                if member is not None:
+                    member.update(process_pid=None, process_role=None, process_started_at=None)
+                STATE.save()
+                needs_end = False
+            if STATE.role == "master":
+                try:
+                    store = _usage_store()
+                    if store.recording != "failed":
+                        store.recording = "interrupted"
+                        store.error = f"collection interrupted: {type(exc).__name__}"
+                except (OSError, sqlite3.Error):
+                    pass
+            elif STATE.role == "worker":
+                _worker_usage_error = f"usage collection/ingest interrupted ({type(exc).__name__}); check private master connection and managed child"
 
 async def _sample_diagnostics():
     from kllm._dbg_a1ff77 import gpu_snapshot, llama_props, write
@@ -75,12 +184,22 @@ async def _sample_diagnostics():
 
 @asynccontextmanager
 async def lifespan(app):
+    global _worker_usage_error, _worker_usage_last_save
+    _worker_usage_error = None
+    _worker_usage_last_save = None
     http_clients.control_client()
+    try:
+        _usage_store()
+    except (OSError, sqlite3.Error):
+        pass  # The private history API reports 503; agent/inference must still start.
     _background_stop.clear()
     _ensure_master_member(persist=True)
+    usage_thread = None
     if "pytest" not in sys.modules:
         _start_membership_thread()
         _start_logs_thread()
+        usage_thread = threading.Thread(target=_usage_loop, name="kllm-usage", daemon=True)
+        usage_thread.start()
     async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5), trust_env=False) as client:
         app.state.inference_client = client
         sampler = asyncio.create_task(_sample_diagnostics()) if os.getenv("KLLM_DEBUG_HARDWARE", "").lower() in ("1", "true", "yes") else None
@@ -88,10 +207,17 @@ async def lifespan(app):
             yield
         finally:
             _background_stop.set()
+            if usage_thread is not None:
+                await asyncio.to_thread(usage_thread.join)
             if sampler:
                 sampler.cancel()
                 await asyncio.gather(sampler, return_exceptions=True)
             http_clients.close()
+            with _usage_lock:
+                store = getattr(app.state, "usage_store", None)
+                if store is not None:
+                    store.close()
+                    del app.state.usage_store
 
 
 app = FastAPI(title="kllm-agent", version="0.1.0", lifespan=lifespan)
@@ -99,9 +225,14 @@ app = FastAPI(title="kllm-agent", version="0.1.0", lifespan=lifespan)
 
 @app.exception_handler(RequestValidationError)
 async def _plan_run_validation_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    for error in errors:
+        value = error.get("input")
+        if isinstance(value, float) and not math.isfinite(value):
+            error["input"] = str(value)
     if request.url.path in ("/v1/plan", "/v1/run"):
-        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        return JSONResponse(status_code=400, content={"detail": jsonable_encoder(errors)})
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 _advertiser: discovery.MasterAdvertiser | None = None
 STATE = ClusterState.load()
@@ -167,6 +298,17 @@ def _sync_master_liveness(*, shrink: bool = True) -> list[str]:
     with _membership_lock:
         dropped = membership_mod.sweep_liveness(STATE)
         if dropped:
+            try:
+                for node_id in dropped:
+                    _usage_store().end_node(node_id, state="unobserved")
+            except (OSError, sqlite3.Error) as exc:
+                try:
+                    store = _usage_store()
+                    store.recording = "failed"
+                    reason = "disk full" if "disk full" in str(exc).lower() else "storage unavailable"
+                    store.error = f"usage lifetime close failed: {reason}"
+                except (OSError, sqlite3.Error):
+                    pass
             STATE.save()
             if shrink:
                 membership_mod.on_membership_shrink(STATE)
@@ -193,7 +335,19 @@ def _heartbeat_payload() -> dict[str, Any]:
         "llama_release": identity.get("llama_release"),
         "process_pid": STATE.process_pid,
         "process_role": STATE.process_role,
+        "process_started_at": _tracked_process_start(),
     }
+
+
+def _tracked_process_start() -> str | None:
+    if not STATE.process_pid:
+        return None
+    import psutil
+
+    try:
+        return usage.utc(psutil.Process(STATE.process_pid).create_time())
+    except (OSError, ValueError, psutil.Error):
+        return None
 
 
 def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
@@ -404,10 +558,10 @@ def _start_membership_thread() -> None:
 
 def _logs_loop() -> None:
     cluster_log.HUB.prime_offsets()
-    if STATE.role == "master":
-        cluster_log.HUB.ensure_journal_loaded()
     while not _background_stop.wait(cluster_log.FLUSH_INTERVAL_S):
         try:
+            if STATE.role == "master":
+                cluster_log.HUB.ensure_journal_loaded()
             master_base = None
             if STATE.role == "worker" and STATE.master_host:
                 master_base = _master_control_base()
@@ -454,6 +608,9 @@ def _build_master_member_record(lan_host: str) -> dict[str, Any]:
         "gpu_ids": STATE.gpu_ids,
         "last_seen": time.time(),
         "latency_ms": 0.0,
+        "process_pid": STATE.process_pid,
+        "process_role": STATE.process_role,
+        "process_started_at": _tracked_process_start(),
     }
 
 
@@ -588,6 +745,7 @@ class RegisterBody(BaseModel):
     llama_release: str | None = None
     process_pid: int | None = None
     process_role: str | None = None
+    process_started_at: str | None = None
 
 
 class UpdateProgressBody(BaseModel):
@@ -601,7 +759,8 @@ class UpdateProgressBody(BaseModel):
 
 
 class LogLineBody(BaseModel):
-    ts: float | None = None
+    event_id: uuid.UUID | None = None
+    ts: float | None = Field(default=None, allow_inf_nan=False)
     source: str = "agent"
     line: str
 
@@ -1355,6 +1514,10 @@ def start_master(body: StartBody) -> dict[str, Any]:
 def stop() -> dict[str, Any]:
     global _advertiser
     if STATE.process_pid:
+        try:
+            _usage_store().end_node(STATE.node_id)
+        except (OSError, sqlite3.Error):
+            pass
         native.stop_process(STATE.process_pid, force=True)
         STATE.process_pid = None
         STATE.process_role = None
@@ -1796,6 +1959,11 @@ def heartbeat(
     accepted = body.node_id in STATE.members
     if accepted:
         update = body.model_dump()
+        if not update.get("process_pid") and STATE.members[body.node_id].get("process_pid"):
+            try:
+                _usage_store().end_node(body.node_id)
+            except (OSError, sqlite3.Error):
+                pass
         peer = request.client.host if request.client else None
         # Keep dial address aligned with the path that reaches the master (LAN).
         if (
@@ -1815,12 +1983,199 @@ def heartbeat(
     }
 
 
-def _logs_snapshot(n: int, node: str | None, source: str | None) -> dict[str, Any]:
+@app.post("/v1/usage/ingest")
+async def usage_ingest(request: Request, _: None = Depends(_require_key)) -> dict[str, Any]:
+    if STATE.role != "master":
+        raise HTTPException(400, "usage ingest requires master role")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 65536:
+            raise HTTPException(400, "usage batch exceeds 64 KiB")
+    try:
+        body = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite number")))
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "invalid usage JSON") from None
+    if not isinstance(body, dict) or set(body) != {"node_id", "readings"}:
+        raise HTTPException(400, "usage batch requires node_id and readings only")
+    node_id = body["node_id"]
+    member = STATE.members.get(node_id) if isinstance(node_id, str) else None
+    if not member or node_id == STATE.node_id or member.get("role") != "worker":
+        raise HTTPException(400, "unregistered worker node")
+    points = body["readings"]
+    if not isinstance(points, list) or not 1 <= len(points) <= 8:
+        raise HTTPException(400, "usage batch must contain 1–8 readings")
+    now = datetime.now(timezone.utc)
+    try:
+        if not member.get("process_pid") or not member.get("process_started_at") or member.get("process_role") != "worker":
+            raise ValueError("worker has no registered managed process")
+        for point in points:
+            usage.validate(node_id, point, now=now, expected_pid=member["process_pid"],
+                           expected_start=member["process_started_at"], expected_role="worker")
+        model = _usage_assignment(node_id)
+        accepted = _usage_store().record_many(
+            node_id, member.get("host") or node_id, points, now=now,
+            expected_pid=member["process_pid"], expected_start=member["process_started_at"],
+            expected_role="worker", model=model, context=_usage_node_context(member, model))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, sqlite3.Error):
+        raise HTTPException(503, "usage recording unavailable; previous history retained") from None
+    return {"accepted": accepted, "duplicates": len(points) - accepted,
+            "last_successful_save": _usage_store().last_successful_save}
+
+
+def _proxy_master_usage(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not STATE.master_host or not STATE.join_key:
+        raise HTTPException(503, "master usage history unavailable")
+    try:
+        response = http_clients.control_client().get(
+            f"{_master_control_base()}{path}", params=params,
+            headers={"X-Kllm-Key": STATE.join_key}, timeout=5.0)
+        if response.status_code != 200:
+            raise HTTPException(response.status_code if response.status_code in (400, 404, 422) else 503,
+                                "master usage history unavailable" if response.status_code >= 500 else response.text[:256])
+        return response.json()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, "master usage history unavailable") from None
+
+
+@app.get("/v1/usage/live")
+def usage_live() -> dict[str, Any]:
+    if STATE.role == "worker":
+        global _worker_usage_last_save
+        try:
+            data = _proxy_master_usage("/v1/usage/live")
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                raise HTTPException(503, {"message": "master usage history unavailable; check private control connection",
+                                          "recording": "interrupted", "error": _worker_usage_error or "master unavailable",
+                                          "last_successful_save": _worker_usage_last_save}) from None
+            raise
+        _worker_usage_last_save = data.get("recording", {}).get("last_successful_save") or _worker_usage_last_save
+        if _worker_usage_error:
+            if STATE.node_id in data.get("nodes", {}):
+                data["nodes"][STATE.node_id]["error"] = _worker_usage_error
+            data["recording"] = {**data["recording"], "recording": "interrupted", "error": _worker_usage_error}
+        return data
+    _sync_master_liveness(shrink=True)
+    try:
+        store = _usage_store()
+        members = dict(STATE.members) if STATE.role == "master" else {}
+        known = store.known_nodes()
+        now = datetime.now(timezone.utc)
+        nodes = {}
+        for node_id in members.keys() | known.keys():
+            member = members.get(node_id)
+            meta = member or known[node_id]
+            point = store.latest(node_id)
+            age = max(0, (now - usage.parse_utc(point["observed_at"])).total_seconds()) if point else None
+            connected = member is not None
+            current = bool(member and member.get("process_pid") and member.get("process_started_at")
+                           and point and point["pid"] == member["process_pid"]
+                           and usage.parse_utc(point["process_started_at"]) == usage.parse_utc(member["process_started_at"]))
+            nodes[node_id] = {
+                "node_id": node_id, "host": meta.get("host") or node_id,
+                "role": meta.get("role", "worker"), "backend": meta.get("actual_backend") or meta.get("backend"),
+                "devices": meta.get("devices") or [], "unified_memory": bool(meta.get("unified_memory")),
+                "total_ram_bytes": meta.get("total_ram_bytes"), "vram_bytes": meta.get("vram_bytes"),
+                "assignment": _usage_assignment(node_id) if member else meta.get("assignment"),
+                "connected": connected, "process_state": "running" if current else "no managed process" if connected else "unobserved",
+                "reading": point if current or not connected else None,
+                "age_seconds": round(age, 1) if point and (current or not connected) else None,
+                "freshness": "fresh" if connected and current and age is not None and age < 10 else "stale" if point and (current or not connected) else "unavailable",
+            }
+        relationships = [
+            {"from_node_id": STATE.node_id, "to_node_id": node_id, "kind": "master-worker"}
+            for node_id, member in members.items()
+            if node_id != STATE.node_id and member.get("role") == "worker"
+        ]
+        recording = store.coverage()
+        if STATE.role != "master" and recording["recording"] != "failed":
+            recording["recording"] = "interrupted"
+        return {"nodes": nodes, "relationships": relationships, "recording": recording}
+    except (OSError, sqlite3.Error):
+        raise HTTPException(503, "usage history unavailable; previously saved records preserved") from None
+
+
+def _usage_read(action) -> dict[str, Any]:
+    try:
+        return action()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (OSError, sqlite3.Error):
+        raise HTTPException(503, "usage history unavailable; previously saved records preserved") from None
+
+
+@app.get("/v1/usage/lifetimes")
+def usage_lifetimes(node_id: str = Query(min_length=1, max_length=128)) -> dict[str, Any]:
+    if STATE.role == "worker":
+        return _proxy_master_usage("/v1/usage/lifetimes", {"node_id": node_id})
+
+    def query():
+        store = _usage_store()
+        known = store.known_nodes()
+        member = STATE.members.get(node_id)
+        if node_id not in known and not member:
+            raise LookupError("unknown node")
+        meta = member or known[node_id]
+        return {"node_id": node_id, "host": meta.get("host") or node_id,
+                "connected": member is not None, "lifetimes": store.lifetimes(node_id),
+                "retained_node_ids": sorted(known), **store.coverage(node_id)}
+
+    return _usage_read(query)
+
+
+@app.get("/v1/usage/series")
+def usage_series(node_id: str = Query(min_length=1, max_length=128),
+                 lifetime_id: str = Query(min_length=1, max_length=256),
+                 window: Literal["15m", "1h", "24h"] = "15m") -> dict[str, Any]:
+    if STATE.role == "worker":
+        return _proxy_master_usage("/v1/usage/series", {"node_id": node_id, "lifetime_id": lifetime_id, "window": window})
+    return _usage_read(lambda: _usage_store().series(node_id, lifetime_id, window))
+
+
+@app.get("/v1/usage/readings")
+def usage_readings(node_id: str = Query(min_length=1, max_length=128),
+                   lifetime_id: str = Query(min_length=1, max_length=256),
+                   window: Literal["15m", "1h", "24h"] = "15m",
+                   limit: int = Query(default=500, ge=1, le=1000),
+                   cursor: str | None = Query(default=None, max_length=2048)) -> dict[str, Any]:
+    params = {"node_id": node_id, "lifetime_id": lifetime_id, "window": window, "limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    if STATE.role == "worker":
+        return _proxy_master_usage("/v1/usage/readings", params)
+    return _usage_read(lambda: _usage_store().readings(node_id, lifetime_id, window, limit=limit, cursor=cursor))
+
+
+def _logs_snapshot(
+    n: int,
+    node: str | None,
+    source: str | None,
+    after: str | None = None,
+) -> dict[str, Any]:
     origin = "cluster" if STATE.role == "master" else "local"
-    return {
-        "lines": cluster_log.HUB.recent(n, node, source),
-        "source": origin,
-    }
+    local_node = node
+    if STATE.role == "worker" and not local_node:
+        local_node = STATE.node_id
+    try:
+        snap = cluster_log.HUB.snapshot(n, local_node, source, after)
+    except cluster_log.CursorError as exc:
+        raise HTTPException(400, f"invalid log cursor: {exc}") from exc
+    snap["source"] = origin
+    return snap
+
+
+def _ensure_log_journal() -> None:
+    try:
+        cluster_log.HUB.ensure_journal_loaded()
+    except OSError as exc:
+        raise HTTPException(503, "cluster log journal is temporarily unavailable; retry") from exc
 
 
 def _logs_sse(
@@ -1829,8 +2184,11 @@ def _logs_sse(
     node: str | None,
     source: str | None,
 ) -> StreamingResponse:
+    local_node = node
+    if STATE.role == "worker" and not local_node:
+        local_node = STATE.node_id
     return StreamingResponse(
-        iterate_in_threadpool(cluster_log.HUB.iter_sse(n, follow, node, source)),
+        iterate_in_threadpool(cluster_log.HUB.iter_sse(n, follow, local_node, source)),
         media_type="text/event-stream",
     )
 
@@ -1840,6 +2198,7 @@ def _try_proxy_master_logs(
     follow: bool,
     node: str | None,
     source: str | None,
+    after: str | None = None,
 ) -> dict[str, Any] | StreamingResponse | None:
     import httpx as httpx_mod
 
@@ -1848,48 +2207,54 @@ def _try_proxy_master_logs(
         params["node"] = node
     if source:
         params["source"] = source
+    if after:
+        params["after"] = after
     headers = {}
     if STATE.join_key:
         headers["X-Kllm-Key"] = STATE.join_key
     url = f"{_master_control_base()}/v1/logs"
-    try:
-        if follow:
-            client = httpx_mod.Client(timeout=None)
+    if follow:
+        client = httpx_mod.Client(timeout=None)
+        try:
+            resp = client.send(
+                client.build_request("GET", url, params=params, headers=headers),
+                stream=True,
+            )
+        except Exception:
+            client.close()
+            return None
+        if resp.status_code != 200:
+            status = resp.status_code
+            resp.close()
+            client.close()
+            raise HTTPException(status, f"master log request returned HTTP {status}")
+
+        def _gen():
             try:
-                resp = client.send(
-                    client.build_request("GET", url, params=params, headers=headers),
-                    stream=True,
-                )
-            except Exception:
-                client.close()
-                return None
-            if resp.status_code != 200:
+                for chunk in resp.iter_bytes():
+                    yield chunk
+            finally:
                 resp.close()
                 client.close()
-                return None
 
-            def _gen():
-                try:
-                    for chunk in resp.iter_bytes():
-                        yield chunk
-                finally:
-                    resp.close()
-                    client.close()
-
-            return StreamingResponse(
-                iterate_in_threadpool(_gen()),
-                media_type="text/event-stream",
-            )
+        return StreamingResponse(
+            iterate_in_threadpool(_gen()),
+            media_type="text/event-stream",
+        )
+    try:
         with httpx_mod.Client(timeout=2.0) as client:
             resp = client.get(url, params=params, headers=headers)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        if not isinstance(data, dict):
-            return None
-        return data
     except Exception:
         return None
+    if resp.status_code != 200:
+        raise HTTPException(resp.status_code, f"master log request returned HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(502, "master returned an invalid log response") from None
+    if not isinstance(data, dict):
+        raise HTTPException(502, "master returned an invalid log response")
+    return data
 
 
 @app.post("/v1/logs")
@@ -1899,8 +2264,11 @@ def ingest_logs(
 ) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(403, "only the master accepts log ingest")
+    _ensure_log_journal()
     events = [
-        cluster_log.make_event(body.node_id, item.source, item.line, ts=item.ts)
+        cluster_log.make_event(
+            body.node_id, item.source, item.line, ts=item.ts, event_id=item.event_id
+        )
         for item in body.lines
     ]
     ingested = cluster_log.HUB.ingest(events, persist=True)
@@ -1913,15 +2281,40 @@ def get_logs(
     follow: bool = False,
     node: str | None = None,
     source: str | None = None,
+    after: str | None = None,
 ):
     n = max(1, min(int(n), 5000))
     if source and source not in cluster_log.VALID_SOURCES:
         raise HTTPException(400, "source must be agent, llama, or rpc")
+    if after is not None:
+        if follow:
+            raise HTTPException(400, "after cannot be combined with follow")
+        try:
+            cluster_log.parse_cursor(after)
+        except cluster_log.CursorError as exc:
+            raise HTTPException(400, f"invalid log cursor: {exc}") from exc
     if STATE.role == "master":
-        cluster_log.HUB.ensure_journal_loaded()
+        _ensure_log_journal()
     if STATE.role == "worker" and STATE.master_host:
-        proxied = _try_proxy_master_logs(n, follow, node, source)
+        proxied = _try_proxy_master_logs(n, follow, node, source, after)
         if proxied is not None:
+            if isinstance(proxied, dict):
+                try:
+                    cluster_log.parse_cursor(proxied.get("cursor"))
+                except cluster_log.CursorError as exc:
+                    raise HTTPException(
+                        502,
+                        "master does not support valid incremental log snapshots",
+                    ) from exc
+                if not isinstance(proxied.get("lines"), list) or any(
+                    not isinstance(line, dict)
+                    or cluster_log.normalize_event_id(line.get("event_id")) is None
+                    for line in proxied["lines"]
+                ):
+                    raise HTTPException(
+                        502,
+                        "master does not support identified incremental log entries",
+                    )
             return proxied
         warning = "master unreachable; showing local logs"
         if follow:
@@ -1929,19 +2322,21 @@ def get_logs(
                 yield cluster_log.encode_sse(
                     cluster_log.make_event("kllm", "agent", warning)
                 )
-                yield from cluster_log.HUB.iter_sse(n, True, node, source)
+                yield from cluster_log.HUB.iter_sse(
+                    n, True, node or STATE.node_id, source
+                )
 
             return StreamingResponse(
                 iterate_in_threadpool(_gen_local()),
                 media_type="text/event-stream",
             )
-        snap = _logs_snapshot(n, node, source)
+        snap = _logs_snapshot(n, node, source, after)
         snap["warning"] = warning
         snap["source"] = "local"
         return snap
     if follow:
         return _logs_sse(n, True, node, source)
-    return _logs_snapshot(n, node, source)
+    return _logs_snapshot(n, node, source, after)
 
 
 def _maybe_remember(body: PlanBody | RunBody) -> None:
@@ -1962,6 +2357,48 @@ def get_model_settings(model: str) -> dict[str, Any]:
         "parameter_set": RunSettingsFields.default_snapshot(model),
         "updated_at": None,
     }
+
+
+@app.get("/v1/run-capabilities")
+def run_capabilities(model: str | None = None) -> dict[str, Any]:
+    from kllm.chat_templates import PRESETS
+    from kllm.gguf_meta import read_inference_metadata
+    from kllm.run_settings import available_threads
+
+    metadata = read_inference_metadata(model_ops.resolve_local_model(model), include_template=True) if model else None
+    return {"threads_max": available_threads(),
+            "template_embedded": bool(metadata and metadata.get("has_chat_template")),
+            "template_text": (metadata or {}).get("chat_template_text"),
+            "templates": [{"id": key, "label": label} for key, (label, _) in PRESETS.items()]}
+
+
+class TemplateCheckBody(BaseModel):
+    text: str
+
+
+@app.post("/v1/chat-template/validate")
+def validate_chat_template(body: TemplateCheckBody) -> dict[str, Any]:
+    from kllm.chat_templates import MAX_TEMPLATE_BYTES
+    import subprocess
+    import tempfile
+
+    if not body.text or len(body.text.encode("utf-8")) > MAX_TEMPLATE_BYTES:
+        raise HTTPException(400, "template must be between 1 byte and 64 KiB")
+    binary = native.resolve_llama_server(str(repo_root()) if repo_root() else None)
+    if not binary:
+        raise HTTPException(503, "llama-server unavailable")
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "draft.jinja"
+        path.write_text(body.text, encoding="utf-8")
+        try:
+            check = subprocess.run([binary, "--jinja", "--chat-template-file", str(path), "--help"],
+                                   capture_output=True, text=True, timeout=10,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(503, f"template check unavailable: {exc}") from exc
+    if check.returncode:
+        raise HTTPException(400, (check.stderr or check.stdout)[-2000:])
+    return {"valid": True, "detail": "Engine parsed a sample message; model compatibility is unverified."}
 
 
 class ModelSettingsBody(BaseModel):
@@ -1995,13 +2432,18 @@ def _guard_context(body: PlanBody | RunBody) -> None:
 
 
 @app.post("/v1/plan")
-def plan(body: PlanBody) -> dict[str, Any]:
+def plan(body: PlanBody, preview: bool = False) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "plan requires master role")
     _ensure_master_member(persist=True)
     _guard_context(body)
     merge_and_sanitize_extra(body)
     result = execute_plan(body, STATE.members)
+    if preview:
+        return result
+    if STATE.process_pid:
+        _maybe_remember(body)
+        return result
     path = model_ops.resolve_local_model(body.model)
     STATE.last_plan = result
     STATE.model_name = path.name

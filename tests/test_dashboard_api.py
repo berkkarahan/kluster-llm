@@ -38,6 +38,411 @@ def test_list_models_empty(client):
     assert r.json()["data"] == []
 
 
+def test_usage_ingest_private_identity_and_durable_ack(client):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "secret-key"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    agent.STATE.members["w1"] = {
+        "node_id": "w1", "role": "worker", "host": "worker", "last_seen": now.timestamp(),
+        "process_pid": 12, "process_role": "worker", "process_started_at": started,
+    }
+    point = {
+        "lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
+        "process_role": "worker", "observed_at": usage.utc(now),
+        "process": {"cpu_percent_machine": 12.5, "rss_bytes": 2 * 1024**3},
+        "host": {"cpu_percent": 20, "used_bytes": 4 * 1024**3, "total_bytes": 8 * 1024**3},
+        "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
+    body = {"node_id": "w1", "readings": [point]}
+    assert c.post("/v1/usage/ingest", json=body).status_code == 401
+    headers = {"X-Kllm-Key": "secret-key"}
+    assert c.post("/v1/usage/ingest", json=body, headers=headers).json()["accepted"] == 1
+    assert c.post("/v1/usage/ingest", json=body, headers=headers).json()["duplicates"] == 1
+    assert agent.STATE.members["w1"]["last_seen"] == now.timestamp()
+    bad = {**body, "readings": [{**point, "pid": 13}]}
+    assert c.post("/v1/usage/ingest", json=bad, headers=headers).status_code == 400
+    assert c.post("/v1/usage/ingest", json={**body, "extra": "secret"}, headers=headers).status_code in (400, 422)
+    assert c.post("/v1/usage/ingest", json={**body, "readings": [point] * 9}, headers=headers).status_code == 400
+    assert c.post("/v1/usage/ingest", content=iter((b" " * 32768, b" " * 32769)),
+                  headers={**headers, "Content-Type": "application/json"}).status_code == 400
+    assert c.post("/v1/usage/ingest", json={"node_id": "unknown", "readings": [point]}, headers=headers).status_code == 400
+    assert agent.app.state.usage_store.count() == 1
+
+    second = {**point, "observed_at": usage.utc(now + timedelta(seconds=2))}
+    third = {**point, "observed_at": usage.utc(now + timedelta(seconds=4))}
+    store = agent.app.state.usage_store
+    previous_save = store.last_successful_save
+    write = store._write
+
+    def fail_second(*args, **kwargs):
+        if args[2]["observed_at"] == third["observed_at"]:
+            raise sqlite3.OperationalError("disk full")
+        return write(*args, **kwargs)
+
+    import sqlite3
+    from unittest.mock import patch as mock_patch
+
+    with mock_patch.object(store, "_write", fail_second):
+        failed = c.post("/v1/usage/ingest", json={**body, "readings": [second, third]}, headers=headers)
+    assert failed.status_code == 503
+    assert store.count() == 1
+    assert store.last_successful_save == previous_save
+    saved = c.post("/v1/usage/ingest", json={**body, "readings": [point, second]}, headers=headers).json()
+    assert (saved["accepted"], saved["duplicates"], store.count()) == (1, 1, 2)
+
+
+def test_usage_live_stale_departed_and_worker_proxy(client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    agent.STATE.role = "master"
+    agent.STATE.node_id = "master"
+    agent.STATE.members = {
+        "master": {"node_id": "master", "role": "master", "host": "same"},
+        "w1": {"node_id": "w1", "role": "worker", "host": "same", "backend": "cpu",
+               "process_pid": 12, "process_started_at": started, "last_seen": now.timestamp(),
+               "total_ram_bytes": 8 * 1024**3, "devices": [{"index": 0, "name": "GPU", "vram_bytes": 4 * 1024**3}]},
+    }
+    point = {
+        "lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
+        "process_role": "worker", "observed_at": usage.utc(now - timedelta(seconds=11)),
+        "process": {"cpu_percent_machine": 12.5, "rss_bytes": 2 * 1024**3},
+        "host": {"cpu_percent": 20, "used_bytes": 4 * 1024**3, "total_bytes": 8 * 1024**3},
+        "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
+    agent.app.state.usage_store.record("w1", "same", point, now=now,
+                                       context={"backend": "cpu", "total_ram_bytes": 8 * 1024**3,
+                                                "devices": [{"index": 0, "name": "GPU", "vram_bytes": 4 * 1024**3}],
+                                                "assignment": "model.gguf"})
+    body = c.get("/v1/usage/live").json()
+    assert set(body["nodes"]) == {"master", "w1"}
+    assert body["nodes"]["w1"]["freshness"] == "stale"
+    assert body["nodes"]["w1"]["reading"]["process"]["rss_bytes"] == 2 * 1024**3
+    assert body["relationships"] == [{"from_node_id": "master", "to_node_id": "w1", "kind": "master-worker"}]
+    agent.STATE.members.pop("w1")
+    departed = c.get("/v1/usage/live").json()["nodes"]["w1"]
+    assert departed["connected"] is False
+    assert departed["backend"] == "cpu" and departed["total_ram_bytes"] == 8 * 1024**3
+    assert departed["devices"][0]["name"] == "GPU"
+    assert departed["assignment"] == "model.gguf"
+    agent.STATE.members["w1"] = {"node_id": "w1", "role": "worker", "host": "same", "last_seen": now.timestamp()}
+    assert list(c.get("/v1/usage/live").json()["nodes"]).count("w1") == 1
+    agent.STATE.members.pop("w1")
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "10.0.0.1"
+    agent.STATE.join_key = "secret-key"
+    requests = []
+
+    class FakeControl:
+        def get(self, path, **kwargs):
+            requests.append((path, kwargs))
+            return SimpleNamespace(status_code=200, json=lambda: body)
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(agent.http_clients, "control_client", lambda: FakeControl())
+    assert c.get("/v1/usage/live").json() == body
+    assert requests[0][1]["headers"] == {"X-Kllm-Key": "secret-key"}
+
+
+def test_usage_live_never_attributes_old_reading_to_stopped_or_new_child(client):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    agent.STATE.role = "master"
+    agent.STATE.node_id = "master"
+    agent.STATE.members = {
+        "master": {"node_id": "master", "role": "master", "host": "same"},
+        "w1": {"node_id": "w1", "role": "worker", "host": "same", "process_pid": 12,
+               "process_started_at": started, "last_seen": now.timestamp()},
+    }
+    point = {"lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
+             "process_role": "worker", "observed_at": usage.utc(now),
+             "process": {"cpu_percent_machine": 10, "rss_bytes": 1024},
+             "host": {"cpu_percent": 5, "used_bytes": 1024, "total_bytes": 4096},
+             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    agent.app.state.usage_store.record("w1", "same", point, now=now)
+    assert c.get("/v1/usage/live").json()["nodes"]["w1"]["reading"]["pid"] == 12
+    for pid in (None, 13):
+        agent.STATE.members["w1"]["process_pid"] = pid
+        result = c.get("/v1/usage/live").json()["nodes"]["w1"]
+        assert result["reading"] is None
+        assert result["freshness"] == "unavailable"
+        assert c.get("/v1/usage/lifetimes", params={"node_id": "w1"}).json()["lifetimes"]
+
+
+def test_stopped_master_still_exposes_retained_history(client):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    node = agent.STATE.node_id
+    point = {"lifetime_id": f"{node}:12:{started}", "pid": 12, "process_started_at": started,
+             "process_role": "master", "observed_at": usage.utc(now),
+             "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
+             "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
+             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    agent.app.state.usage_store.record(node, "local", point, now=now)
+    agent.STATE.members.clear()
+    agent.STATE.role = "idle"
+    live = c.get("/v1/usage/live").json()
+    assert live["relationships"] == []
+    assert live["nodes"][node]["connected"] is False
+    assert live["nodes"][node]["freshness"] == "stale"
+    assert live["recording"]["recording"] == "interrupted"
+    assert c.get("/v1/usage/lifetimes", params={"node_id": node}).json()["lifetimes"][0]["pid"] == 12
+
+
+def test_live_usage_sweeps_expired_members_without_status_poll(client, monkeypatch):
+    import time
+
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    agent.STATE.members["late"] = {"node_id": "late", "role": "worker", "host": "worker",
+                                   "last_seen": time.time() - 30}
+    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", lambda *_: None)
+    result = c.get("/v1/usage/live").json()
+    assert "late" not in agent.STATE.members
+    assert "late" not in result["nodes"]  # No retained observations for this node.
+    assert all(link["to_node_id"] != "late" for link in result["relationships"])
+
+
+def test_usage_collector_runs_without_dashboard(client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from kllm import usage
+
+    _, agent, _ = client
+    started = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()
+    process = SimpleNamespace(create_time=lambda: started, cpu_percent=lambda interval=None: 80,
+                              memory_info=lambda: SimpleNamespace(rss=2048))
+    monkeypatch.setattr(usage.psutil, "Process", lambda pid: process)
+    monkeypatch.setattr(usage.psutil, "cpu_count", lambda logical: 8)
+    monkeypatch.setattr(usage.psutil, "cpu_percent", lambda interval=None: 10)
+    monkeypatch.setattr(usage.psutil, "virtual_memory", lambda: SimpleNamespace(used=2048, total=4096))
+    agent.STATE.role = "master"
+    agent.STATE.process_pid = 42
+    agent.STATE.process_role = "master"
+    agent.STATE.members[agent.STATE.node_id] = {"node_id": agent.STATE.node_id, "host": "master", "role": "master"}
+    ticks = iter((False, False, True))
+    monkeypatch.setattr(agent._background_stop, "wait", lambda interval: next(ticks))
+    agent._usage_loop()
+    store = agent.app.state.usage_store
+    assert store.count() == 2
+    assert store.latest(agent.STATE.node_id)["process"]["cpu_percent_machine"] == 10
+
+
+def test_worker_ingest_failure_is_visible_without_stopping_inference(client, monkeypatch):
+    from types import SimpleNamespace
+    from kllm import usage
+
+    c, agent, _ = client
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "127.0.0.1"
+    agent.STATE.join_key = "private-key"
+    agent.STATE.process_pid = 99
+    agent.STATE.process_role = "worker"
+    monkeypatch.setattr(usage.Sampler, "sample", lambda *_: {"pid": 99})
+    monkeypatch.setattr(agent.http_clients, "control_client", lambda: SimpleNamespace(
+        post=lambda *a, **k: SimpleNamespace(status_code=503)))
+    ticks = iter((False, True))
+    monkeypatch.setattr(agent._background_stop, "wait", lambda _: next(ticks))
+    agent._usage_loop()
+    monkeypatch.setattr(agent, "_proxy_master_usage", lambda *a, **k: {
+        "nodes": {agent.STATE.node_id: {"node_id": agent.STATE.node_id, "reading": None, "connected": True}},
+        "recording": {"recording": "recording", "last_successful_save": "2026-09-28T12:00:00Z"}})
+    response = c.get("/v1/usage/live").json()
+    assert response["recording"]["recording"] == "interrupted"
+    assert response["recording"]["last_successful_save"] == "2026-09-28T12:00:00Z"
+    assert "ingest" in response["nodes"][agent.STATE.node_id]["error"]
+    assert "private-key" not in str(response)
+    assert agent.STATE.process_pid == 99
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(agent, "_proxy_master_usage", lambda *a, **k: (_ for _ in ()).throw(
+        HTTPException(503, "master usage history unavailable")))
+    missing = c.get("/v1/usage/live")
+    assert missing.status_code == 503
+    assert missing.json()["detail"]["recording"] == "interrupted"
+    assert missing.json()["detail"]["last_successful_save"] == "2026-09-28T12:00:00Z"
+    assert "ingest" in missing.json()["detail"]["error"]
+
+
+def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+    from kllm.state import ClusterState
+
+    c, agent, _ = client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    master = ClusterState(node_id="master", role="master", join_key="secret")
+    master.members["w1"] = {"node_id": "w1", "host": "worker", "role": "worker",
+                            "process_pid": 99, "process_started_at": started, "process_role": "worker"}
+    worker = ClusterState(node_id="w1", role="worker", master_host="master", join_key="secret",
+                          process_pid=99, process_role="worker")
+    point = {"lifetime_id": f"w1:99:{started}", "pid": 99, "process_started_at": started,
+             "process_role": "worker", "observed_at": usage.utc(now),
+             "process": {"cpu_percent_machine": None, "rss_bytes": 2048},
+             "host": {"cpu_percent": 0, "used_bytes": 2048, "total_bytes": 4096}, "devices": [],
+             "availability": {"process_cpu": "initializing", "process_rss": "measured"}}
+
+    class PrivateControl:
+        def post(self, url, **kwargs):
+            assert kwargs["headers"] == {"X-Kllm-Key": "secret"}
+            agent.STATE = master
+            try:
+                return c.post("/v1/usage/ingest", json=kwargs["json"], headers=kwargs["headers"])
+            finally:
+                agent.STATE = worker
+
+        def get(self, url, **kwargs):
+            assert kwargs["headers"] == {"X-Kllm-Key": "secret"}
+            agent.STATE = master
+            try:
+                return c.get(url[url.index("/v1/"):], params=kwargs.get("params"))
+            finally:
+                agent.STATE = worker
+
+    monkeypatch.setattr(agent.http_clients, "control_client", lambda: PrivateControl())
+    monkeypatch.setattr(agent, "_master_control_base", lambda: "http://master:18765")
+    monkeypatch.setattr(usage.Sampler, "sample", lambda *_: point)
+    ticks = iter((False, True))
+    monkeypatch.setattr(agent._background_stop, "wait", lambda _: next(ticks))
+    agent.STATE = worker
+    agent._usage_loop()
+    assert agent.app.state.usage_store.count() == 1
+    response = c.get("/v1/usage/readings", params={"node_id": "w1", "lifetime_id": point["lifetime_id"]})
+    assert response.status_code == 200
+    assert response.json()["readings"][0]["process"]["rss_bytes"] == 2048
+    assert "secret" not in str(response.json())
+    assert c.get("/v1/usage/live").json()["nodes"]["w1"]["reading"]["pid"] == 99
+
+
+def test_failed_liveness_history_save_keeps_last_successful_save(client, monkeypatch):
+    import sqlite3
+    import time
+
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    agent.STATE.members["w1"] = {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30}
+    store = agent.app.state.usage_store
+    store.last_successful_save = "2026-09-28T12:00:00Z"
+    monkeypatch.setattr(store, "end_node", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")))
+    agent._sync_master_liveness(shrink=False)
+    status = c.get("/v1/usage/live").json()["recording"]
+    assert status["recording"] == "failed"
+    assert status["last_successful_save"] == "2026-09-28T12:00:00Z"
+    assert "disk full" in status["error"]
+
+
+def test_corrupt_saved_usage_is_server_failure_not_bad_browser_input(client):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    agent.STATE.role = "master"
+    point = {"lifetime_id": f"worker:12:{started}", "pid": 12, "process_started_at": started,
+             "process_role": "worker", "observed_at": usage.utc(now),
+             "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
+             "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
+             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    agent.app.state.usage_store.record("worker", "host", point, now=now)
+    with agent.app.state.usage_store.db:
+        agent.app.state.usage_store.db.execute("UPDATE readings SET payload='{' WHERE node_id='worker'")
+    response = c.get("/v1/usage/readings", params={"node_id": "worker", "lifetime_id": point["lifetime_id"]})
+    assert response.status_code == 503
+    assert "history unavailable" in response.json()["detail"]
+
+
+def test_malformed_saved_usage_times_report_503_not_client_error(client):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    began = usage.utc(now - timedelta(minutes=1))
+    agent.STATE.role = "master"
+    node = agent.STATE.node_id
+    point = {"lifetime_id": f"{node}:12:{began}", "pid": 12, "process_started_at": began,
+             "process_role": "master", "observed_at": usage.utc(now),
+             "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
+             "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
+             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    store = agent.app.state.usage_store
+    store.record(node, "master", point, now=now)
+    with store.db:
+        store.db.execute("UPDATE readings SET payload=? WHERE node_id=?",
+                         (json.dumps({**point, "observed_at": "invalid"}), node))
+    safe = TestClient(agent.app, raise_server_exceptions=False)
+    assert safe.get("/v1/usage/live").status_code == 503
+    with store.db:
+        store.db.execute("INSERT OR REPLACE INTO meta VALUES('storage_truncated','1')")
+        store.db.execute("INSERT OR REPLACE INTO meta VALUES('storage_truncated_at','invalid')")
+    assert safe.get("/v1/usage/lifetimes", params={"node_id": node}).status_code == 503
+
+
+def test_usage_history_filters_errors_and_departed_node(client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from kllm import usage
+
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    started = usage.utc(now - timedelta(minutes=1))
+    point = {"lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
+             "process_role": "worker", "observed_at": usage.utc(now - timedelta(seconds=2)),
+             "process": {"cpu_percent_machine": 0, "rss_bytes": 0},
+             "host": {"cpu_percent": 0, "used_bytes": 0, "total_bytes": 1024},
+             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    agent.app.state.usage_store.record("w1", "departed", point, now=now)
+    agent.app.state.usage_store.record("w1", "departed", {**point, "observed_at": usage.utc(now - timedelta(seconds=1))}, now=now)
+    assert c.get("/v1/usage/lifetimes", params={"node_id": "unknown"}).status_code == 404
+    lifetimes = c.get("/v1/usage/lifetimes", params={"node_id": "w1"}).json()
+    assert lifetimes["connected"] is False
+    assert lifetimes["lifetimes"][0]["pid"] == 12
+    filters = {"node_id": "w1", "lifetime_id": point["lifetime_id"], "window": "15m"}
+    series = c.get("/v1/usage/series", params=filters).json()
+    assert len(series["buckets"]) <= 720
+    page = c.get("/v1/usage/readings", params={**filters, "limit": 1}).json()
+    assert page["readings"][0]["process"]["cpu_percent_machine"] == 0
+    import base64
+
+    forged = json.loads(base64.urlsafe_b64decode(page["next_cursor"]))
+    forged["start"] = usage.utc(now - timedelta(hours=1))
+    invalid = base64.urlsafe_b64encode(json.dumps(forged).encode()).decode()
+    assert c.get("/v1/usage/readings", params={**filters, "cursor": invalid}).status_code == 400
+    assert c.get("/v1/usage/series", params={**filters, "window": "wrong"}).status_code in (400, 422)
+    assert c.get("/v1/usage/readings", params={**filters, "limit": 1001}).status_code in (400, 422)
+    assert c.get("/v1/usage/readings", params={**filters, "cursor": "broken"}).status_code == 400
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "10.0.0.1"
+    agent.STATE.join_key = "secret"
+
+    class FakeControl:
+        def get(self, url, **kwargs):
+            assert kwargs["headers"] == {"X-Kllm-Key": "secret"}
+            return SimpleNamespace(status_code=200, json=lambda: lifetimes)
+
+    from types import SimpleNamespace
+    monkeypatch.setattr(agent.http_clients, "control_client", lambda: FakeControl())
+    assert c.get("/v1/usage/lifetimes", params={"node_id": "w1"}).json() == lifetimes
+
+
 def test_list_models_with_file(client, tmp_path, monkeypatch):
     c, agent, _ = client
     import os

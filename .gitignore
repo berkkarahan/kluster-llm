@@ -60,3 +60,5 @@ build/
 dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
+
+.specify

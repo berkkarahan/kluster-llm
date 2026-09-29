@@ -7,7 +7,7 @@ Thumbs.db
 
 # Logs
 *.log
-logs/
+/logs/
 
 # Local benchmark / validation artifacts (compare_inference.py --output)
 /benchmark-*.json

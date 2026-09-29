@@ -563,6 +563,10 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       const logsText = await evaluate("document.querySelector('.logs-scroll').textContent");
       assert.match(logsText, /boot ok/);
       assert.match(logsText, /worker ready/);
+      assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg').textContent"), 'worker ready',
+        'the newest log is the first row');
+      assert.equal(await evaluate("document.querySelectorAll('.logs-row .logs-msg')[1].textContent"), 'boot ok',
+        'the older log follows the newest row');
       assert.match(logsText, /rpc/);
       assert.match(logsText, /master/);
       assert.match(await evaluate("document.querySelector('.logs-ts').textContent"), /Z$/);
@@ -631,15 +635,17 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       await wait("document.querySelectorAll('.logs-row').length === 200");
       await wait("document.querySelectorAll('.logs-row').length === 2000");
       const anchor = await evaluate(`(() => { const pane = document.querySelector('.logs-scroll');
-        pane.scrollTop = 100; pane.dispatchEvent(new Event('scroll'));
+        const oldest = pane.querySelector('.logs-row:last-child');
+        pane.scrollTop += oldest.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+        pane.dispatchEvent(new Event('scroll'));
         return [...pane.querySelectorAll('.logs-row')].find((r) => r.getBoundingClientRect().bottom > pane.getBoundingClientRect().top + 1)?.dataset.eventId; })()`);
       assert.ok(anchor, 'reading position must identify an anchored row before trimming');
-      await wait("document.querySelector('.logs-row')?.dataset.eventId === '00000000-0000-4000-8000-000000000201'");
+      await wait("document.querySelector('.logs-scroll .logs-row:last-child')?.dataset.eventId === '00000000-0000-4000-8000-000000000201'");
       assert.equal(await evaluate(`document.querySelector('.logs-row[data-event-id="${anchor}"]') === null`), true,
         'the original visible anchor must actually be trimmed in this scenario');
       const anchorAfterTrim = await evaluate(`(() => { const pane = document.querySelector('.logs-scroll');
-        const first = pane.querySelector('.logs-row'); const box = pane.getBoundingClientRect();
-        return { id: first?.dataset.eventId, rowTop: first?.getBoundingClientRect().top, paneTop: box.top,
+        const oldest = pane.querySelector('.logs-row:last-child'); const box = pane.getBoundingClientRect();
+        return { id: oldest?.dataset.eventId, rowTop: oldest?.getBoundingClientRect().top, paneTop: box.top,
           text: document.body.textContent }; })()`);
       assert.equal(anchorAfterTrim.id, '00000000-0000-4000-8000-000000000201');
       assert.ok(Math.abs(anchorAfterTrim.rowTop - anchorAfterTrim.paneTop) < 3,

@@ -4,5 +4,5 @@
   "here": true,
   "integration": "opencode",
   "script": "py",
-  "speckit_version": "1.0.12"
+  "speckit_version": "1.0.8"
 }

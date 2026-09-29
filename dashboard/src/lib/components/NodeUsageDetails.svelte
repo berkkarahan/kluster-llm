@@ -35,7 +35,9 @@
       {#each reading.devices as device (device.device_id)}
         <div class="border-t pt-2" style="border-color: var(--border)">
           <h3>Device {device.device_id} · device-wide {node.unified_memory ? 'shared memory' : 'memory'}</h3>
-          <p>Utilization {percent(device.utilization_percent)} · memory {formatGib(device.used_bytes)} / {formatGib(device.total_bytes)}</p>
+          <p>Utilization {percent(device.utilization_percent)} · memory {device.used_bytes == null
+            ? `usage unavailable · reported ${formatGib(device.total_bytes ?? node.devices?.find((gpu) => String(gpu.index) === device.device_id)?.vram_bytes)} capacity`
+            : `${formatGib(device.used_bytes)} used / ${formatGib(device.total_bytes ?? node.devices?.find((gpu) => String(gpu.index) === device.device_id)?.vram_bytes)} capacity`}</p>
           <p>Temperature {device.temperature_c == null ? 'unavailable' : `${device.temperature_c} °C`}
             · power {device.power_w == null ? 'unavailable' : `${device.power_w} W`}</p>
           {#if device.unavailable_reason}<p>{device.unavailable_reason}</p>{/if}

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import sqlite3
 import subprocess
+import sys
 
 import pytest
 
@@ -92,6 +93,84 @@ def test_optional_device_probe_is_bounded_and_partial_values_have_reasons(monkey
     assert all(d["utilization_percent"] is None and d["unavailable_reason"] for d in failed)
     state.members["worker"]["backend"] = "cpu"
     assert all(d["utilization_percent"] is None for d in usage._devices(state))
+
+
+def test_windows_vulkan_dedicated_memory_matches_adapter_not_gpu_order(monkeypatch):
+    state = ClusterState(node_id="worker", role="worker", members={"worker": {
+        "backend": "vulkan", "devices": [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": 16 * 1024**3},
+                                       {"index": 1, "name": "Intel UHD", "vram_bytes": 2 * 1024**3}]}})
+    monkeypatch.setattr(usage.sys, "platform", "win32")
+    monkeypatch.setattr(usage, "_windows_adapter_records", lambda: [
+        ("000000000000abcd", "AMD Radeon(TM) RX 9070 XT"),
+        ("000000000000dcba", "Intel UHD")])
+    calls = []
+
+    def probe(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout=(
+            r"\\host\gpu adapter memory(luid_0x00000000_0x0000dcba_phys_0)\dedicated usage" + "\t1024\n"
+            + r"\\host\gpu adapter memory(luid_0x00000000_0x0000abcd_phys_0)\dedicated usage" + "\t2147483648\n"
+            + r"\\host\gpu adapter memory(luid_0x00000000_0x0000eeee_phys_0)\dedicated usage" + "\t999999999\n"))
+
+    monkeypatch.setattr(usage.subprocess, "run", probe)
+    readings = usage._devices(state)
+    assert calls[0][1]["timeout"] <= 2
+    assert readings[0]["used_bytes"] == 2 * 1024**3
+    assert readings[0]["total_bytes"] == 16 * 1024**3
+    assert readings[0]["utilization_percent"] is None
+    assert readings[0]["unavailable_reason"] == "some device sensors unavailable"
+    assert readings[1]["used_bytes"] == 1024
+
+    # Missing/ambiguous identity and a counter above the card capacity are not measurements.
+    monkeypatch.setattr(usage, "_windows_adapter_records", lambda: [
+        ("000000000000abcd", "AMD Radeon RX 9070 XT"),
+        ("000000000000eeee", "AMD Radeon RX 9070 XT")])
+    assert usage._devices(state)[0]["used_bytes"] is None
+    monkeypatch.setattr(usage, "_windows_adapter_records", lambda: [("000000000000abcd", "AMD Radeon RX 9070 XT")])
+    monkeypatch.setattr(usage.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=(
+        r"\\host\gpu adapter memory(luid_0x00000000_0x0000abcd_phys_0)\dedicated usage" + "\t999999999999\n")))
+    assert usage._devices(state)[0]["used_bytes"] is None
+    monkeypatch.setattr(usage.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        subprocess.TimeoutExpired("powershell", 1.5)))
+    assert "counter unavailable" in usage._devices(state)[0]["unavailable_reason"]
+
+
+def test_windows_identical_gpu_names_do_not_share_one_counter(monkeypatch):
+    monkeypatch.setattr(usage, "_windows_adapter_records", lambda: [("000000000000abcd", "Radeon RX")])
+    monkeypatch.setattr(usage.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=(
+        r"\\host\gpu adapter memory(luid_0x00000000_0x0000abcd_phys_0)\dedicated usage" + "\t1024\n")))
+    assert usage._windows_dedicated_usage([{"index": 0, "name": "Radeon RX", "vram_bytes": 4096},
+                                          {"index": 1, "name": "Radeon RX", "vram_bytes": 4096}]) == {}
+
+
+def test_windows_directx_luid_registry_reader_skips_non_adapters(monkeypatch):
+    records = {
+        r"SOFTWARE\Microsoft\DirectX": {"children": ["ShaderCache", "{01234567-89ab-cdef-0123-456789abcdef}"]},
+        "{01234567-89ab-cdef-0123-456789abcdef}": {
+            "Description": "AMD Radeon RX 9070 XT", "AdapterLuid": 0xABCD},
+    }
+
+    class Registry:
+        HKEY_LOCAL_MACHINE = object()
+        def OpenKey(self, root, name):
+            return Key(records[name])
+        def QueryInfoKey(self, key):
+            return (len(key["children"]), 0, 0)
+        def EnumKey(self, key, index):
+            return key["children"][index]
+        def QueryValueEx(self, key, name):
+            return key[name], 0
+
+    class Key:
+        def __init__(self, value):
+            self.value = value
+        def __enter__(self):
+            return self.value
+        def __exit__(self, *_):
+            pass
+
+    monkeypatch.setitem(sys.modules, "winreg", Registry())
+    assert usage._windows_adapter_records() == [("000000000000abcd", "AMD Radeon RX 9070 XT")]
 
 
 def test_null_host_and_device_values_require_truthful_availability_and_reasons():

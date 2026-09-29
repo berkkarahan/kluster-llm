@@ -14,11 +14,40 @@
   const isWorker = $derived(appStore.status?.role === 'worker');
   const startJoinDisabled = $derived(!idle || !!appStore.busy);
   const inferenceActivity = $derived(appStore.status?.inference_activity);
-  const displayNodes = $derived.by(() => Object.fromEntries(
-    Object.entries(appStore.liveUsage?.nodes ?? {}).map(([id, node]) =>
-      [id, view !== 'live' ? { ...node, connected: false, freshness: node.reading ? 'stale' as const : 'unavailable' as const } : node]
-    )
-  ));
+  const memberIds = $derived(new Set(Object.keys(appStore.status?.members ?? {})));
+  const displayNodes = $derived.by(() => {
+    const usage = appStore.liveUsage?.nodes ?? {};
+    if (view === 'offline') {
+      return Object.fromEntries(Object.entries(usage).map(([id, node]) =>
+        [id, { ...node, connected: false, freshness: node.reading ? 'stale' as const : 'unavailable' as const }]
+      ));
+    }
+    if (view !== 'live') return {};
+    const members = appStore.status?.members ?? {};
+    return Object.fromEntries(Object.entries(members).map(([id, member]) => {
+      const existing = usage[id];
+      if (existing) return [id, existing];
+      return [id, {
+        node_id: id,
+        host: member.host || id,
+        role: member.role === 'worker' ? 'worker' as const : 'master' as const,
+        backend: member.actual_backend ?? member.backend ?? null,
+        devices: member.devices,
+        unified_memory: !!member.unified_memory,
+        total_ram_bytes: member.total_ram_bytes ?? null,
+        vram_bytes: member.vram_bytes ?? null,
+        connected: true,
+        freshness: 'unavailable' as const,
+        reading: null,
+      }];
+    }));
+  });
+  const displayRelationships = $derived(
+    view === 'live'
+      ? (appStore.liveUsage?.relationships ?? []).filter((edge) =>
+          memberIds.has(edge.from_node_id) && memberIds.has(edge.to_node_id))
+      : []
+  );
   const selectedNode = $derived(displayNodes[appStore.selectedNodeId] ?? null);
   const nodeCount = $derived(Object.keys(displayNodes).length);
   const recording = $derived(appStore.liveUsage?.recording ?? null);
@@ -234,16 +263,11 @@
     <div class="usage-topology-body">
       {#if view === 'loading'}
         <p class="mono" style="padding: 8px 10px">Loading cluster…</p>
-      {:else if idle && !nodeCount}
-        <p class="mono" style="padding: 8px 10px">No members — Start as master or Join a cluster.</p>
-      {:else if appStore.liveUsage && nodeCount}
-        {#if idle}
-          <p class="mono text-[11px]" style="padding: 6px 10px; color: var(--muted)">
-            No members — Start as master or Join a cluster. Retained history is available from the History action.
-          </p>
-        {/if}
-        <NodeMap nodes={displayNodes} relationships={view === 'live' ? appStore.liveUsage.relationships : []}
+      {:else if nodeCount}
+        <NodeMap nodes={displayNodes} relationships={displayRelationships}
           selectedId={appStore.selectedNodeId} onselect={(id) => appStore.selectedNodeId = id} />
+      {:else if idle}
+        <p class="mono" style="padding: 8px 10px">No members — Start as master or Join a cluster.</p>
       {:else}
         <p class="mono" style="padding: 8px 10px">Waiting for measured nodes…</p>
       {/if}

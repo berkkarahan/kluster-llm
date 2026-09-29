@@ -15,7 +15,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
   let statusMembers = { master: { node_id: 'master' } };
   const mockFetch = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
-    requests.push({ path, body });
+    requests.push({ path, method: options.method ?? 'GET', body });
     if (path === '/v1/config' && options.method === 'PUT') {
       savedMode = body.split_mode;
       if ('gpu_ids' in body) savedGpuIds = body.gpu_ids;
@@ -102,6 +102,9 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.doesNotMatch(hardware, /hw-split-mode|Row \(legacy|Tensor \(experimental/);
     const { default: RunPage } = await server.ssrLoadModule('/src/routes/run/+page.svelte');
     const page = render(RunPage).body;
+    const runAt = page.indexOf('>Run</button>');
+    const stopAt = page.indexOf('>Stop</button>');
+    assert.ok(runAt !== -1 && stopAt > runAt, 'Stop sits immediately after Run');
     assert.match(page, /Estimated total memory: 8\.0 GiB/);
     assert.match(page, /Estimated GPU memory: 6\.0 GiB/);
     assert.match(page, /Estimated master CPU RAM: 2\.0 GiB/);
@@ -272,7 +275,7 @@ test('model search keeps one in-flight request and forwards the selected source'
   let mode = 'held';
   const mockFetch = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
-    requests.push({ path, body });
+    requests.push({ path, method: options.method ?? 'GET', body });
     if (path === '/v1/models/search') {
       if (mode === 'held') await searchGate;
       if (mode === 'error') {
@@ -379,6 +382,37 @@ test('model search keeps one in-flight request and forwards the selected source'
     const download = requests.filter(({ path }) => path === '/v1/models/download');
     assert.equal(download.length, 1);
     assert.equal(download[0].body.source, source);
+
+    requests.length = 0;
+    appStore.status = {
+      role: 'worker', node_id: 'worker', join_key: 'secret', master_host: '10.0.0.1',
+      members: {
+        master: { node_id: 'master', host: 'example', role: 'master' },
+        worker: { node_id: 'worker', host: 'worker-host', role: 'worker' },
+      },
+    };
+    appStore.liveUsage = {
+      nodes: {
+        master: { node_id: 'master', host: 'example', role: 'master', connected: true, freshness: 'unavailable', reading: null },
+        worker: { node_id: 'worker', host: 'worker-host', role: 'worker', connected: true, freshness: 'unavailable', reading: null },
+      },
+      relationships: [{ from_node_id: 'master', to_node_id: 'worker', kind: 'master-worker' }],
+      recording: { recording: 'interrupted', last_successful_save: null },
+    };
+    await appStore.leaveCluster();
+    assert.ok(requests.some((req) => req.path === '/v1/leave' && req.method === 'POST'));
+    assert.equal(appStore.status.role, 'idle');
+    assert.deepEqual(appStore.status.members, {});
+    assert.equal(appStore.status.join_key, null);
+    assert.equal(appStore.status.master_host, null);
+    assert.deepEqual(appStore.liveUsage.nodes, {});
+    assert.deepEqual(appStore.liveUsage.relationships, []);
+
+    requests.length = 0;
+    appStore.chatStreaming = true;
+    await appStore.stopInference();
+    assert.equal(appStore.chatStreaming, false);
+    assert.ok(requests.some((req) => req.path === '/v1/inference/stop' && req.method === 'POST'));
   } finally {
     appStore?.stop();
     globalThis.fetch = originalFetch;

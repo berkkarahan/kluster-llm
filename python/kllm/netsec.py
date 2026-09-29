@@ -98,6 +98,7 @@ def pick_rpc_bind_host(preferred: str | None = None, *, toward: str | None = Non
         return ranked[0]
 
     # Fallback: UDP trick used by discovery (may still be a usable LAN IP).
+    # Deferred import: discovery imports netsec (cycle).
     from kllm.discovery import _local_ip
 
     ip = _local_ip()
@@ -501,6 +502,7 @@ def _resolve_rpc_server_path() -> str | None:
     repo_root_str = str(repo_root_path) if repo_root_path else None
 
     try:
+        # Deferred import: native loads the extension; netsec must stay importable without it.
         from kllm import native
 
         resolved = native.resolve_rpc_server(repo_root_str)

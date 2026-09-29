@@ -706,7 +706,23 @@ fn total_sack_capacity(sacks: &[Sack]) -> u64 {
     sacks.iter().map(|s| s.capacity).sum()
 }
 
-pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
+struct SplitPreamble {
+    preferred: String,
+    wv: f64,
+    wl: f64,
+    layers: u32,
+    kv: u64,
+    needed: u64,
+    sacks: Vec<Sack>,
+    total_budget: u64,
+    fit_status: FitStatus,
+    hint: String,
+    node_effective: Vec<String>,
+    node_fallbacks: Vec<bool>,
+    budgets: Vec<u64>,
+}
+
+fn prepare_split(req: &PlanRequest) -> Result<SplitPreamble, PlanError> {
     if req.nodes.is_empty() {
         return Err(PlanError::Message("at least one node is required".into()));
     }
@@ -742,6 +758,39 @@ pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
         node_fallbacks.push(nb.fallback);
         budgets.push(nb.budget);
     }
+    Ok(SplitPreamble {
+        preferred,
+        wv,
+        wl,
+        layers,
+        kv,
+        needed,
+        sacks,
+        total_budget,
+        fit_status,
+        hint,
+        node_effective,
+        node_fallbacks,
+        budgets,
+    })
+}
+
+pub fn plan_split(req: &PlanRequest) -> Result<PlanResult, PlanError> {
+    let SplitPreamble {
+        preferred,
+        wv,
+        wl,
+        layers,
+        kv,
+        needed,
+        sacks,
+        total_budget,
+        fit_status,
+        hint,
+        node_effective,
+        node_fallbacks,
+        budgets,
+    } = prepare_split(req)?;
 
     let (device_alloc, ram_alloc, vram_alloc_total, ram_alloc_total, _sack_scores) =
         greedy_fill(&sacks, needed, wv, wl);

@@ -76,9 +76,11 @@ def ensure_rpc_peers_reachable(
             unreachable.append(ep)
             continue
         try:
+            # Kept inside the probe try so a missing httpx marks this peer unreachable.
             import httpx
 
             url = f"http://{host}:{DEFAULT_CONTROL_PORT}/v1/status"
+            del httpx
             resp = http_clients.control_client().get(url, timeout=3.0)
             if resp.status_code != 200:
                 unreachable.append(ep)
@@ -245,6 +247,7 @@ def resolve_launch_settings(body: RunSettingsFields) -> dict[str, Any]:
             raise HTTPException(400, f"{key} must be positive")
     if result["context"] < 512 and not body.context_auto:
         raise HTTPException(400, "context must be >= 512")
+    # Deferred import: placement constants are checked only while resolving launch settings.
     from kllm.placement import WIDTHS
     if any(result[k] not in WIDTHS for k in ("cache_type_k", "cache_type_v")):
         raise HTTPException(400, "unsupported cache type")
@@ -368,6 +371,7 @@ def build_master_launch(
     settings = plan_result.get("resolved_launch_settings") or resolve_launch_settings(body)
     ctx = int(plan_result.get("context_effective") or settings["context"])
     template = template_launch(body.chat_template, body.chat_template_text, body.model)
+    # Deferred import: dataclasses.replace is only needed when overlaying model defaults.
     from dataclasses import replace
     model_defaults = resolve_model_defaults(model_path)
     if body.chat_template != "default" or body.chat_template_text:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from threading import Barrier
 from pathlib import Path
 
 import pytest
@@ -709,6 +710,37 @@ def test_prefer_prebuilt_allowed_on_macos_cpu(install, monkeypatch, tmp_path):
     monkeypatch.setattr(install, "verify_llama_installed", lambda *a, **k: None)
 
     assert install.main(["--llama-only", "--prefer-prebuilt", "--backend", "cpu"]) == 0
+
+
+def test_main_runs_install_stages_concurrently_and_reports_failure(
+    install, monkeypatch, tmp_path, capsys
+):
+    barrier = Barrier(3, timeout=5)
+
+    def wait_for_other_stages():
+        barrier.wait()
+
+    def build_rust(*args, **kwargs):
+        wait_for_other_stages()
+        raise RuntimeError("rust build broke")
+
+    monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "ensure_venv", lambda: tmp_path / "python")
+    monkeypatch.setattr(install, "build_rust", build_rust)
+    monkeypatch.setattr(install, "build_ui", lambda **kwargs: wait_for_other_stages())
+    monkeypatch.setattr(install, "detect_backend", lambda backend: "cpu")
+    monkeypatch.setattr(install, "install_llama", lambda *args, **kwargs: wait_for_other_stages())
+    monkeypatch.setattr(
+        install,
+        "verify_llama_installed",
+        lambda *args, **kwargs: pytest.fail("llama verification must not mask a stage failure"),
+    )
+
+    assert install.main(["--skip-toolchains", "--skip-wireguard", "--backend", "cpu"]) == 1
+    output = capsys.readouterr()
+    assert "kllm (Rust + Python): rust build broke" in output.err
+    assert "Install complete." not in output.out
 
 
 def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):

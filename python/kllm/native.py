@@ -79,6 +79,7 @@ def list_gpus() -> dict[str, Any]:
     probed = str(backend or "cpu").lower()
     requested = requested_backend()
     try:
+        # Deferred import: state walks the kllm package, which must not import native at load time.
         from kllm.state import repo_root
         binary = resolve_llama_server(str(repo_root()) if repo_root() else None)
         if not binary:
@@ -173,6 +174,7 @@ def plan_split(
     node_shares: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     if launch_settings is not None:
+        # Deferred import: placement is only needed when the caller passed launch settings.
         from kllm.placement import plan_devices
         settings = dict(launch_settings, auxiliary_bytes=int(mmproj_size_bytes) + int(draft_model_size_bytes) + (512 * 1024**2 if vision and not mmproj_size_bytes else 0))
         def compute(ctx):
@@ -282,6 +284,7 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 def start_worker(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
     if "devices" not in kwargs:
+        # Deferred import: config reads ~/.kllm only when the caller omitted devices.
         from kllm import config
         selected = config.get_gpu_ids()
         inventory = list_gpus().get("devices", [])

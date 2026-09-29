@@ -407,6 +407,29 @@ test('model search keeps one in-flight request and forwards the selected source'
     assert.equal(appStore.status.master_host, null);
     assert.deepEqual(appStore.liveUsage.nodes, {});
     assert.deepEqual(appStore.liveUsage.relationships, []);
+    assert.equal(appStore.selectedNodeId, '');
+
+    appStore.status = {
+      role: 'master', node_id: 'master', join_key: 'secret',
+      members: { master: { node_id: 'master', role: 'master' } },
+    };
+    appStore.liveUsage = {
+      nodes: { master: { node_id: 'master', host: 'old-host', role: 'master', connected: false,
+        freshness: 'stale', reading: null } },
+      relationships: [],
+      recording: { recording: 'interrupted', last_successful_save: null },
+    };
+    appStore.selectedNodeId = 'master';
+    await appStore.stopCluster();
+    assert.ok(requests.some((req) => req.path === '/v1/stop' && req.method === 'POST'));
+    assert.equal(appStore.status.role, 'idle');
+    assert.deepEqual(appStore.status.members, {});
+    assert.equal(appStore.status.join_key, null);
+    assert.deepEqual(appStore.liveUsage.nodes, {});
+    assert.deepEqual(appStore.liveUsage.relationships, []);
+    assert.equal(appStore.selectedNodeId, '');
+    appStore.connected = false;
+    assert.equal(appStore.viewState(), 'idle');
 
     requests.length = 0;
     appStore.chatStreaming = true;

@@ -49,6 +49,20 @@ from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
 from kllm import cluster_log
 from kllm.agent.live import LiveFeed, SourceDenied, TOPICS as LIVE_TOPICS, server_time as live_server_time
+from kllm.agent.join_flow import (
+    build_register_payload,
+    cached_llama_pack_warning,
+    post_register,
+    require_join_overlay,
+    resolve_master_endpoint,
+)
+from kllm.agent.live_ws import (
+    apply_upstream_log_batch,
+    log_result_signature,
+    new_worker_log_state,
+    worker_log_snapshot,
+)
+from kllm.agent.run_route import finish_master_launch, run_response, spawn_master, stop_previous_master
 from kllm.run_planning import (
     build_master_launch,
     ensure_master_alive_after_spawn,
@@ -181,6 +195,7 @@ def _usage_loop() -> None:
                 _worker_usage_error = f"usage collection/ingest interrupted ({type(exc).__name__}); check private master connection and managed child"
 
 async def _sample_diagnostics():
+    # Optional debug module; absent unless KLLM_DEBUG_HARDWARE is set. Kept lazy so a normal start does not import it.
     from kllm._dbg_a1ff77 import gpu_snapshot, llama_props, write
     while True:
         def sample():
@@ -497,7 +512,6 @@ def _ensure_master_control_route(master_host: str, master_port: int) -> list[str
 def _worker_post_heartbeat() -> None:
     if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
         return
-    import httpx
 
     # Re-ensure proxy if the helper died across agent restarts.
     try:
@@ -542,7 +556,6 @@ def _probe_worker_latencies() -> None:
     master_id = STATE.node_id
     if master_id in STATE.members:
         STATE.members[master_id]["latency_ms"] = 0.0
-    import httpx
 
     for nid, member in list(STATE.members.items()):
         if nid == master_id or (member or {}).get("role") == "master":
@@ -973,6 +986,7 @@ def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, st
             }
     if os.getenv("KLLM_DEBUG_HARDWARE", "").lower() in ("1", "true", "yes"):
         try:
+            # Optional debug module; import only when the hardware debug flag is set.
             from kllm._dbg_a1ff77 import write as _dbg_write
 
             _dbg_write(
@@ -1648,36 +1662,8 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
 def _join_cluster(body: JoinBody) -> dict[str, Any]:
     if STATE.role == "master":
         raise HTTPException(409, "node is master; stop first")
-    try:
-        overlay = netsec.normalize_overlay(body.overlay)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-    if overlay == netsec.OVERLAY_WIREGUARD and not netsec.wg_tooling_available():
-        raise HTTPException(
-            400,
-            "WireGuard tooling not found (wg). Install WireGuard or use overlay=none",
-        )
-
-    master_host = body.master_host
-    master_port = body.master_port
-    if not master_host:
-        found = discovery.browse_masters(
-            timeout=2.5, key=body.key, port=master_port or DEFAULT_CONTROL_PORT
-        )
-        if not found:
-            raise HTTPException(
-                404,
-                "no matching master discovered on LAN; pass master_host or check join key",
-            )
-        if len(found) > 1:
-            hosts = ", ".join(f"{m.host}:{m.port}" for m in found)
-            raise HTTPException(
-                409,
-                f"multiple masters match join key; pass master_host ({hosts})",
-            )
-        master_host = found[0].host
-        master_port = found[0].port
+    overlay = require_join_overlay(body.overlay)
+    master_host, master_port = resolve_master_endpoint(body.master_host, body.master_port, body.key)
 
     listed = native.list_gpus()
     gpu_ids = _membership_gpu_ids(
@@ -1722,79 +1708,33 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
             raise HTTPException(500, f"WireGuard keygen failed: {exc}") from exc
 
     identity = cluster_update.software_identity()
-    payload = {
-        "node_id": STATE.node_id,
-        "host": lan_host,
-        "lan_host": lan_host,
-        "control_port": STATE.control_port,
-        "rpc_port": body.rpc_port,
-        "total_ram_bytes": cap["total_ram_bytes"],
-        "available_ram_bytes": cap["available_ram_bytes"],
-        "vram_bytes": vram,
-        "backend": backend,
-        "actual_backend": backend,
-        "requested_backend": cap.get("requested_backend"),
-        "devices": gpu_sel["gpus"],
-        "unified_memory": cap.get("unified_memory", False),
-        "binary_version": cap.get("binary_version"),
-        "gpu_ids": STATE.gpu_ids,
-        "wg_public_key": wg_pub,
-        "wg_listen_port": netsec.WG_LISTEN_PORT,
-        "git_head": identity.get("git_head"),
-        "llama_release": identity.get("llama_release"),
-    }
-    import httpx
+    payload = build_register_payload(
+        node_id=STATE.node_id,
+        lan_host=lan_host,
+        control_port=STATE.control_port,
+        rpc_port=body.rpc_port,
+        cap=cap,
+        vram=vram,
+        backend=backend,
+        gpus=gpu_sel["gpus"],
+        gpu_ids=STATE.gpu_ids,
+        wg_public_key=wg_pub,
+        git_head=identity.get("git_head"),
+        llama_release=identity.get("llama_release"),
+    )
+
+    def _drop_cp_proxy() -> None:
+        from kllm import cp_proxy
+
+        cp_proxy.stop_current()
+        STATE.cp_proxy_port = None
+        STATE.cp_proxy_pid = None
 
     if STATE.cp_proxy_port:
         base = f"http://127.0.0.1:{int(STATE.cp_proxy_port)}"
     else:
         base = f"http://{master_host}:{master_port}"
-    url = f"{base}/v1/register"
-    try:
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.post(url, json=payload, headers={"X-Kllm-Key": body.key})
-    except httpx.TimeoutException as exc:
-        from kllm import cp_proxy
-
-        cp_proxy.stop_current()
-        STATE.cp_proxy_port = None
-        STATE.cp_proxy_pid = None
-        raise HTTPException(
-            504,
-            f"master at {master_host}:{master_port} did not respond in time; "
-            f"ensure `kllm start --key …` is running on the master and try "
-            f"`curl http://{master_host}:{master_port}/health` from this machine",
-        ) from exc
-    except httpx.RequestError as exc:
-        from kllm import cp_proxy
-
-        cp_proxy.stop_current()
-        STATE.cp_proxy_port = None
-        STATE.cp_proxy_pid = None
-        detail = (
-            f"cannot reach master at {master_host}:{master_port}: {exc}; "
-            f"ensure `kllm start --key …` is running on the master and try "
-            f"`curl http://{master_host}:{master_port}/health` from this machine"
-        )
-        err_text = str(exc).lower()
-        if "connection reset" in err_text or "errno 54" in err_text:
-            detail += (
-                ". Connection reset usually means the master agent is down, "
-                "crashed, or a firewall closed TCP "
-                f"{master_port} (not macOS Local Network / errno 65)"
-            )
-        raise HTTPException(502, detail) from exc
-    if resp.status_code == 401:
-        raise HTTPException(401, "invalid join key")
-    if resp.status_code >= 400:
-        try:
-            err_payload = resp.json()
-            detail = err_payload.get("detail", resp.text)
-        except Exception:
-            detail = resp.text
-        raise HTTPException(resp.status_code, detail)
-    resp.raise_for_status()
-    reg = resp.json()
+    reg = post_register(base, payload, body.key, master_host, master_port, _drop_cp_proxy)
 
     _apply_cluster_snapshot(reg)
 
@@ -1821,14 +1761,9 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
     # in ~/.kllm/models (avoids GitHub SSL on some macOS venvs). A pack must
     # never change which backends are installed, so a refusal is surfaced rather
     # than silently swallowed on platforms with a multi-backend contract.
-    try:
-        from kllm.llama_pack import PackNotInstallable, install_cached_llama_pack
-
-        install_cached_llama_pack(backend=str(backend), force=False)
-    except PackNotInstallable as exc:
-        STATE.llama_warnings = [*STATE.llama_warnings, str(exc)]
-    except Exception:
-        pass
+    pack_warning = cached_llama_pack_warning(str(backend))
+    if pack_warning:
+        STATE.llama_warnings = [*STATE.llama_warnings, pack_warning]
 
     # Start local rpc-server bound to the RPC address (LAN or WG), not 0.0.0.0 by default
     root = repo_root()
@@ -1895,8 +1830,6 @@ def _worker_bring_up_wg(join_key: str, master_lan: str, reg: dict[str, Any]) -> 
 @app.post("/v1/leave")
 def leave() -> dict[str, Any]:
     if STATE.role == "worker" and STATE.master_host and STATE.join_key:
-        import httpx
-
         try:
             _ensure_master_control_route(STATE.master_host, STATE.master_port)
             with httpx.Client(timeout=10.0) as client:
@@ -2299,8 +2232,6 @@ def _try_proxy_master_logs(
     source: str | None,
     after: str | None = None,
 ) -> dict[str, Any] | StreamingResponse | None:
-    import httpx as httpx_mod
-
     params: dict[str, Any] = {"n": n, "follow": follow}
     if node:
         params["node"] = node
@@ -2313,7 +2244,7 @@ def _try_proxy_master_logs(
         headers["X-Kllm-Key"] = STATE.join_key
     url = f"{_master_control_base()}/v1/logs"
     if follow:
-        client = httpx_mod.Client(timeout=None)
+        client = httpx.Client(timeout=None)
         try:
             resp = client.send(
                 client.build_request("GET", url, params=params, headers=headers),
@@ -2341,7 +2272,7 @@ def _try_proxy_master_logs(
             media_type="text/event-stream",
         )
     try:
-        with httpx_mod.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=2.0) as client:
             resp = client.get(url, params=params, headers=headers)
     except Exception:
         return None
@@ -2526,12 +2457,7 @@ def _live_logs(after: str | None) -> dict[str, Any]:
 
     state = getattr(app.state, "live_log_state", None)
     if state is None:
-        state = {
-            "lock": threading.Lock(), "flight": None, "last_acquired": 0.0,
-            "mirror": cluster_log.LogHub(), "upstream_cursor": None,
-            "source": None, "continuity_id": str(uuid.uuid4()), "discontinuity": None,
-            "changed": False, "error": None,
-        }
+        state = new_worker_log_state()
         app.state.live_log_state = state
 
     with state["lock"]:
@@ -2552,42 +2478,7 @@ def _live_logs(after: str | None) -> dict[str, Any]:
                 if exc.status_code in (401, 403):
                     raise SourceDenied from None
                 raise RuntimeError("Master log source returned an error") from None
-            if upstream is not None:
-                cursor = upstream.get("cursor")
-                lines = upstream.get("lines")
-                if not isinstance(lines, list):
-                    raise RuntimeError("Master log source returned invalid data")
-                cluster_log.parse_cursor(cursor)
-                for item in lines:
-                    if (not isinstance(item, dict) or cluster_log.normalize_event_id(item.get("event_id")) is None
-                        or not isinstance(item.get("ts"), (int, float)) or not math.isfinite(item["ts"])
-                        or not isinstance(item.get("node_id"), str) or not item["node_id"]
-                        or item.get("source") not in cluster_log.STORED_SOURCES or not isinstance(item.get("line"), str)):
-                        raise RuntimeError("Master log source returned invalid data")
-            with state["lock"]:
-                source = "cluster" if upstream is not None else "local"
-                changed = state["source"] is not None and state["source"] != source
-                if changed:
-                    state["continuity_id"] = str(uuid.uuid4())
-                    state["discontinuity"] = {"id": state["continuity_id"], "reason": "coverage_change",
-                                               "detected_at": live_server_time()}
-                    state["changed"] = True
-                state["source"] = source
-                if upstream is not None:
-                    reset = upstream.get("reset") is not None or bool(upstream.get("gap"))
-                    if reset:
-                        state["mirror"].reset()
-                        state["continuity_id"] = str(uuid.uuid4())
-                        gap_reason = upstream.get("gap_reason")
-                        reason = "upstream_retention" if gap_reason == "retention" else "upstream_batch_limit" if gap_reason == "batch_limit" else "upstream_reset"
-                        state["discontinuity"] = {"id": state["continuity_id"], "reason": reason,
-                                                   "detected_at": live_server_time()}
-                        state["changed"] = True
-                    if lines:
-                        state["mirror"].ingest(lines, persist=False)
-                    state["upstream_cursor"] = cursor
-                state["error"] = None
-                state["last_acquired"] = time.monotonic()
+            apply_upstream_log_batch(state, upstream)
         except Exception as exc:
             failure = exc
             with state["lock"]:
@@ -2602,28 +2493,7 @@ def _live_logs(after: str | None) -> dict[str, Any]:
     elif flight is not None:
         flight.wait(2)
 
-    with state["lock"]:
-        error = state.get("error")
-        source = state["source"] or "local"
-        continuity_id = state["continuity_id"]
-        discontinuity = dict(state["discontinuity"]) if state["discontinuity"] else None
-        changed = state["changed"]
-        state["changed"] = False
-        mirror = state["mirror"]
-    if error == "denied":
-        raise SourceDenied
-    if error == "unavailable":
-        raise RuntimeError("Master log source is unavailable")
-    if source == "cluster":
-        snapshot = mirror.snapshot(200, after=after)
-        snapshot.update(source="cluster", continuity_id=continuity_id, discontinuity=discontinuity)
-    else:
-        snapshot = cluster_log.HUB.snapshot(200, STATE.node_id, None, after)
-        snapshot.update(source="local", warning="master unreachable; showing local logs",
-                        continuity_id=continuity_id, discontinuity=discontinuity)
-    if changed:
-        snapshot.update(reset="origin_changed", gap=True, gap_reason="feed_reset")
-    return snapshot
+    return worker_log_snapshot(state, after, STATE.node_id)
 
 
 def _new_live_feed() -> LiveFeed:
@@ -2856,14 +2726,7 @@ async def dashboard_live_websocket(websocket: WebSocket) -> None:
                 changed = {topic: record for topic, record in snapshot["areas"].items() if sent_revisions.get(topic) != record["revision"]}
                 log_result = snapshot["logs"]
                 current_cursor = (log_result or {}).get("snapshot", {}).get("cursor") if log_result else None
-                log_snapshot = (log_result or {}).get("snapshot") or {}
-                log_error = (log_result or {}).get("error") or {}
-                current_signature = ((log_result or {}).get("availability"), current_cursor,
-                                     log_snapshot.get("continuity_id"), log_snapshot.get("reset"),
-                                     log_snapshot.get("gap"), log_snapshot.get("gap_reason"),
-                                     log_snapshot.get("source"), log_snapshot.get("warning"),
-                                     log_error.get("code"), log_error.get("message"),
-                                     (log_snapshot.get("discontinuity") or {}).get("id")) if log_result else None
+                current_signature = log_result_signature(log_result) if log_result else None
                 if changed or (log_result is not None and current_signature != sent_log_signature):
                     batch += 1
                     await websocket.send_json({"type": "data", "generation": generation, "batch": batch, "initial": False,
@@ -2930,14 +2793,7 @@ async def dashboard_live_websocket(websocket: WebSocket) -> None:
                                            "epoch": snapshot["epoch"], "server_time": live_server_time(), "areas": snapshot["areas"], "logs": snapshot["logs"]})
                 current_continuity = (snapshot["logs"] or {}).get("snapshot", {}).get("continuity_id") if snapshot["logs"] else None
                 logs = snapshot["logs"]
-                log_snapshot = (logs or {}).get("snapshot") or {}
-                log_error = (logs or {}).get("error") or {}
-                current_signature = ((logs or {}).get("availability"), current_cursor,
-                                     log_snapshot.get("continuity_id"), log_snapshot.get("reset"),
-                                     log_snapshot.get("gap"), log_snapshot.get("gap_reason"),
-                                     log_snapshot.get("source"), log_snapshot.get("warning"),
-                                     log_error.get("code"), log_error.get("message"),
-                                     (log_snapshot.get("discontinuity") or {}).get("id")) if logs is not None else None
+                current_signature = log_result_signature(logs)
                 outstanding = (batch, time.monotonic(), current_cursor, current_continuity, current_signature)
                 sent_revisions = {topic: record["revision"] for topic, record in snapshot["areas"].items()}
                 next_refresh = time.monotonic() + 1
@@ -3105,11 +2961,7 @@ def run(body: RunBody) -> dict[str, Any]:
     rpc_servers = list(plan_result.get("rpc_endpoints") or [])
     ensure_rpc_peers_reachable(rpc_servers)
     root = repo_root()
-    if STATE.process_pid:
-        native.stop_process(STATE.process_pid, force=True)
-        runtime.clear_children()
-        load_progress.end()
-        STATE.inference_activity = inference_activity.idle()
+    stop_previous_master(STATE, native, runtime, load_progress, inference_activity)
     gpu_env = _gpu_visibility_env(
         (STATE.members.get(STATE.node_id) or {}).get("backend") or "cpu",
         STATE.gpu_ids,
@@ -3117,6 +2969,7 @@ def run(body: RunBody) -> dict[str, Any]:
     extra = sanitize_extra_args(body.extra_args) if body.extra_args else []
     if os.getenv("KLLM_DEBUG_HARDWARE", "").lower() in ("1", "true", "yes"):
         try:
+            # Optional debug module; import only when the hardware debug flag is set.
             from kllm._dbg_a1ff77 import write as _dbg_write
 
             _dbg_write(
@@ -3149,39 +3002,18 @@ def run(body: RunBody) -> dict[str, Any]:
         gpu_env=gpu_env,
         extra_args=extra,
     )
-    launched: dict[str, Any] | None = None
-    try:
-        launched = native.start_master(**launch_cfg)
-        ensure_master_alive_after_spawn(launched.get("pid"))
-    except HTTPException:
-        if launched and launched.get("pid"):
-            native.stop_process(int(launched["pid"]), force=True)
-            runtime.clear_children()
-        raise
-    except Exception as exc:
-        if launched and launched.get("pid"):
-            native.stop_process(int(launched["pid"]), force=True)
-            runtime.clear_children()
-        raise HTTPException(500, str(exc)) from exc
-    STATE.process_pid = launched.get("pid")
-    STATE.process_role = "master"
-    STATE.model_name = path.name
-    STATE.last_plan = plan_result
-    STATE.apply_error = None
-    STATE.apply_warning = plan_result.get("warning") if plan_result.get("fit_status") == "tight" else None
-    _persist_last_settings(body)
-    if launched.get("pid"):
-        runtime.register_child(int(launched["pid"]), "llama-server")
-        try:
-            load_progress.begin(path.name, int(launched["pid"]), path.stat().st_size)
-        except OSError:
-            pass
-    STATE.save()
-    _maybe_remember(body)
-    out: dict[str, Any] = {"plan": plan_result, "launch": launched}
-    if plan_result.get("fit_status") == "tight":
-        out["warning"] = plan_result.get("warning") or plan_result.get("hint")
-    return out
+    launched = spawn_master(native, runtime, launch_cfg, ensure_master_alive_after_spawn)
+    finish_master_launch(
+        STATE,
+        path,
+        plan_result,
+        launched,
+        runtime,
+        load_progress,
+        lambda: _persist_last_settings(body),
+        lambda: _maybe_remember(body),
+    )
+    return run_response(plan_result, launched)
 
 
 @app.post("/v1/inference/stop")

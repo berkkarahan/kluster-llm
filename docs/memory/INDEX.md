@@ -7,8 +7,12 @@ This is a compact routing map for durable project memory (`docs/memory/`). Keep 
 
 ## Architecture
 
+- A1: Structural coding standards -> architecture/2026-09-29-structural-standards.md
+
 ## Bugs
 
 ## Decisions
+
+- D1: Keep test patch surfaces on facade modules -> decisions/2026-09-29-facade-patch-surface.md
 
 ## Workflow

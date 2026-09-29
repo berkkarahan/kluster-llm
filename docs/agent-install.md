@@ -110,10 +110,10 @@ python3 scripts/install.py --backend cuda --from-source
 
 ### 2.3 What the installer does (in order)
 
-1. Ensures **git** (and other toolchains unless `--skip-toolchains`).  
-2. Ensures **uv**, creates/repairs **`.venv`** (Python from **`.python-version`**), runs **`uv sync`**, installs **Rust** if missing, builds **`kllm`** with maturin, installs wheel + pytest.  
-3. Ensures **Node/npm**, runs `dashboard` `npm install` + `npm run build`.  
-4. Installs **llama.cpp** binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
+1. Ensures required toolchains (including **git**, **uv**, **Rust**, and **Node/npm**, unless `--skip-toolchains`), creates/repairs **`.venv`** (Python from **`.python-version`**).
+2. Installs **WireGuard** when requested. This runs outside the parallel build phase to avoid concurrent system package-manager operations.
+3. Runs the independent **kllm** build (`uv sync`, maturin, wheel install), **dashboard** build (`npm install` + `npm run build`), and **llama.cpp** install concurrently, subject to the skip flags. The installer waits for all stages and reports each failure before returning non-zero.
+4. The llama.cpp stage installs binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
    The macOS Homebrew dependencies are `molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`. The Vulkan gate checks `glslc` (provided by `shaderc`) and the `SPIRV-Headers` CMake config alongside Vulkan headers and the MoltenVK ICD manifest.
    The reusable `vendor/llama.cpp/build` tree is installer-owned: it is discarded when the pin, backend flags or a recorded OpenSSL package path changes, so a toolchain upgrade (`brew upgrade openssl@3`) cannot leave a cache that half-resolves a package. A dangling `-L` in an exported `LDFLAGS` is ignored rather than treated as stale, so it cannot force a rebuild every run.
    On macOS the default install **aborts** when the Metal+Vulkan build fails; it never downgrades to a Metal-only pack, and `--prefer-prebuilt` is rejected outright. Verification probes the binary the runtime actually launches (`vendor/bin/llama-server`, which `kllm-native` resolves first), not the CMake build output, and `--check` exits non-zero on a backend mismatch.

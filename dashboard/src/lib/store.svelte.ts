@@ -215,6 +215,7 @@ class AppStore {
 
   viewState(): ClusterView {
     if (!this.statusSeen) return 'loading';
+    if (this.status?.role === 'idle') return 'idle';
     if (!this.connected) return 'offline';
     const role = this.status?.role;
     if (role === 'master' || role === 'worker') return 'live';
@@ -1174,6 +1175,23 @@ class AppStore {
 
   async stopCluster() {
     await this.post('/v1/stop');
+    this.resetClusterView();
+  }
+
+  private resetClusterView() {
+    if (this.status) {
+      this.status = {
+        ...this.status,
+        role: 'idle',
+        members: {},
+        join_key: null,
+        master_host: null,
+      };
+    }
+    if (this.liveUsage) {
+      this.liveUsage = { ...this.liveUsage, nodes: {}, relationships: [] };
+    }
+    this.selectedNodeId = '';
   }
 
   async joinCluster() {
@@ -1197,18 +1215,7 @@ class AppStore {
 
   async leaveCluster() {
     await this.post('/v1/leave');
-    if (this.status) {
-      this.status = {
-        ...this.status,
-        role: 'idle',
-        members: {},
-        join_key: null,
-        master_host: null,
-      };
-    }
-    if (this.liveUsage) {
-      this.liveUsage = { ...this.liveUsage, nodes: {}, relationships: [] };
-    }
+    this.resetClusterView();
   }
 
   async updateWorkers() {

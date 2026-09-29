@@ -115,21 +115,22 @@
         label: device.name ? `GPU ${id} · ${device.name}` : `GPU ${id}`,
         util: 'unavailable',
         mem: typeof capacity === 'number' && Number.isFinite(capacity) && capacity > 0
-          ? `reported ${formatGib(capacity)}` : 'unavailable',
+          ? `reported ${formatGib(capacity)} capacity${node.unified_memory ? ' · shared with host RAM' : ''}` : 'unavailable',
         reason: null
       });
     }
     for (const device of node.reading?.devices ?? []) {
       const id = String(device.device_id);
       const prior = rows.get(id);
-      const hasMemory = device.used_bytes != null || device.total_bytes != null;
+      const capacity = device.total_bytes ?? node.devices?.find((gpu) => String(gpu.index) === id)?.vram_bytes;
       rows.set(id, {
         id,
         label: prior?.label ?? `GPU ${id}`,
         util: percentText(device.utilization_percent),
-        mem: hasMemory
-          ? `${formatGib(device.used_bytes)} / ${formatGib(device.total_bytes)}`
-          : prior?.mem ?? 'unavailable',
+        mem: (device.used_bytes != null
+          ? capacity != null ? `${formatGib(device.used_bytes)} / ${formatGib(capacity)}` : `${formatGib(device.used_bytes)} used`
+          : capacity != null ? `reported ${formatGib(capacity)} capacity` : 'unavailable')
+          + (node.unified_memory ? ' · shared with host RAM' : ''),
         reason: device.unavailable_reason ?? null
       });
     }

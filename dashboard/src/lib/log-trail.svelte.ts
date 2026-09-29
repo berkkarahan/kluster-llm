@@ -1,4 +1,5 @@
-import type { LogEntry, LogSnapshot, LogSource, RefreshMode } from './types';
+import type { LiveLogs, LogEntry, LogSnapshot, LogSource, RefreshMode } from './types';
+import { appStore } from './store.svelte';
 
 export const REFRESH_MODES: RefreshMode[] = ['live', '5s', '30s', '1m'];
 
@@ -99,6 +100,7 @@ export class LogTrail {
   omittedRows = $state(0);
   /** Last committed receiver-local checkpoint; null until the first success. */
   cursor = $state<string | null>(null);
+  continuityId = $state<string | null>(null);
 
   // ponytail: ID-only seen set for one mounted visit; it grows with observed
   // events. Swap for producer sequence watermarks if day-long high-volume
@@ -108,18 +110,32 @@ export class LogTrail {
   private inFlight = false;
   private disposed = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
   private deadline = 0;
   private hasCleared = false;
   private onVisibility: (() => void) | null = null;
+  private visibilityListener = () => this.handleVisibility();
+  private usingLive = false;
+  private denied = false;
+  private liveListener = {
+    after: () => this.cursor,
+    continuity: () => this.continuityId,
+    onLogs: (logs: LiveLogs) => this.receiveLive(logs)
+  };
 
   start(): void {
     if (this.disposed) return;
-    if (typeof document !== 'undefined') {
-      this.onVisibility = () => this.handleVisibility();
+    if (typeof document !== 'undefined' && !appStore.setLogVisibilityListener(this.visibilityListener)) {
+      this.onVisibility = this.visibilityListener;
       document.addEventListener('visibilitychange', this.onVisibility);
     }
     this.deadline = nowMs() + REFRESH_MS[this.refreshMode];
+    this.usingLive = this.refreshMode === 'live' && appStore.setLogListener(this.liveListener);
+    if (this.usingLive) {
+      this.armLiveFallback();
+      return;
+    }
     void this.read();
     this.arm();
   }
@@ -129,24 +145,45 @@ export class LogTrail {
     this.generation += 1;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+    this.fallbackTimer = null;
     this.abort?.abort();
     this.abort = null;
     this.inFlight = false;
     if (this.onVisibility && typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.onVisibility);
     }
+    appStore.setLogVisibilityListener(null, this.visibilityListener);
     this.onVisibility = null;
+    if (this.usingLive) appStore.setLogListener(null);
+    this.usingLive = false;
     this.entries = [];
     this.seenIds.clear();
     this.cursor = null;
+    this.continuityId = null;
     this.hasCleared = false;
   }
 
   setMode(mode: RefreshMode): void {
     if (mode === this.refreshMode) return;
     this.refreshMode = mode;
+    if (mode === 'live') this.denied = false;
     this.deadline = nowMs() + REFRESH_MS[mode];
     this.cancelActiveRead();
+    if (mode === 'live') {
+      this.usingLive = appStore.setLogListener(this.liveListener);
+      if (this.usingLive) {
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        this.armLiveFallback();
+        return;
+      }
+    } else if (this.usingLive) {
+      appStore.setLogListener(null);
+      this.usingLive = false;
+      if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = null;
+    }
     this.arm();
   }
 
@@ -166,6 +203,7 @@ export class LogTrail {
     this.abort = null;
     this.inFlight = false;
     this.state = 'cleared';
+    if (this.usingLive) appStore.setLogListener(this.liveListener);
   }
 
   visibleEntries(): LogEntry[] {
@@ -180,9 +218,15 @@ export class LogTrail {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
       this.cancelActiveRead();
+      if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = null;
       return;
     }
     this.deadline = nowMs() + REFRESH_MS[this.refreshMode];
+    if (this.usingLive) {
+      this.armLiveFallback();
+      return;
+    }
     void this.read();
     this.arm();
   }
@@ -193,6 +237,19 @@ export class LogTrail {
     this.abort?.abort();
     this.abort = null;
     this.inFlight = false;
+  }
+
+  private armLiveFallback(): void {
+    if (this.disposed || !this.usingLive || this.fallbackTimer
+      || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
+    const tick = () => {
+      this.fallbackTimer = null;
+      if (this.disposed || !this.usingLive || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
+      if (!this.denied && (appStore.deliveryHealth === 'periodic-refresh'
+        || appStore.deliveryHealth === 'unavailable')) void this.read();
+      this.fallbackTimer = setTimeout(tick, 2000);
+    };
+    this.fallbackTimer = setTimeout(tick, 2000);
   }
 
   private arm(): void {
@@ -215,7 +272,7 @@ export class LogTrail {
   }
 
   private async read(): Promise<void> {
-    if (this.disposed || this.inFlight) return;
+    if (this.disposed || this.inFlight || (this.usingLive && this.denied)) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     this.inFlight = true;
     const gen = ++this.generation;
@@ -228,14 +285,37 @@ export class LogTrail {
       controller.abort();
     }, REQUEST_TIMEOUT_MS);
     try {
-      const params = new URLSearchParams({ n: String(this.cursor === null ? INITIAL_N : POLL_N) });
+      const liveFallback = this.usingLive && this.refreshMode === 'live';
+      const params = liveFallback ? new URLSearchParams({ topics: '', logs: '1' })
+        : new URLSearchParams({ n: String(this.cursor === null ? INITIAL_N : POLL_N) });
       if (this.cursor !== null) params.set('after', this.cursor);
-      const response = await fetch(`/v1/logs?${params.toString()}`, { signal: controller.signal });
+      if (liveFallback && this.continuityId) params.set('continuity_id', this.continuityId);
+      let response = await fetch(`${liveFallback ? '/v1/dashboard/live' : '/v1/logs'}?${params}`, { signal: controller.signal });
+      if (liveFallback && (response.status === 401 || response.status === 403)) this.denied = true;
+      let legacyHandoff = false;
+      if (liveFallback && !response.ok && response.status !== 401 && response.status !== 403) {
+        const legacy = new URLSearchParams({ n: String(this.cursor === null ? INITIAL_N : POLL_N) });
+        if (this.cursor && !this.continuityId) legacy.set('after', this.cursor);
+        response = await fetch(`/v1/logs?${legacy}`, { signal: controller.signal });
+        if (response.status === 401 || response.status === 403) this.denied = true;
+        legacyHandoff = this.continuityId !== null;
+      }
       if (!response.ok) throw new Error(`logs ${response.status}`);
-      const data = validateSnapshot(await response.json());
+      const raw = await response.json();
+      if (liveFallback) {
+        if (raw?.logs?.availability === 'denied') this.denied = true;
+        if (!legacyHandoff && raw?.version !== 1 && raw?.lines === undefined) {
+          throw new Error('Incremental logs unsupported');
+        }
+        if (raw?.version === 1 && (raw.logs?.availability !== 'available' || !raw.logs.snapshot)) {
+          throw new Error(raw?.logs?.error?.message ?? 'Live logs unavailable');
+        }
+      }
+      const data = validateSnapshot(raw?.version === 1 ? raw.logs.snapshot : raw);
       if (this.disposed || gen !== this.generation) return;
       if (nowMs() - started >= REQUEST_TIMEOUT_MS) throw new Error('Log read timed out; retrying');
-      this.commit(data);
+      this.commit(legacyHandoff ? { ...data, reset: 'origin_changed', gap: true, gap_reason: 'feed_reset' } : data);
+      if (legacyHandoff) this.continuityId = null;
     } catch (error) {
       if (this.disposed || gen !== this.generation) return;
       this.errorText = timedOut ? 'Log read timed out; retrying' : String(error);
@@ -249,8 +329,26 @@ export class LogTrail {
     }
   }
 
-  private commit(data: LogSnapshot): void {
-    const isReset = Boolean(data.reset);
+  private receiveLive(result: LiveLogs): void {
+    if (this.disposed || !this.usingLive) return;
+    if (result.availability === 'denied') this.denied = true;
+    if (result.availability !== 'available' || !result.snapshot) {
+      this.errorText = result.error?.message ?? 'Live logs unavailable';
+      this.state = 'error';
+      return;
+    }
+    try {
+      this.commit(validateSnapshot(result.snapshot));
+    } catch (error) {
+      this.errorText = String(error);
+      this.state = 'error';
+    }
+  }
+
+  private commit(data: LogSnapshot & { continuity_id?: string }): void {
+    const continuityChanged = Boolean(this.continuityId && data.continuity_id
+      && this.continuityId !== data.continuity_id);
+    const isReset = Boolean(data.reset) || continuityChanged;
     const baselineOnly = this.hasCleared && isReset;
     const appended: LogEntry[] = [];
     for (const entry of data.lines ?? []) {
@@ -271,8 +369,9 @@ export class LogTrail {
     }
     this.state = this.entries.length ? 'ready' : this.hasCleared ? 'cleared' : 'empty';
     if (data.cursor) this.cursor = data.cursor;
+    if (data.continuity_id) this.continuityId = data.continuity_id;
     this.coverage = data.source === 'local' ? 'local' : 'cluster';
-    this.gap = gapNow || this.omittedRows > 0;
+    this.gap = this.gap || gapNow || this.omittedRows > 0;
     this.warning = data.warning ?? '';
     this.errorText = '';
     this.lastSuccessAt = Date.now();

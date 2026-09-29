@@ -6,8 +6,10 @@ from kllm.transfer_manifest import atomic_json, read_json, identity
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -36,10 +38,13 @@ _QUANT_TOKEN_RE = re.compile(
 
 _DOWNLOAD_LOCK = threading.Lock()
 _DOWNLOAD_PROGRESS: dict[str, Any] | None = None
+_DOWNLOAD_LAST_TERMINAL: dict[str, Any] | None = None
 _DOWNLOAD_CANCEL: threading.Event | None = None
 # Rolling (monotonic_time, bytes) samples for transfer-rate / ETA estimation.
 _DOWNLOAD_SAMPLES: deque[tuple[float, int]] = deque()
 _RATE_WINDOW = 10.0
+
+_TERMINAL_DOWNLOAD_PHASES = frozenset({"complete", "error", "cancelled"})
 
 _PROGRESS_MIN_INTERVAL = 0.1
 _TRANSFER_CHUNK = 1024 * 1024
@@ -122,8 +127,40 @@ def get_download_progress() -> dict[str, Any] | None:
     snap = _DOWNLOAD_PROGRESS
     return dict(snap) if snap is not None else None
 
-def _reset_download_state() -> None:
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def begin_download(source: str, dest_name: str | None = None) -> dict[str, Any]:
+    """Reserve a download operation before its background runner starts."""
     global _DOWNLOAD_PROGRESS, _DOWNLOAD_CANCEL
+    if _DOWNLOAD_PROGRESS is not None and _DOWNLOAD_PROGRESS.get("phase") not in _TERMINAL_DOWNLOAD_PHASES:
+        raise DownloadInProgressError("a download is already in progress")
+    if not _DOWNLOAD_LOCK.acquire(blocking=False):
+        raise DownloadInProgressError("a download is already in progress")
+    stamp = _timestamp()
+    filename = _safe_name(dest_name or Path(urlparse(source).path).name or "model.gguf")
+    _DOWNLOAD_CANCEL = threading.Event()
+    _DOWNLOAD_PROGRESS = {
+        "operation_id": str(uuid.uuid4()),
+        "filename": filename,
+        "bytes": 0,
+        "total": None,
+        "pct": 0,
+        "phase": "queued",
+        "rate_bps": None,
+        "eta_seconds": None,
+        "started_at": stamp,
+        "updated_at": stamp,
+        "finished_at": None,
+    }
+    return dict(_DOWNLOAD_PROGRESS)
+
+def _reset_download_state() -> None:
+    global _DOWNLOAD_PROGRESS, _DOWNLOAD_CANCEL, _DOWNLOAD_LAST_TERMINAL
+    if _DOWNLOAD_PROGRESS is not None and _DOWNLOAD_PROGRESS.get("phase") in _TERMINAL_DOWNLOAD_PHASES:
+        _DOWNLOAD_LAST_TERMINAL = dict(_DOWNLOAD_PROGRESS)
     _DOWNLOAD_PROGRESS = None
     _DOWNLOAD_CANCEL = None
     _DOWNLOAD_SAMPLES.clear()
@@ -164,7 +201,10 @@ def _set_progress(
         )
     else:
         rate, eta = None, None
+    previous = _DOWNLOAD_PROGRESS or {}
+    stamp = _timestamp()
     snap = {
+        "operation_id": previous.get("operation_id") or str(uuid.uuid4()),
         "filename": filename,
         "bytes": nbytes,
         "total": total,
@@ -172,6 +212,9 @@ def _set_progress(
         "phase": "downloading",
         "rate_bps": rate,
         "eta_seconds": eta,
+        "started_at": previous.get("started_at") or stamp,
+        "updated_at": stamp,
+        "finished_at": None,
     }
     _DOWNLOAD_PROGRESS = snap
     if on_progress is not None:
@@ -191,39 +234,69 @@ def _transfer_rate(current_bytes: int) -> float | None:
 
 def finalize_download_progress(filename: str, total: int | None) -> None:
     """Mark the active download complete so pollers see a terminal phase."""
-    global _DOWNLOAD_PROGRESS
+    global _DOWNLOAD_PROGRESS, _DOWNLOAD_LAST_TERMINAL
     if _DOWNLOAD_PROGRESS is None or _DOWNLOAD_PROGRESS.get("filename") != filename:
         return
     snap = dict(_DOWNLOAD_PROGRESS)
-    snap.update({"phase": "complete", "rate_bps": None, "eta_seconds": None})
+    stamp = _timestamp()
+    snap.update({
+        "phase": "complete",
+        "rate_bps": None,
+        "eta_seconds": None,
+        "updated_at": stamp,
+        "finished_at": stamp,
+    })
     if total:
         snap["bytes"] = total
         snap["pct"] = 100
     _DOWNLOAD_PROGRESS = snap
+    _DOWNLOAD_LAST_TERMINAL = dict(snap)
 
 def fail_download_progress(filename: str, error: str) -> None:
     """Mark the active download failed with a message."""
-    global _DOWNLOAD_PROGRESS
+    global _DOWNLOAD_PROGRESS, _DOWNLOAD_LAST_TERMINAL
     if _DOWNLOAD_PROGRESS is None or _DOWNLOAD_PROGRESS.get("filename") != filename:
         return
     snap = dict(_DOWNLOAD_PROGRESS)
-    snap.update({"phase": "error", "rate_bps": None, "eta_seconds": None, "error": error})
+    stamp = _timestamp()
+    snap.update({
+        "phase": "error",
+        "rate_bps": None,
+        "eta_seconds": None,
+        "error": error,
+        "updated_at": stamp,
+        "finished_at": stamp,
+    })
     _DOWNLOAD_PROGRESS = snap
+    _DOWNLOAD_LAST_TERMINAL = dict(snap)
 
 def download_job_snapshot() -> dict[str, Any] | None:
     """Job-level view for /v1/models/download-progress (None when idle)."""
     snap = get_download_progress()
+    if snap is None and _DOWNLOAD_LAST_TERMINAL is not None:
+        snap = dict(_DOWNLOAD_LAST_TERMINAL)
     if snap is None:
         return None
     out = dict(snap)
-    out["state"] = "running" if snap.get("phase") == "downloading" else snap.get("phase")
+    out["state"] = "running" if snap.get("phase") in {"queued", "downloading"} else snap.get("phase")
     return out
+
+
+def download_progress_records() -> dict[str, dict[str, Any] | None]:
+    """Return the active operation separately from its retained terminal outcome."""
+    global _DOWNLOAD_LAST_TERMINAL
+    snap = download_job_snapshot()
+    if snap is not None and snap.get("state") in _TERMINAL_DOWNLOAD_PHASES:
+        _DOWNLOAD_LAST_TERMINAL = dict(snap)
+        snap = None
+    return {"current": snap, "last_terminal": dict(_DOWNLOAD_LAST_TERMINAL) if _DOWNLOAD_LAST_TERMINAL else None}
 
 def set_download_terminal(
     filename: str,
     total: int | None,
     phase: str,
     error: str | None = None,
+    operation_id: str | None = None,
 ) -> None:
     """Publish a terminal snapshot for an async (thread-pool) download.
 
@@ -231,8 +304,13 @@ def set_download_terminal(
     runners publish the terminal state themselves; pollers then see
     complete/error before the runner forgets it.
     """
-    global _DOWNLOAD_PROGRESS
+    global _DOWNLOAD_PROGRESS, _DOWNLOAD_LAST_TERMINAL
+    previous = _DOWNLOAD_PROGRESS or {}
+    if operation_id is not None and previous.get("operation_id") not in (None, operation_id):
+        return
+    stamp = _timestamp()
     snap: dict[str, Any] = {
+        "operation_id": operation_id or previous.get("operation_id") or str(uuid.uuid4()),
         "filename": filename,
         "bytes": total if (total and phase == "complete") else 0,
         "total": total,
@@ -240,10 +318,14 @@ def set_download_terminal(
         "phase": phase,
         "rate_bps": None,
         "eta_seconds": None,
+        "started_at": previous.get("started_at") or stamp,
+        "updated_at": stamp,
+        "finished_at": stamp,
     }
     if error:
         snap["error"] = error
     _DOWNLOAD_PROGRESS = snap
+    _DOWNLOAD_LAST_TERMINAL = dict(snap)
 
 def normalize_quant(value: str) -> str:
     """Strip separators and optional .gguf so Q4_K_M / Q_4_K_M / q4-k-m match."""
@@ -671,7 +753,7 @@ def _stream_to_models(
     total: int | None = None
     try:
         with httpx.stream(
-            "GET", url, headers=headers or {}, follow_redirects=True, timeout=None
+            "GET", url, headers=headers or {}, follow_redirects=True, timeout=5.0
         ) as resp:
             resp.raise_for_status()
             length = _content_length(resp.headers)
@@ -711,12 +793,19 @@ def download_model(
     on_progress: ProgressCallback | None = None,
 ) -> Path:
     """Download a GGUF from Hugging Face repo id, HF URL, or direct HTTP(S) URL."""
-    if not _DOWNLOAD_LOCK.acquire(blocking=False):
-        raise DownloadInProgressError("a download is already in progress")
     global _DOWNLOAD_PROGRESS, _DOWNLOAD_CANCEL
-    cancel_event = threading.Event()
-    _DOWNLOAD_CANCEL = cancel_event
-    keep_snapshot = False
+    reserved = _DOWNLOAD_LOCK.locked() and (_DOWNLOAD_PROGRESS or {}).get("phase") == "queued"
+    if not reserved and not _DOWNLOAD_LOCK.acquire(blocking=False):
+        raise DownloadInProgressError("a download is already in progress")
+    if reserved:
+        cancel_event = _DOWNLOAD_CANCEL
+        if cancel_event is None:  # pragma: no cover - reservation always creates one
+            raise RuntimeError("download reservation is missing its cancellation event")
+    else:
+        _DOWNLOAD_PROGRESS = None  # A retained terminal must not become this operation.
+        cancel_event = threading.Event()
+        _DOWNLOAD_CANCEL = cancel_event
+    keep_snapshot = reserved
     try:
         models_dir().mkdir(parents=True, exist_ok=True)
         token = resolve_hf_token()
@@ -766,6 +855,7 @@ def download_model(
             if _DOWNLOAD_PROGRESS is not None:
                 _DOWNLOAD_PROGRESS["phase"] = "cancelled"
         keep_snapshot = True  # let pollers see the terminal cancelled state
+        raise
     except Exception as exc:
         snap = get_download_progress()
         if snap is not None:

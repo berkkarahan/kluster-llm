@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * HF / URL download job strip. State comes from appStore.downloadJob
-   * (PollLoop → GET /v1/models/download-progress); cancel is non-blocking.
+   * (shared dashboard live feed); cancel is non-blocking.
    */
   import { appStore } from '$lib/store.svelte';
   import { composeProgressLabel, formatGb } from '$lib/format-transfer';
@@ -9,7 +9,7 @@
   const job = $derived(appStore.downloadJob);
   const running = $derived(job?.state === 'running');
   const terminal = $derived(
-    !!job && (job.state === 'complete' || job.state === 'error' || job.state === 'cancelled')
+    !!job && job.state !== 'running' && job.state !== 'idle'
   );
 
   const phaseLabel = $derived.by(() => {
@@ -21,6 +21,7 @@
     if (job.state === 'complete') return 'Download complete';
     if (job.state === 'error') return 'Download failed';
     if (job.state === 'cancelled') return 'Download cancelled';
+    if (job.state === 'unknown') return 'Download outcome unknown';
     return job.state;
   });
 
@@ -28,6 +29,7 @@
     if (!job) return '';
     if (job.state === 'running' || job.state === 'complete') return 'chip-ok';
     if (job.state === 'error') return 'chip-danger';
+    if (job.state === 'unknown') return 'chip-warn';
     return 'chip-muted';
   });
 
@@ -70,8 +72,10 @@
       </p>
     {:else if job?.state === 'error'}
       <p class="mono text-[12px]" style="color: var(--danger)">{job.error ?? 'unknown error'}</p>
-    {:else}
+    {:else if job?.state === 'cancelled'}
       <p class="mono text-[11px]" style="color: var(--muted)">Cancelled — nothing was saved.</p>
+    {:else}
+      <p class="mono text-[11px]" style="color: var(--warn)">Reconnect or inspect the model list to determine the final outcome.</p>
     {/if}
   </div>
 {/if}

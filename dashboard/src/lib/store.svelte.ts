@@ -20,7 +20,9 @@ import type {
   } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { pushToast } from './toast';
-import { PollLoop } from './poll-loop';
+import { DashboardUpdates } from './live-updates';
+import type { LiveLogListener } from './live-updates';
+import type { DeliveryHealth, LiveArea, LiveAreaHealth, LiveAreaName, LiveProgress } from './types';
 
 const ACCEL_LABELS: Record<AccelBackend, string> = {
   metal: 'Metal',
@@ -106,6 +108,9 @@ class AppStore {
   historyError = $state('');
   private historySeq = 0;
   connected = $state(false);
+  deliveryHealth = $state<DeliveryHealth>('loading');
+  deliveryError = $state('');
+  areaHealth = $state<Partial<Record<LiveAreaName, LiveAreaHealth>>>({});
   statusSeen = $state(false);
   models = $state<ModelInfo[]>([]);
   apiToken = $state('');
@@ -186,55 +191,19 @@ class AppStore {
   loadProgress = $state<LoadProgress | null>(null);
   /** Live HF download job from /v1/models/download-progress (null when idle). */
   downloadJob = $state<DownloadJob | null>(null);
-  private loadLoop = new PollLoop(
-    async () => {
-      const r = await fetch('/v1/load-progress');
-      if (!r.ok) return null;
-      return (await r.json()) as LoadProgress;
-    },
-    1000,
-    5000,
-    (d) => {
-      const p = d as LoadProgress | null;
-      this.loadProgress = p && typeof p === 'object' && 'phase' in p ? p : null;
-    },
-    (d) => {
-      const p = (d as LoadProgress | null)?.phase ?? null;
-      return p === 'starting' || p === 'loading' ? 'fast' : 'slow';
-    }
-  );
-  private downloadLoop = new PollLoop(
-    async () => {
-      const r = await fetch('/v1/models/download-progress');
-      if (!r.ok) return null;
-      return (await r.json()) as DownloadJob;
-    },
-    800,
-    4000,
-    (d) => {
-      const job = d as DownloadJob | null;
-      const prev = this.downloadJob;
-      this.downloadJob = job && typeof job === 'object' && 'state' in job ? job : null;
-      // Auto-select the freshly downloaded GGUF (Unsloth: click → download → ready to load).
-      if (
-        this.downloadJob?.state === 'complete' &&
-        prev?.state === 'running' &&
-        this.downloadJob.filename
-      ) {
-        const name = this.downloadJob.filename;
-        void this.loadModels().then(() => {
-          if (this.models.some((m) => m.id === name)) void this.selectModel(name);
-        });
-      }
-    },
-    (d) => ((d as DownloadJob | null)?.state === 'running' ? 'fast' : 'slow')
-  );
   chat = $state<ChatMessage[]>([]);
   chatInput = $state('');
   chatStreaming = $state(false);
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private usageTimer: ReturnType<typeof setInterval> | null = null;
+  private updates: DashboardUpdates | null = null;
   private abort: AbortController | null = null;
+  private selectionGeneration = 0;
+  private handledDownloadTerminals = new Set<string>();
+  private reconciledDownloadTerminals = new Set<string>();
+  private selectedDownloadTerminals = new Set<string>();
+  private downloadSelectionGenerations = new Map<string, number>();
+  private observedDownloadIds = new Set<string>();
+  private acceptedDownloadIds = new Set<string>();
+  private lastDownloadTerminal: DownloadJob | null = null;
   private gpusLoaded = false;
   private configGpuIds: number[] | null = null;
   private selectionHydrated = false;
@@ -250,63 +219,169 @@ class AppStore {
   }
 
   start() {
-    void this.refresh();
-    void this.refreshUsage();
+    if (!this.updates) {
+      this.updates = new DashboardUpdates({
+        onArea: (topic, area) => this.applyLiveArea(topic, area),
+        onAreaHealth: (topic, area) => this.applyLiveHealth(topic, area),
+        onHealth: (health, error) => {
+          this.deliveryHealth = health;
+          this.deliveryError = error ?? '';
+          if (health === 'unavailable') {
+            this.connected = false;
+            this.statusSeen = true;
+          }
+        }
+      });
+    }
+    this.updates.start();
     void this.loadToken();
     void this.loadHfToken();
     void this.loadModels();
     void this.loadConfig();
     void this.loadGpus();
-    this.timer = setInterval(() => void this.refresh(), 1000);
-    this.usageTimer = setInterval(() => void this.refreshUsage(), 2000);
-    this.loadLoop.start();
-    this.downloadLoop.start();
   }
 
   stop() {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    if (this.usageTimer) clearInterval(this.usageTimer);
-    this.usageTimer = null;
+    this.updates?.stop();
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
-    this.loadLoop.stop();
-    this.downloadLoop.stop();
+  }
+
+  setLogListener(listener: LiveLogListener | null): boolean {
+    this.updates?.setLogListener(listener);
+    return this.updates !== null;
+  }
+
+  setLogVisibilityListener(listener: (() => void) | null, expected?: () => void): boolean {
+    this.updates?.setLogVisibilityListener(listener, expected);
+    return this.updates !== null;
+  }
+
+  setUsageInterest(active: boolean) {
+    this.updates?.setUsageInterest(active);
+  }
+
+  private applyLiveArea(topic: LiveAreaName, area: LiveArea<unknown>) {
+    if (area.availability !== 'available' || area.data === null) return;
+    if (topic === 'status') this.applyStatus(area.data as Status);
+    else if (topic === 'usage') this.applyUsage(area.data as UsageLive);
+    else if (topic === 'load') {
+      const progress = area.data as LiveProgress<LoadProgress>;
+      const selected = progress.current ?? progress.last_terminal;
+      if (!selected && (this.loadProgress?.phase === 'starting' || this.loadProgress?.phase === 'loading')) {
+        this.loadProgress = { ...this.loadProgress, phase: 'unknown' };
+      } else this.loadProgress = selected;
+    } else if (topic === 'download') {
+      const progress = area.data as LiveProgress<DownloadJob>;
+      this.applyDownloadRecords(progress);
+    }
+  }
+
+  private applyLiveHealth(topic: LiveAreaName, area: LiveArea<unknown>) {
+    const previous = this.areaHealth[topic];
+    this.areaHealth[topic] = {
+      availability: area.availability,
+      coverage: area.coverage,
+      last_success_at: area.availability === 'available' ? area.sampled_at : previous?.last_success_at ?? null,
+      error: area.error
+    };
+  }
+
+  private applyStatus(data: Status) {
+    this.statusSeen = true;
+    this.status = data;
+    this.connected = true;
+    const live = data.role === 'master' || data.role === 'worker';
+    if (live) {
+      if (data.join_key) this.joinKeyInput = data.join_key;
+      if (data.master_host) this.masterHostInput = data.master_host;
+      if (data.rpc_bind) this.rpcBindInput = data.rpc_bind;
+      if (data.overlay === 'none' || data.overlay === 'wireguard') this.overlay = data.overlay;
+    }
+    if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
+    else if (data.accel_backend === null) this.accelBackend = null;
+    const next = fp(data);
+    if (next !== fingerprint) {
+      fingerprint = next;
+      if (data.model_name && !this.selectedModel) this.selectedModel = data.model_name;
+      if (!this.selectedModel && data.role === 'master' && data.last_plan) {
+        this.planResult = data.last_plan as Record<string, unknown>;
+      }
+      if (this.selectedModel && data.role === 'master') this.scheduleEstimate();
+      const err = data.apply_error ?? null;
+      const warn = data.apply_warning ?? null;
+      if (err && err !== this.lastApplyError) pushToast('danger', err);
+      if (warn && warn !== this.lastApplyWarning) pushToast('warn', warn);
+      this.lastApplyError = err;
+      this.lastApplyWarning = warn;
+      if (!this.selectionHydrated) this.hydrateGpuSelection();
+    }
+  }
+
+  private applyUsage(data: UsageLive) {
+    this.liveUsage = data;
+    this.usageError = '';
+    if (!this.selectedNodeId || !this.liveUsage.nodes[this.selectedNodeId]) {
+      this.selectedNodeId = Object.keys(this.liveUsage.nodes)[0] ?? this.selectedNodeId;
+    }
+  }
+
+  private applyDownload(job: DownloadJob | null) {
+    this.downloadJob = job && typeof job === 'object' && 'state' in job ? job : null;
+  }
+
+  private applyDownloadRecords(progress: LiveProgress<DownloadJob>) {
+    const current = progress.current;
+    const terminal = progress.last_terminal;
+    if (current?.operation_id) this.observedDownloadIds.add(current.operation_id);
+    this.lastDownloadTerminal = terminal;
+    const tracked = this.downloadJob;
+    if (!current && tracked?.state === 'running'
+      && (!terminal || (tracked.operation_id && tracked.operation_id !== terminal.operation_id))) {
+      this.applyDownload({ ...tracked, state: 'unknown' });
+    } else {
+      this.applyDownload(current ?? terminal);
+    }
+    if (terminal?.state === 'complete' && !terminal.operation_id && tracked?.state === 'running'
+      && !tracked.operation_id && terminal.filename === tracked.filename) {
+      void this.loadModels();
+    }
+    if (terminal?.state === 'complete' && terminal.operation_id && !this.handledDownloadTerminals.has(terminal.operation_id)) {
+      const id = terminal.operation_id;
+      this.handledDownloadTerminals.add(id);
+      this.downloadSelectionGenerations.set(id, this.selectionGeneration);
+      void this.loadModels().then(() => {
+        this.reconciledDownloadTerminals.add(id);
+        this.maybeSelectCompletedDownload(terminal);
+      });
+    }
+  }
+
+  private maybeSelectCompletedDownload(job: DownloadJob) {
+    const id = job.operation_id;
+    if (!id || !job.filename || this.selectedDownloadTerminals.has(id)
+      || !this.reconciledDownloadTerminals.has(id)
+      || (!this.observedDownloadIds.has(id) && !this.acceptedDownloadIds.has(id))) return;
+    if (this.downloadSelectionGenerations.get(id) !== this.selectionGeneration
+      || !this.models.some((model) => model.id === job.filename)) return;
+    this.selectedDownloadTerminals.add(id);
+    void this.selectModel(job.filename);
   }
 
   async refresh() {
+    if (this.updates) {
+      this.updates.refresh();
+      return;
+    }
+    return this.refreshDirect();
+  }
+
+  private async refreshDirect() {
     try {
       const r = await fetch('/v1/status');
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = (await r.json()) as Status;
-      this.statusSeen = true;
-      this.status = data;
-      this.connected = true;
-      const live = data.role === 'master' || data.role === 'worker';
-      if (live) {
-        if (data.join_key) this.joinKeyInput = data.join_key;
-        if (data.master_host) this.masterHostInput = data.master_host;
-        if (data.rpc_bind) this.rpcBindInput = data.rpc_bind;
-        if (data.overlay === 'none' || data.overlay === 'wireguard') this.overlay = data.overlay;
-      }
-      if (isAccelBackend(data.accel_backend)) this.accelBackend = data.accel_backend;
-      else if (data.accel_backend === null) this.accelBackend = null;
-      const next = fp(data);
-      if (next !== fingerprint) {
-        fingerprint = next;
-        if (data.model_name && !this.selectedModel) this.selectedModel = data.model_name;
-        if (!this.selectedModel && data.role === 'master' && data.last_plan) {
-          this.planResult = data.last_plan as Record<string, unknown>;
-        }
-        if (this.selectedModel && data.role === 'master') this.scheduleEstimate();
-        const err = data.apply_error ?? null;
-        const warn = data.apply_warning ?? null;
-        if (err && err !== this.lastApplyError) pushToast('danger', err);
-        if (warn && warn !== this.lastApplyWarning) pushToast('warn', warn);
-        this.lastApplyError = err;
-        this.lastApplyWarning = warn;
-        if (!this.selectionHydrated) this.hydrateGpuSelection();
-      }
+      this.applyStatus(data);
     } catch {
       this.statusSeen = true;
       this.connected = false;
@@ -314,6 +389,10 @@ class AppStore {
   }
 
   async refreshUsage() {
+    if (this.updates) {
+      this.updates.refresh();
+      return;
+    }
     try {
       const r = await fetch('/v1/usage/live');
       if (!r.ok) {
@@ -323,11 +402,7 @@ class AppStore {
           : typeof detail === 'string' ? detail : `usage ${r.status}`;
         throw new Error(message);
       }
-      this.liveUsage = (await r.json()) as UsageLive;
-      this.usageError = '';
-      if (!this.selectedNodeId || !this.liveUsage.nodes[this.selectedNodeId]) {
-        this.selectedNodeId = Object.keys(this.liveUsage.nodes)[0] ?? '';
-      }
+      this.applyUsage((await r.json()) as UsageLive);
     } catch (error) {
       this.usageError = String(error);
       if (this.liveUsage) this.liveUsage = { ...this.liveUsage, nodes: Object.fromEntries(
@@ -592,11 +667,14 @@ class AppStore {
   }
 
   async selectModel(id: string) {
+    const generation = ++this.selectionGeneration;
     this.selectedModel = id;
     this.distributableBytes = 0;
     await this.loadRunCapabilities();
+    if (generation !== this.selectionGeneration) return;
     try {
       const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
+      if (generation !== this.selectionGeneration) return;
       if (!r.ok) {
         this.clampContextToModel();
         this.seedSamplingDefaults();
@@ -605,12 +683,14 @@ class AppStore {
         return;
       }
       const data = await r.json();
+      if (generation !== this.selectionGeneration) return;
       if (data.parameter_set) this.applyParameterSet(data.parameter_set);
       else {
         this.clampContextToModel();
         this.seedSamplingDefaults();
       }
     } catch {
+      if (generation !== this.selectionGeneration) return;
       this.clampContextToModel();
       this.seedSamplingDefaults();
     }
@@ -1038,6 +1118,14 @@ class AppStore {
         pushToast('danger', typeof data === 'string' ? data : JSON.stringify(data));
         throw new Error(String(text));
       }
+      if (path === '/v1/models/download' && data && typeof data === 'object'
+        && typeof (data as { operation_id?: unknown }).operation_id === 'string') {
+        const operationId = (data as { operation_id: string }).operation_id;
+        this.acceptedDownloadIds.add(operationId);
+        if (this.lastDownloadTerminal?.operation_id === operationId) {
+          this.maybeSelectCompletedDownload(this.lastDownloadTerminal);
+        }
+      }
       pushToast('ok', `${path} ok`);
       await this.refresh();
       await this.loadModels();
@@ -1193,7 +1281,7 @@ class AppStore {
         pushToast('danger', text || `cancel ${r.status}`);
         return;
       }
-      this.downloadJob = { state: 'cancelled', filename: this.downloadJob.filename };
+      await this.refresh();
     } catch (e) {
       pushToast('danger', String(e));
     } finally {

@@ -119,7 +119,7 @@ def test_join_discovers_master_by_key(client, monkeypatch):
 
     kid = join_key_id("secret")
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int | None = None):
         masters = [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
         if key is not None:
             want = join_key_id(key)
@@ -185,7 +185,11 @@ def test_join_discovers_master_by_key(client, monkeypatch):
 def test_join_no_matching_master_returns_404(client, monkeypatch):
     c, agent = client
 
-    monkeypatch.setattr(agent.discovery, "browse_masters", lambda timeout=2.0, key=None: [])
+    monkeypatch.setattr(
+        agent.discovery,
+        "browse_masters",
+        lambda timeout=2.0, key=None, port=None: [],
+    )
     r = c.post("/v1/join", json={"key": "missing", "overlay": "none"})
     assert r.status_code == 404
     assert "no matching master" in r.text.lower() or "no matching master" in r.json()["detail"].lower()
@@ -197,7 +201,7 @@ def test_join_multiple_matching_masters_returns_409(client, monkeypatch):
 
     kid = join_key_id("dup-key")
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int | None = None):
         return [
             DiscoveredMaster(name="a", host="10.0.0.1", port=18765, key_id=kid),
             DiscoveredMaster(name="b", host="10.0.0.2", port=18765, key_id=kid),

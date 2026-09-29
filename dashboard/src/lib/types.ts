@@ -40,7 +40,7 @@ export type DownloadProgress = {
 
 /** Live download job view from /v1/models/download-progress. */
 export type DownloadJob = {
-  state: 'idle' | 'running' | 'complete' | 'error' | 'cancelled';
+  state: 'idle' | 'running' | 'complete' | 'error' | 'cancelled' | 'unknown';
   filename?: string;
   bytes?: number;
   total?: number | null;
@@ -49,11 +49,15 @@ export type DownloadJob = {
   rate_bps?: number | null;
   eta_seconds?: number | null;
   error?: string | null;
+  operation_id?: string | null;
+  started_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
 };
 
 /** Live inference load view from /v1/load-progress. */
 export type LoadProgress = {
-  phase: 'starting' | 'loading' | 'ready' | 'error' | null;
+  phase: 'starting' | 'loading' | 'ready' | 'error' | 'cancelled' | 'unknown' | null;
   model: string | null;
   bytes_loaded: number;
   bytes_total: number;
@@ -61,6 +65,10 @@ export type LoadProgress = {
   rate_bps?: number | null;
   eta_seconds?: number | null;
   error?: string;
+  operation_id?: string | null;
+  started_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
 };
 
 /** Live serving state sampled from llama-server slots on the master. */
@@ -334,6 +342,58 @@ export type LogSnapshot = {
 };
 
 export type RefreshMode = 'live' | '5s' | '30s' | '1m';
+
+export type LiveAvailability = 'loading' | 'available' | 'unavailable' | 'denied';
+export type LiveCoverage = 'local' | 'cluster' | 'local_with_cluster_view';
+export type DeliveryHealth = 'loading' | 'live' | 'reconnecting' | 'periodic-refresh' | 'unavailable' | 'paused';
+export type LiveAreaName = 'status' | 'usage' | 'load' | 'download';
+
+export type LiveError = { code: string; message: string };
+
+export type LiveArea<T> = {
+  revision: number;
+  sampled_at: string | null;
+  availability: LiveAvailability;
+  coverage: LiveCoverage;
+  upstream_last_success_at: string | null;
+  data: T | null;
+  error: LiveError | null;
+};
+
+export type LiveAreaHealth = {
+  availability: LiveAvailability;
+  coverage: LiveCoverage;
+  last_success_at: string | null;
+  error: LiveError | null;
+};
+
+export type LiveLogSnapshot = LogSnapshot & {
+  continuity_id: string;
+  discontinuity: { id: string; reason: string; detected_at: string } | null;
+};
+
+export type LiveLogs = {
+  availability: LiveAvailability;
+  sampled_at: string | null;
+  snapshot: LiveLogSnapshot | null;
+  error: LiveError | null;
+};
+
+export type LiveProgress<T> = { current: T | null; last_terminal: T | null };
+
+export type LiveSnapshot = {
+  version: 1;
+  transport: 'websocket';
+  epoch: string;
+  server_time: string;
+  areas: Partial<{
+    status: LiveArea<Status>;
+    usage: LiveArea<UsageLive>;
+    load: LiveArea<LiveProgress<LoadProgress>>;
+    download: LiveArea<LiveProgress<DownloadJob>>;
+  }>;
+  logs: LiveLogs | null;
+};
 
 export type ModelDefaultsInfo = {
   sampling?: Record<string, number>;

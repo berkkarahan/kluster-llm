@@ -333,6 +333,7 @@ def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
 
 def test_failed_liveness_history_save_keeps_last_successful_save(client, monkeypatch):
     import sqlite3
+    import threading
     import time
 
     c, agent, _ = client
@@ -340,8 +341,18 @@ def test_failed_liveness_history_save_keeps_last_successful_save(client, monkeyp
     agent.STATE.members["w1"] = {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30}
     store = agent.app.state.usage_store
     store.last_successful_save = "2026-09-28T12:00:00Z"
-    monkeypatch.setattr(store, "end_node", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")))
+    finished = threading.Event()
+
+    def fail_close(*_args, **_kwargs):
+        try:
+            raise sqlite3.OperationalError("disk full")
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(store, "end_node", fail_close)
     agent._sync_master_liveness(shrink=False)
+    assert "w1" not in agent.STATE.members, "liveness publication must precede slow storage maintenance"
+    assert finished.wait(2), "background liveness maintenance did not run"
     status = c.get("/v1/usage/live").json()["recording"]
     assert status["recording"] == "failed"
     assert status["last_successful_save"] == "2026-09-28T12:00:00Z"

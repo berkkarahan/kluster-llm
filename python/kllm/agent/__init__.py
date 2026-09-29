@@ -3,9 +3,12 @@ from __future__ import annotations
 import os
 import asyncio
 import json
+import logging
 import math
 import sqlite3
+import ipaddress
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 import httpx
 from kllm import http_clients, rpc_cache
 import secrets
@@ -18,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -45,6 +48,7 @@ from kllm.hf_token import hf_token_status, save_hf_token
 from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
 from kllm import cluster_log
+from kllm.agent.live import LiveFeed, SourceDenied, TOPICS as LIVE_TOPICS, server_time as live_server_time
 from kllm.run_planning import (
     build_master_launch,
     ensure_master_alive_after_spawn,
@@ -69,8 +73,12 @@ from kllm.state import (
 
 _background_stop = threading.Event()
 _usage_lock = threading.Lock()
+_activity_lock = threading.Lock()
+_activity_sampled_at = 0.0
+_activity_cached: dict[str, Any] | None = None
 _worker_usage_error: str | None = None
 _worker_usage_last_save: str | None = None
+_worker_usage_last_success_at: str | None = None
 
 
 def _usage_store() -> usage.UsageStore:
@@ -184,9 +192,10 @@ async def _sample_diagnostics():
 
 @asynccontextmanager
 async def lifespan(app):
-    global _worker_usage_error, _worker_usage_last_save
+    global _worker_usage_error, _worker_usage_last_save, _worker_usage_last_success_at
     _worker_usage_error = None
     _worker_usage_last_save = None
+    _worker_usage_last_success_at = None
     http_clients.control_client()
     try:
         _usage_store()
@@ -194,6 +203,7 @@ async def lifespan(app):
         pass  # The private history API reports 503; agent/inference must still start.
     _background_stop.clear()
     _ensure_master_member(persist=True)
+    app.state.live_feed = _new_live_feed()
     usage_thread = None
     if "pytest" not in sys.modules:
         _start_membership_thread()
@@ -218,6 +228,9 @@ async def lifespan(app):
                 if store is not None:
                     store.close()
                     del app.state.usage_store
+            if hasattr(app.state, "live_feed"):
+                await asyncio.to_thread(app.state.live_feed.stop)
+                del app.state.live_feed
 
 
 app = FastAPI(title="kllm-agent", version="0.1.0", lifespan=lifespan)
@@ -279,6 +292,11 @@ _refresh_persisted_netsec_warnings()
 ensure_api_token()
 
 _membership_lock = threading.Lock()
+_membership_maintenance_lock = threading.Lock()
+_membership_pending: dict[str, tuple[bool, tuple[str, str | None]]] = {}
+_membership_maintenance_inflight = False
+_latency_probe_lock = threading.Lock()
+_latency_probe_inflight = False
 _membership_thread_started = False
 _logs_thread_started = False
 _capacity_refresh_lock = threading.Lock()
@@ -293,26 +311,70 @@ def _persist_last_settings(body: PlanBody | RunBody) -> None:
 
 def _sync_master_liveness(*, shrink: bool = True) -> list[str]:
     """Sweep stale workers. Optionally replan-and-apply on shrink (master only)."""
+    global _membership_maintenance_inflight
     if STATE.role != "master":
         return []
     with _membership_lock:
         dropped = membership_mod.sweep_liveness(STATE)
-        if dropped:
-            try:
-                for node_id in dropped:
-                    _usage_store().end_node(node_id, state="unobserved")
-            except (OSError, sqlite3.Error) as exc:
-                try:
-                    store = _usage_store()
-                    store.recording = "failed"
-                    reason = "disk full" if "disk full" in str(exc).lower() else "storage unavailable"
-                    store.error = f"usage lifetime close failed: {reason}"
-                except (OSError, sqlite3.Error):
-                    pass
-            STATE.save()
-            if shrink:
-                membership_mod.on_membership_shrink(STATE)
+    if not dropped:
         return dropped
+    with _membership_maintenance_lock:
+        identity = (STATE.node_id, STATE.join_key)
+        for node_id in dropped:
+            previous = _membership_pending.get(node_id)
+            _membership_pending[node_id] = (shrink or bool(previous and previous[0] and previous[1] == identity), identity)
+        if _membership_maintenance_inflight:
+            return dropped
+        _membership_maintenance_inflight = True
+
+    def maintain() -> None:
+        global _membership_maintenance_inflight
+        try:
+            while True:
+                with _membership_maintenance_lock:
+                    pending = dict(_membership_pending)
+                    _membership_pending.clear()
+                    if not pending:
+                        return
+                try:
+                    identity = (STATE.node_id, STATE.join_key)
+                    if STATE.role != "master":
+                        continue
+                    removed = [node_id for node_id, (_, expected) in pending.items()
+                               if expected == identity and node_id not in STATE.members]
+                    if not removed:
+                        continue
+                    try:
+                        store = _usage_store()
+                        for node_id in removed:
+                            if STATE.role != "master" or (STATE.node_id, STATE.join_key) != identity:
+                                break
+                            if node_id not in STATE.members:
+                                store.end_node(node_id, state="unobserved")
+                    except (OSError, sqlite3.Error) as exc:
+                        try:
+                            store = _usage_store()
+                            store.recording = "failed"
+                            reason = "disk full" if "disk full" in str(exc).lower() else "storage unavailable"
+                            store.error = f"usage lifetime close failed: {reason}"
+                        except (OSError, sqlite3.Error):
+                            pass
+                    if STATE.role != "master" or (STATE.node_id, STATE.join_key) != identity:
+                        continue
+                    STATE.save()
+                    if any(pending[node_id][0] and node_id not in STATE.members for node_id in removed):
+                        membership_mod.on_membership_shrink(STATE)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("membership maintenance failed (%s)", type(exc).__name__)
+        finally:
+            with _membership_maintenance_lock:
+                restart = bool(_membership_pending)
+                _membership_maintenance_inflight = restart
+            if restart:
+                threading.Thread(target=maintain, name="kllm-membership-maintenance", daemon=True).start()
+
+    threading.Thread(target=maintain, name="kllm-membership-maintenance", daemon=True).start()
+    return dropped
 
 
 def _heartbeat_payload() -> dict[str, Any]:
@@ -367,13 +429,20 @@ def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
 
 def _inference_activity() -> dict[str, Any]:
     """Read local master activity or return the master's latest worker mirror."""
+    global _activity_sampled_at, _activity_cached
     if STATE.role != "master":
         return STATE.inference_activity or inference_activity.idle()
-    running = bool(STATE.process_pid and STATE.process_role == "master")
-    load = load_progress.sample(STATE.infer_port) if running else None
-    activity = inference_activity.sample(STATE.infer_port, running=running, load=load)
-    STATE.inference_activity = activity
-    return activity
+    with _activity_lock:
+        now = time.monotonic()
+        if _activity_cached is not None and now - _activity_sampled_at < 0.5:
+            return dict(_activity_cached)
+        running = bool(STATE.process_pid and STATE.process_role == "master")
+        load = load_progress.sample(STATE.infer_port) if running else None
+        activity = inference_activity.sample(STATE.infer_port, running=running, load=load)
+        STATE.inference_activity = activity
+        _activity_cached = dict(activity)
+        _activity_sampled_at = now
+        return dict(activity)
 
 
 def _worker_local_leave() -> None:
@@ -504,11 +573,29 @@ def _probe_worker_latencies() -> None:
 def _tick_membership() -> None:
     if STATE.role == "master":
         _sync_master_liveness(shrink=True)
-        _probe_worker_latencies()
-        STATE.save()
+        _schedule_worker_latency_probe()
     elif STATE.role == "worker":
         _worker_post_heartbeat()
     _schedule_local_capacity_refresh()
+
+
+def _schedule_worker_latency_probe() -> None:
+    global _latency_probe_inflight
+    with _latency_probe_lock:
+        if _latency_probe_inflight:
+            return
+        _latency_probe_inflight = True
+
+    def probe() -> None:
+        global _latency_probe_inflight
+        try:
+            _probe_worker_latencies()
+            STATE.save()
+        finally:
+            with _latency_probe_lock:
+                _latency_probe_inflight = False
+
+    threading.Thread(target=probe, name="kllm-latency-probe", daemon=True).start()
 
 
 def _schedule_local_capacity_refresh() -> None:
@@ -1101,10 +1188,10 @@ _DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kllm-
 def _download_job_runner(source: str, name: str | None) -> None:
     """Run the download off the request path; publish terminal progress.
 
-    ``download_model`` clears its live snapshot on return, so the runner
-    publishes the terminal state itself — pollers see complete/error for as
-    long as the snapshot lives (cleared by the next start).
+    The operation ID prevents a late terminal publish from replacing a newer
+    queued download.
     """
+    operation_id = (model_ops.get_download_progress() or {}).get("operation_id")
     try:
         path = model_ops.download_model(source, dest_name=name)
     except model_ops.DownloadCancelledError:
@@ -1113,21 +1200,19 @@ def _download_job_runner(source: str, name: str | None) -> None:
         snap = model_ops.get_download_progress()
         filename = (snap or {}).get("filename") or (name or Path(source).name)
         try:
-            model_ops.set_download_terminal(filename, None, "error", str(exc))
+            model_ops.set_download_terminal(filename, None, "error", str(exc), operation_id)
         except Exception:
             pass
         return
     total = path.stat().st_size
     try:
-        model_ops.set_download_terminal(path.name, total, "complete")
+        model_ops.set_download_terminal(path.name, total, "complete", operation_id=operation_id)
     except OSError:
         pass
 
 
 @app.post("/v1/models/download")
 def download_model(body: DownloadBody) -> dict[str, Any]:
-    if model_ops.get_download_progress() is not None:
-        raise HTTPException(409, "a download is already in progress")
     try:
         # Validate the source up front (resolves HF filename / quant) so a bad
         # ref fails fast with 400 instead of surfacing mid-transfer.
@@ -1136,8 +1221,20 @@ def download_model(body: DownloadBody) -> dict[str, Any]:
             model_ops.resolve_hf_filename(repo_id, suffix, token=model_ops.resolve_hf_token())
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
+    try:
+        operation = model_ops.begin_download(body.source, body.name)
+    except model_ops.DownloadInProgressError as exc:
+        raise HTTPException(409, str(exc)) from exc
     _DOWNLOAD_EXECUTOR.submit(_download_job_runner, body.source, body.name)
-    return {"ok": True, "accepted": True, "source": body.source}
+    return {
+        "ok": True,
+        "accepted": True,
+        "source": body.source,
+        "kind": "download",
+        "node_id": STATE.node_id,
+        "state": "running",
+        **{key: operation[key] for key in ("operation_id", "started_at", "updated_at", "finished_at")},
+    }
 
 
 @app.get("/v1/models/download-progress")
@@ -2033,8 +2130,9 @@ def _proxy_master_usage(path: str, params: dict[str, Any] | None = None) -> dict
             f"{_master_control_base()}{path}", params=params,
             headers={"X-Kllm-Key": STATE.join_key}, timeout=5.0)
         if response.status_code != 200:
-            raise HTTPException(response.status_code if response.status_code in (400, 404, 422) else 503,
-                                "master usage history unavailable" if response.status_code >= 500 else response.text[:256])
+            status = response.status_code if response.status_code in (400, 401, 403, 404, 422) else 503
+            raise HTTPException(status, "master usage access denied" if status in (401, 403)
+                                else "master usage history unavailable")
         return response.json()
     except HTTPException:
         raise
@@ -2045,7 +2143,7 @@ def _proxy_master_usage(path: str, params: dict[str, Any] | None = None) -> dict
 @app.get("/v1/usage/live")
 def usage_live() -> dict[str, Any]:
     if STATE.role == "worker":
-        global _worker_usage_last_save
+        global _worker_usage_last_save, _worker_usage_last_success_at
         try:
             data = _proxy_master_usage("/v1/usage/live")
         except HTTPException as exc:
@@ -2055,6 +2153,7 @@ def usage_live() -> dict[str, Any]:
                                           "last_successful_save": _worker_usage_last_save}) from None
             raise
         _worker_usage_last_save = data.get("recording", {}).get("last_successful_save") or _worker_usage_last_save
+        _worker_usage_last_success_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if _worker_usage_error:
             if STATE.node_id in data.get("nodes", {}):
                 data["nodes"][STATE.node_id]["error"] = _worker_usage_error
@@ -2337,6 +2436,532 @@ def get_logs(
     if follow:
         return _logs_sse(n, True, node, source)
     return _logs_snapshot(n, node, source, after)
+
+
+def _live_coverage() -> str:
+    return "cluster" if STATE.role == "master" else "local_with_cluster_view" if STATE.role == "worker" else "local"
+
+
+def _live_status() -> dict[str, Any]:
+    """Fast detached status view; probes and software discovery stay off the feed path."""
+    config = kllm_config.load_config()
+    member = dict(STATE.members.get(STATE.node_id) or {})
+    capacity = {key: member[key] for key in (
+        "total_ram_bytes", "available_ram_bytes", "vram_bytes", "backend", "actual_backend",
+        "devices", "unified_memory", "reclaimable_ram_bytes",
+    ) if key in member}
+    activity = _inference_activity()
+    return {
+        "role": STATE.role, "node_id": STATE.node_id,
+        "join_key": STATE.join_key if STATE.role == "master" else None,
+        "master_host": STATE.master_host, "master_port": STATE.master_port,
+        "cp_proxy_port": STATE.cp_proxy_port,
+        "members": {node_id: dict(value) for node_id, value in STATE.members.items()},
+        "process_pid": STATE.process_pid, "process_role": STATE.process_role,
+        "last_plan": membership_mod.public_last_plan(STATE), "model_name": STATE.model_name,
+        "download": model_ops.get_download_progress(), "rpc_cache": rpc_cache.status(),
+        "update": cluster_update.get_update_progress(),
+        "software": {key: member.get(key) for key in ("binary_version", "git_head", "llama_release")},
+        "capacity": capacity, "control_port": STATE.control_port, "rpc_port": STATE.rpc_port,
+        "infer_port": STATE.infer_port, "inference_up": bool(activity.get("server_ready")),
+        "inference_activity": activity, "device": config.get("device", kllm_config.DEFAULT_DEVICE),
+        "vram_percent": config.get("vram_percent"), "ram_percent": config.get("ram_percent"),
+        "config_gpu_ids": config.get("gpu_ids"),
+        "accel_backend": config.get("accel_backend", member.get("actual_backend", member.get("backend"))),
+        "gpu_ids": STATE.gpu_ids, "rpc_bind": STATE.rpc_bind, "overlay": STATE.overlay,
+        "wg_address": STATE.wg_address, "overlay_status": STATE.overlay_status,
+        "netsec_warnings": list(STATE.netsec_warnings or []),
+        "apply_error": STATE.apply_error, "apply_warning": STATE.apply_warning,
+    }
+
+
+def _operation_records(kind: str, records: dict[str, Any]) -> dict[str, Any]:
+    for key in ("current", "last_terminal"):
+        operation = records.get(key)
+        if not isinstance(operation, dict):
+            continue
+        operation = dict(operation)
+        operation["kind"] = kind
+        operation["node_id"] = STATE.node_id
+        if kind == "load":
+            operation["state"] = ("running" if operation.get("phase") in {"starting", "loading"}
+                                   else "complete" if operation.get("phase") == "ready"
+                                   else "cancelled" if operation.get("phase") == "cancelled" else "error")
+        records[key] = operation
+    return records
+
+
+def _live_load() -> dict[str, Any]:
+    return _operation_records("load", load_progress.records(STATE.infer_port))
+
+
+def _live_usage() -> dict[str, Any]:
+    try:
+        return usage_live()
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            raise SourceDenied from None
+        raise
+
+
+def _live_upstream_success(topic: str) -> str | None:
+    return _worker_usage_last_success_at if topic == "usage" and STATE.role == "worker" else None
+
+
+def _live_download() -> dict[str, Any]:
+    return _operation_records("download", model_ops.download_progress_records())
+
+
+def _live_logs(after: str | None) -> dict[str, Any]:
+    if after is not None:
+        cluster_log.parse_cursor(after)
+    if STATE.role != "worker":
+        snapshot = _logs_snapshot(n=200, node=None, source=None, after=after)
+        continuity_id = getattr(app.state, "live_log_continuity", None)
+        if continuity_id is None:
+            continuity_id = str(uuid.uuid4())
+            app.state.live_log_continuity = continuity_id
+        snapshot.update(source="cluster", continuity_id=continuity_id, discontinuity=None)
+        return snapshot
+
+    state = getattr(app.state, "live_log_state", None)
+    if state is None:
+        state = {
+            "lock": threading.Lock(), "flight": None, "last_acquired": 0.0,
+            "mirror": cluster_log.LogHub(), "upstream_cursor": None,
+            "source": None, "continuity_id": str(uuid.uuid4()), "discontinuity": None,
+            "changed": False, "error": None,
+        }
+        app.state.live_log_state = state
+
+    with state["lock"]:
+        flight = state["flight"]
+        retry_delay = 30.0 if state.get("error") == "denied" else 0.5
+        owner = flight is None and time.monotonic() - state["last_acquired"] >= retry_delay
+        if owner:
+            flight = threading.Event()
+            state["flight"] = flight
+
+    if owner:
+        upstream = None
+        failure: Exception | None = None
+        try:
+            try:
+                upstream = _try_proxy_master_logs(500, False, None, None, state["upstream_cursor"])
+            except HTTPException as exc:
+                if exc.status_code in (401, 403):
+                    raise SourceDenied from None
+                raise RuntimeError("Master log source returned an error") from None
+            if upstream is not None:
+                cursor = upstream.get("cursor")
+                lines = upstream.get("lines")
+                if not isinstance(lines, list):
+                    raise RuntimeError("Master log source returned invalid data")
+                cluster_log.parse_cursor(cursor)
+                for item in lines:
+                    if (not isinstance(item, dict) or cluster_log.normalize_event_id(item.get("event_id")) is None
+                        or not isinstance(item.get("ts"), (int, float)) or not math.isfinite(item["ts"])
+                        or not isinstance(item.get("node_id"), str) or not item["node_id"]
+                        or item.get("source") not in cluster_log.VALID_SOURCES or not isinstance(item.get("line"), str)):
+                        raise RuntimeError("Master log source returned invalid data")
+            with state["lock"]:
+                source = "cluster" if upstream is not None else "local"
+                changed = state["source"] is not None and state["source"] != source
+                if changed:
+                    state["continuity_id"] = str(uuid.uuid4())
+                    state["discontinuity"] = {"id": state["continuity_id"], "reason": "coverage_change",
+                                               "detected_at": live_server_time()}
+                    state["changed"] = True
+                state["source"] = source
+                if upstream is not None:
+                    reset = upstream.get("reset") is not None or bool(upstream.get("gap"))
+                    if reset:
+                        state["mirror"].reset()
+                        state["continuity_id"] = str(uuid.uuid4())
+                        gap_reason = upstream.get("gap_reason")
+                        reason = "upstream_retention" if gap_reason == "retention" else "upstream_batch_limit" if gap_reason == "batch_limit" else "upstream_reset"
+                        state["discontinuity"] = {"id": state["continuity_id"], "reason": reason,
+                                                   "detected_at": live_server_time()}
+                        state["changed"] = True
+                    if lines:
+                        state["mirror"].ingest(lines, persist=False)
+                    state["upstream_cursor"] = cursor
+                state["error"] = None
+                state["last_acquired"] = time.monotonic()
+        except Exception as exc:
+            failure = exc
+            with state["lock"]:
+                state["error"] = "denied" if isinstance(exc, SourceDenied) else "unavailable"
+                state["last_acquired"] = time.monotonic()
+        finally:
+            with state["lock"]:
+                state["flight"] = None
+                flight.set()
+        if failure is not None:
+            raise failure
+    elif flight is not None:
+        flight.wait(2)
+
+    with state["lock"]:
+        error = state.get("error")
+        source = state["source"] or "local"
+        continuity_id = state["continuity_id"]
+        discontinuity = dict(state["discontinuity"]) if state["discontinuity"] else None
+        changed = state["changed"]
+        state["changed"] = False
+        mirror = state["mirror"]
+    if error == "denied":
+        raise SourceDenied
+    if error == "unavailable":
+        raise RuntimeError("Master log source is unavailable")
+    if source == "cluster":
+        snapshot = mirror.snapshot(200, after=after)
+        snapshot.update(source="cluster", continuity_id=continuity_id, discontinuity=discontinuity)
+    else:
+        snapshot = cluster_log.HUB.snapshot(200, STATE.node_id, None, after)
+        snapshot.update(source="local", warning="master unreachable; showing local logs",
+                        continuity_id=continuity_id, discontinuity=discontinuity)
+    if changed:
+        snapshot.update(reset="origin_changed", gap=True, gap_reason="feed_reset")
+    return snapshot
+
+
+def _new_live_feed() -> LiveFeed:
+    return LiveFeed(
+        {
+            "status": (_live_status, _live_coverage),
+            "usage": (_live_usage, _live_coverage),
+            "load": (_live_load, "local"),
+            "download": (_live_download, "local"),
+        },
+        _live_logs,
+        upstream_success=_live_upstream_success,
+        scope=lambda: (STATE.role, STATE.node_id, STATE.master_host, STATE.join_key, STATE.process_pid),
+    )
+
+
+def _live_feed() -> LiveFeed:
+    feed = getattr(app.state, "live_feed", None)
+    if feed is None:
+        feed = _new_live_feed()
+        app.state.live_feed = feed
+    feed.start()
+    return feed
+
+
+def _origin(value: str, *, limit: int = 512) -> tuple[str, str, int] | None:
+    if not value or len(value) > limit:
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+            return None
+        if parsed.path or parsed.query or parsed.fragment:
+            return None
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return parsed.scheme, parsed.hostname.rstrip(".").lower(), port
+
+
+def _is_loopback(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return bool(host and ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        return False
+
+
+def _request_origin(request: Request) -> tuple[str, str, int] | None:
+    parsed = urlsplit(str(request.url))
+    return _origin(f"{parsed.scheme}://{parsed.netloc}")
+
+
+def _websocket_origin(websocket: WebSocket) -> tuple[str, str, int] | None:
+    parsed = urlsplit(str(websocket.url))
+    scheme = "https" if parsed.scheme == "wss" else "http"
+    return _origin(f"{scheme}://{parsed.netloc}")
+
+
+def _origin_allowed(value: str, target: tuple[str, str, int] | None, peer: str | None) -> bool:
+    origin = _origin(value)
+    if origin is None or target is None:
+        return False
+    if origin == target:
+        return True
+    return origin[0] == "http" and origin[2] == 5173 and _is_loopback(origin[1]) and _is_loopback(target[1]) and _is_loopback(peer)
+
+
+def _live_request(
+    topics: str | None,
+    logs: str,
+    after: str | None,
+    continuity_id: str | None,
+    page_origin: str | None,
+    origin: str | None,
+    request: Request,
+) -> tuple[list[str], bool, str | None, str | None]:
+    if topics is None:
+        selected = list(LIVE_TOPICS)
+    elif topics == "":
+        selected = []
+    else:
+        selected = topics.split(",")
+        if len(selected) != len(set(selected)) or any(topic not in LIVE_TOPICS for topic in selected):
+            raise HTTPException(422, "topics must be a unique subset of status, usage, load, download")
+    wants_logs = logs == "1"
+    if (after is not None or continuity_id is not None) and not wants_logs:
+        raise HTTPException(422, "after and continuity_id require logs=1")
+    if not selected and not wants_logs:
+        raise HTTPException(422, "request at least one topic or logs")
+    if after is not None:
+        try:
+            cluster_log.parse_cursor(after)
+        except cluster_log.CursorError:
+            raise HTTPException(400, "invalid log cursor") from None
+    if continuity_id is not None:
+        try:
+            uuid.UUID(continuity_id)
+        except ValueError:
+            raise HTTPException(422, "invalid continuity_id") from None
+    target = _request_origin(request)
+    if page_origin is not None:
+        if _origin(page_origin) is None:
+            raise HTTPException(422, "invalid page_origin")
+        if not _origin_allowed(page_origin, target, request.client.host if request.client else None):
+            raise HTTPException(403, "page origin is not permitted")
+    if origin is not None and not _origin_allowed(origin, target, request.client.host if request.client else None):
+        raise HTTPException(403, "origin is not permitted")
+    return selected, wants_logs, after, continuity_id
+
+
+@app.get("/v1/dashboard/live")
+def dashboard_live(
+    request: Request,
+    topics: str | None = Query(default=None, max_length=256),
+    logs: Literal["0", "1"] = "0",
+    after: str | None = Query(default=None, max_length=128),
+    continuity_id: str | None = Query(default=None, max_length=64),
+    page_origin: str | None = Query(default=None, max_length=512),
+    origin: str | None = Header(default=None),
+) -> JSONResponse:
+    selected, wants_logs, cursor, continuity = _live_request(topics, logs, after, continuity_id, page_origin, origin, request)
+    try:
+        payload = _live_feed().snapshot(selected, logs=wants_logs, after=cursor, continuity_id=continuity)
+    except OverflowError:
+        raise HTTPException(503, "dashboard snapshot is temporarily unavailable") from None
+    except ValueError:
+        raise HTTPException(400, "invalid log cursor") from None
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+def _safe_control(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**53
+
+
+def _subscription(control: dict[str, Any], generation: int) -> tuple[int, list[str], str | None, str | None] | None:
+    if set(control) != {"type", "version", "generation", "topics", "logs"} or control.get("type") != "subscribe" or control.get("version") != 1:
+        return None
+    next_generation = control.get("generation")
+    topics = control.get("topics")
+    logs = control.get("logs")
+    if not _safe_control(next_generation) or next_generation <= generation or not isinstance(topics, list):
+        return None
+    if any(not isinstance(topic, str) or topic not in LIVE_TOPICS for topic in topics):
+        return None
+    if len(topics) != len(set(topics)):
+        return None
+    if logs is None:
+        cursor = None
+    elif isinstance(logs, dict) and set(logs) == {"after", "continuity_id"}:
+        cursor = logs.get("after")
+        continuity_id = logs.get("continuity_id")
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 128):
+            return None
+        if continuity_id is not None:
+            try:
+                uuid.UUID(continuity_id)
+            except (ValueError, TypeError):
+                return None
+    else:
+        return None
+    if not topics and logs is None:
+        return None
+    try:
+        if cursor is not None:
+            cluster_log.parse_cursor(cursor)
+    except cluster_log.CursorError:
+        return None
+    return next_generation, topics, cursor, continuity_id if logs is not None else None
+
+
+@app.websocket("/v1/dashboard/live")
+async def dashboard_live_websocket(websocket: WebSocket) -> None:
+    origin = websocket.headers.get("origin")
+    target = _websocket_origin(websocket)
+    peer = websocket.client.host if websocket.client else None
+    if origin is None or not _origin_allowed(origin, target, peer):
+        await websocket.close(code=1008)
+        return
+    feed = _live_feed()
+    viewer_id = str(uuid.uuid4())
+    serving_epoch = feed.current_epoch()
+    await websocket.accept()
+    await websocket.send_json({"type": "hello", "version": 1, "epoch": serving_epoch,
+                               "server_time": live_server_time(), "heartbeat_ms": 2000})
+    generation = 0
+    topics: list[str] = []
+    logs_requested = False
+    log_cursor: str | None = None
+    log_continuity: str | None = None
+    outstanding: tuple[int, float, str | None, str | None, tuple[Any, ...] | None] | None = None
+    sent_revisions: dict[str, int] = {}
+    sent_log_cursor: str | None = None
+    sent_log_signature: tuple[Any, ...] | None = None
+    batch = 0
+    next_ping = time.monotonic() + 2
+    next_refresh = time.monotonic()
+    peer_seen = time.monotonic()
+    control_times: list[float] = []
+    ping_id = 0
+    pending_ping: int | None = None
+
+    async def fail(code: str, message: str, close_code: int = 1008) -> None:
+        await websocket.send_json({"type": "error", "area": "connection", "code": code, "message": message})
+        await websocket.close(code=close_code)
+
+    try:
+        while True:
+            now = time.monotonic()
+            if feed.current_epoch() != serving_epoch:
+                await websocket.close(code=1012)
+                return
+            if now - peer_seen > 4:
+                await websocket.close(code=1013)
+                return
+            if outstanding is not None and now - outstanding[1] > 5:
+                await websocket.close(code=1013)
+                return
+            if generation and outstanding is None and now >= next_refresh:
+                try:
+                    snapshot = await asyncio.to_thread(feed.snapshot, topics, logs=logs_requested,
+                                                       after=log_cursor, continuity_id=log_continuity, lease=False)
+                except ValueError:
+                    await fail("invalid_cursor", "Invalid log cursor")
+                    return
+                if feed.current_epoch() != serving_epoch:
+                    await websocket.close(code=1012)
+                    return
+                changed = {topic: record for topic, record in snapshot["areas"].items() if sent_revisions.get(topic) != record["revision"]}
+                log_result = snapshot["logs"]
+                current_cursor = (log_result or {}).get("snapshot", {}).get("cursor") if log_result else None
+                log_snapshot = (log_result or {}).get("snapshot") or {}
+                log_error = (log_result or {}).get("error") or {}
+                current_signature = ((log_result or {}).get("availability"), current_cursor,
+                                     log_snapshot.get("continuity_id"), log_snapshot.get("reset"),
+                                     log_snapshot.get("gap"), log_snapshot.get("gap_reason"),
+                                     log_snapshot.get("source"), log_snapshot.get("warning"),
+                                     log_error.get("code"), log_error.get("message"),
+                                     (log_snapshot.get("discontinuity") or {}).get("id")) if log_result else None
+                if changed or (log_result is not None and current_signature != sent_log_signature):
+                    batch += 1
+                    await websocket.send_json({"type": "data", "generation": generation, "batch": batch, "initial": False,
+                                               "epoch": snapshot["epoch"], "server_time": live_server_time(), "areas": changed, "logs": log_result})
+                    current_continuity = (log_result or {}).get("snapshot", {}).get("continuity_id") if log_result else None
+                    outstanding = (batch, time.monotonic(), current_cursor, current_continuity, current_signature)
+                    sent_revisions.update({topic: record["revision"] for topic, record in changed.items()})
+                next_refresh = time.monotonic() + 1
+            timeout = min(max(0.01, next_ping - now), max(0.01, next_refresh - now), 1.0)
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout)
+            except TimeoutError:
+                if time.monotonic() >= next_ping:
+                    ping_id += 1
+                    pending_ping = ping_id
+                    await websocket.send_json({"type": "ping", "id": ping_id})
+                    next_ping = time.monotonic() + 2
+                continue
+            if message["type"] == "websocket.disconnect":
+                return
+            raw = message.get("text")
+            if raw is None:
+                await fail("invalid_request", "JSON text controls are required")
+                return
+            if len(raw.encode()) > 4096:
+                await websocket.close(code=1009)
+                return
+            try:
+                control = json.loads(raw)
+            except ValueError:
+                await fail("invalid_request", "Invalid JSON control")
+                return
+            now = time.monotonic()
+            control_times = [item for item in control_times if now - item < 1]
+            control_times.append(now)
+            if len(control_times) > 20 or not isinstance(control, dict):
+                await fail("invalid_request", "Invalid control")
+                return
+            peer_seen = now
+            kind = control.get("type")
+            if kind == "subscribe":
+                parsed = _subscription(control, generation)
+                if parsed is None:
+                    await fail("invalid_request", "Invalid subscription")
+                    return
+                generation, topics, log_cursor, log_continuity = parsed
+                logs_requested = control["logs"] is not None
+                feed.subscribe(viewer_id, topics)
+                sent_revisions = {}
+                sent_log_cursor = None
+                sent_log_signature = None
+                try:
+                    snapshot = await asyncio.to_thread(feed.snapshot, topics, logs=logs_requested,
+                                                       after=log_cursor, continuity_id=log_continuity, lease=False)
+                except ValueError:
+                    await fail("invalid_cursor", "Invalid log cursor")
+                    return
+                if feed.current_epoch() != serving_epoch:
+                    await websocket.close(code=1012)
+                    return
+                batch += 1
+                current_cursor = (snapshot["logs"] or {}).get("snapshot", {}).get("cursor") if snapshot["logs"] else None
+                await websocket.send_json({"type": "data", "generation": generation, "batch": batch, "initial": True,
+                                           "epoch": snapshot["epoch"], "server_time": live_server_time(), "areas": snapshot["areas"], "logs": snapshot["logs"]})
+                current_continuity = (snapshot["logs"] or {}).get("snapshot", {}).get("continuity_id") if snapshot["logs"] else None
+                logs = snapshot["logs"]
+                log_snapshot = (logs or {}).get("snapshot") or {}
+                log_error = (logs or {}).get("error") or {}
+                current_signature = ((logs or {}).get("availability"), current_cursor,
+                                     log_snapshot.get("continuity_id"), log_snapshot.get("reset"),
+                                     log_snapshot.get("gap"), log_snapshot.get("gap_reason"),
+                                     log_snapshot.get("source"), log_snapshot.get("warning"),
+                                     log_error.get("code"), log_error.get("message"),
+                                     (log_snapshot.get("discontinuity") or {}).get("id")) if logs is not None else None
+                outstanding = (batch, time.monotonic(), current_cursor, current_continuity, current_signature)
+                sent_revisions = {topic: record["revision"] for topic, record in snapshot["areas"].items()}
+                next_refresh = time.monotonic() + 1
+            elif kind == "ack" and set(control) == {"type", "generation", "batch"} and _safe_control(control.get("generation")) and _safe_control(control.get("batch")):
+                if outstanding is not None and control["generation"] == generation and control["batch"] == outstanding[0]:
+                    log_cursor = outstanding[2]
+                    sent_log_cursor = outstanding[2]
+                    log_continuity = outstanding[3]
+                    sent_log_signature = outstanding[4]
+                    outstanding = None
+                elif control["generation"] > generation or (control["generation"] == generation and (outstanding is None or control["batch"] > outstanding[0])):
+                    await fail("invalid_request", "Invalid acknowledgement")
+                    return
+            elif kind == "ping" and set(control) == {"type", "id"} and _safe_control(control.get("id")):
+                await websocket.send_json({"type": "pong", "id": control["id"], "server_time": live_server_time()})
+            elif kind == "pong" and set(control) == {"type", "id"} and control.get("id") == pending_ping:
+                pending_ping = None
+            else:
+                await fail("invalid_request", "Invalid control")
+                return
+    except WebSocketDisconnect:
+        return
+    finally:
+        feed.unsubscribe(viewer_id)
 
 
 def _maybe_remember(body: PlanBody | RunBody) -> None:

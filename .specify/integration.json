@@ -2,12 +2,17 @@
   "version": "1.0.12",
   "integration_state_schema": 1,
   "installed_integrations": [
-    "opencode"
+    "opencode",
+    "cursor-agent"
   ],
   "integration_settings": {
     "opencode": {
       "script": "py",
       "invoke_separator": "."
+    },
+    "cursor-agent": {
+      "script": "py",
+      "invoke_separator": "-"
     }
   },
   "integration": "opencode",

@@ -157,11 +157,19 @@ kllm ui
 
 The dashboard mirrors CLI actions (start/join/leave/stop, models, plan/run, chat) plus a Connect page for harness commands. Design tokens live in [`dashboard/DESIGN.md`](../dashboard/DESIGN.md).
 
+### Dashboard updates
+
+The open dashboard uses one same-origin WebSocket at `/v1/dashboard/live` for status and operation progress. Home subscribes to usage, and Logs subscribes to log events only while its refresh mode is **Live**. Initial state and recovery use the matching versioned snapshot route; explicit commands remain ordinary single requests.
+
+The header labels delivery as **live**, **refresh**, **updates unavailable**, or **reconnecting**. If a socket closes or becomes silent, the dashboard retains the last accepted values, refreshes the aggregate snapshot every two seconds, and probes for live delivery every 30 seconds. A healthy but unchanged socket remains live. Area errors and coverage are distinct from delivery health; source readings may be stale even while delivery is live. On a worker, local-plus-mirrored status/usage is labeled as mirrored coverage; load/download progress remains local. A denied area is shown as unavailable with its safe error and last successful update when known.
+
+Download and load operations carry source-assigned IDs. Completion effects are deduplicated during the visit; an operation that disappears before a recoverable outcome is available is shown as unknown rather than treated as success. Reconnection does not repeat commands.
+
 ### Logs page
 
-`/logs` shows one combined master + worker trail over the same `GET /v1/logs` data as `kllm logs`. Choose **All nodes**, the master, or an individual worker; entries carry a UTC timestamp, node, source, and message. The refresh control offers **Live** (one-second reads), **5s**, **30s**, and **1m** and defaults to Live. **Clear** empties only this page's displayed buffer (including rows hidden by the node filter) — it never deletes stored logs, does not affect other viewers, and keeps the selected node and refresh interval. Before the first successful load, Clear is a no-op so an in-flight result is not discarded.
+`/logs` shows one combined master + worker trail over the same log events as `kllm logs`. Choose **All nodes**, the master, or an individual worker; entries carry a UTC timestamp, node, source, and message. The refresh control offers **Live**, **5s**, **30s**, and **1m** and defaults to Live. Live uses the dashboard feed; timed modes use snapshot reads at the selected interval. **Clear** empties only this page's displayed buffer (including rows hidden by the node filter) — it never deletes stored logs, does not affect other viewers, and keeps the selected node and refresh interval. Before the first successful load, Clear is a no-op so an in-flight result is not discarded.
 
-The page reads a bounded recent tail (initially 200 rows, then incremental reads) and renders at most 2,000 rows, disclosing older-row omissions. Each read has a five-second total deadline; a stalled read reports a timeout and retries on the next selected interval. If the master is unreachable from a worker-served dashboard the page labels the trail **local only**, and known retention/batch/reconnect gaps are labeled rather than presented as complete history. `follow` (SSE) stays on `kllm logs -f`; the page uses snapshot reads.
+The page reads a bounded recent tail (initially 200 rows, then incremental checkpoints) and renders at most 2,000 rows, disclosing older-row omissions. Each timed read has a five-second total deadline; a stalled read reports a timeout and retries on the next selected interval. If the master is unreachable from a worker-served dashboard the page labels the trail **local only**, and known retention/batch/reconnect gaps are labeled rather than presented as complete history. `follow` remains on `kllm logs -f`; the dashboard feed does not change the CLI stream contract.
 
 ## Connect harnesses (Unsloth-style)
 

@@ -710,6 +710,139 @@ def test_worker_heartbeat_precedes_capacity_refresh(client):
     assert events == ["heartbeat", "refresh"]
 
 
+def test_master_liveness_sweep_does_not_wait_for_shrink_maintenance(client, monkeypatch):
+    import threading
+    import time
+
+    _, agent = client
+    agent.STATE.role = "master"
+    agent.STATE.members = {
+        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
+    }
+    entered = threading.Event()
+    release = threading.Event()
+    second_replan = threading.Event()
+    replans = 0
+
+    def blocked_replan(_state):
+        nonlocal replans
+        replans += 1
+        if replans == 1:
+            entered.set()
+            assert release.wait(3)
+        else:
+            second_replan.set()
+
+    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", blocked_replan)
+    assert agent._sync_master_liveness() == ["w1"]
+    assert entered.wait(2)
+
+    agent.STATE.members["w2"] = {"node_id": "w2", "role": "worker", "last_seen": time.time() - 30}
+    started = time.monotonic()
+    assert agent._sync_master_liveness() == ["w2"]
+    assert time.monotonic() - started < 0.5, "a blocked shrink replan delayed the next fast sweep"
+    release.set()
+    assert second_replan.wait(3)
+
+
+def test_expired_worker_disconnection_reaches_live_feed_within_25_seconds(client):
+    import time
+
+    c, agent = client
+    last_contact = time.time() - 22
+    agent.STATE.role = "master"
+    agent.STATE.members = {
+        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        "w1": {"node_id": "w1", "role": "worker", "last_seen": last_contact},
+    }
+    agent.app.state.live_feed = agent._new_live_feed()
+    body = c.get("/v1/dashboard/live", params={"topics": "status,usage"}).json()["areas"]
+    assert body["status"]["availability"] == "available"
+    assert "w1" not in body["status"]["data"]["members"]
+    assert not body["usage"]["data"]["nodes"].get("w1", {}).get("connected", False)
+    assert time.time() - last_contact < 25
+
+
+def test_failed_liveness_maintenance_does_not_strand_future_removals(client, monkeypatch):
+    import threading
+
+    _, agent = client
+    agent.STATE.role = "master"
+    agent.STATE.members = {
+        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
+    }
+    monkeypatch.setattr(agent, "_membership_pending", {})
+    monkeypatch.setattr(agent, "_membership_maintenance_inflight", False)
+    first_done = threading.Event()
+    second_done = threading.Event()
+    count = 0
+
+    def replan(_state):
+        nonlocal count
+        count += 1
+        if count == 1:
+            try:
+                raise RuntimeError("planner failed")
+            finally:
+                first_done.set()
+        second_done.set()
+
+    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", replan)
+    assert agent._sync_master_liveness() == ["w1"]
+    assert first_done.wait(2)
+    agent.STATE.members["w2"] = {"node_id": "w2", "role": "worker", "last_seen": time.time() - 30}
+    assert agent._sync_master_liveness() == ["w2"]
+    assert second_done.wait(2), "failed maintenance permanently held the in-flight slot"
+
+
+@pytest.mark.parametrize("transition", ["rejoin", "role-change"])
+def test_liveness_maintenance_discards_obsolete_removal(client, monkeypatch, transition):
+    import threading
+
+    _, agent = client
+    agent.STATE.role = "master"
+    agent.STATE.members = {
+        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
+    }
+    monkeypatch.setattr(agent, "_membership_pending", {})
+    monkeypatch.setattr(agent, "_membership_maintenance_inflight", False)
+    entered = threading.Event()
+    release = threading.Event()
+    end_calls = []
+    replans = []
+
+    class Store:
+        def end_node(self, node_id, **_kwargs):
+            end_calls.append(node_id)
+
+    def waiting_store():
+        entered.set()
+        assert release.wait(3)
+        return Store()
+
+    monkeypatch.setattr(agent, "_usage_store", waiting_store)
+    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", lambda _state: replans.append(True))
+    try:
+        assert agent._sync_master_liveness() == ["w1"]
+        assert entered.wait(2)
+        if transition == "rejoin":
+            agent.STATE.members["w1"] = {"node_id": "w1", "role": "worker", "last_seen": time.time()}
+        else:
+            agent.STATE.role = "idle"
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 2
+    while agent._membership_maintenance_inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not agent._membership_maintenance_inflight
+    assert end_calls == []
+    assert replans == []
+
+
 def test_capacity_refresh_allows_only_one_probe(client):
     _, agent = client
     started = []

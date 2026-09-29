@@ -198,6 +198,40 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     await new Promise((resolve) => setTimeout(resolve, 400));
     assert.ok(requests.some(({ path }) => path === '/v1/plan?preview=true'),
       'membership change did not re-estimate');
+    // A newer running download must not hide the prior terminal reconciliation.
+    const originalLoadModels = appStore.loadModels.bind(appStore);
+    let resolveInventory;
+    let inventoryReads = 0;
+    appStore.loadModels = () => {
+      inventoryReads++;
+      return new Promise((resolve) => { resolveInventory = resolve; });
+    };
+    const previous = { state: 'complete', operation_id: 'download-previous', filename: 'finished.gguf' };
+    const current = { state: 'running', operation_id: 'download-current', filename: 'next.gguf' };
+    appStore.applyDownloadRecords({ current, last_terminal: previous });
+    appStore.applyDownloadRecords({ current, last_terminal: previous });
+    assert.equal(appStore.downloadJob.operation_id, current.operation_id);
+    assert.equal(inventoryReads, 1, 'a repeated terminal reconciled inventory more than once');
+    await appStore.selectModel('manual-choice');
+    resolveInventory();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(appStore.selectedModel, 'manual-choice', 'late reconciliation overwrote user selection');
+    appStore.loadProgress = { operation_id: 'load-tracked', phase: 'loading', model: 'fixture.gguf',
+      bytes_loaded: 1, bytes_total: 2, fraction: 0.5 };
+    appStore.applyLiveArea('load', { revision: 2, sampled_at: null, availability: 'available', coverage: 'local',
+      upstream_last_success_at: null, data: { current: null, last_terminal: null }, error: null });
+    assert.equal(appStore.loadProgress.phase, 'unknown', 'a vanished tracked load must not look idle or complete');
+    let legacyInventoryReads = 0;
+    appStore.loadModels = async () => { legacyInventoryReads++; };
+    const legacyRunning = { state: 'running', filename: 'legacy.gguf' };
+    const legacyComplete = { state: 'complete', filename: 'legacy.gguf' };
+    appStore.applyDownloadRecords({ current: legacyRunning, last_terminal: null });
+    appStore.applyDownloadRecords({ current: null, last_terminal: legacyComplete });
+    appStore.applyDownloadRecords({ current: null, last_terminal: legacyComplete });
+    assert.equal(appStore.downloadJob.state, 'complete');
+    assert.equal(legacyInventoryReads, 1, 'legacy terminal transition should reconcile inventory only once');
+    assert.equal(appStore.selectedModel, 'manual-choice', 'unidentified legacy completion must not auto-select');
+    appStore.loadModels = originalLoadModels;
     appStore.liveUsage.nodes.master.reading = { observed_at: '2020-01-01T00:00:00Z' };
     appStore.liveUsage.nodes.master.freshness = 'fresh';
     globalThis.fetch = async (path) => path === '/v1/usage/live'
@@ -206,6 +240,13 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     await appStore.refreshUsage();
     assert.equal(appStore.liveUsage.nodes.master.freshness, 'stale');
     assert.match(appStore.usageError, /master unavailable.*2026-09-28T12:00:00Z/);
+    appStore.applyLiveArea('status', { revision: 2, sampled_at: '2026-09-29T12:00:00Z',
+      availability: 'available', coverage: 'cluster', upstream_last_success_at: null,
+      data: { role: 'master', node_id: 'master', join_key: 'join-from-live-status',
+        apply_error: 'model does not fit', members: statusMembers }, error: null });
+    assert.equal(appStore.joinKeyInput, 'join-from-live-status');
+    assert.equal(appStore.status.join_key, 'join-from-live-status');
+    assert.equal(appStore.status.apply_error, 'model does not fit');
   } finally {
     appStore?.stop();
     globalThis.fetch = originalFetch;

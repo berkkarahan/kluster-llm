@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from kllm import models as model_ops
 from kllm import native, runtime
+from kllm import load_progress
 from kllm.extra_args import sanitize_extra_args
 from kllm.run_planning import (
     build_master_launch,
@@ -178,6 +179,7 @@ def _stop_inference(state: ClusterState) -> None:
     if state.process_pid:
         native.stop_process(state.process_pid, force=True)
         runtime.clear_children()
+    load_progress.end()
     state.process_pid = None
     state.process_role = None
 
@@ -190,6 +192,7 @@ def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, An
     if state.process_pid:
         native.stop_process(state.process_pid, force=True)
         runtime.clear_children()
+        load_progress.end()
     gpu_env = _gpu_visibility_env(
         (state.members.get(state.node_id) or {}).get("backend") or "cpu",
         state.gpu_ids,
@@ -211,6 +214,11 @@ def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, An
     state.model_name = path.name
     if launched.get("pid"):
         runtime.register_child(int(launched["pid"]), "llama-server")
+        try:
+            total_bytes = path.stat().st_size
+        except OSError:
+            total_bytes = 0
+        load_progress.begin(path.name, int(launched["pid"]), total_bytes)
 
 
 def on_membership_grow(state: ClusterState) -> None:

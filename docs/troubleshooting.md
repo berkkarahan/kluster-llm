@@ -248,6 +248,25 @@ The dashboard **Logs** page (`/logs`) reads the same stream for master and worke
 - **Log read timed out; retrying** means one snapshot read exceeded its five-second deadline; the page retries on the next selected interval. Repeated timeouts point at the control plane or an overloaded node.
 - Clearing the display ("Display cleared — waiting for a new entry") is display-only. Stored logs and other dashboards are unaffected. After a service restart or a switch between cluster and local-only coverage, the page reports the recovery window it cannot backfill; entries generated during that window may not appear.
 
+### Dashboard live updates
+
+- **Live** means the dashboard WebSocket is receiving application updates. It does not certify that every source reading is fresh; check the node's own reading status and observation age.
+- **Refresh** means socket delivery is interrupted. The dashboard retains the last accepted values, reads the aggregate snapshot every two seconds, and probes live delivery every 30 seconds. If ordinary reads also fail, the header shows **updates unavailable**.
+- **reconnecting** means a replacement live connection is being initialized. A healthy connection with unchanged values should remain labeled **live**.
+- An area labeled **denied** remains inaccessible; periodic refresh does not bypass access rules. The header shows its last successful update when available.
+- On a worker, **mirrored** status/usage means the worker view includes upstream cluster information; load/download progress remains local. Logs can switch to explicitly labeled **local only** if the master cannot be reached. Check the worker's private control connection and `kllm status` before treating local-only logs as the cluster trail.
+- A load/download outcome labeled **unknown** means the serving process no longer has a retained result for the operation. Check the model list and inference status; the dashboard will not infer success or replay the command.
+- For Vite development, use `http://localhost:5173` or `http://127.0.0.1:5173`; the `/v1` proxy forwards WebSocket upgrades with the browser Origin intact. Do not rewrite Origin or expose worker services to make an upgrade succeed.
+
+Inspect the snapshot without credentials when diagnosing the serving agent:
+
+```bash
+curl --get 'http://127.0.0.1:18765/v1/dashboard/live' \
+  --data-urlencode 'topics=status,usage,load,download'
+```
+
+The endpoint is a dashboard read, not an authentication mechanism. Keep it on the existing private control plane. RPC port 50052 remains private and must never be exposed publicly.
+
 Runtime logs live under `~/.kllm/logs`. When reporting a problem, include:
 
 - Operating system, CPU, GPU, RAM, and VRAM for each node

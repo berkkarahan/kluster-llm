@@ -374,6 +374,120 @@ test('US3: clear is a no-op before first success and display-only afterwards', a
   }
 });
 
+test('Clear treats an unseen log-continuity change as a baseline and keeps the gap visible', async () => {
+  const f = install();
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const trail = new LogTrail();
+    const continuityA = '00000000-0000-4000-8000-000000000010';
+    const continuityB = '00000000-0000-4000-8000-000000000011';
+    trail.commit({ ...snapshot([master], { cursor: `${EPOCH}:1` }), continuity_id: continuityA, discontinuity: null });
+    trail.clear();
+    trail.commit({ ...snapshot([worker], { cursor: `${EPOCH}:1` }), continuity_id: continuityB,
+      discontinuity: { id: continuityB, reason: 'coverage_change', detected_at: '2026-09-29T12:00:00Z' } });
+    assert.equal(trail.entries.length, 0, 'rows from a missed continuity interval stay cleared');
+    assert.equal(trail.continuityId, continuityB);
+    assert.equal(trail.gap, true);
+
+    const next = { ...worker, event_id: eventId(3), line: 'after recovery' };
+    trail.commit({ ...snapshot([next], { cursor: `${EPOCH}:2` }), continuity_id: continuityB, discontinuity: null });
+    assert.deepEqual(trail.entries.map((entry) => entry.event_id), [next.event_id]);
+    trail.stop();
+  } finally {
+    f.restore();
+  }
+});
+
+test('known log gap remains visible until the visit is cleared', async () => {
+  const f = install();
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const trail = new LogTrail();
+    trail.commit(snapshot([master], { cursor: `${EPOCH}:1`, gap: true, gapReason: 'retention' }));
+    trail.commit(snapshot([worker], { cursor: `${EPOCH}:2` }));
+    assert.equal(trail.gap, true);
+    trail.clear();
+    assert.equal(trail.gap, false);
+    trail.stop();
+  } finally {
+    f.restore();
+  }
+});
+
+test('Live fallback owns an independent log GET lane and resets old-server cursor after Clear', async () => {
+  const f = install();
+  const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
+  const realListener = appStore.setLogListener;
+  const realHealth = appStore.deliveryHealth;
+  const doc = fakeDocument();
+  f.setDocument(doc);
+  appStore.setLogListener = () => true;
+  appStore.deliveryHealth = 'periodic-refresh';
+  let trail;
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    trail = new LogTrail();
+    trail.start();
+    f.advance(2000);
+    assert.equal(f.calls.length, 1);
+    assert.match(f.calls[0].url, /\/v1\/dashboard\/live\?topics=&logs=1/);
+    const continuity = '00000000-0000-4000-8000-000000000003';
+    f.respond(f.calls[0], { version: 1, logs: { availability: 'available', snapshot: {
+      ...snapshot([master], { cursor: `${EPOCH}:1` }), continuity_id: continuity, discontinuity: null },
+      error: null } });
+    await f.flush();
+    assert.equal(trail.cursor, `${EPOCH}:1`);
+    trail.clear();
+    f.advance(2000);
+    assert.equal(f.calls.length, 2);
+    assert.match(f.calls[1].url, /continuity_id=/);
+    f.respond(f.calls[1], { detail: 'old route' }, 404);
+    await f.flush();
+    assert.equal(f.calls.length, 3);
+    assert.match(f.calls[2].url, /\/v1\/logs\?n=5000/);
+    assert.doesNotMatch(f.calls[2].url, /after=/, 'a mirror cursor must not be passed to old-server Logs');
+    f.respond(f.calls[2], snapshot([worker], { cursor: `${EPOCH}:2` }));
+    await f.flush();
+    assert.equal(trail.entries.length, 0, 'Clear must not restore legacy handoff history');
+    assert.equal(trail.gap, true);
+    assert.equal(trail.continuityId, null);
+  } finally {
+    trail?.stop();
+    appStore.setLogListener = realListener;
+    appStore.deliveryHealth = realHealth;
+    f.restore();
+  }
+});
+
+test('Live log access denial stops fallback reads without bypassing through old routes', async () => {
+  const f = install();
+  const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
+  const realListener = appStore.setLogListener;
+  const realHealth = appStore.deliveryHealth;
+  appStore.setLogListener = () => true;
+  appStore.deliveryHealth = 'periodic-refresh';
+  let trail;
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    trail = new LogTrail();
+    trail.start();
+    f.advance(2000);
+    assert.equal(f.calls.length, 1);
+    f.respond(f.calls[0], { version: 1, logs: { availability: 'denied', snapshot: null,
+      error: { code: 'forbidden', message: 'Log access denied' } } });
+    await f.flush();
+    assert.equal(trail.state, 'error');
+    assert.match(trail.errorText, /access denied/i);
+    f.advance(6000);
+    assert.equal(f.calls.length, 1, 'a denied log area was retried without explicit access change');
+  } finally {
+    trail?.stop();
+    appStore.setLogListener = realListener;
+    appStore.deliveryHealth = realHealth;
+    f.restore();
+  }
+});
+
 test('buffer caps at 2000 rows and reports trimming', async () => {
   const f = install();
   try {

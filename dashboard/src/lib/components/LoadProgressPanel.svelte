@@ -2,7 +2,7 @@
   /**
    * Live inference load strip — Unsloth Studio chat toast analogue.
    * Phases: Starting engine → Loading to VRAM/RAM → Ready | error | OOM Warning.
-   * Reads appStore.loadProgress (PollLoop → GET /v1/load-progress); never blocks UI.
+   * Reads the shared dashboard live feed; never blocks UI.
    */
   import { appStore } from '$lib/store.svelte';
   import { composeProgressLabel } from '$lib/format-transfer';
@@ -16,12 +16,14 @@
   const active = $derived(p?.phase === 'starting' || p?.phase === 'loading');
   const ready = $derived(p?.phase === 'ready' && !dismissedReady);
   const failed = $derived(p?.phase === 'error');
-  const showOom = $derived(oom && !active && !ready && !failed);
+  const unknown = $derived(p?.phase === 'unknown');
+  const cancelled = $derived(p?.phase === 'cancelled');
+  const showOom = $derived(oom && !active && !ready && !failed && !unknown && !cancelled);
 
   // Auto-dismiss Ready after a short confirmation (Unsloth toast pattern).
   $effect(() => {
     if (p?.phase === 'ready') {
-      const key = `${p.model}:${p.phase}`;
+      const key = p.operation_id ?? `${p.model}:${p.phase}`;
       if (key !== readyKey) {
         readyKey = key;
         dismissedReady = false;
@@ -48,6 +50,10 @@
         return 'Ready';
       case 'error':
         return 'Load failed';
+      case 'unknown':
+        return 'Load outcome unknown';
+      case 'cancelled':
+        return 'Load cancelled';
       default:
         return '';
     }
@@ -61,10 +67,10 @@
   );
 </script>
 
-{#if active || ready || failed || showOom}
+{#if active || ready || failed || unknown || cancelled || showOom}
   <div
     class="panel flex flex-col gap-2 p-3"
-    style:border-color={failed || showOom
+    style:border-color={failed || showOom || unknown
       ? 'var(--danger)'
       : ready
         ? 'var(--accent)'
@@ -78,7 +84,8 @@
         class:chip={true}
         class:chip-ok={ready}
         class:chip-warn={active || tight}
-        class:chip-danger={failed || showOom}>{label}</span
+        class:chip-danger={failed || showOom}
+        class:chip-muted={unknown || cancelled}>{label}</span
       >
       <span class="ml-auto mono text-[11px]" style="color: var(--muted)">{p?.model ?? appStore.selectedModel}</span>
     </div>
@@ -108,6 +115,10 @@
       <p class="mono text-[11px]" style="color: var(--accent)">Inference is up and answering requests.</p>
     {:else if failed}
       <p class="mono text-[12px]" style="color: var(--danger)">{p?.error ?? 'unknown error'}</p>
+    {:else if unknown}
+      <p class="mono text-[12px]" style="color: var(--warn)">Reconnect or inspect inference status to determine the final load outcome.</p>
+    {:else if cancelled}
+      <p class="mono text-[12px]" style="color: var(--muted)">The load operation was cancelled.</p>
     {/if}
   </div>
 {/if}

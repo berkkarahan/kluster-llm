@@ -25,6 +25,10 @@ Do not invent alternate install flows until that guide’s recovery tree is exha
 | [docs/engine-decision.md](docs/engine-decision.md) | Why llama.cpp RPC; security posture |
 | [README.md](README.md) | Human project overview |
 
+### Spec Kit
+
+You MUST follow the memory-first workflow defined in `.specify/memory/workflow.md`. Before planning, prepare context using the best available path: MCP tools if configured, or `/speckit.memory-md.prepare-context` if Spec Kit commands are available.
+
 ## Conventions
 
 - Prefer editing existing modules under `python/kllm/` and `crates/kllm-native/`; keep changes scoped.

@@ -13,6 +13,8 @@
     return () => appStore.stop();
   });
 
+  $effect(() => appStore.setUsageInterest(page.url.pathname === '/'));
+
   const nav = [
     { href: '/', label: 'Home' },
     { href: '/models', label: 'Models' },
@@ -43,15 +45,49 @@
         </a>
       {/each}
     </nav>
-    <div class="ml-auto flex items-center gap-2">
+    <div class="ml-auto flex flex-wrap items-center justify-end gap-2 min-w-0">
       {#if appStore.connected}
         <span class="chip chip-ok">online</span>
       {:else}
         <span class="chip chip-danger">offline</span>
       {/if}
+      {#if appStore.deliveryHealth === 'live'}
+        <span class="chip chip-ok">live</span>
+      {:else if appStore.deliveryHealth === 'loading'}
+        <span class="chip chip-muted">updates loading</span>
+      {:else if appStore.deliveryHealth === 'periodic-refresh'}
+        <span class="chip chip-warn">refresh</span>
+      {:else if appStore.deliveryHealth === 'unavailable'}
+        <span class="chip chip-danger" title={appStore.deliveryError}>updates unavailable</span>
+      {:else if appStore.deliveryHealth === 'reconnecting'}
+        <span class="chip chip-warn">reconnecting</span>
+      {:else if appStore.deliveryHealth === 'paused'}
+        <span class="chip chip-muted">updates paused</span>
+      {/if}
+      {#each Object.entries(appStore.areaHealth) as [topic, health]}
+        {#if health.availability === 'denied' || health.availability === 'unavailable'}
+          <span class="chip chip-danger" role="status" aria-live="polite" style="white-space:normal;overflow-wrap:anywhere">
+            {topic} {health.availability}: {health.error?.message ?? 'source unavailable'} · last success {health.last_success_at ?? 'never'}
+          </span>
+        {:else if (topic === 'status' || topic === 'usage') && health.coverage === 'local_with_cluster_view'}
+          <span class="chip chip-warn" title="Local worker view with mirrored cluster information">{topic} mirrored</span>
+        {:else if (topic === 'status' || topic === 'usage') && health.coverage === 'local'}
+          <span class="chip chip-muted" title="This area contains local-node coverage only">{topic} local</span>
+        {/if}
+      {/each}
       <span class="chip chip-muted mono">{appStore.status?.role ?? (appStore.statusSeen ? '…' : 'loading')}</span>
-      {#if appStore.downloadJob?.state === 'running'}
-        <span class="chip chip-ok">dl {Math.round(appStore.downloadJob.pct ?? 0)}%</span>
+      {#if appStore.downloadJob && appStore.downloadJob.state !== 'idle'}
+        {#if appStore.downloadJob.state === 'running'}
+          <span class="chip chip-ok">dl {Math.round(appStore.downloadJob.pct ?? 0)}%</span>
+        {:else if appStore.downloadJob.state === 'complete'}
+          <span class="chip chip-ok">dl ✓</span>
+        {:else if appStore.downloadJob.state === 'error'}
+          <span class="chip chip-danger">dl !</span>
+        {:else if appStore.downloadJob.state === 'unknown'}
+          <span class="chip chip-warn">dl ?</span>
+        {:else}
+          <span class="chip chip-muted">dl cancelled</span>
+        {/if}
       {:else if appStore.status?.download}
         <span class="chip chip-ok">dl {Math.round(appStore.status.download.pct)}%</span>
       {/if}

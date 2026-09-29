@@ -112,6 +112,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       let logsFailure = false;
       let logsWarning = '';
       let logsBulk = false;
+      let liveIncrementalReads = 0;
       const json = (res, payload, status = 200) =>
         res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
 
@@ -125,19 +126,61 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         const recorder = { recording: 'recording', error: null, last_successful_save: '2026-09-29T00:00:02Z',
           earliest_retained: '2026-09-29T00:00:00Z', latest_retained: '2026-09-29T00:00:02Z',
           storage_truncated: false, coverage: 'recorded' };
+        const status = { role: mode === 'empty' ? 'idle' : 'master', node_id: 'master', inference_up: false,
+          netsec_warnings: ['RPC port 50052 reachable from the public interface'],
+          overlay_status: 'up 10.66.87.1 (listen 51820)',
+          update: { phase: 'failed', pct: 40,
+            workers: [{ host: 'worker-b7', phase: 'failed', error: 'git pull failed' }] },
+          members: mode === 'empty' ? {} : Object.fromEntries(Object.entries(nodes)
+            .map(([id, n]) => [id, { node_id: id, host: n.host, role: n.role }])) };
+        const usage = { nodes: mode === 'empty' ? {} : nodes,
+          relationships: mode === 'empty' ? [] : relationships, recording: recorder };
+        if (path === '/v1/dashboard/live') {
+          const after = new URL(req.url, 'http://x').searchParams.get('after');
+          const lines = after && ++liveIncrementalReads === 1
+            ? []
+            : after
+            ? [{ event_id: '00000000-0000-4000-8000-000000000003', ts: 3, node_id: 'w1', source: 'rpc', line: '<b>three</b>' }]
+            : [
+                { event_id: '00000000-0000-4000-8000-000000000001', ts: 1, node_id: 'master', source: 'agent', line: 'boot ok' },
+                { event_id: '00000000-0000-4000-8000-000000000002', ts: 2, node_id: 'w1', source: 'rpc', line: 'worker ready' }
+              ];
+          const logs = new URL(req.url, 'http://x').searchParams.get('logs') === '1'
+            ? logsFailure
+              ? { availability: 'unavailable', sampled_at: null, snapshot: null,
+                  error: { code: 'source_unavailable', message: 'Logs are unavailable' } }
+              : { availability: 'available', sampled_at: '2026-09-29T00:00:02Z', error: null,
+                  snapshot: { lines, source: logsWarning ? 'local' : 'cluster',
+                    ...(logsWarning ? { warning: logsWarning } : {}),
+                    cursor: after ? '00000000-0000-4000-8000-000000000001:3' : '00000000-0000-4000-8000-000000000001:2',
+                    reset: null, gap: false, gap_reason: null, continuity_id: '00000000-0000-4000-8000-000000000001', discontinuity: null } }
+            : null;
+          const areas = {
+            status: { revision: 1, sampled_at: '2026-09-29T00:00:02Z', availability: 'available',
+              coverage: 'cluster', upstream_last_success_at: null, data: status, error: null },
+            usage: { revision: 1, sampled_at: '2026-09-29T00:00:02Z', availability: 'available',
+              coverage: 'cluster', upstream_last_success_at: null, data: usage, error: null },
+            load: { revision: 1, sampled_at: '2026-09-29T00:00:02Z', availability: 'available',
+              coverage: 'cluster', upstream_last_success_at: null, data: { current: null, last_terminal: null }, error: null },
+            download: { revision: 1, sampled_at: '2026-09-29T00:00:02Z', availability: 'available',
+              coverage: 'cluster', upstream_last_success_at: null, data: { current: null, last_terminal: null }, error: null }
+          };
+          if (mode === 'usage_denied') areas.usage = {
+            ...areas.usage, availability: 'denied', sampled_at: null, data: null,
+            error: { code: 'forbidden', message: 'Access denied' }
+          };
+          const requested = new URL(req.url, 'http://x').searchParams.get('topics')?.split(',') ?? [];
+          json(res, { version: 1, transport: 'websocket', epoch: '00000000-0000-4000-8000-000000000001',
+            server_time: '2026-09-29T00:00:02Z',
+            areas: Object.fromEntries(requested.filter((topic) => topic in areas).map((topic) => [topic, areas[topic]])), logs });
+          return;
+        }
         if (path === '/v1/status') {
-          json(res, { role: mode === 'empty' ? 'idle' : 'master', node_id: 'master', inference_up: false,
-            netsec_warnings: ['RPC port 50052 reachable from the public interface'],
-            overlay_status: 'up 10.66.87.1 (listen 51820)',
-            update: { phase: 'failed', pct: 40,
-              workers: [{ host: 'worker-b7', phase: 'failed', error: 'git pull failed' }] },
-            members: mode === 'empty' ? {} : Object.fromEntries(Object.entries(nodes)
-              .map(([id, n]) => [id, { node_id: id, host: n.host, role: n.role }])) });
+          json(res, status);
           return;
         }
         if (path === '/v1/usage/live') {
-          json(res, { nodes: mode === 'empty' ? {} : nodes,
-            relationships: mode === 'empty' ? [] : relationships, recording: recorder });
+          json(res, usage);
           return;
         }
         if (path === '/v1/usage/lifetimes') {
@@ -611,7 +654,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
 
       // Failures keep the rows but must not continue to claim a healthy stream.
       logsFailure = true;
-      await wait("document.querySelector('[role=status]').textContent.includes('logs 503')");
+      await wait("document.querySelector('[role=status]').textContent.includes('Logs are unavailable')");
       assert.equal(await evaluate("document.querySelectorAll('.logs-row').length"), 1);
       logsFailure = false;
       logsWarning = 'master unreachable; showing local logs';
@@ -660,6 +703,9 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       mode = 'offline';
       await call('Page.navigate', { url: base + '/' });
       await wait("document.body.textContent.includes('Disconnected — keeping last cluster view')");
+      mode = 'usage_denied';
+      await call('Page.navigate', { url: base + '/' });
+      await wait("document.body.textContent.includes('usage denied: Access denied · last success never')");
     } finally {
       ws?.close();
       browser?.kill();

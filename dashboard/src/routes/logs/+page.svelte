@@ -33,6 +33,9 @@
     for (const entry of trail.entries) {
       if (!options.has(entry.node_id)) options.set(entry.node_id, entry.node_id);
     }
+    if (trail.selectedNodeId && !options.has(trail.selectedNodeId)) {
+      options.set(trail.selectedNodeId, trail.selectedNodeId);
+    }
     return [...options.entries()].map(([id, label]) => ({ id, label }));
   });
 
@@ -160,6 +163,11 @@
   </section>
 
   <div class="flex items-center gap-2 flex-wrap text-[12px]">
+    {#if trail.refreshMode === 'live'}
+      <span class="chip chip-muted mono" title="Connection delivery is separate from log source coverage">
+        updates {appStore.deliveryHealth}
+      </span>
+    {/if}
     <span
       class="chip"
       class:chip-ok={trail.state === 'ready' || trail.state === 'empty'}
@@ -170,7 +178,9 @@
     >
       {statusText()}
     </span>
-    <span class="chip chip-muted mono">{MODE_LABELS[trail.refreshMode]} · {REFRESH_MS[trail.refreshMode] / 1000}s</span>
+    <span class="chip chip-muted mono">{trail.refreshMode === 'live'
+      ? 'Live'
+      : `${MODE_LABELS[trail.refreshMode]} · ${REFRESH_MS[trail.refreshMode] / 1000}s`}</span>
     {#if trail.gap}
       <span class="chip chip-warn" role="note">history gap — older entries omitted</span>
     {/if}

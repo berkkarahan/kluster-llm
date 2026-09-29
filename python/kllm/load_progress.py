@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -38,6 +40,7 @@ _RATE_WINDOW = 15.0  # seconds — matches Unsloth's transfer estimator window
 _lock = threading.Lock()
 # Active load descriptor, or None when nothing is loading.
 _active: dict[str, Any] | None = None
+_latest_terminal: dict[str, Any] | None = None
 # Rolling (monotonic_ts, rss_bytes) samples for rate / ETA while loading.
 _samples: deque[tuple[float, int]] = deque()
 
@@ -46,19 +49,32 @@ def begin(model_name: str, pid: int, total_bytes: int) -> None:
     """Arm progress sampling for a freshly launched inference process."""
     global _active
     with _lock:
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         _active = {
+            "operation_id": str(uuid.uuid4()),
             "model": model_name,
             "pid": int(pid),
             "total_bytes": max(0, int(total_bytes)),
-            "started_at": time.time(),
+            "started_at": stamp,
+            "updated_at": stamp,
+            "finished_at": None,
         }
         _samples.clear()
 
 
 def end() -> None:
     """Clear the active load (called on stop / eject / ready)."""
-    global _active
+    global _active, _latest_terminal
     with _lock:
+        if _active is not None:
+            if _active.get("phase") in {"ready", "error", "cancelled"}:
+                _latest_terminal = dict(_active)
+            else:
+                stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                _latest_terminal = {
+                    **_active, "phase": "cancelled", "updated_at": stamp, "finished_at": stamp,
+                    "bytes_loaded": 0, "fraction": 0.0, "rate_bps": None, "eta_seconds": None,
+                }
         _active = None
         _samples.clear()
 
@@ -106,7 +122,10 @@ def sample(infer_port: int) -> dict[str, Any]:
     with _lock:
         active = dict(_active) if _active is not None else None
     if active is None:
+        if _latest_terminal is not None:
+            return dict(_latest_terminal)
         return {
+            "operation_id": None,
             "phase": None,
             "model": None,
             "bytes_loaded": 0,
@@ -114,33 +133,29 @@ def sample(infer_port: int) -> dict[str, Any]:
             "fraction": 0.0,
             "rate_bps": None,
             "eta_seconds": None,
+            "started_at": None,
+            "updated_at": None,
+            "finished_at": None,
         }
+
+    with _lock:
+        still_current = _active is not None and _active.get("operation_id") == active["operation_id"]
+    if not still_current:
+        return sample(infer_port)
+
+    if active.get("phase") in {"ready", "error", "cancelled"}:
+        return active
 
     pid = active["pid"]
     total = active["total_bytes"]
 
     if not _alive(pid):
-        return {
-            "phase": "error",
-            "model": active["model"],
-            "bytes_loaded": 0,
-            "bytes_total": total,
-            "fraction": 0.0,
-            "rate_bps": None,
-            "eta_seconds": None,
-            "error": "inference process exited during load",
-        }
+        terminal = _terminal_snapshot(active, "error", 0, 0.0, "inference process exited during load")
+        return terminal if terminal is not None else sample(infer_port)
 
     if _health_ok(infer_port):
-        return {
-            "phase": "ready",
-            "model": active["model"],
-            "bytes_loaded": total,
-            "bytes_total": total,
-            "fraction": 1.0,
-            "rate_bps": None,
-            "eta_seconds": None,
-        }
+        terminal = _terminal_snapshot(active, "ready", total, 1.0)
+        return terminal if terminal is not None else sample(infer_port)
 
     rss = _rss_bytes(pid)
     loaded = rss if rss is not None else 0
@@ -148,7 +163,7 @@ def sample(infer_port: int) -> dict[str, Any]:
     phase = "loading" if loaded > 0 else "starting"
     with _lock:
         # Drop samples if begin()/end() raced us away.
-        if _active is None or _active.get("pid") != pid:
+        if _active is None or _active.get("operation_id") != active["operation_id"]:
             rate, eta = None, None
         else:
             rate, _ = _record_sample(loaded)
@@ -157,7 +172,9 @@ def sample(infer_port: int) -> dict[str, Any]:
                 if rate is not None and rate > 0 and total > loaded
                 else None
             )
+    stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
+        "operation_id": active["operation_id"],
         "phase": phase,
         "model": active["model"],
         "bytes_loaded": loaded,
@@ -165,7 +182,52 @@ def sample(infer_port: int) -> dict[str, Any]:
         "fraction": round(fraction, 4),
         "rate_bps": rate,
         "eta_seconds": eta,
+        "started_at": active["started_at"],
+        "updated_at": stamp,
+        "finished_at": None,
     }
+
+
+def _terminal_snapshot(
+    active: dict[str, Any],
+    phase: str,
+    loaded: int,
+    fraction: float,
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    global _active, _latest_terminal
+    stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    snap = {
+        "operation_id": active["operation_id"],
+        "phase": phase,
+        "model": active["model"],
+        "bytes_loaded": loaded,
+        "bytes_total": active["total_bytes"],
+        "fraction": fraction,
+        "rate_bps": None,
+        "eta_seconds": None,
+        "started_at": active["started_at"],
+        "updated_at": stamp,
+        "finished_at": stamp,
+    }
+    if error:
+        snap["error"] = error
+    with _lock:
+        if _active is None or _active.get("operation_id") != active["operation_id"]:
+            return None
+        _active = snap
+        _latest_terminal = dict(snap)
+    return snap
+
+
+def records(infer_port: int) -> dict[str, dict[str, Any] | None]:
+    """Return the active load separately from its retained terminal outcome."""
+    progress = sample(infer_port)
+    if progress.get("phase") in {"ready", "error", "cancelled"}:
+        return {"current": None, "last_terminal": progress}
+    if progress.get("phase") is None:
+        return {"current": None, "last_terminal": dict(_latest_terminal) if _latest_terminal else None}
+    return {"current": progress, "last_terminal": dict(_latest_terminal) if _latest_terminal else None}
 
 
 def _alive(pid: int) -> bool:

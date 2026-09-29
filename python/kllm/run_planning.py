@@ -18,7 +18,9 @@ from kllm.model_defaults import merge_defaults_into_extra_args, overlay_user_inf
 from kllm.gguf_meta import read_inference_metadata
 from kllm.accel import llama_device_for_backend
 from kllm.run_settings import RunBody, RunSettingsFields
-from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT, ensure_home
+from kllm.run_settings import available_threads
+from kllm.chat_templates import template_launch
+from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT
 
 # Prefer cluster `host` (WG overlay address when set) over LAN — matches worker RPC bind.
 _RPC_CONNECT_TIMEOUT_S = 2.0
@@ -209,7 +211,7 @@ def resolve_launch_settings(body: RunSettingsFields) -> dict[str, Any]:
               "batch_size": 512 if body.batch_size == "auto" else int(body.batch_size),
               "micro_batch": 128 if body.micro_batch == "auto" else int(body.micro_batch),
               "context": body.context, "cache_type_k": body.cache_type_k,
-              "cache_type_v": body.cache_type_v, "flash_attention": "auto",
+              "cache_type_v": body.cache_type_v, "flash_attention": body.flash_attention,
               "threads": body.threads,
               "checkpoints": 32 if body.checkpoints == "auto" else int(body.checkpoints),
                "cache_ram": 8192 if body.cache_ram == "auto" else int(body.cache_ram),
@@ -248,6 +250,8 @@ def resolve_launch_settings(body: RunSettingsFields) -> dict[str, Any]:
         raise HTTPException(400, "unsupported cache type")
     if result["flash_attention"] not in ("auto", "on", "off"):
         raise HTTPException(400, "flash attention must be auto, on, or off")
+    if result["threads"] > available_threads():
+        raise HTTPException(400, f"threads must be 1–{available_threads()} on the master")
     result["micro_batch"] = min(result["micro_batch"], result["batch_size"])
     result["extra_args"] = extra
     return result
@@ -310,6 +314,7 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             mmproj_size_bytes=_file_size_bytes(body.mmproj),
             draft_model_size_bytes=_file_size_bytes(body.draft_model),
             vision=bool(body.vision),
+            node_shares=body.node_shares,
         )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -362,13 +367,13 @@ def build_master_launch(
 ) -> dict[str, Any]:
     settings = plan_result.get("resolved_launch_settings") or resolve_launch_settings(body)
     ctx = int(plan_result.get("context_effective") or settings["context"])
-    chat_template_file = None
-    chat_template = body.chat_template
-    if body.chat_template_text:
-        chat_template_file = str(ensure_home() / f"chat-template-{body.model}.jinja")
-        Path(chat_template_file).write_text(body.chat_template_text, encoding="utf-8")
+    template = template_launch(body.chat_template, body.chat_template_text, body.model)
+    from dataclasses import replace
+    model_defaults = resolve_model_defaults(model_path)
+    if body.chat_template != "default" or body.chat_template_text:
+        model_defaults = replace(model_defaults, chat_template_kwargs={}, reasoning_format=None, jinja=False)
     defaults = overlay_user_inference(
-        resolve_model_defaults(model_path),
+        model_defaults,
         temperature=body.temperature,
         top_p=body.top_p,
         top_k=body.top_k,
@@ -412,10 +417,14 @@ def build_master_launch(
         launch["mmproj"] = body.mmproj
     if body.draft_model:
         launch["draft_model"] = body.draft_model
-    if chat_template_file:
-        launch["chat_template_file"] = chat_template_file
-    elif chat_template and chat_template != "default":
-        launch["chat_template"] = chat_template
+    launch.update({k: v for k, v in template.items() if k != "jinja"})
+    if "jinja" in template:
+        if template["jinja"]:
+            launch["jinja"] = True
+            launch["extra_args"] = [x for x in launch["extra_args"] if x != "--no-jinja"]
+        else:
+            launch["jinja"] = False
+            launch["extra_args"] = [x for x in launch["extra_args"] if x != "--jinja"] + ["--no-jinja"]
     if "device_order" in plan_result:
         launch["extra_args"] += ["--device", ",".join(plan_result["device_order"]) or "none"]
     elif gpu_env:

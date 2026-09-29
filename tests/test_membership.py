@@ -44,6 +44,18 @@ REGISTER_BODY = {
 }
 
 
+def test_usage_identity_survives_membership_snapshot_and_disconnect():
+    state = ClusterState(role="master", node_id="master")
+    state.members = {
+        "master": {"node_id": "master", "role": "master", "last_seen": 100},
+        "w1": {"node_id": "w1", "role": "worker", "host": "same", "process_pid": 12,
+               "process_started_at": "2026-09-28T12:00:00Z", "last_seen": 100},
+    }
+    assert cluster_snapshot(state.members)["w1"]["process_started_at"] == "2026-09-28T12:00:00Z"
+    assert sweep_liveness(state, now=121) == ["w1"]
+    assert "w1" not in state.members
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
@@ -488,6 +500,27 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
     assert overflow_state.apply_error
     assert "does not fit" in overflow_state.apply_error.lower()
     assert overflow_state.last_plan["node_ids"] == ["master1"]
+
+
+def test_manual_worker_loss_does_not_relaunch_or_show_stale_devices(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
+    state = ClusterState(role="master", node_id="master1", process_pid=111, process_role="master",
+                         members={"master1": {"node_id": "master1", "role": "master"}},
+                         last_settings={"model": "toy.gguf", "node_shares": {"master1": .5, "worker": .5}},
+                         last_plan={"node_ids": ["worker", "master1"],
+                                    "device_allocations": [{"node_id": "worker"}],
+                                    "rpc_endpoints": ["worker:50052"]})
+    with (patch("kllm.membership.execute_plan", side_effect=ValueError("node shares must match members")),
+          patch("kllm.membership.native.stop_process") as stopped,
+          patch("kllm.membership.native.start_master") as started,
+          patch("kllm.membership.runtime.clear_children")):
+        on_membership_shrink(state)
+    stopped.assert_called_once()
+    started.assert_not_called()
+    assert state.process_pid is None
+    assert "device_allocations" not in state.last_plan
+    assert "rpc_endpoints" not in state.last_plan
+    assert state.last_plan["fit_status"] == "overflow"
 
 
 def test_shrink_plan_only_does_not_start(tmp_path, monkeypatch):

@@ -68,6 +68,8 @@ uv run kllm ui
 
 The GGUF remains on the master. Workers contribute memory and compute through `rpc-server`; tensors are transferred automatically. The dashboard is served at `http://127.0.0.1:18765/`.
 
+On Home, select a node to inspect measured process/host/device usage and recorded 15-minute, one-hour or 24-hour history. See [node usage monitor](docs/node-usage-monitor.md) for retention, availability and private-cluster access details.
+
 Optional coding-harness integration:
 
 ```bash

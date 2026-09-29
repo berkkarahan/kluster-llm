@@ -126,7 +126,7 @@ def sniff_reasoning_flags(chat_template: str) -> dict[str, Any]:
     }
 
 
-def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
+def read_inference_metadata(path: Path | str, *, include_template: bool = False) -> dict[str, Any] | None:
     """Read architecture, context_length, sampling, and reasoning flags from a GGUF.
 
     Returns None if the file is not a readable GGUF. Does not retain the full
@@ -157,6 +157,7 @@ def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
                 "default_enable_thinking": None,
             }
             has_chat_template = False
+            chat_template_text = None
 
             for _ in range(n_kv):
                 key = _read_string(f)
@@ -204,6 +205,8 @@ def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
                 elif key in ("tokenizer.chat_template", "tokenizer.ggml.chat_template") and vtype == _STRING:
                     tmpl = str(_read_scalar(f, vtype))
                     has_chat_template = bool(tmpl.strip())
+                    if include_template and len(tmpl.encode("utf-8")) <= 65536:
+                        chat_template_text = tmpl
                     reasoning = sniff_reasoning_flags(tmpl)
                 else:
                     _skip_value(f, vtype)
@@ -215,6 +218,7 @@ def read_inference_metadata(path: Path | str) -> dict[str, Any] | None:
                 "sampling": sampling,
                 "reasoning": reasoning,
                 "has_chat_template": has_chat_template,
+                **({"chat_template_text": chat_template_text} if include_template else {}),
             }
     except (OSError, struct.error, ValueError, UnicodeError):
         return None

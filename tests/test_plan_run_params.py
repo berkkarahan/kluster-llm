@@ -115,6 +115,72 @@ def test_plan_response_contract_keys(client):
         assert key in data
 
 
+def test_preview_never_overwrites_applied_settings_or_remembered_model(client):
+    c, agent, tmp = client
+    _model_file(tmp)
+    agent.STATE.last_settings = {"model": "serving.gguf", "context": 2048}
+    agent.STATE.last_plan = {"fit_status": "fits", "model": "serving.gguf"}
+    agent.STATE.model_name = "serving.gguf"
+    with patch.object(agent.native, "plan_split", return_value=_fake_plan()):
+        r = c.post("/v1/plan?preview=true", json=_payload(context=8192, flash_attention="off"))
+    assert r.status_code == 200, r.text
+    assert r.json()["resolved_launch_settings"]["flash_attention"] == "off"
+    assert agent.STATE.last_settings["context"] == 2048
+    assert agent.STATE.last_plan["model"] == "serving.gguf"
+    assert agent.STATE.model_name == "serving.gguf"
+    assert c.get("/v1/model-settings/toy.gguf").json()["updated_at"] is None
+
+
+def test_template_selection_and_threads_capabilities(client, monkeypatch):
+    c, agent, tmp = client
+    _model_file(tmp)
+    from kllm.chat_templates import PRESETS
+    from kllm.run_settings import available_threads
+    from kllm.run_settings import RunBody
+    from kllm.run_planning import build_master_launch
+    info = c.get("/v1/run-capabilities", params={"model": "toy.gguf"})
+    assert info.status_code == 200, info.text
+    assert info.json()["threads_max"] == available_threads()
+    assert {p["id"] for p in info.json()["templates"]} == set(PRESETS)
+    if agent.native.resolve_llama_server():
+        assert c.post("/v1/chat-template/validate", json={"text": "{{ messages[0]['content'] }}"}).json()["valid"]
+        assert c.post("/v1/chat-template/validate", json={"text": "{{ broken"}).status_code == 400
+    bad = c.put("/v1/model-settings/toy.gguf", json={"parameter_set": {"chat_template": "made-up"}})
+    assert bad.status_code == 422
+    plan = _fake_plan()
+    launch = build_master_launch(RunBody(model="toy.gguf", chat_template="preset:qwen35-4b"),
+                                 plan, model_path=Path("missing.gguf"), rpc_servers=[], infer_port=8080,
+                                 repo_root=None, gpu_env={}, extra_args=[])
+    assert launch["chat_template_file"].endswith("Qwen3.5-4B.jinja")
+    assert launch["jinja"] is True
+    assert not any(a == "--chat-template" for a in launch["extra_args"])
+
+
+def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
+    from kllm import run_settings
+
+    monkeypatch.setattr(run_settings, "available_threads", lambda: 4)
+    assert run_settings.RunBody(model="toy.gguf").threads == 4
+    with pytest.raises(ValueError, match="threads"):
+        run_settings.RunBody(model="toy.gguf", threads=5)
+    from kllm.run_planning import resolve_launch_settings
+    monkeypatch.setattr("kllm.run_planning.available_threads", lambda: 4)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException, match="threads"):
+        resolve_launch_settings(run_settings.RunBody(model="toy.gguf", extra_args=["--threads", "5"]))
+    c, _, tmp = client
+    _model_file(tmp)
+    saved = c.put("/v1/model-settings/toy.gguf", json={"parameter_set": {
+        "threads": 4, "chat_template": "preset:qwen3-0.6b", "flash_attention": "off",
+        "node_shares": {"worker": 0.3, "master1": 0.7},
+    }})
+    assert saved.status_code == 200, saved.text
+    restored = c.get("/v1/model-settings/toy.gguf").json()["parameter_set"]
+    assert restored["flash_attention"] == "off"
+    assert restored["chat_template"] == "preset:qwen3-0.6b"
+    assert restored["node_shares"] == {"worker": 0.3, "master1": 0.7}
+
+
 @pytest.mark.parametrize("legacy", ["row", "tensor"])
 def test_dashboard_layer_overrides_legacy_config_at_plan_and_run_boundary(client, legacy):
     c, agent, tmp = client

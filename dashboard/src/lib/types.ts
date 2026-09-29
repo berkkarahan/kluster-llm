@@ -185,6 +185,156 @@ export type PlacementPlan = {
 
 export type ClusterView = 'loading' | 'offline' | 'idle' | 'live';
 
+export type UsageDevice = {
+  device_id: string;
+  scope: 'device';
+  utilization_percent: number | null;
+  used_bytes: number | null;
+  total_bytes: number | null;
+  temperature_c: number | null;
+  power_w: number | null;
+  unavailable_reason?: string | null;
+};
+
+export type UsageReading = {
+  lifetime_id: string;
+  pid: number;
+  process_role: 'master' | 'worker';
+  process_started_at: string;
+  observed_at: string;
+  received_at?: string;
+  process: { cpu_percent_machine: number | null; rss_bytes: number | null };
+  host: { cpu_percent: number | null; used_bytes: number | null; total_bytes: number | null };
+  devices: UsageDevice[];
+  availability: Record<string, 'measured' | 'initializing' | 'unsupported' | 'error'>;
+  collector_error?: string | null;
+};
+
+export type RecorderStatus = {
+  recording: 'recording' | 'interrupted' | 'failed';
+  error?: string | null;
+  last_successful_save: string | null;
+  earliest_retained?: string | null;
+  latest_retained?: string | null;
+  storage_truncated?: boolean;
+};
+
+export type UsageNode = {
+  node_id: string;
+  host: string;
+  role: 'master' | 'worker';
+  backend?: string | null;
+  devices?: GpuInfo[];
+  unified_memory?: boolean;
+  total_ram_bytes?: number | null;
+  vram_bytes?: number | null;
+  assignment?: string | null;
+  connected: boolean;
+  process_state?: 'running' | 'ended' | 'unobserved' | 'no managed process';
+  freshness: 'fresh' | 'stale' | 'unavailable';
+  age_seconds?: number | null;
+  reading: UsageReading | null;
+};
+
+export type UsageLive = {
+  nodes: Record<string, UsageNode>;
+  relationships: { from_node_id: string; to_node_id: string; kind: 'master-worker' }[];
+  recording: RecorderStatus;
+};
+
+export type UsageLifetime = {
+  lifetime_id: string;
+  pid: number;
+  role: 'master' | 'worker';
+  started_at: string;
+  ended_at: string | null;
+  state: 'running' | 'ended' | 'unobserved';
+  model?: string | null;
+  associations?: { model: string; observed_from: string; observed_until: string | null }[];
+};
+
+export type UsageCoverage = RecorderStatus & {
+  coverage: 'recorded' | 'unrecorded';
+  earliest_retained: string | null;
+  latest_retained: string | null;
+  storage_truncated: boolean;
+};
+
+export type UsageLifetimes = UsageCoverage & {
+  node_id: string;
+  host: string;
+  connected: boolean;
+  lifetimes: UsageLifetime[];
+  retained_node_ids: string[];
+};
+
+export type UsageBucket = {
+  start: string;
+  end: string;
+  count: number;
+  process_cpu_min: number | null;
+  process_cpu_max: number | null;
+  process_rss_min: number | null;
+  process_rss_max: number | null;
+  host_cpu_min: number | null;
+  host_cpu_max: number | null;
+  host_used_bytes_min: number | null;
+  host_used_bytes_max: number | null;
+  devices: {
+    device_id: string;
+    scope: 'device';
+    total_bytes: number | null;
+    unavailable_reason?: string | null;
+    utilization_percent_min?: number | null;
+    utilization_percent_max?: number | null;
+    used_bytes_min?: number | null;
+    used_bytes_max?: number | null;
+    temperature_c_min?: number | null;
+    temperature_c_max?: number | null;
+    power_w_min?: number | null;
+    power_w_max?: number | null;
+  }[];
+};
+
+export type UsageSeries = UsageCoverage & {
+  window_start: string;
+  window_end: string;
+  time_zone: 'UTC';
+  buckets: UsageBucket[];
+};
+
+export type UsagePage = UsageCoverage & {
+  window_start: string;
+  window_end: string;
+  time_zone: 'UTC';
+  readings: UsageReading[];
+  next_cursor: string | null;
+};
+
+export type LogSource = 'agent' | 'llama' | 'rpc';
+
+/** One recorded cluster log line from GET /v1/logs. */
+export type LogEntry = {
+  event_id: string;
+  ts: number;
+  node_id: string;
+  source: LogSource;
+  line: string;
+};
+
+/** Bounded recent snapshot plus a resumable receiver-local checkpoint. */
+export type LogSnapshot = {
+  lines: LogEntry[];
+  source: 'cluster' | 'local';
+  warning?: string;
+  cursor: string;
+  reset: 'origin_changed' | 'restart' | null;
+  gap: boolean;
+  gap_reason: 'retention' | 'batch_limit' | 'feed_reset' | null;
+};
+
+export type RefreshMode = 'live' | '5s' | '30s' | '1m';
+
 export type ModelDefaultsInfo = {
   sampling?: Record<string, number>;
   chat_template_kwargs?: Record<string, unknown>;

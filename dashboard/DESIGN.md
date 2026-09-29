@@ -40,14 +40,20 @@ Use tabular numerics for RAM/VRAM, tok/s, ports.
 - Dense panels with hairline borders; no card shadows, no rounded-full pills.
 - Inline status chips: success / warn / danger with restrained tinted backgrounds.
 - No hero imagery, oversized headlines, or marketing copy.
-- Three-pane home: cluster actions | topology/status | chat.
+- Viewport-filling home: the app shell is a `100dvh` grid (intrinsic header + remaining-height
+  `main`). Home has one compact toolbar (collapsed cluster-controls disclosure, live status,
+  Details/History/Chat actions), a full-area topology graph/list, and a native modal inspector
+  opened on demand. There are no permanent side rails; on-demand panels reserve no width.
+- Node cards carry their own telemetry (Host CPU, Host RAM used/total/percent, one row per GPU)
+  and grow to fit it; the graph measures real card bounds for row spacing and Fit.
 - Keyboard-first affordances; high contrast focus rings using `--accent`.
 
 ## Layout density
 
-- Header ~40px; pane gutters 12px; row height ~28–32px.
+- Header intrinsic height (~33px at the 13px root font; wraps below 700px); pane gutters 12px; row height ~28–32px.
 - Prefer tables and lists over cards.
-- Topology: compact node rows or simple SVG graph — not decorative.
+- Topology: compact node rows or simple SVG graph — not decorative. Below 700px the graph is
+  replaced by an equivalent full-width scrolling node list; above it the graph fills the area.
 
 ## Motion
 

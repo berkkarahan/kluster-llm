@@ -37,6 +37,10 @@ target/
 *.pyd
 *.pdb
 *.so
+*.exe
+*.dll
+*.o
+*.a
 .mypy_cache/
 
 # Vendored third-party (cloned by scripts/install.py)
@@ -44,6 +48,7 @@ vendor/
 
 # Editor / agent
 .cursor/
+.opencode/
 .vscode/
 .idea/
 

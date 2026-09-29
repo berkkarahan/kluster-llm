@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Iterator
@@ -48,18 +50,54 @@ def cluster_journal_path() -> Path:
     return _log_file("cluster.jsonl")
 
 
+class CursorError(ValueError):
+    """Raised for malformed, future, or otherwise unusable snapshot cursors."""
+
+
+def normalize_event_id(value: Any) -> str | None:
+    """Return a canonical UUID string for a supplied identity, else None."""
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, str):
+        try:
+            return str(uuid.UUID(value))
+        except (ValueError, AttributeError):
+            return None
+    return None
+
+
+def parse_cursor(value: Any) -> tuple[str, int]:
+    """Split an opaque ``<epoch-uuid>:<sequence>`` cursor, raising CursorError."""
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise CursorError("malformed cursor")
+    epoch, sep, seq = value.partition(":")
+    if not sep or not seq or not seq.isdigit():
+        raise CursorError("malformed cursor")
+    try:
+        parsed_epoch = uuid.UUID(epoch)
+    except (ValueError, AttributeError) as exc:
+        raise CursorError("malformed cursor") from exc
+    if str(parsed_epoch) != epoch:
+        raise CursorError("epoch must be a canonical UUID")
+    return epoch, int(seq)
+
+
 def make_event(
     node_id: str,
     source: str,
     line: str,
     ts: float | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         stamp = float(time.time() if ts is None else ts)
     except (TypeError, ValueError):
         stamp = time.time()
+    if not math.isfinite(stamp):
+        stamp = time.time()
     src = source if source in VALID_SOURCES else "agent"
     return {
+        "event_id": normalize_event_id(event_id) or str(uuid.uuid4()),
         "ts": stamp,
         "node_id": str(node_id),
         "source": src,
@@ -102,6 +140,9 @@ class LogHub:
         self.journal_max_bytes = journal_max_bytes
         self._lock = threading.Lock()
         self._ring: deque[dict[str, Any]] = deque(maxlen=ring_max)
+        self._seqs: deque[int] = deque(maxlen=ring_max)
+        self._seq_counter = 0
+        self._epoch = str(uuid.uuid4())
         self._subs: list[queue.Queue[dict[str, Any] | None]] = []
         self._pending: deque[dict[str, Any]] = deque()
         self._journal_loaded = False
@@ -112,12 +153,22 @@ class LogHub:
     def reset(self) -> None:
         with self._lock:
             self._ring = deque(maxlen=self.ring_max)
+            self._seqs = deque(maxlen=self.ring_max)
+            self._seq_counter = 0
+            self._epoch = str(uuid.uuid4())
             self._subs.clear()
             self._pending.clear()
             self._journal_loaded = False
             self._offsets.clear()
             self._partial.clear()
             self._primed = False
+
+    def _append_locked(self, event: dict[str, Any], *, notify: bool = True) -> None:
+        self._seq_counter += 1
+        self._ring.append(event)
+        self._seqs.append(self._seq_counter)
+        if notify:
+            self._notify_locked(event)
 
     def prime_offsets(self) -> None:
         """Skip existing local file content so agent restarts do not re-relay history."""
@@ -132,19 +183,21 @@ class LogHub:
                     self._offsets[key] = path.stat().st_size
 
     def ensure_journal_loaded(self) -> None:
+        """Load retained master history once, before newer startup events.
+
+        Always merges the active journal instead of skipping when the ring is
+        already non-empty, so a startup-local record cannot hide retained history.
+        Loaded events keep their persisted identity; legacy rows get a runtime one.
+        """
         with self._lock:
             if self._journal_loaded:
                 return
-            self._journal_loaded = True
-            if self._ring:
-                return
             path = cluster_journal_path()
             if not path.is_file():
+                self._journal_loaded = True
                 return
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                return
+            text = path.read_text(encoding="utf-8", errors="replace")
+            loaded: list[dict[str, Any]] = []
             for raw in text.splitlines():
                 raw = raw.strip()
                 if not raw:
@@ -154,7 +207,31 @@ class LogHub:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(event, dict) and "line" in event:
-                    self._ring.append(event)
+                    loaded.append(event)
+            if not loaded:
+                self._journal_loaded = True
+                return
+            existing_ids = {ev.get("event_id") for ev in self._ring}
+            loaded = [ev for ev in loaded if ev.get("event_id") not in existing_ids]
+            if not loaded:
+                self._journal_loaded = True
+                return
+            existing = list(self._ring)
+            self._ring.clear()
+            self._seqs.clear()
+            self._seq_counter = 0
+            for event in loaded + existing:
+                self._append_locked(
+                    make_event(
+                        str(event.get("node_id") or ""),
+                        str(event.get("source") or "agent"),
+                        str(event.get("line") or ""),
+                        ts=event.get("ts"),
+                        event_id=event.get("event_id"),
+                    ),
+                    notify=False,
+                )
+            self._journal_loaded = True
 
     def ingest(self, events: list[dict[str, Any]], *, persist: bool) -> int:
         cleaned: list[dict[str, Any]] = []
@@ -170,17 +247,70 @@ class LogHub:
                     str(raw.get("source") or "agent"),
                     str(line),
                     ts=raw.get("ts"),
+                    event_id=raw.get("event_id"),
                 )
             )
         if not cleaned:
             return 0
         with self._lock:
             for event in cleaned:
-                self._ring.append(event)
-                self._notify_locked(event)
+                self._append_locked(event)
             if persist:
                 self._append_journal_locked(cleaned)
         return len(cleaned)
+
+    def snapshot(
+        self,
+        n: int = 200,
+        node: str | None = None,
+        source: str | None = None,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomic bounded tail read plus a resumable receiver-local checkpoint."""
+        n = max(1, min(int(n), 5000))
+        parsed = parse_cursor(after) if after is not None else None
+        reset: str | None = None
+        gap = False
+        gap_reason: str | None = None
+        with self._lock:
+            epoch = self._epoch
+            high = self._seq_counter
+            unfiltered = node is None and source is None
+            from_seq: int | None = None
+            if parsed is not None:
+                p_epoch, p_seq = parsed
+                if p_epoch != epoch:
+                    reset = "origin_changed"
+                    gap = True
+                    gap_reason = "feed_reset"
+                elif p_seq > high:
+                    raise CursorError("cursor is beyond the current log position")
+                else:
+                    from_seq = p_seq
+                    if unfiltered:
+                        youngest = self._seqs[0] if self._seqs else high
+                        if p_seq < youngest - 1:
+                            gap = True
+                            gap_reason = "retention"
+            ring = list(self._ring)
+            seqs = list(self._seqs)
+        matched = [
+            ev
+            for seq, ev in zip(seqs, ring)
+            if match_event(ev, node, source) and (from_seq is None or seq > from_seq)
+        ]
+        if len(matched) > n:
+            matched = matched[-n:]
+            if gap_reason != "retention":
+                gap = True
+                gap_reason = "batch_limit"
+        return {
+            "lines": matched,
+            "cursor": f"{epoch}:{high}",
+            "reset": reset,
+            "gap": gap,
+            "gap_reason": gap_reason,
+        }
 
     def recent(
         self,
@@ -350,6 +480,7 @@ class LogHub:
                 "node_id": batch[0].get("node_id") or "",
                 "lines": [
                     {
+                        "event_id": ev.get("event_id"),
                         "ts": ev["ts"],
                         "source": ev["source"],
                         "line": ev["line"],

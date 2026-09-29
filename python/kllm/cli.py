@@ -19,6 +19,7 @@ from kllm import config as kllm_config
 from kllm import models as model_ops
 from kllm import runtime
 from kllm.cli_payload import build_plan_run_payload
+from kllm.run_settings import available_threads
 from kllm.connect import AGENTS, build_launch_plan, print_plan, run_plan
 from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, home_dir
 
@@ -560,8 +561,16 @@ def _run_settings_options(
     repeat_penalty: Optional[float],
     enable_thinking: Optional[bool],
     split_mode: Optional[str] = None,
+    flash_attention: str = "auto",
+    node_share: list[str] | None = None,
 ) -> dict:
     headroom = _headroom_override(device, vram_percent, ram_percent)
+    shares = None
+    if node_share:
+        try:
+            shares = {key: float(value) for key, value in (part.split("=", 1) for part in node_share)}
+        except (ValueError, TypeError) as exc:
+            raise typer.BadParameter("use --node-share NODE=FRACTION") from exc
     return build_plan_run_payload(
         model=model,
         context=context,
@@ -577,6 +586,8 @@ def _run_settings_options(
         parallel=parallel,
         batch_size=batch_size,
         micro_batch=micro_batch,
+        flash_attention=flash_attention,
+        node_shares=shares,
         vision=vision,
         mmproj=mmproj,
         chat_template=chat_template,
@@ -653,7 +664,7 @@ def plan_cmd(
     load_mode: str = typer.Option("auto", "--load-mode"),
     ctx_checkpoints: str = typer.Option("auto", "--ctx-checkpoints"),
     cache_ram: str = typer.Option("auto", "--cache-ram"),
-    threads: int = typer.Option(8, "--threads"),
+    threads: int = typer.Option(min(8, available_threads()), "--threads"),
     temperature: Optional[float] = typer.Option(
         None, "--temperature", min=0.0, max=2.0, help="Sampling temperature (omit = model default)"
     ),
@@ -680,6 +691,8 @@ def plan_cmd(
     split_mode: Optional[str] = typer.Option(
         None, "--split-mode", help="Override system split mode: layer|row|tensor"
     ),
+    flash_attention: str = typer.Option("auto", "--flash-attention", help="auto|on|off"),
+    node_share: list[str] = typer.Option([], "--node-share", help="NODE=FRACTION; repeat for every member"),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -719,6 +732,8 @@ def plan_cmd(
         repeat_penalty,
         enable_thinking,
         split_mode,
+        flash_attention,
+        node_share,
     )
     with _client(port) as c:
         r = c.post("/v1/plan", json=payload)
@@ -780,7 +795,7 @@ def run(
     load_mode: str = typer.Option("auto", "--load-mode"),
     ctx_checkpoints: str = typer.Option("auto", "--ctx-checkpoints"),
     cache_ram: str = typer.Option("auto", "--cache-ram"),
-    threads: int = typer.Option(8, "--threads"),
+    threads: int = typer.Option(min(8, available_threads()), "--threads"),
     temperature: Optional[float] = typer.Option(
         None, "--temperature", min=0.0, max=2.0, help="Sampling temperature (omit = model default)"
     ),
@@ -807,6 +822,8 @@ def run(
     split_mode: Optional[str] = typer.Option(
         None, "--split-mode", help="Override system split mode: layer|row|tensor"
     ),
+    flash_attention: str = typer.Option("auto", "--flash-attention", help="auto|on|off"),
+    node_share: list[str] = typer.Option([], "--node-share", help="NODE=FRACTION; repeat for every member"),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -846,6 +863,8 @@ def run(
         repeat_penalty,
         enable_thinking,
         split_mode,
+        flash_attention,
+        node_share,
     )
     with _client(port) as c:
         r = c.post("/v1/run", json=payload)
@@ -910,6 +929,22 @@ def connect_cmd(
     console.print(f"[dim]Starting {plan.agent}…[/dim]")
     code = run_plan(plan)
     raise typer.Exit(code)
+
+
+@model_app.command("templates")
+def model_templates(
+    model: Optional[str] = typer.Option(None, "--model"),
+    port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
+) -> None:
+    """List pinned chat templates and inspect a model's embedded template."""
+    with _client(port) as client:
+        response = client.get("/v1/run-capabilities", params={"model": model} if model else {})
+        response.raise_for_status()
+        data = response.json()
+    console.print(f"Auto (embedded GGUF): {'present' if data['template_embedded'] else 'unavailable'}")
+    for preset in data["templates"]:
+        console.print(f"{preset['id']}: {preset['label']}")
+    console.print("custom: --chat-template-file PATH")
 
 
 @model_app.command("download")

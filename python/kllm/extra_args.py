@@ -17,6 +17,7 @@ BLOCKED_FLAGS = frozenset(
         "--override-tensor", "-ot", "--cpu-moe", "-cmoe", "--n-cpu-moe", "-ncmoe",
         "--n-cpu-ffn", "-ncffn", "--fit", "-fit", "--override-kv",
         "--model", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "-hfr",
+        "--chat-template", "--chat-template-file", "--jinja", "--no-jinja",
         "--no-kv-offload", "-nkvo", "--no-op-offload",
         "--kv-unified-per-slot", "--model-draft", "-md", "--mmproj", "-mm",
         "-h",

@@ -191,11 +191,11 @@
         <p class="mono text-[12px]" style="color: var(--danger)">{appStore.searchError}</p>
       {:else if appStore.busy === '/v1/models/search'}
         <p class="mono text-[12px]" style="color: var(--muted)">searching…</p>
-      {:else if appStore.searchHits.length === 0}
+      {:else if appStore.searchResults.length === 0}
         <p class="mono text-[12px]" style="color: var(--muted)">No GGUF hits</p>
       {:else}
         <ul class="flex flex-col gap-2 max-h-[60vh] overflow-auto">
-          {#each appStore.searchHits as row (row.source)}
+          {#each appStore.searchResults as row (row.source)}
             <li class="flex items-center justify-between gap-2 panel p-2" style="border-color: var(--border)">
               <div class="min-w-0">
                 <div class="mono text-[12px] truncate">{row.filename}</div>

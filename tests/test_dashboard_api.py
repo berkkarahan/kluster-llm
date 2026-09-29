@@ -916,3 +916,203 @@ def test_models_search_qwen_quant_fit(client, monkeypatch):
     assert row["source"] == f"{ORCA_REPO}:Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
     assert row["fit"] == "fits"
     assert row["gated"] is False
+
+
+class _BytesResp:
+    def __init__(self, data: bytes):
+        self._data = data
+        self.headers = {"Content-Length": str(len(data))}
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_bytes(self):
+        yield self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+def _wait_download(client, state: str):
+    import time
+
+    last = None
+    for _ in range(100):
+        last = client.get("/v1/models/download-progress").json()
+        if last.get("state") == state:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(last)
+
+
+def test_repository_search_download_preserves_revision_and_path(client, monkeypatch):
+    from huggingface_hub.errors import RevisionNotFoundError
+    import httpx
+    from kllm import models as model_ops
+    from kllm.state import models_dir
+
+    c, agent, _ = client
+    model_ops._reset_download_state()
+    agent.STATE.members = {"n1": {"vram_bytes": 8_000_000_000}}
+    streamed: list[str] = []
+    calls: list[tuple] = []
+
+    class Sibling:
+        def __init__(self, name: str, size: int | None):
+            self.rfilename = name
+            self.size = size
+
+    class Info:
+        gated = False
+
+        def __init__(self, siblings):
+            self.siblings = siblings
+
+    release = [
+        Sibling("model.Q8_0.gguf", 20_000_000_000),
+        Sibling("gguf/model.Q4_K_M.gguf", 4_000_000_000),
+        Sibling("other/model.Q4_K_M.gguf", 4_000_000_000),
+        Sibling("gguf/nested/model.Q5_K_M.gguf", 6_000_000_000),
+        Sibling("gguf/README.md", 12),
+        Sibling("docs/README.md", 12),
+    ]
+
+    def fake_info(repo_id, **kwargs):
+        calls.append((repo_id, kwargs))
+        if kwargs.get("revision") == "missing":
+            request = httpx.Request("GET", "https://huggingface.co/api/models/demo/model-GGUF")
+            response = httpx.Response(404, request=request)
+            raise RevisionNotFoundError("missing revision https://huggingface.co/secret", response=response)
+        if kwargs.get("revision") == "release/v2":
+            return Info(release)
+        return Info([Sibling("main-only.Q4_K_M.gguf", 10)])
+
+    def fake_stream(_method, url, **_kwargs):
+        streamed.append(url)
+        return _BytesResp(b"tiny-selected")
+
+    monkeypatch.setattr(model_ops, "model_info", fake_info)
+    monkeypatch.setattr(model_ops, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery")))
+    monkeypatch.setattr(model_ops.httpx, "stream", fake_stream)
+    try:
+        query = "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf"
+        searched = c.post("/v1/models/search", json={"query": query})
+        assert searched.status_code == 200
+        body = searched.json()
+        assert body["warnings"] == []
+        assert [row["path"] for row in body["results"]] == [
+            "gguf/model.Q4_K_M.gguf",
+            "gguf/nested/model.Q5_K_M.gguf",
+        ]
+        assert calls[0][1]["revision"] == "release/v2"
+        assert calls[0][1]["timeout"] == 15.0
+        selected = body["results"][0]["source"]
+        accepted = c.post("/v1/models/download", json={"source": selected})
+        assert accepted.status_code == 200
+        assert accepted.json()["accepted"] is True
+        assert accepted.json()["source"] == selected
+        done = _wait_download(c, "complete")
+        assert done["filename"] == "model.Q4_K_M.gguf"
+        assert streamed == [selected]
+        saved = models_dir() / "model.Q4_K_M.gguf"
+        assert saved.read_bytes() == b"tiny-selected"
+        assert (models_dir() / "model.Q4_K_M.gguf.sha256").is_file()
+
+        model_ops._reset_download_state()
+        exact = "https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/gguf/nested/model.Q5_K_M.gguf"
+        found = c.post("/v1/models/search", json={"query": exact})
+        assert found.status_code == 200
+        row = found.json()["results"]
+        assert len(row) == 1
+        assert row[0]["path"] == "gguf/nested/model.Q5_K_M.gguf"
+        assert row[0]["revision"] == "release/v2"
+        streamed.clear()
+        again = c.post("/v1/models/download", json={"source": row[0]["source"]})
+        assert again.status_code == 200
+        _wait_download(c, "complete")
+        assert streamed == [row[0]["source"]]
+        assert "release%2Fv2" in streamed[0]
+        assert "gguf/nested/model.Q5_K_M.gguf" in streamed[0]
+
+        missing = c.post(
+            "/v1/models/search",
+            json={"query": "https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/missing.gguf"},
+        )
+        assert missing.status_code == 400
+        assert "unavailable" in missing.json()["detail"]
+        assert "results" not in missing.json()
+
+        unsupported = c.post(
+            "/v1/models/search",
+            json={"query": "https://huggingface.co/demo/model-GGUF/blob/release%2Fv2/gguf/README.md"},
+        )
+        assert unsupported.status_code == 400
+        assert "standalone GGUF" in unsupported.json()["detail"]
+
+        calls.clear()
+        bad = c.post("/v1/models/search", json={"query": "https://huggingface.co/datasets/demo/model-GGUF"})
+        assert bad.status_code == 400
+        assert "supported model repository" in bad.json()["detail"]
+        assert calls == []
+
+        empty = c.post(
+            "/v1/models/search",
+            json={"query": "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/docs"},
+        )
+        assert empty.status_code == 200
+        assert empty.json()["results"] == []
+        assert empty.json()["warnings"] == []
+
+        revision = c.post(
+            "/v1/models/search",
+            json={"query": "https://huggingface.co/demo/model-GGUF/tree/missing"},
+        )
+        assert revision.status_code == 400
+        detail = revision.json()["detail"]
+        assert "Revision" in detail
+        assert "https://" not in detail
+    finally:
+        model_ops._reset_download_state()
+
+
+def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
+    from kllm import models as model_ops
+
+    c, _, _ = client
+
+    class Sibling:
+        def __init__(self, name: str, size: int):
+            self.rfilename = name
+            self.size = size
+
+    class Info:
+        gated = False
+        siblings = [Sibling("real.Q4_K_M.gguf", 10)]
+
+    def fake_list(**_kwargs):
+        return [type("M", (), {"id": "org/good"})(), type("M", (), {"id": "org/bad"})()]
+
+    def fake_info(repo_id, **_kwargs):
+        if repo_id == "org/bad":
+            raise OSError("boom hf_SUPERSECRET https://signed.example/hidden")
+        return Info()
+
+    monkeypatch.setattr(model_ops, "list_models", fake_list)
+    monkeypatch.setattr(model_ops, "model_info", fake_info)
+    ok = c.post("/v1/models/search", json={"query": "llama:Q4_K_M"})
+    assert ok.status_code == 200
+    body = ok.json()
+    assert len(body["results"]) == 1
+    assert body["warnings"]
+    blob = json.dumps(body)
+    assert "hf_SUPERSECRET" not in blob
+    assert "signed.example" not in blob
+
+    monkeypatch.setattr(model_ops, "model_info", lambda *a, **k: (_ for _ in ()).throw(OSError("all-down")))
+    failed = c.post("/v1/models/search", json={"query": "llama"})
+    assert failed.status_code == 400
+    assert "all-down" in failed.json()["detail"]
+    assert "results" not in failed.json()

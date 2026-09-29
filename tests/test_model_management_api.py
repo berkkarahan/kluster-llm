@@ -116,6 +116,40 @@ def test_download_start_and_complete(client, monkeypatch):
     assert finished.wait(timeout=5)
 
 
+def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
+    """Complete, error, and cancelled snapshots must not block the next selection."""
+    c, agent, _ = client
+    from kllm import models as model_ops
+
+    finished = threading.Event()
+
+    def fake_runner(source, name):
+        model_ops._DOWNLOAD_LOCK.release()
+        model_ops._DOWNLOAD_CANCEL = None
+        finished.set()
+
+    monkeypatch.setattr(agent, "_download_job_runner", fake_runner)
+    try:
+        for phase, error in (("complete", None), ("error", "transfer failed"), ("cancelled", "cancelled")):
+            model_ops._reset_download_state()
+            model_ops.set_download_terminal("old.gguf", 4, phase, error)
+            finished.clear()
+            accepted = c.post("/v1/models/download", json={"source": f"https://example.com/{phase}.gguf"})
+            assert accepted.status_code == 200, accepted.text
+            assert finished.wait(timeout=5)
+            model_ops._DOWNLOAD_PROGRESS = {
+                "filename": f"{phase}.gguf",
+                "phase": "downloading",
+                "bytes": 1,
+                "total": 4,
+                "pct": 25,
+            }
+            blocked = c.post("/v1/models/download", json={"source": "https://example.com/busy.gguf"})
+            assert blocked.status_code == 409
+    finally:
+        model_ops._reset_download_state()
+
+
 def test_operation_records_keep_terminal_separate_from_current():
     from kllm import models as model_ops
 

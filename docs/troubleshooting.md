@@ -160,6 +160,17 @@ On Windows, also check `C:\Program Files\WireGuard\wg.exe`. Start and join with 
 
 ## Planning and inference
 
+### Model search or Hugging Face link failed
+
+Dashboard search and `kllm model download` share one resolver.
+
+- An empty result means the repository or folder was read and contained no standalone GGUF. Documentation, projectors (`mmproj`), importance matrices (`imatrix`), and split shards are not offered as models.
+- An error is a different outcome: unsupported page (dataset, Space, collection, profile), missing repository, revision, folder, or file, a file that is not a standalone GGUF, gated access, timeout, or rate limit. Correct the link or retry. Do not treat that error as an empty repository.
+- A keyword search can return usable rows plus a warning when some candidate repositories could not be inspected. If every candidate fails, the search errors instead of showing an empty list.
+- Gated or private repositories use the configured token (`kllm` token file, `HF_TOKEN`, or `HUGGING_FACE_HUB_TOKEN`). The dashboard does not print the token. A repository error does not prove that the repository does not exist.
+- File links are exact and case-sensitive. Encode a slash inside a revision as `%2F`. Repository and tree pages must be searched, then downloaded from a result; they are not file downloads.
+- CLI download still takes a file URL or `org/repo:file.gguf` / `org/repo:Q4_K_M`. Keyword search belongs to the dashboard, not the CLI.
+
 ### Model not found
 
 List or download models through the CLI:
@@ -239,6 +250,7 @@ uv run kllm status
 The dashboard **Logs** page (`/logs`) reads the same stream for master and workers. Interpret its status text before assuming a problem:
 
 - **Connected — no log entries** is a healthy empty poll, not an outage.
+- **No entries for the selected tag** or **No entries match the selected node and tag** means this visit still holds other rows. Change **All tags**, **UI**, **Inference**, or **Unclassified**, or the node filter. That empty selection is not an outage, a cleared display, or a history gap.
 - **Local only — master unreachable** means the page is showing only the serving worker's buffered records; the journal on the master is not being read. Confirm the control connection on port 18765.
 - **Disconnected / cached rows** keeps the last received rows readable after a failure; they are not fresh.
 - **Read error / timed out** keeps prior rows visible and reports the last successful read; a timed-out snapshot retries at the next selected interval. A stale warning clears when a later snapshot confirms recovery.

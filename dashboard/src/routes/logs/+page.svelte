@@ -1,3 +1,28 @@
+<script module lang="ts">
+  import type { LogTrailState } from '$lib/log-trail.svelte';
+  import type { LogTag } from '$lib/types';
+
+  /** List copy when nothing is visible. Tag sentences apply only when the buffer holds rows. */
+  export function logListEmptyCopy(input: {
+    state: LogTrailState;
+    buffered: number;
+    selectedNodeId: string;
+    selectedTag: '' | LogTag;
+  }): string {
+    if (input.state === 'cleared') return 'Display cleared — waiting for a new entry.';
+    if (input.buffered > 0) {
+      if (input.selectedNodeId && input.selectedTag) {
+        return 'No entries match the selected node and tag in the current buffer.';
+      }
+      if (input.selectedTag) return 'No entries for the selected tag in the current buffer.';
+      if (input.selectedNodeId) return 'No entries for the selected node in the current buffer.';
+    } else if (!input.selectedTag && input.selectedNodeId) {
+      return 'No entries for the selected node in the current buffer.';
+    }
+    return 'No log entries yet.';
+  }
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
   import { appStore } from '$lib/store.svelte';
@@ -12,6 +37,12 @@
     '30s': '30s',
     '1m': '1m'
   };
+
+  const TAG_LABELS = {
+    ui: 'UI',
+    inference: 'Inference',
+    unclassified: 'Unclassified'
+  } as const;
 
   let scroller = $state<HTMLDivElement | null>(null);
   /** True while the viewport is pinned to the newest row at the top. */
@@ -91,6 +122,15 @@
     return `${date.toISOString().slice(11, 23)}Z`;
   }
 
+  function emptyText(): string {
+    return logListEmptyCopy({
+      state: trail.state,
+      buffered: trail.entries.length,
+      selectedNodeId: trail.selectedNodeId,
+      selectedTag: trail.selectedTag
+    });
+  }
+
   function statusText(): string {
     if (trail.state === 'error') {
       const lastSuccess = trail.lastSuccessAt === null
@@ -125,6 +165,16 @@
         {#each nodeOptions as option (option.id)}
           <option value={option.id}>{option.label}</option>
         {/each}
+      </select>
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span class="text-[10px] uppercase tracking-wider" style="color: var(--muted)">Tag</span>
+      <select class="field mono" aria-label="Filter by tag" bind:value={trail.selectedTag}>
+        <option value="">All tags</option>
+        <option value="ui">UI</option>
+        <option value="inference">Inference</option>
+        <option value="unclassified">Unclassified</option>
       </select>
     </label>
 
@@ -200,6 +250,7 @@
       <span>UTC</span>
       <span>Node</span>
       <span>Source</span>
+      <span>Tag</span>
       <span>Message</span>
     </div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -224,19 +275,14 @@
       {#if trail.state === 'loading' && !visible.length}
         <p class="p-3 m-0" style="color: var(--muted)">Loading logs…</p>
       {:else if visible.length === 0}
-        <p class="p-3 m-0" style="color: var(--muted)">
-          {trail.state === 'cleared'
-            ? 'Display cleared — waiting for a new entry.'
-            : trail.selectedNodeId
-              ? 'No entries for the selected node in the current buffer.'
-              : 'No log entries yet.'}
-        </p>
+        <p class="p-3 m-0" style="color: var(--muted)">{emptyText()}</p>
       {:else}
         {#each visibleNewestFirst as entry (entry.event_id)}
           <div class="logs-row grid" data-event-id={entry.event_id}>
             <time class="logs-ts" datetime={new Date(entry.ts * 1000).toISOString()}>{utcText(entry.ts)}</time>
             <span class="logs-node">{entry.node_id}</span>
             <span class="logs-source">{entry.source}</span>
+            <span class="logs-tag">{TAG_LABELS[entry.tag]}</span>
             <span class="logs-msg">{entry.line}</span>
           </div>
         {/each}
@@ -267,9 +313,14 @@
     color: var(--accent);
   }
 
+  .logs-page select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   .logs-head,
   .logs-row {
-    grid-template-columns: 96px minmax(90px, 140px) 56px minmax(0, 1fr);
+    grid-template-columns: 96px minmax(72px, 120px) 52px minmax(88px, 120px) minmax(0, 1fr);
     column-gap: 10px;
     align-items: start;
   }
@@ -293,9 +344,13 @@
     color: var(--muted);
   }
 
+  .logs-source,
+  .logs-tag {
+    color: var(--muted);
+  }
+
   .logs-source {
     text-transform: uppercase;
-    color: var(--muted);
   }
 
   .logs-msg {
@@ -318,7 +373,8 @@
       grid-column: 1;
     }
 
-    .logs-source {
+    .logs-source,
+    .logs-tag {
       grid-column: 2;
       text-align: right;
     }
@@ -326,6 +382,10 @@
     .logs-node {
       grid-column: 1;
       color: var(--muted);
+    }
+
+    .logs-tag {
+      grid-row: 2;
     }
 
     .logs-msg {

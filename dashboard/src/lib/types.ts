@@ -319,7 +319,10 @@ export type UsagePage = UsageCoverage & {
   next_cursor: string | null;
 };
 
-export type LogSource = 'agent' | 'llama' | 'rpc';
+export type LogSource = 'agent' | 'llama' | 'rpc' | 'unknown';
+
+/** Producer tag. `ui` is the control application, `inference` is model serving, `unclassified` is an unknown producer. */
+export type LogTag = 'ui' | 'inference' | 'unclassified';
 
 /** One recorded cluster log line from GET /v1/logs. */
 export type LogEntry = {
@@ -327,6 +330,7 @@ export type LogEntry = {
   ts: number;
   node_id: string;
   source: LogSource;
+  tag: LogTag;
   line: string;
 };
 
@@ -419,8 +423,12 @@ export type ModelInfo = {
 export type ModelSearchFit = 'fits' | 'overflow' | 'unknown';
 
 export type ModelSearchHit = {
-  repo_id: string;
+  repo_id: string | null;
   filename: string;
+  /** Full repository-relative Hub path. Absent or null on older servers and direct URLs. */
+  path?: string | null;
+  /** Effective Hub revision. Absent or null on older servers and direct URLs. */
+  revision?: string | null;
   quant: string | null;
   size_bytes: number;
   gated: boolean;
@@ -432,6 +440,8 @@ export type ModelSearchResponse = {
   query: string;
   total_vram_bytes: number | null;
   results: ModelSearchHit[];
+  /** Sanitized partial keyword-search failures. Omitted or empty means none. */
+  warnings?: string[];
 };
 
 export const MIN_CONTEXT = 512;

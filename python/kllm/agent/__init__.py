@@ -2562,7 +2562,7 @@ def _live_logs(after: str | None) -> dict[str, Any]:
                     if (not isinstance(item, dict) or cluster_log.normalize_event_id(item.get("event_id")) is None
                         or not isinstance(item.get("ts"), (int, float)) or not math.isfinite(item["ts"])
                         or not isinstance(item.get("node_id"), str) or not item["node_id"]
-                        or item.get("source") not in cluster_log.VALID_SOURCES or not isinstance(item.get("line"), str)):
+                        or item.get("source") not in cluster_log.STORED_SOURCES or not isinstance(item.get("line"), str)):
                         raise RuntimeError("Master log source returned invalid data")
             with state["lock"]:
                 source = "cluster" if upstream is not None else "local"

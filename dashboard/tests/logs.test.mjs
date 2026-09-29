@@ -528,7 +528,7 @@ test('rejects malformed snapshots and times out while consuming a response body'
       { ...snapshot([], { cursor: `${EPOCH}:1` }), lines: 'not-an-array' },
       snapshot([{ ...master, event_id: 'not-a-uuid' }], { cursor: `${EPOCH}:1` }),
       snapshot([{ ...master, ts: null }], { cursor: `${EPOCH}:1` }),
-      snapshot([{ ...master, source: 'unknown' }], { cursor: `${EPOCH}:1` }),
+      snapshot([{ ...master, source: 'not-a-source' }], { cursor: `${EPOCH}:1` }),
       snapshot([], { cursor: 'not-a-canonical-cursor' })
     ];
     for (const payload of malformed) {
@@ -562,4 +562,121 @@ test('rejects malformed snapshots and times out while consuming a response body'
   } finally {
     f.restore();
   }
+});
+
+test('producer tags filter the visit without a new request and survive Clear', async () => {
+  const f = install();
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const trail = new LogTrail();
+    trail.start();
+    assert.equal(trail.selectedTag, '');
+    const llama = {
+      event_id: eventId(3),
+      ts: 3,
+      node_id: 'master',
+      source: 'llama',
+      line: 'control application asked for a slot'
+    };
+    const unknown = { event_id: eventId(4), ts: 4, node_id: 'w1', source: 'unknown', line: 'mystery' };
+    f.respond(f.calls[0], snapshot([master, worker, llama, unknown], { cursor: `${EPOCH}:4` }));
+    await f.flush();
+    assert.deepEqual(trail.entries.map((entry) => entry.tag), ['ui', 'inference', 'inference', 'unclassified']);
+
+    const calls = f.calls.length;
+    trail.selectedTag = 'ui';
+    assert.deepEqual(trail.visibleEntries().map((entry) => entry.event_id), [master.event_id]);
+    trail.selectedTag = 'inference';
+    assert.deepEqual(trail.visibleEntries().map((entry) => entry.line), [worker.line, llama.line]);
+    trail.selectedTag = 'unclassified';
+    assert.deepEqual(trail.visibleEntries().map((entry) => entry.line), ['mystery']);
+    trail.selectedTag = '';
+    assert.equal(trail.visibleEntries().length, 4);
+    assert.equal(f.calls.length, calls, 'tag selection issues no log request');
+
+    trail.setMode('30s');
+    trail.setNode('w1');
+    trail.selectedTag = 'inference';
+    assert.deepEqual(trail.visibleEntries().map((entry) => entry.event_id), [worker.event_id]);
+    trail.selectedTag = 'ui';
+    assert.equal(trail.selectedNodeId, 'w1');
+    assert.equal(trail.refreshMode, '30s');
+    assert.equal(trail.state, 'ready');
+    assert.equal(trail.visibleEntries().length, 0);
+    assert.equal(trail.entries.length, 4);
+
+    trail.gap = true;
+    trail.omittedRows = 3;
+    trail.selectedTag = '';
+    assert.equal(trail.gap, true);
+    assert.equal(trail.omittedRows, 3);
+
+    trail.selectedTag = 'ui';
+    trail.clear();
+    assert.equal(trail.entries.length, 0);
+    assert.equal(trail.selectedTag, 'ui');
+    assert.equal(trail.selectedNodeId, 'w1');
+    assert.equal(trail.refreshMode, '30s');
+    trail.selectedTag = '';
+    trail.setNode('');
+    assert.equal(trail.visibleEntries().length, 0);
+    trail.stop();
+
+    const early = new LogTrail();
+    early.start();
+    early.selectedTag = 'ui';
+    const pending = f.calls.at(-1);
+    early.clear();
+    assert.equal(early.cursor, null);
+    assert.equal(early.state, 'loading');
+    f.respond(pending, snapshot([llama], { cursor: `${EPOCH}:9` }));
+    await f.flush();
+    assert.equal(early.entries.length, 1);
+    assert.equal(early.entries[0].tag, 'inference');
+    assert.equal(early.visibleEntries().length, 0);
+    assert.equal(early.state, 'ready');
+    early.stop();
+
+    const bad = new LogTrail();
+    bad.start();
+    f.respond(f.calls.at(-1), snapshot([{ ...llama, event_id: eventId(11), tag: 'ui' }], { cursor: `${EPOCH}:11` }));
+    await f.flush();
+    assert.equal(bad.state, 'error');
+    assert.equal(bad.cursor, null);
+    f.advance(1000);
+    f.respond(f.calls.at(-1), snapshot([{ ...master, event_id: eventId(12), tag: 'other' }], { cursor: `${EPOCH}:12` }));
+    await f.flush();
+    assert.equal(bad.cursor, null);
+    f.advance(1000);
+    f.respond(f.calls.at(-1), snapshot([{ ...unknown, event_id: eventId(13) }], { cursor: `${EPOCH}:13` }));
+    await f.flush();
+    assert.equal(bad.cursor, `${EPOCH}:13`);
+    assert.equal(bad.entries[0].tag, 'unclassified');
+    bad.stop();
+  } finally {
+    f.restore();
+  }
+});
+
+test('an empty visit keeps the empty-visit copy when a tag is selected', async () => {
+  const { logListEmptyCopy } = await server.ssrLoadModule('/src/routes/logs/+page.svelte');
+  const copy = (over = {}) => logListEmptyCopy({
+    state: 'empty',
+    buffered: 0,
+    selectedNodeId: '',
+    selectedTag: '',
+    ...over
+  });
+  assert.equal(copy({ selectedTag: 'inference' }), 'No log entries yet.');
+  assert.equal(copy({ selectedTag: 'ui', selectedNodeId: 'w1' }), 'No log entries yet.');
+  assert.equal(copy({ state: 'cleared', selectedTag: 'ui' }), 'Display cleared — waiting for a new entry.');
+  assert.equal(
+    copy({ state: 'ready', buffered: 4, selectedTag: 'inference' }),
+    'No entries for the selected tag in the current buffer.'
+  );
+  assert.equal(
+    copy({ state: 'ready', buffered: 4, selectedNodeId: 'w1', selectedTag: 'ui' }),
+    'No entries match the selected node and tag in the current buffer.'
+  );
+  assert.equal(copy({ selectedNodeId: 'w1' }), 'No entries for the selected node in the current buffer.');
 });

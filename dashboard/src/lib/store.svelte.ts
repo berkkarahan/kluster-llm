@@ -134,6 +134,9 @@ class AppStore {
   searchResults = $state<ModelSearchHit[]>([]);
   searchTotalVram = $state<number | null>(null);
   searchError = $state('');
+  searchWarnings = $state<string[]>([]);
+  /** Accepted query for the open results, empty state, or error. Edits to the search field do not change it. */
+  searchQuery = $state('');
   searching = $state(false);
   hfTokenInput = $state('');
   hfTokenConfigured = $state(false);
@@ -1222,11 +1225,14 @@ class AppStore {
 
   async searchModels(): Promise<ModelSearchResponse | null> {
     const query = this.modelSource.trim();
-    if (!query) return null;
+    if (!query || this.searching) return null;
     this.busy = '/v1/models/search';
     this.searching = true;
     this.searchError = '';
     this.searchResults = [];
+    this.searchTotalVram = null;
+    this.searchWarnings = [];
+    this.searchQuery = query;
     try {
       const r = await fetch('/v1/models/search', {
         method: 'POST',
@@ -1243,12 +1249,17 @@ class AppStore {
       if (!r.ok) {
         const msg = apiErrorMessage(data, text, r.status, 'search');
         this.searchError = msg;
+        this.searchResults = [];
+        this.searchTotalVram = null;
+        this.searchWarnings = [];
         pushToast('danger', msg);
         throw new Error(msg);
       }
       const body = data as ModelSearchResponse;
       this.searchResults = body.results ?? [];
       this.searchTotalVram = body.total_vram_bytes ?? null;
+      this.searchWarnings = Array.isArray(body.warnings) ? body.warnings : [];
+      if (typeof body.query === 'string' && body.query.trim()) this.searchQuery = body.query;
       return body;
     } catch (e) {
       if (!this.searchError) {
@@ -1256,6 +1267,9 @@ class AppStore {
         this.searchError = msg;
         pushToast('danger', msg);
       }
+      this.searchResults = [];
+      this.searchTotalVram = null;
+      this.searchWarnings = [];
       throw e;
     } finally {
       this.busy = '';
@@ -1264,7 +1278,7 @@ class AppStore {
   }
 
   async downloadModel(source?: string) {
-    const src = (source ?? this.modelSource).trim();
+    const src = source !== undefined ? source : this.modelSource.trim();
     if (!src) return;
     this.modelSource = '';
     await this.post('/v1/models/download', { source: src });

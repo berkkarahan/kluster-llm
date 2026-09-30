@@ -15,6 +15,21 @@ from websockets.exceptions import ConnectionClosed
 from kllm.agent.live import LiveFeed, SourceDenied, _encoded
 
 
+@pytest.fixture(autouse=True)
+def close_owned_live_feeds(monkeypatch):
+    feeds = []
+    original = LiveFeed.__init__
+
+    def tracked_init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        feeds.append(self)
+
+    monkeypatch.setattr(LiveFeed, "__init__", tracked_init)
+    yield
+    for feed in feeds:
+        feed.stop()
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
@@ -112,6 +127,7 @@ def test_live_socket_closes_on_serving_role_replacement(client):
         assert closed.value.code == 1012
 
 
+@pytest.mark.integration
 def test_real_uvicorn_http_snapshot_and_websocket_change(client, monkeypatch):
     _, agent = client
     state = {"role": "idle", "node_id": "testnode"}
@@ -202,6 +218,7 @@ def test_real_uvicorn_http_snapshot_and_websocket_change(client, monkeypatch):
         assert not thread.is_alive(), "Uvicorn did not shut down"
 
 
+@pytest.mark.integration
 def test_real_uvicorn_near_limit_initial_snapshot_is_one_frame(client):
     _, agent = client
     large = lambda: {"payload": "x" * 900_000}
@@ -364,6 +381,7 @@ def test_cached_usage_age_advances_without_claiming_a_new_observation():
     assert aged["data"]["nodes"]["n1"]["freshness"] == "stale"
 
 
+@pytest.mark.unit
 def test_near_limit_four_area_plus_logs_snapshot_fits_one_frame():
     topics = ("status", "usage", "load", "download")
     sources = {topic: (lambda: {"payload": "x" * 900_000}, "local") for topic in topics}
@@ -373,9 +391,11 @@ def test_near_limit_four_area_plus_logs_snapshot_fits_one_frame():
         "gap": False, "gap_reason": None, "source": "cluster"}
     snapshot = LiveFeed(sources, lambda _after: dict(log_result)).snapshot(list(topics), logs=True)
     assert set(snapshot["areas"]) == set(topics)
+    assert len(_encoded(snapshot["logs"])) <= 256 * 1024
     assert len(_encoded(snapshot)) < 5 * 1024 * 1024
 
 
+@pytest.mark.unit
 def test_log_count_limit_reports_omitted_prefix_without_losing_highwater():
     from kllm import cluster_log
 
@@ -393,6 +413,70 @@ def test_log_count_limit_reports_omitted_prefix_without_losing_highwater():
         assert empty["lines"] == [] and empty["cursor"] == snap["cursor"]
     finally:
         feed.stop()
+
+
+@pytest.mark.unit
+def test_log_suffix_fits_the_maximal_newest_complete_result_without_mutating_source():
+    from kllm.agent.live import _fit_log_suffix
+    from kllm.cluster_log import make_event
+
+    rows = [make_event("n1", "agent", f"line-{i}-" + "x" * 100, ts=1.0) for i in range(20)]
+    snapshot = {"lines": list(rows), "source": "cluster", "cursor": "epoch:20",
+                "reset": None, "gap": False, "gap_reason": None}
+    source = list(snapshot["lines"])
+    prefix = {"availability": "available", "sampled_at": "2026-09-30T00:00:00Z", "error": None}
+    expected = {**snapshot, "lines": rows[-5:], "gap": True, "gap_reason": "batch_limit"}
+    budget = len(_encoded({**prefix, "snapshot": expected}))
+
+    lines, gap = _fit_log_suffix(snapshot, budget, prefix)
+
+    assert lines == rows[-5:]
+    assert gap == {"gap": True, "gap_reason": "batch_limit"}
+    assert snapshot["lines"] == rows[-5:]
+    assert source == rows
+    assert len(_encoded({**prefix, "snapshot": snapshot})) == budget
+    larger = {**snapshot, "lines": rows[-6:]}
+    assert len(_encoded({**prefix, "snapshot": larger})) > budget
+
+
+@pytest.mark.unit
+def test_log_suffix_uses_encoded_unicode_and_retains_retention_gap():
+    from kllm.agent.live import _fit_log_suffix
+
+    prefix = {"availability": "available", "sampled_at": "2026-09-30T00:00:00Z", "error": None}
+    lines = [{"event_id": "one", "line": "older \"quoted\"\\\\ text 😀" * 20},
+             {"event_id": "two", "line": "newest café 東京\\n" * 20}]
+    base = {"lines": lines, "source": "cluster", "cursor": "epoch:2", "reset": None,
+            "gap": False, "gap_reason": None}
+    exact_budget = len(_encoded({**prefix, "snapshot": base}))
+    exact = dict(base)
+    assert _fit_log_suffix(exact, exact_budget, prefix)[0] == lines
+    shrunk = dict(base)
+    kept, gap = _fit_log_suffix(shrunk, exact_budget - 1, prefix)
+    assert kept == lines[-1:]
+    assert gap == {"gap": True, "gap_reason": "batch_limit"}
+    assert len(_encoded({**prefix, "snapshot": shrunk})) <= exact_budget - 1
+
+    retained = {**base, "gap": True, "gap_reason": "retention"}
+    tight = len(_encoded({**prefix, "snapshot": {**retained, "lines": []}}))
+    _fit_log_suffix(retained, tight + 20, prefix)
+    assert retained["gap_reason"] == "retention"
+
+
+@pytest.mark.unit
+def test_log_suffix_validates_omitted_rows_and_rejects_unfit_metadata():
+    from kllm.agent.live import _fit_log_suffix
+
+    prefix = {"availability": "available", "sampled_at": "2026-09-30T00:00:00Z", "error": None}
+    invalid = {"lines": [{"line": "older", "bad": float("nan")}, {"line": "newest"}],
+               "source": "cluster", "cursor": "epoch:2", "reset": None, "gap": False, "gap_reason": None}
+    with pytest.raises(ValueError):
+        _fit_log_suffix(invalid, 128, prefix)
+
+    impossible = {"lines": [{"line": "x" * 1000}], "source": "cluster", "cursor": "epoch:1",
+                  "reset": None, "gap": False, "gap_reason": None}
+    with pytest.raises(OverflowError):
+        _fit_log_suffix(impossible, 1, prefix)
 
 
 def test_dashboard_log_get_and_websocket_keep_event_ids_and_checkpoint(client, monkeypatch):
@@ -422,6 +506,7 @@ def test_dashboard_log_get_and_websocket_keep_event_ids_and_checkpoint(client, m
     assert empty["lines"] == [] and empty["cursor"] == http_logs["cursor"]
 
 
+@pytest.mark.unit
 def test_live_feed_coalesces_source_work_without_blocking_other_areas():
     started = threading.Event()
     release = threading.Event()
@@ -434,7 +519,7 @@ def test_live_feed_coalesces_source_work_without_blocking_other_areas():
         assert release.wait(3)
         return {"node_id": "n1"}
 
-    feed = LiveFeed({"status": (slow_status, "local"), "usage": (lambda: {"nodes": {}}, "cluster")}, lambda _after: {})
+    feed = LiveFeed({"status": (slow_status, "local"), "usage": (lambda: {"nodes": {}}, "cluster")}, lambda _after: {}, wait_budget=0.05)
     results = []
     owner = threading.Thread(target=lambda: results.append(feed.snapshot(["status"])))
     owner.start()
@@ -452,6 +537,34 @@ def test_live_feed_coalesces_source_work_without_blocking_other_areas():
     feed._futures["status"].result(timeout=3)
     assert feed.snapshot(["status"])["areas"]["status"]["data"]["node_id"] == "n1"
     feed.stop()
+
+
+@pytest.mark.unit
+def test_live_feed_test_wait_budget_bounds_pending_snapshot():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked():
+        entered.set()
+        assert release.wait(3)
+        return {"node_id": "n1"}
+
+    feed = LiveFeed({"status": (blocked, "local")}, lambda _after: {}, wait_budget=0.05)
+    workers = []
+    try:
+        began = time.monotonic()
+        result = feed.snapshot(["status"])
+        assert time.monotonic() - began < 0.2
+        assert entered.is_set()
+        assert result["areas"]["status"]["availability"] == "loading"
+    finally:
+        release.set()
+        feed._futures["status"].result(timeout=3)
+        workers = list(feed._executor._threads)
+        feed.stop()
+        for worker in workers:
+            worker.join(timeout=1)
+        assert all(not worker.is_alive() for worker in workers)
 
 
 def test_live_feed_cold_sources_are_independent_and_initial_read_is_bounded():
@@ -527,6 +640,7 @@ def test_expired_http_lease_stops_source_acquisition():
         feed.stop()
 
 
+@pytest.mark.unit
 def test_scope_change_rejects_obsolete_in_flight_source_result():
     scope = {"role": "master"}
     started = threading.Event()
@@ -539,7 +653,7 @@ def test_scope_change_rejects_obsolete_in_flight_source_result():
             assert release.wait(3)
         return {"role": role}
 
-    feed = LiveFeed({"status": (status, "local")}, lambda _after: {}, scope=lambda: scope["role"])
+    feed = LiveFeed({"status": (status, "local")}, lambda _after: {}, scope=lambda: scope["role"], wait_budget=0.05)
     try:
         first = feed.snapshot(["status"])
         assert started.is_set() and first["areas"]["status"]["availability"] == "loading"

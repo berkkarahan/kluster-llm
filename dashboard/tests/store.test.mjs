@@ -3,7 +3,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 
-test('dashboard always requests Layer and normalizes legacy hardware saves', async () => {
+test('dashboard always requests Layer and normalizes legacy hardware saves', async (t) => {
   const cwd = process.cwd();
   const originalFetch = globalThis.fetch;
   const requests = [];
@@ -50,6 +50,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     });
     globalThis.fetch = mockFetch;
     ({ appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts'));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     appStore.models = [{ id: 'fixture.gguf' }];
     appStore.selectedModel = 'fixture.gguf';
     appStore.status = { role: 'master', node_id: 'master', members: { master: { node_id: 'master' } } };
@@ -160,7 +161,8 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     appStore.selectedGpuIds = [0];
     await appStore.saveConfig({ gpu_ids: [0] });
     assert.equal(appStore.planResult, null);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    t.mock.timers.tick(300);
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(appStore.planResult.budget_bytes, 15.2 * 1024 ** 3);
     assert.match(render(RunPage).body, /usable total memory budget 15\.2 GiB/);
     appStore.nodeShares = { master: 1 };
@@ -214,7 +216,8 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     // A real membership change still refreshes it.
     statusMembers.worker = { node_id: 'worker', role: 'worker' };
     await appStore.refresh();
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    t.mock.timers.tick(300);
+    await new Promise((resolve) => setImmediate(resolve));
     assert.ok(requests.some(({ path }) => path === '/v1/plan?preview=true'),
       'membership change did not re-estimate');
     // A newer running download must not hide the prior terminal reconciliation.
@@ -233,7 +236,8 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.equal(inventoryReads, 1, 'a repeated terminal reconciled inventory more than once');
     await appStore.selectModel('manual-choice');
     resolveInventory();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    t.mock.timers.tick(0);
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(appStore.selectedModel, 'manual-choice', 'late reconciliation overwrote user selection');
     appStore.loadProgress = { operation_id: 'load-tracked', phase: 'loading', model: 'fixture.gguf',
       bytes_loaded: 1, bytes_total: 2, fraction: 0.5 };
@@ -268,6 +272,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.equal(appStore.status.apply_error, 'model does not fit');
   } finally {
     appStore?.stop();
+    t.mock.timers.reset();
     globalThis.fetch = originalFetch;
     try {
       try {
@@ -282,7 +287,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
   }
 });
 
-test('model search keeps one in-flight request and forwards the selected source', async () => {
+test('model search keeps one in-flight request and forwards the selected source', async (t) => {
   const cwd = process.cwd();
   const originalFetch = globalThis.fetch;
   const requests = [];
@@ -341,9 +346,10 @@ test('model search keeps one in-flight request and forwards the selected source'
     });
     globalThis.fetch = mockFetch;
     ({ appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts'));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     appStore.modelSource = '  https://huggingface.co/demo/model-GGUF/tree/main  ';
     const first = appStore.searchModels();
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(appStore.searching, true);
     assert.deepEqual(appStore.searchResults, []);
     assert.deepEqual(appStore.searchWarnings, []);
@@ -454,6 +460,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     assert.ok(requests.some((req) => req.path === '/v1/inference/stop' && req.method === 'POST'));
   } finally {
     appStore?.stop();
+    t.mock.timers.reset();
     globalThis.fetch = originalFetch;
     try { await server?.watcher?.close(); } catch { /* ignore */ }
     await server?.close();

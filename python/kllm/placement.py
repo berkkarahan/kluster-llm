@@ -31,12 +31,16 @@ def memory_costs(layout, size, context, settings):
     embd = int(val("embedding_length", 4096))
     state = []
     kv = []
+    recurrent_layers = val("attention.recurrent_layers", None)
+    if recurrent_layers is None and hybrid:
+        interval = max(1, int(val("full_attention_interval", 4)))
+        recurrent_layers = [(j + 1) % interval != 0 for j in range(len(layers))]
     for i, weight in enumerate(layers):
         heads = int(at(val("attention.head_count", 32), i)) or 1
         kvheads = int(at(val("attention.head_count_kv", heads), i))
         dk = int(at(val("attention.key_length", embd // heads), i))
         dv = int(at(val("attention.value_length", embd // heads), i))
-        recurrent = hybrid and bool(at(val("attention.recurrent_layers", [(j + 1) % int(val("full_attention_interval", 4)) != 0 for j in range(len(layers))]), i))
+        recurrent = hybrid and bool(at(recurrent_layers, i))
         if recurrent:
             d = int(val("ssm.state_size", 128))
             rank = int(val("ssm.time_step_rank", 32))
@@ -202,13 +206,18 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
     model_bytes = sum(costs)
     overhead = memory["overhead"]
     locals_only = [d for d in devices if d.get("local")]
+    local_solution = (
+        _allocate_contiguous(
+            locals_only, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+            overhead=overhead, master_node_id=master["node_id"],
+        )
+        if cpu_base <= cpu_budget and locals_only
+        else None
+    )
     locals_fit = (
         cpu_base <= cpu_budget
         and bool(locals_only)
-        and _allocate_contiguous(
-            locals_only, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
-            overhead=overhead, master_node_id=master["node_id"],
-        ) is not None
+        and local_solution is not None
     )
     if node_shares is not None:
         if device != "gpu" or settings.get("split_mode", "layer") != "layer":
@@ -233,8 +242,9 @@ def plan_devices(nodes, size, layout, settings, *, context, headroom, device, vr
                                             cpu_budget=cpu_budget, cpu_base=cpu_base,
                                             overhead=overhead, master_node_id=master["node_id"])
     else:
-        solution = _allocate_contiguous(devices, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
-                                        overhead=overhead, master_node_id=master["node_id"])
+        solution = local_solution if routing_mode == "local" else _allocate_contiguous(
+            devices, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+            overhead=overhead, master_node_id=master["node_id"])
     fits = solution is not None
     cpu_count, cpu_bytes, allocations = solution or (count, cpu_base + sum(costs), [])
     ngl = count - cpu_count

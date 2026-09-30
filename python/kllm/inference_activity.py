@@ -7,6 +7,17 @@ from typing import Any
 import httpx
 
 
+def _fetch_slots(client: httpx.Client, base: str, server_ready: bool, *, timeout: float | None) -> tuple[bool, Any]:
+    kwargs = {"timeout": timeout} if timeout is not None else {}
+    if not server_ready:
+        health = client.get(f"{base}/health", **kwargs)
+        if health.status_code != 200:
+            return False, None
+        server_ready = True
+    slots_response = client.get(f"{base}/slots", **kwargs)
+    return server_ready, slots_response.json() if slots_response.status_code == 200 else []
+
+
 def idle() -> dict[str, Any]:
     return {
         "phase": "idle",
@@ -19,7 +30,13 @@ def idle() -> dict[str, Any]:
     }
 
 
-def sample(port: int, *, running: bool, load: dict[str, Any] | None = None) -> dict[str, Any]:
+def sample(
+    port: int,
+    *,
+    running: bool,
+    load: dict[str, Any] | None = None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
     """Return the current loading or request phase without affecting inference."""
     if not running:
         return idle()
@@ -41,14 +58,13 @@ def sample(port: int, *, running: bool, load: dict[str, Any] | None = None) -> d
     server_ready = load_phase == "ready"
     base = f"http://127.0.0.1:{port}"
     try:
-        with httpx.Client(timeout=0.35) as client:
-            if not server_ready:
-                health = client.get(f"{base}/health")
-                if health.status_code != 200:
-                    return {**idle(), "phase": "starting", "detail": "waiting for inference server"}
-                server_ready = True
-            slots_response = client.get(f"{base}/slots")
-            slots_raw = slots_response.json() if slots_response.status_code == 200 else []
+        if client is None:
+            with httpx.Client(timeout=0.35, trust_env=False) as owned_client:
+                server_ready, slots_raw = _fetch_slots(owned_client, base, server_ready, timeout=None)
+        else:
+            server_ready, slots_raw = _fetch_slots(client, base, server_ready, timeout=0.35)
+        if slots_raw is None:
+            return {**idle(), "phase": "starting", "detail": "waiting for inference server"}
     except (httpx.HTTPError, ValueError):
         return {
             **idle(),

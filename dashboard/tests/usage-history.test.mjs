@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
+import { createSsrServer } from './ssr-server.mjs';
 
 test('history includes bounded keyboard-readable zero, gaps, UTC and failure state', async () => {
   const cwd = process.cwd();
   process.chdir(fileURLToPath(new URL('..', import.meta.url)));
   let server;
   try {
-    server = await createServer({ server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' });
+    server = await createSsrServer();
     const { render } = await server.ssrLoadModule('svelte/server');
     const { default: UsageHistory } = await server.ssrLoadModule('/src/lib/components/UsageHistory.svelte');
     const life = { lifetime_id: 'w1:12:2026-09-28T12:00:00Z', pid: 12, state: 'ended', started_at: '2026-09-28T12:00:00Z',

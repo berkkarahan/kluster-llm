@@ -3,6 +3,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+from kllm import gguf_meta
 from kllm.gguf_meta import (
     read_context_length,
     read_inference_metadata,
@@ -56,6 +57,23 @@ def test_read_context_length_from_minimal_gguf(tmp_path: Path):
     path = tmp_path / "toy.gguf"
     path.write_bytes(_minimal_gguf(arch="llama", context_length=8192))
     assert read_context_length(path) == 8192
+
+
+def test_metadata_cache_is_stat_keyed_and_returns_isolated_values(tmp_path: Path):
+    gguf_meta._read_inference_metadata.cache_clear()
+    path = tmp_path / "cached.gguf"
+    path.write_bytes(_minimal_gguf(arch="llama", context_length=8192))
+    first = read_inference_metadata(path)
+    assert first is not None
+    first["sampling"]["temperature"] = 99
+    before = gguf_meta._read_inference_metadata.cache_info()
+    second = read_inference_metadata(path)
+    after = gguf_meta._read_inference_metadata.cache_info()
+    assert second is not None and second["sampling"] == {}
+    assert after.hits == before.hits + 1
+
+    path.write_bytes(_minimal_gguf(arch="llama", context_length=4096))
+    assert read_context_length(path) == 4096
 
 
 def test_read_context_length_invalid_returns_none(tmp_path: Path):

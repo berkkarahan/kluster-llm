@@ -89,6 +89,13 @@ impl CapacitySnapshot {
 }
 
 pub fn probe_capacity() -> CapacitySnapshot {
+    probe_capacity_with_gpus().0
+}
+
+/// Probe host memory and GPU topology in one pass.  Python needs both views
+/// for a capacity refresh; returning them together avoids launching the
+/// platform GPU tools twice for the same observation.
+pub fn probe_capacity_with_gpus() -> (CapacitySnapshot, Vec<GpuDevice>, BackendHint) {
     let mut sys = System::new();
     sys.refresh_memory();
 
@@ -97,13 +104,14 @@ pub fn probe_capacity() -> CapacitySnapshot {
     let (devices, backend) = enumerate_gpus();
     let vram_bytes = sum_vram(&devices);
 
-    CapacitySnapshot {
+    let snapshot = CapacitySnapshot {
         total_ram_bytes,
         available_ram_bytes,
         vram_bytes,
         backend: backend.as_str().to_string(),
         hostname: hostname(),
-    }
+    };
+    (snapshot, devices, backend)
 }
 
 /// Enumerate local GPUs with index, name, and VRAM.

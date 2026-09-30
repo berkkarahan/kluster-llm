@@ -47,7 +47,8 @@ _LAUNCH_FLAG_MAP = (
 )
 
 _cache_lock = threading.Lock()
-_cache: dict[tuple[str, int, int], ModelDefaults] = {}
+_cache: dict[tuple[str, int, int, int], ModelDefaults] = {}
+_CACHE_LIMIT = 32
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,15 @@ class ModelDefaults:
         return out
 
 
+def _cache_result(key: tuple[str, int, int, int], result: ModelDefaults) -> None:
+    with _cache_lock:
+        for old_key in [candidate for candidate in _cache if candidate[0] == key[0] and candidate != key]:
+            del _cache[old_key]
+        while len(_cache) >= _CACHE_LIMIT:
+            _cache.pop(next(iter(_cache)))
+        _cache[key] = result
+
+
 def _is_hybrid_family(architecture: str | None, reasoning: dict[str, Any]) -> bool:
     if reasoning.get("supports_enable_thinking") or reasoning.get("always_on_thinking"):
         return True
@@ -121,7 +131,8 @@ def resolve_model_defaults(model_path: Path | str | None) -> ModelDefaults:
         st = path.stat()
     except OSError:
         return ModelDefaults()
-    cache_key = (str(path.resolve()), int(st.st_mtime_ns), int(st.st_size))
+    resolved = str(path.resolve())
+    cache_key = (resolved, int(st.st_mtime_ns), int(st.st_ctime_ns), int(st.st_size))
     with _cache_lock:
         hit = _cache.get(cache_key)
         if hit is not None:
@@ -130,8 +141,7 @@ def resolve_model_defaults(model_path: Path | str | None) -> ModelDefaults:
     meta = read_inference_metadata(path)
     if meta is None:
         result = ModelDefaults()
-        with _cache_lock:
-            _cache[cache_key] = result
+        _cache_result(cache_key, result)
         return result
 
     sampling: dict[str, float | int] = dict(meta.get("sampling") or {})
@@ -177,8 +187,7 @@ def resolve_model_defaults(model_path: Path | str | None) -> ModelDefaults:
         jinja=jinja,
         reasoning_format=reasoning_format,
     )
-    with _cache_lock:
-        _cache[cache_key] = result
+    _cache_result(cache_key, result)
     return result
 
 

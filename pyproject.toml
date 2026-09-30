@@ -50,3 +50,7 @@ features = ["pyo3/extension-module"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["python"]
+markers = [
+    "unit: deterministic test with controlled external dependencies",
+    "integration: real local transport, persistence, process, native, or browser boundary",
+]

@@ -626,16 +626,24 @@ def test_chat_requires_token(client):
     assert r.status_code == 401
 
 
-def test_chat_503_when_inference_down(client):
+@pytest.mark.unit
+def test_chat_503_when_inference_down(client, monkeypatch):
+    import httpx
+
     c, agent, token = client
-    # Avoid flaking when a real llama-server is bound to the default infer port.
-    agent.STATE.infer_port = 39999
+    requests = []
+    def unavailable(request):
+        requests.append(request.url.path)
+        raise httpx.ConnectError("controlled inference outage", request=request)
+
+    agent.app.state.inference_client = httpx.AsyncClient(transport=httpx.MockTransport(unavailable), trust_env=False)
     r = c.post(
         "/v1/chat/completions",
         json={"model": "x", "messages": [{"role": "user", "content": "hi"}]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 503
+    assert requests == ["/v1/chat/completions"]
 
 
 def test_api_token_endpoint(client):

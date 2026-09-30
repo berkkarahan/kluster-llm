@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
+import { createSsrServer } from './ssr-server.mjs';
 
 const GIB = 1024 ** 3;
 
@@ -35,7 +35,7 @@ test('node summaries expose host CPU, RAM and per-device readings before selecti
   process.chdir(fileURLToPath(new URL('..', import.meta.url)));
   let server;
   try {
-    server = await createServer({ server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' });
+    server = await createSsrServer();
     const { render } = await server.ssrLoadModule('svelte/server');
     const { default: NodeMap } = await server.ssrLoadModule('/src/lib/components/NodeMap.svelte');
     const { default: NodeUsageDetails } = await server.ssrLoadModule('/src/lib/components/NodeUsageDetails.svelte');

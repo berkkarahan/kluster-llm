@@ -348,8 +348,13 @@ test('usage ages locally, equal observation replay cannot freshen it, and a cloc
   wall = Date.parse(stamp);
   updates.sampleClock(stamp, wall, monotonic);
 
-  const nodes = { n1: { node_id: 'n1', freshness: 'fresh', age_seconds: 7.5,
-    reading: { observed_at: stamp, lifetime_id: 'first' } } };
+  const nodes = {
+    n1: { node_id: 'n1', connected: true, freshness: 'fresh', age_seconds: 7.5,
+      resources: { snapshot_id: 'native-first' }, resource_freshness: 'fresh', resource_age_seconds: 7.5,
+      reading: { observed_at: stamp, lifetime_id: 'first' } },
+    n2: { node_id: 'n2', connected: true, freshness: 'unavailable', reading: null,
+      resources: { snapshot_id: 'native-no-child' }, resource_freshness: 'fresh', resource_age_seconds: 7.5 }
+  };
   const areas = snapshot().areas;
   areas.usage = area(2, { nodes, relationships: [], recording: { recording: 'recording' } });
   sockets[0].receive({ type: 'data', generation: 1, batch: 1, initial: true, epoch, server_time: stamp,
@@ -359,12 +364,15 @@ test('usage ages locally, equal observation replay cannot freshen it, and a cloc
   wall += 1500;
   t.mock.timers.tick(1500);
   assert.equal(applied.findLast(([topic]) => topic === 'usage')[1].data.nodes.n1.freshness, 'stale');
+  assert.equal(applied.findLast(([topic]) => topic === 'usage')[1].data.nodes.n1.resource_freshness, 'stale');
+  assert.equal(applied.findLast(([topic]) => topic === 'usage')[1].data.nodes.n2.resource_freshness, 'stale');
 
-  areas.usage = area(3, { nodes: { n1: { ...nodes.n1, age_seconds: 0 } }, relationships: [],
+  areas.usage = area(3, { nodes: { n1: { ...nodes.n1, age_seconds: 0, resource_age_seconds: 0 } }, relationships: [],
     recording: { recording: 'recording' } });
   sockets[0].receive({ type: 'data', generation: 1, batch: 2, initial: false, epoch, server_time: stamp,
     areas: { usage: areas.usage }, logs: null });
   assert.equal(applied.findLast(([topic]) => topic === 'usage')[1].data.nodes.n1.freshness, 'stale');
+  assert.equal(applied.findLast(([topic]) => topic === 'usage')[1].data.nodes.n1.resource_freshness, 'stale');
 
   wall += 30_000;
   const next = { ...nodes.n1, age_seconds: 0, reading: { observed_at: stamp, lifetime_id: 'second' } };

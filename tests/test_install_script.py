@@ -625,6 +625,29 @@ def test_cache_reset_flags_only_scrub_dangling_linker_flags(install, tmp_path):
     assert "-UCMAKE_EXE_LINKER_FLAGS" not in flags, "a live linker flag must survive"
 
 
+def test_cached_package_and_quoted_linker_paths_with_spaces_survive(install, tmp_path):
+    sdk = tmp_path / "SDK with spaces #1"
+    sdk.mkdir()
+    library = sdk / "libssl.a"
+    library.write_bytes(b"reference")
+    entries = {
+        "OPENSSL_SSL_LIBRARY:FILEPATH": str(library),
+        "OPENSSL_INCLUDE_DIR:PATH": str(sdk),
+        "CMAKE_EXE_LINKER_FLAGS:STRING": f'-L"{sdk}"',
+    }
+    assert install._dangling_cached_paths(entries) == []
+    assert "-UCMAKE_EXE_LINKER_FLAGS" not in install._cache_reset_flags(entries)
+    library.unlink()
+    assert install._dangling_cached_paths(entries) == [f"OPENSSL_SSL_LIBRARY:FILEPATH={library}"]
+
+
+def test_quoted_missing_linker_path_resets_only_that_flag(install, tmp_path):
+    missing = tmp_path / "missing SDK" / "lib"
+    flags = install._cache_reset_flags({"CMAKE_MODULE_LINKER_FLAGS:STRING": f'-L"{missing}"'})
+    assert "-UCMAKE_MODULE_LINKER_FLAGS" in flags
+    assert "-UCMAKE_EXE_LINKER_FLAGS" not in flags
+
+
 def test_expected_stamp_for_default_never_raises(install, monkeypatch):
     """Callers run inside request handlers; an escaping SystemExit kills the agent."""
     monkeypatch.setattr(install, "_is_macos", lambda: True)

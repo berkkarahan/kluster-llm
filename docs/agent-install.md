@@ -280,6 +280,7 @@ Each worker runs `git pull --ff-only`, then `scripts/install.py` if `llama-relea
 | `cargo` missing after install | PATH not refreshed | New shell; ensure `~/.cargo/bin` or `%USERPROFILE%\.cargo\bin` on PATH; re-run |
 | `npm` missing after install | PATH / winget needs new shell | New shell; re-run with `--skip-rust` if kllm already built |
 | maturin / Rust compile fails | Broken toolchain | Re-run rustup; `rustup default stable`; re-run install |
+| CMake cache points to a removed SDK/OpenSSL directory | Stale cached package path | Re-run the installer: it discards its stale build tree for missing package paths and resets dangling linker flags. Windows drive/UNC paths and quoted SDK paths with spaces are recognized; a dangling linker flag alone does not discard the tree. |
 | `llama-server` missing | Prebuilt miss or cmake fail | `python scripts/install.py --llama-only --force`; or `--from-source`; set `KLLM_LLAMA_SERVER` if you have a binary |
 | `rpc-server` missing | Some prebuilt packs omit it | `python scripts/install.py --llama-only --from-source` (`-DGGML_RPC=ON`); verify it was staged in `vendor/bin/` |
 | `install.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/install.py --llama-only` on **every** node; do not mix HEAD source with a pinned nightly |

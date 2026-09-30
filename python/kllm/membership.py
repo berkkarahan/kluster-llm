@@ -38,6 +38,7 @@ _SNAPSHOT_OPTIONAL = (
     "process_pid",
     "process_role",
     "process_started_at",
+    "process_start_token",
 )
 
 _UNREACHABLE_WARNING = "master heartbeat unreachable"

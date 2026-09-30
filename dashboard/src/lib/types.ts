@@ -227,6 +227,37 @@ export type RecorderStatus = {
   storage_truncated?: boolean;
 };
 
+export type ResourceMetric = {
+  value: number | null;
+  unit: 'bytes' | 'percent_machine';
+  scope: 'host' | 'process' | 'device';
+  status: 'measured' | 'initializing' | 'unsupported' | 'error';
+  reason: string | null;
+  detail: string | null;
+  observed_at: string;
+  interval_start: string | null;
+  interval_end: string | null;
+  duration_ms: number | null;
+  source: string;
+};
+
+export type ResourceSnapshot = {
+  schema_version: 1; node_id: string; generation: string; sequence: number; snapshot_id: string;
+  requested_at: string; completed_at: string;
+  host: { logical_cpu_count: number | null; cpu: ResourceMetric;
+    memory: { pool_id: string; total: ResourceMetric; used: ResourceMetric; free: ResourceMetric; available: ResourceMetric } };
+  devices: { device_key: string; name: string; vendor: string; memory_kind: 'dedicated' | 'shared' | 'mixed' | 'unknown';
+    inventory_device_id: string | null; memory: { kind: 'dedicated' | 'shared'; pool_id: string; backing_pool_id: string | null;
+      total: ResourceMetric; used: ResourceMetric; free: ResourceMetric }[] }[];
+  device_discovery: { status: 'measured' | 'error' | 'unsupported'; reason: string | null; observed_at: string };
+  processes: { pid: number; role: 'master' | 'worker'; start_token: string; started_at: string; node_id: string;
+    lifetime_id: string; state: 'running' | 'exited' | 'unavailable'; identity_verified: boolean; cpu: ResourceMetric; rss: ResourceMetric }[];
+  totals: Record<'dedicated_capacity' | 'dedicated_used' | 'physical_capacity', {
+    value: number | null; unit: 'bytes'; status: 'complete' | 'partial' | 'unavailable';
+    included_pool_ids: string[]; missing_pool_ids: string[]; observed_at: string[] }>;
+  collector: { kind: 'native' | 'legacy'; platform: string };
+};
+
 export type UsageNode = {
   node_id: string;
   host: string;
@@ -238,13 +269,17 @@ export type UsageNode = {
   vram_bytes?: number | null;
   assignment?: string | null;
   connected: boolean;
-  process_state?: 'running' | 'ended' | 'unobserved' | 'no managed process';
+  process_state?: 'running' | 'ended' | 'unobserved' | 'unavailable' | 'no managed process';
   freshness: 'fresh' | 'stale' | 'unavailable';
   age_seconds?: number | null;
   reading: UsageReading | null;
+  resources?: ResourceSnapshot | null;
+  resource_age_seconds?: number | null;
+  resource_freshness?: 'fresh' | 'stale' | 'unavailable';
 };
 
 export type UsageLive = {
+  resource_schema_versions?: number[];
   nodes: Record<string, UsageNode>;
   relationships: { from_node_id: string; to_node_id: string; kind: 'master-worker' }[];
   recording: RecorderStatus;

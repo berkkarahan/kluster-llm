@@ -181,6 +181,7 @@ export class DashboardUpdates {
   private openingProbe: { gen: number; wall: number; monotonic: number } | null = null;
   private usageArea: LiveArea<UsageLive> | null = null;
   private usageAnchors = new Map<string, { observation: string; deadline: number }>();
+  private resourceAnchors = new Map<string, { observation: string; deadline: number }>();
   private legacyAttempt = 0;
 
   constructor(options: Options) {
@@ -508,6 +509,7 @@ export class DashboardUpdates {
     if (this.epoch && this.epoch !== snapshot.epoch) {
       this.revisions = {};
       this.usageAnchors.clear();
+      this.resourceAnchors.clear();
     }
     this.epoch = snapshot.epoch;
     for (const topic of TOPICS) {
@@ -593,7 +595,22 @@ export class DashboardUpdates {
   private ageUsage(area: LiveArea<UsageLive>, serverTime: string): LiveArea<UsageLive> {
     const now = performance.now();
     const transit = this.transitUpper(serverTime);
+    for (const anchors of [this.usageAnchors, this.resourceAnchors]) {
+      for (const id of anchors.keys()) if (!Object.prototype.hasOwnProperty.call(area.data?.nodes ?? {}, id)) anchors.delete(id);
+    }
     const nodes = Object.fromEntries(Object.entries(area.data?.nodes ?? {}).map(([id, node]) => {
+      if (node.resources && node.resource_freshness === 'fresh') {
+        const age = typeof node.resource_age_seconds === 'number' && Number.isFinite(node.resource_age_seconds)
+          ? Math.max(0, node.resource_age_seconds) + transit : Infinity;
+        const deadline = now + Math.max(0, 10 - age) * 1000;
+        const previous = this.resourceAnchors.get(id);
+        const observation = node.resources.snapshot_id;
+        const anchor = previous?.observation === observation ? Math.min(previous.deadline, deadline) : deadline;
+        this.resourceAnchors.set(id, { observation, deadline: anchor });
+        if (!node.connected || anchor <= now) node = { ...node, resource_freshness: 'stale' as const };
+      } else {
+        this.resourceAnchors.delete(id);
+      }
       const observed = node.reading?.observed_at;
       if (!observed) {
         this.usageAnchors.delete(id);
@@ -619,13 +636,17 @@ export class DashboardUpdates {
     this.staleTimer = null;
     if (!this.running || hidden()) return;
     const now = performance.now();
-    const deadlines = [...this.usageAnchors.values()].map(({ deadline }) => deadline).filter((deadline) => deadline > now);
+    const deadlines = [...this.usageAnchors.values(), ...this.resourceAnchors.values()].map(({ deadline }) => deadline).filter((deadline) => deadline > now);
     if (!deadlines.length) return;
     this.staleTimer = setTimeout(() => {
       this.staleTimer = null;
       const area = this.usageArea;
       if (!area?.data || !this.running || hidden()) return;
       const nodes = Object.fromEntries(Object.entries(area.data.nodes).map(([id, node]) => {
+        const resourceAnchor = this.resourceAnchors.get(id);
+        if (node.resource_freshness === 'fresh' && resourceAnchor && resourceAnchor.deadline <= performance.now()) {
+          node = { ...node, resource_freshness: 'stale' as const };
+        }
         const anchor = this.usageAnchors.get(id);
         return [id, node.freshness === 'fresh' && anchor && anchor.deadline <= performance.now()
           ? { ...node, freshness: 'stale' as const } : node];

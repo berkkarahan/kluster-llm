@@ -49,6 +49,7 @@ vendor/
 # Editor / agent
 .cursor/
 .opencode/
+.spec-kit-memory/
 .vscode/
 .idea/
 

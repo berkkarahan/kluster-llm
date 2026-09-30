@@ -28,6 +28,32 @@
   const fitStatus = $derived(
     appStore.planResult?.fit_status ? String(appStore.planResult.fit_status) : null
   );
+  const overflowGpuBudget = $derived.by(() => {
+    if (fitStatus !== 'overflow') return null;
+    const budgets = appStore.planResult?.node_gpu_budget_bytes;
+    if (!budgets || typeof budgets !== 'object') return null;
+    let total = 0;
+    let any = false;
+    for (const value of Object.values(budgets as Record<string, unknown>)) {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        total += value;
+        any = true;
+      }
+    }
+    return any ? total : null;
+  });
+  const overflowRamBudget = $derived.by(() => {
+    if (fitStatus !== 'overflow') return null;
+    const plan = appStore.planResult;
+    const ids = plan?.node_ids;
+    const budgets = plan?.budgets_bytes;
+    if (!Array.isArray(ids) || !Array.isArray(budgets)) return null;
+    const members = appStore.status?.members ?? {};
+    const master = ids.findIndex((id) => members[String(id)]?.role === 'master');
+    const index = master >= 0 ? master : ids.length === 1 ? 0 : -1;
+    const value = index >= 0 ? budgets[index] : null;
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  });
   const maxContext = $derived(appStore.selectedModelMaxContext());
   const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
   const estimateReady = $derived(
@@ -138,10 +164,15 @@
         <div class="mono text-[11px] p-2" style="background: var(--bg); border: 1px solid var(--border)">
           Estimated total memory: {formatGib(appStore.planResult.estimated_bytes as number)}
           / usable total memory budget {formatGib(appStore.planResult.budget_bytes as number)}
-          {#if appStore.device === 'gpu' && appStore.planResult.vram_alloc_bytes != null}
-            <div>Estimated GPU memory: {formatGib(appStore.planResult.vram_alloc_bytes as number)}</div>
+          {#if fitStatus === 'overflow'}
+            {#if overflowGpuBudget != null}<div>GPU budget: {formatGib(overflowGpuBudget)} · does not fit</div>{/if}
+            {#if overflowRamBudget != null}<div>RAM budget: {formatGib(overflowRamBudget)}</div>{/if}
+          {:else}
+            {#if appStore.device === 'gpu' && appStore.planResult.vram_alloc_bytes != null}
+              <div>Estimated GPU memory: {formatGib(appStore.planResult.vram_alloc_bytes as number)}</div>
+            {/if}
+            {#if appStore.planResult.cpu_alloc_bytes != null}<div>Estimated master CPU RAM: {formatGib(appStore.planResult.cpu_alloc_bytes as number)}</div>{/if}
           {/if}
-          {#if appStore.planResult.cpu_alloc_bytes != null}<div>Estimated master CPU RAM: {formatGib(appStore.planResult.cpu_alloc_bytes as number)}</div>{/if}
           {#if fitStatus}<span style="color: var(--accent)">{fitStatus}</span>{/if}
           {#if appStore.estimating}<span style="color: var(--muted)"> · updating…</span>{/if}
         </div>

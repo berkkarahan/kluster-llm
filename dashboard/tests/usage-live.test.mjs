@@ -126,6 +126,38 @@ test('node summaries expose host CPU, RAM and per-device readings before selecti
     assert.match(details, /2\.0 GiB/);
     assert.match(details, /25%/);
     assert.match(details, /8\.0 GiB/);
+
+    const measure = (value, unit = 'bytes', scope = 'host') => ({ value, unit, scope,
+      status: value == null ? 'unsupported' : 'measured', reason: value == null ? 'unsupported_counter' : null,
+      observed_at: '2026-09-30T00:00:00Z', source: 'fixture' });
+    const resources = {
+      snapshot_id: 'native-host-only', host: { cpu: measure(12.5, 'percent_machine'),
+        memory: { total: measure(16 * GIB), used: measure(4 * GIB), available: measure(12 * GIB), free: measure(null) } },
+      processes: [], devices: [], device_discovery: { status: 'error', reason: 'source_error' },
+      totals: { physical_capacity: { value: 16 * GIB, status: 'partial' } }
+    };
+    const nativeNode = node('native', { reading: null, backend: 'cpu', freshness: 'unavailable',
+      resources, resource_freshness: 'fresh', resource_age_seconds: 1, process_state: 'no managed process' });
+    const nativeMap = render(NodeMap, { props: { nodes: { native: nativeNode }, relationships: [], selectedId: null, onselect: () => {} } }).body;
+    assert.match(nativeMap, /GPU discovery error: source_error/);
+    assert.doesNotMatch(nativeMap, /no GPUs reported/);
+    assert.match(nativeMap, /4\.0 GiB \/ 16\.0 GiB/);
+    const nativeDetails = render(NodeUsageDetails, { props: { node: nativeNode, assignment: false, activity: null } }).body;
+    assert.match(nativeDetails, /Native resources/);
+    assert.match(nativeDetails, /12\.5%/);
+    assert.match(nativeDetails, /available 12\.0 GiB/);
+    assert.match(nativeDetails, /unsupported_counter/);
+    assert.match(nativeDetails, /partial/);
+    assert.doesNotMatch(nativeDetails, /Process and host measurements unavailable/);
+    const canonical = 17095983104;
+    const dedicatedNode = node('native', { ...nativeNode, resources: { ...resources, devices: [{
+      device_key: 'win:0', name: 'AMD Radeon RX 9070 XT', memory: [{
+        kind: 'dedicated', backing_pool_id: null,
+        used: measure(5 * GIB), total: measure(canonical), free: measure(canonical - 5 * GIB)
+      }]
+    }] } });
+    const dedicatedMap = render(NodeMap, { props: { nodes: { native: dedicatedNode }, relationships: [], selectedId: null, onselect: () => {} } }).body;
+    assert.match(dedicatedMap, /5\.0 GiB \/ 15\.9 GiB/);
   } finally {
     try { await server?.watcher?.close(); } catch { /* no watcher */ }
     await server?.close();

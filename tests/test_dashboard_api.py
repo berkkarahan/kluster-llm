@@ -31,11 +31,131 @@ def client(tmp_path, monkeypatch):
         yield client, agent_mod, token
 
 
+def test_status_capacity_vram_matches_the_member(client, monkeypatch):
+    from types import SimpleNamespace
+
+    c, agent, _ = client
+    llama = 17_095_983_104
+    agent.STATE.role = "master"
+    agent.STATE.members[agent.STATE.node_id] = {"role": "master", "node_id": agent.STATE.node_id, "vram_bytes": None}
+    snap = SimpleNamespace(backend="vulkan", total_ram_bytes=32 * 1024**3, available_ram_bytes=8 * 1024**3,
+                           vram_bytes=llama + 536_870_912, hostname="box")
+    listed = {"backend": "vulkan", "gpus": [
+        {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": llama, "device": "Vulkan0"}],
+              "devices": [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": llama, "device": "Vulkan0"}],
+              "unified_memory": False, "requested_backend": None, "binary_version": "v"}
+    monkeypatch.setattr(agent.native, "require_native", lambda: SimpleNamespace(probe_capacity=lambda: snap))
+    monkeypatch.setattr(agent.native, "list_gpus", lambda: listed)
+    agent._refresh_local_capacity()
+    body = c.get("/v1/status").json()
+    node = agent.STATE.node_id
+    assert body["capacity"]["vram_bytes"] == llama
+    assert body["members"][node]["vram_bytes"] == llama
+
+
 def test_list_models_empty(client):
     c, _, _ = client
     r = c.get("/v1/models")
     assert r.status_code == 200
     assert r.json()["data"] == []
+
+
+def test_native_resources_without_process_and_replayed_generations(client, monkeypatch):
+    import uuid
+    from datetime import datetime, timezone
+    from kllm import usage_probe
+
+    c, agent, _ = client
+    if not agent.native.resource_probe_available():
+        pytest.skip("requires rebuilt native schema validator")
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "resource-test-key"
+    now = datetime.now(timezone.utc)
+    agent.STATE.members["r1"] = dict(node_id="r1", role="worker", host="worker", last_seen=now.timestamp())
+    headers = {"X-Kllm-Key": "resource-test-key"}
+    reset = dict(node_id="r1", host="worker", resource_session=dict(request_id=uuid.uuid4().hex, previous_generation=None))
+    response = c.post("/v1/register", json=reset, headers=headers)
+    assert response.status_code == 200
+    generation = response.json()["resource_generation"]
+    snapshot = usage_probe.probe("r1", [], supported=False)
+    try:
+        snapshot.update(generation=generation, sequence=1, snapshot_id=f"{generation}:1")
+        body = dict(node_id="r1", readings=[], resources=snapshot)
+        first = c.post("/v1/usage/ingest", json=body, headers=headers)
+        assert first.status_code == 200, first.text
+        assert first.json()["accepted"] == 0
+        assert first.json()["resources_accepted"] is True
+        assert agent.app.state.usage_store.count() == 0
+        assert c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"] is False
+        live = c.get("/v1/usage/live").json()
+        assert live["nodes"]["r1"]["resources"]["snapshot_id"] == snapshot["snapshot_id"]
+        assert live["nodes"]["r1"]["reading"] is None
+        import sqlite3
+        def broken_history():
+            raise sqlite3.DatabaseError("test history unavailable")
+        monkeypatch.setattr(agent, "_usage_store", broken_history)
+        snapshot.update(sequence=2, snapshot_id=f"{generation}:2")
+        assert c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"] is True
+        fallback = c.get("/v1/usage/live")
+        assert fallback.status_code == 200
+        assert fallback.json()["recording"]["recording"] == "failed"
+        assert fallback.json()["nodes"]["r1"]["resources"]["sequence"] == 2
+        reset["resource_session"] = dict(request_id=uuid.uuid4().hex, previous_generation=generation)
+        assert c.post("/v1/register", json=reset, headers=headers).status_code == 200
+        assert c.post("/v1/usage/ingest", json=body, headers=headers).status_code == 409
+        assert "r1" not in agent._resources.latest
+    finally:
+        usage_probe.close()
+
+
+def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, monkeypatch):
+    from types import SimpleNamespace
+    from kllm import usage
+
+    _, agent, _ = client
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "master"
+    agent.STATE.join_key = "resource-test-key"
+    monkeypatch.setattr(agent, "_master_control_base", lambda: "http://master")
+    monkeypatch.setattr(agent, "_tracked_process_token", lambda: None)
+    monkeypatch.setattr(agent, "_heartbeat_payload", lambda: dict(node_id=agent.STATE.node_id, host="worker"))
+    supported = [False]
+    server = usage.ResourceState()
+    posted = []
+    def response(data, status=200):
+        return SimpleNamespace(status_code=status, json=lambda: data, raise_for_status=lambda: None)
+    def get(*args, **kwargs):
+        return response(dict(resource_schema_versions=[1] if supported[0] else []))
+    def post(url, *, json, **kwargs):
+        posted.append((url, json))
+        if url.endswith("heartbeat"):
+            return response(dict(accepted=True))
+        if url.endswith("register"):
+            reset = json["resource_session"]
+            try:
+                generation = server.establish(agent.STATE.node_id, reset)
+            except usage.ResourceConflict as exc:
+                return response(dict(detail=dict(resource_generation=exc.generation)), 409)
+            return response(dict(request_id=reset["request_id"], resource_generation=generation))
+        return response(dict(resources_accepted=True))
+    monkeypatch.setattr(agent.http_clients, "control_client", lambda: SimpleNamespace(get=get, post=post))
+    original = dict(generation="a" * 32, sequence=1, snapshot_id="a" * 32 + ":1")
+    agent._publish_resources(original)
+    assert posted == []
+    supported[0] = True
+    agent._resource_remote.clear()  # Reconnect invalidates the old capability result.
+    agent._publish_resources(original)
+    first = posted[-1][1]["resources"]
+    assert first["generation"] != original["generation"]
+    assert first["sequence"] == 1
+    agent._publish_resources(original)
+    assert posted[-1][1]["resources"]["sequence"] == 1
+    agent._publish_resources(dict(original, sequence=2, snapshot_id="a" * 32 + ":2"))
+    assert posted[-1][1]["resources"]["sequence"] == 2
+    agent._publish_resources(dict(original, generation="c" * 32, snapshot_id="c" * 32 + ":1"))
+    assert posted[-1][1]["resources"]["generation"] != first["generation"]
+    assert posted[-1][1]["resources"]["sequence"] == 1
+    assert original["generation"] == "a" * 32
 
 
 def test_usage_ingest_private_identity_and_durable_ack(client):
@@ -225,6 +345,8 @@ def test_usage_collector_runs_without_dashboard(client, monkeypatch):
     from kllm import usage
 
     _, agent, _ = client
+    # This check deliberately exercises the preserved psutil fallback.
+    monkeypatch.setattr(agent.native, "resource_probe_available", lambda: False)
     started = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()
     process = SimpleNamespace(create_time=lambda: started, cpu_percent=lambda interval=None: 80,
                               memory_info=lambda: SimpleNamespace(rss=2048))

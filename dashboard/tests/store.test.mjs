@@ -112,6 +112,22 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.match(page, /Advanced settings/);
     assert.doesNotMatch(page, /VRAM weight|Latency weight|Placement weights/);
     assert.match(page, /15\.2 GiB/);
+    const fitted = appStore.planResult;
+    appStore.planResult = {
+      estimated_bytes: Math.round(54.4 * 1024 ** 3), budget_bytes: Math.round(20.3 * 1024 ** 3),
+      vram_alloc_bytes: 0, cpu_alloc_bytes: Math.round(54.4 * 1024 ** 3), fit_status: 'overflow',
+      node_ids: ['master'], budgets_bytes: [Math.round(20.3 * 1024 ** 3)],
+      node_gpu_budget_bytes: { master: Math.round(15.1 * 1024 ** 3) },
+      hint: 'no contiguous device allocation fits available memory'
+    };
+    appStore.status = { ...appStore.status, members: { master: { node_id: 'master', role: 'master' } } };
+    const overflow = render(RunPage).body;
+    assert.match(overflow, /GPU budget: 15\.1 GiB · does not fit/);
+    assert.match(overflow, /RAM budget: 20\.3 GiB/);
+    assert.doesNotMatch(overflow, /Estimated GPU memory/);
+    assert.doesNotMatch(overflow, /Estimated master CPU RAM/);
+    appStore.planResult = fitted;
+    appStore.status = { ...appStore.status, members: { master: { node_id: 'master' } } };
     appStore.gpus = [...appStore.gpus, { index: 2, name: 'unknown', vram_bytes: null }];
     appStore.selectedGpuIds = [0, 2];
     assert.match(render(HardwareSettings).body, /Selected VRAM capacity: —/);

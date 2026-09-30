@@ -66,6 +66,104 @@ def test_sampler_process_identity_scope_and_first_cpu(monkeypatch):
     assert usage.Sampler().sample(state, now=now + timedelta(seconds=6))["lifetime_id"] == later["lifetime_id"]
 
 
+def test_native_device_projection_requires_unique_os_identity_not_name_or_order():
+    state = ClusterState(node_id="n", members={"n": dict(devices=[dict(index=4, name="same GPU")])})
+    device = dict(device_key="win:luid:1", name="same GPU", inventory_device_id=None, memory=[dict(kind="dedicated",
+        total=dict(value=8 * 1024**3), used=dict(value=0))])
+    snapshot = dict(devices=[device])
+    assert usage.project_resource_devices(snapshot, state) == []
+    device["inventory_device_id"] = "4"
+    point = usage.project_resource_devices(snapshot, state)[0]
+    assert point["device_id"] == "4"
+    assert point["used_bytes"] == 0
+    assert point["total_bytes"] == 8 * 1024**3
+    assert point["unavailable_reason"]
+    state.members["n"]["devices"].append(dict(index=4, name="same GPU"))
+    assert usage.project_resource_devices(snapshot, state) == []
+
+
+def _byte_metric(value, source):
+    return dict(value=value, unit="bytes", scope="device", status="measured" if value is not None else "unsupported",
+                reason=None if value is not None else "unsupported_counter", detail=None,
+                observed_at=usage.utc(datetime.now(timezone.utc)), interval_start=None, interval_end=None,
+                duration_ms=None, source=source)
+
+
+def _dedicated_device(name, *, total, used, key="win:luid:1"):
+    return dict(device_key=key, name=name, vendor="1002", memory_kind="dedicated", inventory_device_id=None,
+                memory=[dict(kind="dedicated", pool_id=f"{key}:dedicated", backing_pool_id=None,
+                             total=_byte_metric(total, "win.dxgi.dedicated_video_memory"),
+                             used=_byte_metric(used, "win.pdh.gpu_adapter.dedicated_usage"),
+                             free=_byte_metric(None if used is None or total is None else total - used,
+                                               "win.dedicated.capacity_minus_usage"))])
+
+
+def test_reconcile_resources_uses_the_unique_llama_capacity():
+    from kllm import usage_probe
+
+    llama, dxgi, used = 17_095_983_104, 16_974_905_344, 5_000_000_000
+    device = _dedicated_device("AMD Radeon RX 9070 XT", total=dxgi, used=used)
+    host = dict(memory=dict(total=_byte_metric(32 * 1024**3, "win.physical.total")))
+    snapshot = dict(devices=[device], host=host, device_discovery=dict(status="measured", reason=None), totals={})
+    inventory = [dict(index=0, name="AMD Radeon(TM) RX 9070 XT", vram_bytes=llama)]
+    usage.reconcile_resources(snapshot, inventory)
+    view = device["memory"][0]
+    assert device["inventory_device_id"] == "0"
+    assert view["total"]["value"] == llama
+    assert view["total"]["source"] == "inventory.llama_list_devices"
+    assert view["total"]["detail"] == f"win.dxgi.dedicated_video_memory={dxgi}"
+    assert view["free"]["value"] == llama - used
+    assert view["free"]["source"] == "inventory.capacity_minus_usage"
+    assert snapshot["totals"]["dedicated_capacity"]["value"] == llama
+
+    duplicate = dict(devices=[
+        _dedicated_device("AMD Radeon RX 9070 XT", total=dxgi, used=used, key="win:a"),
+        _dedicated_device("AMD Radeon RX 9070 XT", total=dxgi, used=used, key="win:b"),
+    ], host=host, device_discovery=snapshot["device_discovery"])
+    usage.reconcile_resources(duplicate, inventory)
+    assert all(item["inventory_device_id"] is None for item in duplicate["devices"])
+
+    overflow = _dedicated_device("AMD Radeon RX 9070 XT", total=dxgi, used=llama + 1)
+    over = dict(devices=[overflow], host=host, device_discovery=snapshot["device_discovery"])
+    usage.reconcile_resources(over, inventory)
+    assert overflow["memory"][0]["free"]["value"] is None
+    assert overflow["memory"][0]["free"]["status"] == "error"
+    assert overflow["memory"][0]["free"]["reason"] == "ambiguous_pool"
+    assert usage_probe.memory_totals(host, over) == over["totals"]
+
+
+def test_reconciled_snapshot_still_passes_resource_validation():
+    from datetime import datetime, timezone
+    from kllm import native, usage_probe
+
+    if not native.resource_probe_available():
+        pytest.skip("requires rebuilt native schema validator")
+    llama, used = 17_095_983_104, 5_000_000_000
+    snapshot = usage_probe.probe("n", [], supported=False)
+    try:
+        snapshot["device_discovery"] = dict(status="measured", reason=None, observed_at=snapshot["completed_at"])
+        snapshot["devices"] = [_dedicated_device("AMD Radeon RX 9070 XT", total=16_974_905_344, used=used)]
+        usage.reconcile_resources(snapshot, [dict(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=llama)])
+        usage.validate_resources("n", snapshot, {}, datetime.now(timezone.utc))
+        assert snapshot["devices"][0]["memory"][0]["total"]["value"] == llama
+        assert snapshot["totals"]["dedicated_capacity"]["value"] == llama
+    finally:
+        usage_probe.close()
+
+
+def test_sample_reconciles_resources_without_a_managed_process():
+    llama = 17_095_983_104
+    device = _dedicated_device("AMD Radeon RX 9070 XT", total=16_974_905_344, used=1)
+    snapshot = dict(devices=[device], processes=[], host=dict(memory=dict(total=_byte_metric(1, "host"))),
+                    device_discovery=dict(status="measured", reason=None))
+    state = ClusterState(node_id="n", members={"n": {"devices": [
+        dict(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=llama)]}})
+    sampler = usage.Sampler(resource_probe=lambda **_kwargs: snapshot)
+    assert sampler.sample(state) is None
+    assert sampler.resources["devices"][0]["inventory_device_id"] == "0"
+    assert device["memory"][0]["total"]["value"] == llama
+
+
 def test_optional_device_probe_is_bounded_and_partial_values_have_reasons(monkeypatch):
     state = ClusterState(node_id="worker", role="worker", members={"worker": {
         "backend": "cuda", "devices": [{"index": 0, "vram_bytes": 8 * 1024**3},

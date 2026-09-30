@@ -1,6 +1,7 @@
 mod hw;
 mod planner;
 mod process;
+mod usage;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -8,6 +9,18 @@ use pyo3::types::PyDict;
 use hw::{CapacitySnapshot, GpuDevice};
 use planner::{NodeCapacity, PlanRequest, PlanResult};
 use process::{LaunchConfig, LaunchResult, ProcessHandle};
+
+#[pyfunction]
+fn _process_identity(pid: u32) -> PyResult<(String, String)> {
+    usage::process_counters(pid)
+        .map(|p| (p.token, p.started))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn _validate_source_json(source: &str, payload: &str) -> PyResult<()> {
+    usage::validate_source_json(source, payload).map_err(pyo3::exceptions::PyValueError::new_err)
+}
 
 #[pyfunction]
 fn probe_capacity() -> PyResult<CapacitySnapshot> {
@@ -23,9 +36,8 @@ fn list_gpus() -> PyResult<(Vec<GpuDevice>, String)> {
 #[pyfunction]
 fn plan_split(request: &Bound<'_, PyDict>) -> PyResult<PlanResult> {
     let req = PlanRequest::from_pydict(request)?;
-    planner::plan_split_entry(&req).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(e.to_string())
-    })
+    planner::plan_split_entry(&req)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 #[pyfunction]
@@ -43,17 +55,15 @@ fn resolve_rpc_server(repo_root: Option<String>) -> PyResult<Option<String>> {
 #[pyfunction]
 fn start_master(config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::master_from_pydict(config)?;
-    process::start_process(&cfg).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-    })
+    process::start_process(&cfg)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pyfunction]
 fn start_worker(config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::worker_from_pydict(config)?;
-    process::start_process(&cfg).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-    })
+    process::start_process(&cfg)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pyfunction]
@@ -68,6 +78,9 @@ fn process_alive(pid: u32) -> PyResult<bool> {
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<usage::UsageCollector>()?;
+    m.add_function(wrap_pyfunction!(_process_identity, m)?)?;
+    m.add_function(wrap_pyfunction!(_validate_source_json, m)?)?;
     m.add_function(wrap_pyfunction!(probe_capacity, m)?)?;
     m.add_function(wrap_pyfunction!(list_gpus, m)?)?;
     m.add_function(wrap_pyfunction!(plan_split, m)?)?;

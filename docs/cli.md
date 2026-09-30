@@ -165,6 +165,38 @@ The header labels delivery as **live**, **refresh**, **updates unavailable**, or
 
 Download and load operations carry source-assigned IDs. Completion effects are deduplicated during the visit; an operation that disappears before a recoverable outcome is available is shown as unknown rather than treated as success. Reconnection does not repeat commands.
 
+### Native resource probes
+
+Windows and macOS agents can collect resource readings through the Rust extension. Node
+details distinguish host CPU/RAM, managed-process CPU/resident RAM, and device-wide memory.
+Host/device readings continue without a managed child. CPU uses total logical processor
+capacity as 100%; its first observation initializes a baseline instead of reporting zero.
+Memory values are bytes at the native boundary and one-decimal GiB in the CLI and dashboard. Device capacity is the engine-reported `llama-server --list-devices` total for the selected GPUs. An integrated adapter the engine does not expose is not added to that total.
+
+For an on-demand host/device snapshot from the repository environment:
+
+```text
+uv run python -c "import json; from kllm import native; print(json.dumps(native.probe_resources(node_id='local', managed_processes=[]), indent=2)); native.close_resource_probes()"
+```
+
+The agent supplies registered process identities automatically; the library rejects arbitrary
+or mismatched process selections. Readings include observation times, scope, units and
+`measured`, `initializing`, `unsupported` or `error` status. Private owned helpers isolate
+blocked sources; no additional monitoring service or network port is installed.
+
+| Platform | Memory semantics / validation |
+|----------|-------------------------------|
+| Windows WDDM | Adapter-wide dedicated/shared usage; dedicated free only for a compatible physical pool. Dedicated capacity shown with usage is the `--list-devices` total; the DXGI dedicated total is kept in the metric `detail` for reconciliation. Thirty paired used/free comparisons passed on an AMD RX 9070 XT (driver 32.0.31041.1004); other vendor/driver combinations require validation. |
+| Windows RAM | Available includes reclaimable memory. True free is unsupported by the initial provider and is not replaced with available. |
+| Apple Silicon | GPU memory shares host RAM and is counted once. Device-wide GPU used/free remain unsupported; the profiler's own Metal allocations and allocation budgets are not usage. |
+| Intel macOS | Devices are classified using actual Metal metadata, including discrete memory. Native code cross-compiles; runtime/hardware acceptance remains pending. |
+| Linux / older extension | Existing monitoring remains the compatibility path. New native counters are not implied by that fallback. |
+
+Resource snapshots use the existing usage/live transport. Old masters receive legacy readings;
+new masters negotiate the optional resource format and reject previous-session/replayed data.
+Process history retains its existing format and limits; host-only live snapshots are transient.
+Node capacity and model-placement budgets use that same `--list-devices` total. The registry or SMI sum remains only when the engine inventory cannot be read.
+
 ### Logs page
 
 `/logs` shows one combined master + worker trail over the same log events as `kllm logs`. Choose **All nodes**, the master, or an individual worker. Entries carry a UTC timestamp, node, source, tag, and message. The tag is **UI** for kllm control-application logs, **Inference** for model serving and the activity that spreads that serving across machines, or **Unclassified** when the producer is unknown. Filter with **All tags**, **UI**, **Inference**, or **Unclassified**. A new visit starts on **All tags**. The filter changes only this visit's display and does not request a different log feed. `kllm logs --source` remains `agent`, `llama`, or `rpc`. There is no `--tag` flag. The refresh control offers **Live**, **5s**, **30s**, and **1m** and defaults to Live. Live uses the dashboard feed; timed modes use snapshot reads at the selected interval. **Clear** empties only this page's displayed buffer (including rows hidden by the node or tag filter) — it never deletes stored logs, does not affect other viewers, and keeps the selected node, tag, and refresh interval. Before the first successful load, Clear is a no-op so an in-flight result is not discarded.

@@ -148,9 +148,9 @@ def parse_gpu_ids(value: str | None) -> list[int] | None:
 
 
 def _fmt_vram(vram_bytes: int | None) -> str:
-    if vram_bytes is None:
+    if type(vram_bytes) is not int or vram_bytes < 0:
         return "—"
-    return f"{vram_bytes / 1e9:.1f} GB"
+    return f"{vram_bytes / 1024**3:.1f} GiB"
 
 
 def _prompt_gpu_ids(gpus: list[dict], backend: str) -> list[int] | None:
@@ -424,8 +424,8 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
     cap = data.get("capacity") or {}
     if cap:
         console.print(
-            f"Capacity: RAM {cap.get('total_ram_bytes', 0) / 1e9:.1f} GB, "
-            f"VRAM {cap.get('vram_bytes')}, backend={cap.get('backend')}"
+            f"Capacity: RAM {_fmt_vram(cap.get('total_ram_bytes') or 0)}, "
+            f"VRAM {_fmt_vram(cap.get('vram_bytes'))}, backend={cap.get('backend')}"
         )
     members = data.get("members") or {}
     if members:
@@ -443,7 +443,7 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
                 str(m.get("role")),
                 str(m.get("backend")),
                 str(m.get("gpu_ids") or "—"),
-                str(m.get("vram_bytes")),
+                _fmt_vram(m.get("vram_bytes")),
             )
         console.print(mt)
     if data.get("last_plan"):

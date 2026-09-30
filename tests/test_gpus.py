@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -439,3 +440,66 @@ def test_join_passes_gpu_env(client, monkeypatch):
     assert captured["payload"]["gpu_ids"] == [0]
     assert captured["payload"]["vram_bytes"] == 24 * 1024**3
     assert captured["worker_kwargs"]["env"] == {"CUDA_VISIBLE_DEVICES": "0"}
+
+
+LLAMA_VRAM = 17_095_983_104
+REGISTRY_VRAM = LLAMA_VRAM + 536_870_912
+
+
+def _snap():
+    return SimpleNamespace(
+        backend="vulkan", total_ram_bytes=32 * 1024**3, available_ram_bytes=8 * 1024**3,
+        vram_bytes=REGISTRY_VRAM, hostname="box",
+    )
+
+
+def test_probe_capacity_vram_is_the_llama_device_total(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
+    monkeypatch.setattr(native_mod, "list_gpus", lambda: {
+        "backend": "vulkan", "gpus": [
+            {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM},
+        ],
+    })
+    assert native_mod.probe_capacity()["vram_bytes"] == LLAMA_VRAM
+
+
+def test_probe_capacity_without_a_gpu_is_unknown(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
+    monkeypatch.setattr(native_mod, "list_gpus", lambda: {"backend": "cpu", "gpus": []})
+    assert native_mod.probe_capacity()["vram_bytes"] is None
+
+
+def test_probe_capacity_keeps_the_registry_sum_when_inventory_fails(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
+    monkeypatch.setattr(native_mod, "list_gpus", lambda: {
+        "backend": "cpu", "gpus": [], "error": "llama-server is not installed",
+    })
+    assert native_mod.probe_capacity()["vram_bytes"] == REGISTRY_VRAM
+
+
+def test_refresh_local_capacity_updates_member_vram(client):
+    c, agent = client
+    agent.STATE.role = "master"
+    agent.STATE.members[agent.STATE.node_id] = {
+        "role": "master", "node_id": agent.STATE.node_id, "vram_bytes": None, "devices": [],
+    }
+    with (
+        patch.object(agent.native, "probe_capacity", return_value={
+            "total_ram_bytes": 32 * 1024**3, "available_ram_bytes": 8 * 1024**3,
+            "requested_backend": None, "unified_memory": False, "binary_version": "v",
+        }),
+        patch.object(agent, "_resolve_gpu_selection", return_value={
+            "backend": "vulkan", "gpu_ids": [0], "vram_bytes": LLAMA_VRAM,
+            "gpus": [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM}],
+        }),
+    ):
+        agent._refresh_local_capacity()
+    member = agent.STATE.members[agent.STATE.node_id]
+    assert member["vram_bytes"] == LLAMA_VRAM
+    assert member["devices"][0]["vram_bytes"] == LLAMA_VRAM

@@ -279,7 +279,32 @@ curl --get 'http://127.0.0.1:18765/v1/dashboard/live' \
 
 The endpoint is a dashboard read, not an authentication mechanism. Keep it on the existing private control plane. RPC port 50052 remains private and must never be exposed publicly.
 
-Runtime logs live under `~/.kllm/logs`. When reporting a problem, include:
+### Native resource readings
+
+- **Initializing CPU** needs a second observation, normally two seconds later. Reset process
+  identity, suspended/discontinuous timing, and CPU-count changes invalidate old baselines.
+- **Unsupported** is not zero usage. Windows free RAM is distinct from available RAM; macOS
+  GPU-wide usage is unavailable when the public interface cannot establish that scope.
+- **GPU discovery error** with an empty list is not proof of a GPU-less machine. Check the
+  display driver and counter provider; valid host/process readings remain usable.
+- **Process identity unavailable** can occur for legacy saved records. The agent adopts an
+  identity only if its saved start time matches the actual process; otherwise a normal
+  managed-process relaunch is required before new process-attributed readings are trusted.
+- **Timeout / source quarantined** indicates an isolated collector exceeded its deadline.
+  The source is not replaced until its previous helper has exited; other sources can continue.
+- If an updated Python wrapper cannot find the native collector, rebuild with
+  `uv run python scripts/build.py --skip-ui`. Check the actual loaded file with
+  `uv run python -c "from kllm import native; print(native.require_native().__file__)"`.
+  Checkout tests use `python/` and can load an older in-tree `.pyd` instead of a rebuilt wheel.
+  For that specific editable-build mismatch, `uv run maturin develop` refreshes the in-tree
+  extension. Windows error 32 means a process still maps it: stop that owning agent safely
+  before rebuilding; do not force-delete or overwrite a loaded DLL.
+- Resource session conflicts require a fresh authenticated registration/reset handshake.
+  Retrying an old generation or changing a sequence number alone does not reset its watermark.
+
+### Information to include in reports
+
+Runtime logs live under `~/.kllm/logs`. Include:
 
 - Operating system, CPU, GPU, RAM, and VRAM for each node
 - The committed `llama-release` value and `install.py --check` output

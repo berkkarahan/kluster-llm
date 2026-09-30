@@ -91,6 +91,8 @@ _activity_lock = threading.Lock()
 _activity_sampled_at = 0.0
 _activity_cached: dict[str, Any] | None = None
 _worker_usage_error: str | None = None
+_resources = usage.ResourceState()
+_resource_remote: dict[str, Any] = {}
 _worker_usage_last_save: str | None = None
 _worker_usage_last_success_at: str | None = None
 
@@ -131,18 +133,106 @@ def _usage_node_context(member: dict[str, Any], model: str | None) -> dict[str, 
             "assignment": model[:160] if model else None}
 
 
+def _publish_resources(snapshot: dict[str, Any]) -> None:
+    if STATE.role == "master":
+        with _resources.lock:
+            _resources.latest[STATE.node_id] = snapshot
+            _resources.received[STATE.node_id] = time.monotonic()
+        return
+    if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
+        return
+    base = _master_control_base()
+    session_key = (base, STATE.node_id, STATE.join_key)
+    client = http_clients.control_client()
+    headers = {"X-Kllm-Key": STATE.join_key}
+    if _resource_remote.get("key") != session_key:
+        _resource_remote.clear()
+        _resource_remote["key"] = session_key
+    if "supported" not in _resource_remote or time.monotonic() - _resource_remote.get("capability_checked_at", 0) >= 30:
+        response = client.get(f"{base}/v1/usage/live", headers=headers, timeout=1.5)
+        response.raise_for_status()
+        versions = response.json().get("resource_schema_versions", [])
+        if not isinstance(versions, list) or len(versions) > 8 or any(type(v) is not int for v in versions):
+            raise ValueError("invalid resource capability response")
+        _resource_remote["supported"] = 1 in versions
+        _resource_remote["capability_checked_at"] = time.monotonic()
+    if not _resource_remote["supported"]:
+        return
+    process_identity = (STATE.process_pid, _tracked_process_token())
+    if _resource_remote.get("process_identity") != process_identity:
+        heartbeat_response = client.post(f"{base}/v1/heartbeat", json=_heartbeat_payload(), headers=headers, timeout=1.5)
+        heartbeat_response.raise_for_status()
+        if not heartbeat_response.json().get("accepted"):
+            raise RuntimeError("resource publisher requires worker registration")
+        _resource_remote["process_identity"] = process_identity
+    if _resource_remote.get("source_generation") != snapshot["generation"] or (_resource_remote.get("sequence", 0) >= 9007199254740991 and _resource_remote.get("last_snapshot_id") != snapshot["snapshot_id"]):
+        _resource_remote.pop("generation", None)
+        _resource_remote["source_generation"] = snapshot["generation"]
+    if not _resource_remote.get("generation"):
+        previous = None
+        for _attempt in range(2):
+            request_id = uuid.uuid4().hex
+            request = dict(_heartbeat_payload(), resource_session=dict(request_id=request_id, previous_generation=previous))
+            response = client.post(f"{base}/v1/register", json=request, headers=headers, timeout=1.5)
+            if response.status_code == 409:
+                previous = response.json().get("detail", {}).get("resource_generation")
+                continue
+            response.raise_for_status()
+            ack = response.json()
+            generation = ack.get("resource_generation")
+            if ack.get("request_id") != request_id or not isinstance(generation, str) or len(generation) != 32 or any(c not in "0123456789abcdef" for c in generation):
+                raise ValueError("resource session acknowledgement mismatch")
+            _resource_remote.update(generation=generation, sequence=0, last_snapshot_id=None)
+            break
+        if not _resource_remote.get("generation"):
+            raise RuntimeError("resource session conflict; retrying next sample")
+    if _resource_remote.get("last_snapshot_id") != snapshot["snapshot_id"]:
+        _resource_remote["sequence"] += 1
+        _resource_remote["last_snapshot_id"] = snapshot["snapshot_id"]
+    outgoing = dict(snapshot, generation=_resource_remote["generation"], sequence=_resource_remote["sequence"])
+    outgoing["snapshot_id"] = f"{outgoing['generation']}:{outgoing['sequence']}"
+    response = client.post(f"{base}/v1/usage/ingest", json=dict(node_id=STATE.node_id, readings=[], resources=outgoing), headers=headers, timeout=1.5)
+    if response.status_code == 409:
+        _resource_remote.pop("generation", None)
+    response.raise_for_status()
+
+
 def _usage_loop() -> None:
     global _worker_usage_error, _worker_usage_last_save
     sampler = usage.Sampler()
+    if hasattr(sampler, "_resource_probe") and native.resource_probe_available() and sys.platform in ("win32", "darwin"):
+        sampler._resource_probe = native.probe_resources
     needs_end = True
     while not _background_stop.wait(2):
         pid = STATE.process_pid
         try:
+            if hasattr(sampler, "_resource_probe"):
+                legacy_master = STATE.role == "worker" and _resource_remote.get("supported") is False and time.monotonic() - _resource_remote.get("capability_checked_at", 0) < 30
+                use_native = native.resource_probe_available() and sys.platform in ("win32", "darwin") and not legacy_master
+                if sampler._resource_probe is not None and not use_native:
+                    native.close_resource_probes()
+                sampler._resource_probe = native.probe_resources if use_native else None
+                if not use_native:
+                    sampler.resources = None
             point = sampler.sample(STATE)
+            if getattr(sampler, "resources", None) is not None:
+                ended = {(p["pid"], p["start_token"]) for p in sampler.resources["processes"] if p["state"] == "exited"}
+                if ended:
+                    tracked = runtime.load()
+                    if STATE.process_pid == pid and any((c.pid, c.start_token) in ended for c in tracked.children):
+                        tracked.children = [c for c in tracked.children if (c.pid, c.start_token) not in ended]
+                        runtime.save(tracked)
+                        STATE.process_pid = STATE.process_role = None
+                        member = STATE.members.get(STATE.node_id)
+                        if member is not None:
+                            member.update(process_pid=None, process_role=None, process_started_at=None, process_start_token=None)
+                        STATE.save()
+                    sampler.resources = dict(sampler.resources, processes=[p for p in sampler.resources["processes"] if p["state"] != "exited"])
+                _publish_resources(sampler.resources)
             if point is None:
                 if STATE.role == "worker":
                     _worker_usage_error = None
-                if needs_end and STATE.role == "master":
+                if needs_end and STATE.role == "master" and not STATE.process_pid:
                     _usage_store().end_node(STATE.node_id)
                     needs_end = False
                 continue
@@ -170,6 +260,8 @@ def _usage_loop() -> None:
                     pass
                 _worker_usage_error = None
         except Exception as exc:
+            if STATE.role == "worker":
+                _resource_remote.clear()
             if isinstance(exc, (usage.psutil.NoSuchProcess, usage.psutil.ZombieProcess)) and STATE.process_pid == pid:
                 if STATE.role == "master":
                     try:
@@ -211,12 +303,19 @@ async def lifespan(app):
     _worker_usage_error = None
     _worker_usage_last_save = None
     _worker_usage_last_success_at = None
+    with _resources.lock:
+        _resources.sessions.clear()
+        _resources.latest.clear()
+        _resources.received.clear()
+    _resource_remote.clear()
     http_clients.control_client()
     try:
         _usage_store()
     except (OSError, sqlite3.Error):
         pass  # The private history API reports 503; agent/inference must still start.
     _background_stop.clear()
+    if sys.platform in ("win32", "darwin"):
+        runtime.adopt_child_identity(STATE.process_pid, (STATE.members.get(STATE.node_id) or {}).get("process_started_at"))
     _ensure_master_member(persist=True)
     app.state.live_feed = _new_live_feed()
     usage_thread = None
@@ -233,7 +332,8 @@ async def lifespan(app):
         finally:
             _background_stop.set()
             if usage_thread is not None:
-                await asyncio.to_thread(usage_thread.join)
+                await asyncio.to_thread(native.close_resource_probes)
+                await asyncio.to_thread(usage_thread.join, 4)
             if sampler:
                 sampler.cancel()
                 await asyncio.gather(sampler, return_exceptions=True)
@@ -413,18 +513,26 @@ def _heartbeat_payload() -> dict[str, Any]:
         "process_pid": STATE.process_pid,
         "process_role": STATE.process_role,
         "process_started_at": _tracked_process_start(),
+        "process_start_token": _tracked_process_token(),
     }
 
 
 def _tracked_process_start() -> str | None:
     if not STATE.process_pid:
         return None
+    for child in runtime.load().children:
+        if child.pid == STATE.process_pid and child.start_token and child.started_at:
+            return child.started_at
     import psutil
 
     try:
         return usage.utc(psutil.Process(STATE.process_pid).create_time())
     except (OSError, ValueError, psutil.Error):
         return None
+
+
+def _tracked_process_token() -> str | None:
+    return next((c.start_token for c in runtime.load().children if c.pid == STATE.process_pid), None)
 
 
 def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
@@ -755,7 +863,8 @@ def _refresh_local_capacity() -> None:
         cap = native.probe_capacity()
         selected = _resolve_gpu_selection(STATE.gpu_ids)
         member.update({k: cap[k] for k in ("total_ram_bytes", "available_ram_bytes", "requested_backend", "unified_memory", "binary_version") if k in cap})
-        member.update(backend=selected["backend"], actual_backend=selected["backend"], devices=selected["gpus"])
+        member.update(backend=selected["backend"], actual_backend=selected["backend"], devices=selected["gpus"],
+                      vram_bytes=selected["vram_bytes"])
         # RSS is measured from our own tracked child, never inferred from total RAM usage.
         member["reclaimable_ram_bytes"] = 0
         if STATE.process_pid:
@@ -846,6 +955,8 @@ class RegisterBody(BaseModel):
     process_pid: int | None = None
     process_role: str | None = None
     process_started_at: str | None = None
+    process_start_token: str | None = None
+    resource_session: dict[str, Any] | None = None
 
 
 class UpdateProgressBody(BaseModel):
@@ -1864,7 +1975,17 @@ def register(
     if STATE.role != "master":
         raise HTTPException(400, "not a master")
     _sync_master_liveness(shrink=True)
-
+    _resources.prune(STATE.members)
+    if body.resource_session is not None:
+        if body.node_id not in STATE.members or body.node_id == STATE.node_id or not native.resource_probe_available():
+            raise HTTPException(400, "resource session requires a registered worker and native support")
+        try:
+            generation = _resources.establish(body.node_id, body.resource_session)
+        except usage.ResourceConflict as exc:
+            raise HTTPException(409, {"message": str(exc), "resource_generation": exc.generation}) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "request_id": body.resource_session["request_id"], "resource_generation": generation}
     lan_host = body.lan_host or body.host
     peer = request.client.host if request.client else None
     response: dict[str, Any] = {"ok": True}
@@ -1880,7 +2001,7 @@ def register(
         lan_host = peer
 
     member: dict[str, Any] = {
-        **body.model_dump(),
+        **body.model_dump(exclude={"resource_session"}),
         "host": lan_host,
         "lan_host": lan_host,
         "role": "worker",
@@ -1973,6 +2094,7 @@ def unregister(body: dict[str, str], _: None = Depends(_require_key)) -> dict[st
     nid = body.get("node_id", "")
     if nid and nid != STATE.node_id and nid in STATE.members:
         STATE.members.pop(nid, None)
+        _resources.prune(STATE.members)
         membership_mod.on_membership_shrink(STATE)
     else:
         STATE.save()
@@ -1988,7 +2110,7 @@ def heartbeat(
     _sync_master_liveness(shrink=True)
     accepted = body.node_id in STATE.members
     if accepted:
-        update = body.model_dump()
+        update = body.model_dump(exclude={"resource_session"})
         if not update.get("process_pid") and STATE.members[body.node_id].get("process_pid"):
             try:
                 _usage_store().end_node(body.node_id)
@@ -2017,42 +2139,57 @@ def heartbeat(
 async def usage_ingest(request: Request, _: None = Depends(_require_key)) -> dict[str, Any]:
     if STATE.role != "master":
         raise HTTPException(400, "usage ingest requires master role")
+    _resources.prune(STATE.members)
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
         if len(raw) > 65536:
             raise HTTPException(400, "usage batch exceeds 64 KiB")
     try:
-        body = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite number")))
-    except (ValueError, UnicodeDecodeError):
+        body = usage.usage_probe.decode(bytes(raw), framed=False)
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(400, "invalid usage JSON") from None
-    if not isinstance(body, dict) or set(body) != {"node_id", "readings"}:
-        raise HTTPException(400, "usage batch requires node_id and readings only")
+    if not isinstance(body, dict) or set(body) not in ({"node_id", "readings"}, {"node_id", "readings", "resources"}):
+        raise HTTPException(400, "usage batch requires node_id, readings and optional resources")
     node_id = body["node_id"]
     member = STATE.members.get(node_id) if isinstance(node_id, str) else None
     if not member or node_id == STATE.node_id or member.get("role") != "worker":
         raise HTTPException(400, "unregistered worker node")
     points = body["readings"]
-    if not isinstance(points, list) or not 1 <= len(points) <= 8:
+    snapshot = body.get("resources")
+    if not isinstance(points, list) or not (0 if snapshot is not None else 1) <= len(points) <= 8:
         raise HTTPException(400, "usage batch must contain 1–8 readings")
     now = datetime.now(timezone.utc)
     try:
-        if not member.get("process_pid") or not member.get("process_started_at") or member.get("process_role") != "worker":
+        if snapshot is not None:
+            if not native.resource_probe_available():
+                raise ValueError("native resource validation unavailable")
+            usage.validate_resources(node_id, snapshot, member, now)
+        if points and (not member.get("process_pid") or not member.get("process_started_at") or member.get("process_role") != "worker"):
             raise ValueError("worker has no registered managed process")
         for point in points:
             usage.validate(node_id, point, now=now, expected_pid=member["process_pid"],
                            expected_start=member["process_started_at"], expected_role="worker")
         model = _usage_assignment(node_id)
-        accepted = _usage_store().record_many(
-            node_id, member.get("host") or node_id, points, now=now,
-            expected_pid=member["process_pid"], expected_start=member["process_started_at"],
-            expected_role="worker", model=model, context=_usage_node_context(member, model))
+        with _resources.lock:
+            if snapshot is not None:
+                _resources.validate_session(node_id, snapshot)
+            accepted = _usage_store().record_many(
+                node_id, member.get("host") or node_id, points, now=now,
+                expected_pid=member["process_pid"], expected_start=member["process_started_at"],
+                expected_role="worker", model=model, context=_usage_node_context(member, model)) if points else 0
+            resources_accepted = _resources.install(node_id, snapshot) if snapshot is not None else False
+    except usage.ResourceConflict as exc:
+        raise HTTPException(409, {"message": str(exc), "resource_generation": exc.generation}) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except (OSError, sqlite3.Error):
         raise HTTPException(503, "usage recording unavailable; previous history retained") from None
-    return {"accepted": accepted, "duplicates": len(points) - accepted,
-            "last_successful_save": _usage_store().last_successful_save}
+    result = {"accepted": accepted, "duplicates": len(points) - accepted,
+              "last_successful_save": _usage_store().last_successful_save if points else None}
+    if snapshot is not None:
+        result["resources_accepted"] = resources_accepted
+    return result
 
 
 def _proxy_master_usage(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2071,6 +2208,15 @@ def _proxy_master_usage(path: str, params: dict[str, Any] | None = None) -> dict
         raise
     except Exception:
         raise HTTPException(503, "master usage history unavailable") from None
+
+
+def _with_resources(node_id, node, connected, now):
+    with _resources.lock:
+        snapshot = _resources.latest.get(node_id)
+        residence = max(0.0, time.monotonic() - _resources.received.get(node_id, time.monotonic()))
+    age, freshness = usage.resource_freshness(snapshot, connected, now, residence)
+    node.update(resources=snapshot, resource_age_seconds=age, resource_freshness=freshness)
+    return node
 
 
 @app.get("/v1/usage/live")
@@ -2096,6 +2242,7 @@ def usage_live() -> dict[str, Any]:
     try:
         store = _usage_store()
         members = dict(STATE.members) if STATE.role == "master" else {}
+        _resources.prune(members)
         known = store.known_nodes()
         now = datetime.now(timezone.utc)
         nodes = {}
@@ -2119,6 +2266,11 @@ def usage_live() -> dict[str, Any]:
                 "age_seconds": round(age, 1) if point and (current or not connected) else None,
                 "freshness": "fresh" if connected and current and age is not None and age < 10 else "stale" if point and (current or not connected) else "unavailable",
             }
+            _with_resources(node_id, nodes[node_id], connected, now)
+            if nodes[node_id]["resources"] and member and member.get("process_pid"):
+                verified = any(p["pid"] == member["process_pid"] and p["identity_verified"] and p["state"] == "running"
+                               for p in nodes[node_id]["resources"]["processes"])
+                nodes[node_id]["process_state"] = "running" if verified else "unavailable"
         relationships = [
             {"from_node_id": STATE.node_id, "to_node_id": node_id, "kind": "master-worker"}
             for node_id, member in members.items()
@@ -2127,8 +2279,19 @@ def usage_live() -> dict[str, Any]:
         recording = store.coverage()
         if STATE.role != "master" and recording["recording"] != "failed":
             recording["recording"] = "interrupted"
-        return {"nodes": nodes, "relationships": relationships, "recording": recording}
+        return {"nodes": nodes, "relationships": relationships, "recording": recording,
+                "resource_schema_versions": [1] if native.resource_probe_available() else []}
     except (OSError, sqlite3.Error):
+        with _resources.lock:
+            has_resources = any(node in STATE.members for node in _resources.latest)
+        if has_resources:
+            now = datetime.now(timezone.utc)
+            nodes = {node: _with_resources(node, dict(node_id=node, host=member.get("host") or node,
+                role=member.get("role", "worker"), connected=True, reading=None, freshness="unavailable",
+                process_state="unavailable" if member.get("process_pid") else "no managed process"), True, now)
+                for node, member in STATE.members.items()}
+            return {"nodes": nodes, "relationships": [], "resource_schema_versions": [1],
+                    "recording": {"recording": "failed", "error": "usage history unavailable; live resources retained", "last_successful_save": None}}
         raise HTTPException(503, "usage history unavailable; previously saved records preserved") from None
 
 

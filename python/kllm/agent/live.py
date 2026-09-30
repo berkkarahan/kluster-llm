@@ -135,6 +135,11 @@ class LiveFeed:
                 node["age_seconds"] = round(age + residence, 1)
                 if node["age_seconds"] >= 10 and node.get("reading") is not None:
                     node["freshness"] = "stale"
+            resource_age = node.get("resource_age_seconds")
+            if isinstance(resource_age, (int, float)) and resource_age >= 0:
+                node["resource_age_seconds"] = round(resource_age + residence, 1)
+                if node["resource_age_seconds"] >= 10 and node.get("resources") is not None:
+                    node["resource_freshness"] = "stale"
             nodes[node_id] = node
         data["nodes"] = nodes
         record["data"] = data

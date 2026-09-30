@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import os
-import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -127,14 +127,30 @@ def dangling_cached_paths(
         raw = entries.get(key)
         if not raw:
             continue
-        for token in re.split(r"[\s;]+", raw.strip()):
+        if key in _CACHE_LINKER_KEYS:
+            lexer = shlex.shlex(raw, posix=True)
+            lexer.whitespace_split = True
+            lexer.whitespace += ";"
+            lexer.commenters = ""
+            if os.name == "nt":
+                lexer.escape = ""  # Backslashes are native path separators, not shell escapes.
+            try:
+                tokens = list(lexer)
+            except ValueError:
+                dangling.append(f"{key}=invalid quoting")
+                continue
+        else:
+            tokens = [token.strip() for token in raw.split(";")]
+        for token in tokens:
             if not token:
                 continue
+            if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+                token = token[1:-1]
             is_linker_dir = token.startswith("-L")
             candidate = token[2:] if is_linker_dir else token
-            if not candidate.startswith("/"):
-                continue
             probe = Path(candidate)
+            if not (candidate.startswith("/") or probe.is_absolute()):
+                continue
             exists = probe.is_dir() if is_linker_dir else probe.exists()
             if not exists:
                 dangling.append(f"{key}={token}")

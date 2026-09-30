@@ -29,6 +29,10 @@ pub struct ProcessHandle {
 #[derive(Clone, Debug)]
 pub struct LaunchResult {
     #[pyo3(get)]
+    pub process_start_token: Option<String>,
+    #[pyo3(get)]
+    pub process_started_at: Option<String>,
+    #[pyo3(get)]
     pub pid: u32,
     #[pyo3(get)]
     pub binary: String,
@@ -609,12 +613,15 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
 
     let child = cmd.spawn()?;
     let pid = child.id();
+    let identity = crate::usage::process_counters(pid).ok();
     children()
         .lock()
         .map_err(|_| ProcessError::Message("process lock poisoned".into()))?
         .push(TrackedChild { child });
 
     Ok(LaunchResult {
+        process_start_token: identity.as_ref().map(|p| p.token.clone()),
+        process_started_at: identity.map(|p| p.started),
         pid,
         binary: cfg.binary.to_string_lossy().into(),
         argv: cfg.argv.clone(),

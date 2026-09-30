@@ -14,6 +14,8 @@ from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, runtime_path
 class ChildProc:
     pid: int
     kind: str
+    start_token: str | None = None
+    started_at: str | None = None
 
 
 @dataclass
@@ -26,7 +28,7 @@ class RuntimeInfo:
         return {
             "agent_pid": self.agent_pid,
             "control_port": self.control_port,
-            "children": [asdict(c) for c in self.children],
+            "children": [{k: v for k, v in asdict(c).items() if v is not None} for c in self.children],
         }
 
     @classmethod
@@ -39,7 +41,8 @@ class RuntimeInfo:
             pid = row.get("pid")
             kind = row.get("kind") or "child"
             if isinstance(pid, int) and pid > 0:
-                children.append(ChildProc(pid=pid, kind=str(kind)))
+                children.append(ChildProc(pid=pid, kind=str(kind),
+                                          start_token=row.get("start_token"), started_at=row.get("started_at")))
         agent_pid = data.get("agent_pid")
         if not isinstance(agent_pid, int) or agent_pid <= 0:
             agent_pid = None
@@ -87,8 +90,29 @@ def register_agent(pid: int, control_port: int = DEFAULT_CONTROL_PORT) -> None:
 def register_child(pid: int, kind: str) -> None:
     info = load()
     # Local node runs at most one llama/rpc child at a time.
-    info.children = [ChildProc(pid=pid, kind=kind)]
+    identity = native.registered_process_identity(pid) or {}
+    info.children = [ChildProc(pid=pid, kind=kind, start_token=identity.get("start_token"),
+                               started_at=identity.get("started_at"))]
     save(info)
+
+
+def adopt_child_identity(pid: int | None, expected_started_at: str | None) -> bool:
+    """Upgrade legacy metadata only against a previously saved matching start time."""
+    if not pid or not expected_started_at or not native.resource_probe_available():
+        return False
+    info = load()
+    child = next((c for c in info.children if c.pid == pid), None)
+    if child is None or (child.start_token and child.started_at):
+        return False
+    try:
+        token, started = native.require_native()._process_identity(pid)
+    except (RuntimeError, ValueError, OSError):
+        return False
+    if started != expected_started_at or (child.start_token is not None and child.start_token != token):
+        return False
+    child.start_token, child.started_at = token, started
+    save(info)
+    return True
 
 
 def clear_children() -> None:

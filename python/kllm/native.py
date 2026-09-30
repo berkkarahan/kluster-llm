@@ -15,9 +15,11 @@ from kllm.accel import (
 from pathlib import Path
 import time
 import sys
+from kllm import usage_probe
 
 _NATIVE = None
 _IMPORT_ERROR: Exception | None = None
+_launched_identities: dict[int, dict[str, Any]] = {}
 
 try:
     from kllm import _native as _NATIVE  # type: ignore
@@ -27,6 +29,36 @@ except Exception as exc:  # pragma: no cover - depends on maturin build
 
 def native_available() -> bool:
     return _NATIVE is not None
+
+
+def resource_probe_available() -> bool:
+    return _NATIVE is not None and hasattr(_NATIVE, "_UsageCollector") and hasattr(_NATIVE, "_validate_source_json")
+
+
+def probe_resources(*, node_id: str, managed_processes: list[dict] | None = None) -> dict:
+    return usage_probe.probe(node_id, [] if managed_processes is None else managed_processes,
+                             supported=resource_probe_available())
+
+
+def close_resource_probes() -> None:
+    usage_probe.close()
+
+
+def registered_process_identity(pid: int) -> dict[str, Any] | None:
+    record = _launched_identities.get(pid)
+    return dict(record) if record else None
+
+
+def _launch_record(result) -> dict[str, Any]:
+    token = getattr(result, "process_start_token", None)
+    started = getattr(result, "process_started_at", None)
+    _launched_identities.clear()  # The existing runtime owns one managed child per node.
+    if token and started:
+        _launched_identities[result.pid] = dict(pid=result.pid, role=result.role, start_token=token, started_at=started)
+    record = dict(pid=result.pid, binary=result.binary, argv=list(result.argv), role=result.role)
+    if token and started:
+        record.update(process_start_token=token, process_started_at=started)
+    return record
 
 
 def install_recovery_command() -> str:
@@ -51,6 +83,23 @@ def require_native():
     return _NATIVE
 
 
+def _inventory_vram_bytes(devices: dict[str, Any], fallback: int | None) -> int | None:
+    """Canonical VRAM is the llama.cpp device total, not the OS adapter sum.
+
+    A failed inventory keeps the Rust registry/SMI sum. A successful inventory with
+    no GPU for the selected backend is unknown (``None``), so an integrated adapter
+    the engine did not expose cannot inflate the node total.
+    """
+    if devices.get("error"):
+        return fallback
+    total: int | None = None
+    for gpu in devices.get("gpus") or []:
+        value = gpu.get("vram_bytes") if isinstance(gpu, dict) else None
+        if type(value) is int and value >= 0:
+            total = (total or 0) + value
+    return total
+
+
 def probe_capacity() -> dict[str, Any]:
     n = require_native()
     snap = n.probe_capacity()
@@ -60,7 +109,7 @@ def probe_capacity() -> dict[str, Any]:
         "unified_memory": snap.backend == "metal",
         "total_ram_bytes": snap.total_ram_bytes,
         "available_ram_bytes": snap.available_ram_bytes,
-        "vram_bytes": snap.vram_bytes,
+        "vram_bytes": _inventory_vram_bytes(devices, snap.vram_bytes),
         "backend": devices["backend"],
         "hostname": snap.hostname,
     }
@@ -273,12 +322,7 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
         except ValueError:
             pass
     result = n.start_master(kwargs)
-    return {
-        "pid": result.pid,
-        "binary": result.binary,
-        "argv": list(result.argv),
-        "role": result.role,
-    }
+    return _launch_record(result)
 
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
@@ -295,16 +339,14 @@ def start_worker(**kwargs: Any) -> dict[str, Any]:
     if kwargs.get("env") is None:
         kwargs.pop("env", None)
     result = n.start_worker(kwargs)
-    return {
-        "pid": result.pid,
-        "binary": result.binary,
-        "argv": list(result.argv),
-        "role": result.role,
-    }
+    return _launch_record(result)
 
 
 def stop_process(pid: int, force: bool = False) -> bool:
-    return bool(require_native().stop_process(pid, force))
+    stopped = bool(require_native().stop_process(pid, force))
+    if stopped:
+        _launched_identities.pop(pid, None)
+    return stopped
 
 
 def process_alive(pid: int) -> bool:

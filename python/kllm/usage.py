@@ -15,16 +15,174 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import psutil
+from kllm import native, runtime, usage_probe
 
 
 WINDOW = timedelta(hours=24)
 MAX_BYTES = 256 * 1024 * 1024
 WINDOWS = {"15m": timedelta(minutes=15), "1h": timedelta(hours=1), "24h": WINDOW}
+
+
+class ResourceConflict(ValueError):
+    def __init__(self, generation):
+        super().__init__("resource generation conflict")
+        self.generation = generation
+
+
+class ResourceState:
+    """Transient resource sessions; history remains owned by UsageStore."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.sessions = {}
+        self.latest = {}
+        self.received = {}
+
+    def establish(self, node, request):
+        if not isinstance(request, dict) or set(request) != {"request_id", "previous_generation"}:
+            raise ValueError("invalid resource session request")
+        ident, previous = request["request_id"], request["previous_generation"]
+        if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{32}", ident) or (previous is not None and (not isinstance(previous, str) or not re.fullmatch(r"[0-9a-f]{32}", previous))):
+            raise ValueError("invalid resource session identity")
+        with self.lock:
+            current = self.sessions.get(node)
+            if current and current["request_id"] == ident:
+                if current["previous"] != previous:
+                    raise ValueError("reset request_id reused with different previous generation")
+                return current["generation"]
+            active = current["generation"] if current else None
+            if previous != active:
+                raise ResourceConflict(active)
+            generation = uuid.uuid4().hex
+            self.sessions[node] = dict(generation=generation, request_id=ident, previous=previous, sequence=0)
+            self.latest.pop(node, None)
+            self.received.pop(node, None)
+            return generation
+
+    def validate_session(self, node, snapshot):
+        current = self.sessions.get(node)
+        if not current or snapshot["generation"] != current["generation"]:
+            raise ResourceConflict(current["generation"] if current else None)
+        if snapshot["sequence"] <= current["sequence"]:
+            return False
+        previous = self.latest.get(node)
+        if previous:
+            old = resource_observations(previous)
+            if any(key in old and observed < old[key] for key, observed in resource_observations(snapshot).items()):
+                return False
+        return True
+
+    def install(self, node, snapshot):
+        with self.lock:
+            if not self.validate_session(node, snapshot):
+                return False
+            self.latest[node] = snapshot
+            self.received[node] = time.monotonic()
+            self.sessions[node]["sequence"] = snapshot["sequence"]
+            return True
+
+    def prune(self, nodes):
+        with self.lock:
+            for mapping in (self.sessions, self.latest, self.received):
+                for node in list(mapping):
+                    if node not in nodes:
+                        del mapping[node]
+
+
+def resource_observations(snapshot):
+    """Compare matching resource identities, never list order or reused numeric PIDs."""
+    observations = {}
+    def metrics(owner, value):
+        if isinstance(value, dict):
+            if "value" in value and "observed_at" in value:
+                observations[owner] = parse_utc(value["observed_at"])
+            else:
+                for key, item in value.items():
+                    metrics((*owner, key), item)
+    metrics(("host",), snapshot.get("host"))
+    for device in snapshot.get("devices", []):
+        for view in device["memory"]:
+            metrics(("device", device["device_key"], view["kind"]), view)
+    for point in snapshot.get("processes", []):
+        metrics(("process", point["lifetime_id"]), point)
+    return observations
+
+
+def validate_resources(node_id, snapshot, member, now):
+    if not isinstance(snapshot, dict) or set(snapshot) != {
+        "schema_version", "node_id", "generation", "sequence", "snapshot_id", "requested_at", "completed_at",
+        "host", "devices", "device_discovery", "processes", "totals", "collector",
+    }:
+        raise ValueError("invalid resource snapshot fields")
+    seq, generation = snapshot["sequence"], snapshot["generation"]
+    if type(snapshot["schema_version"]) is not int or snapshot["schema_version"] != 1 or snapshot["node_id"] != node_id or isinstance(seq, bool) or not isinstance(seq, int) or not 1 <= seq <= 9007199254740991 or not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{32}", generation) or snapshot["snapshot_id"] != f"{generation}:{seq}":
+        raise ValueError("invalid resource snapshot identity")
+    requested, completed = parse_utc(snapshot["requested_at"]), parse_utc(snapshot["completed_at"])
+    if requested > completed or completed > now + timedelta(seconds=30) or requested < now - WINDOW:
+        raise ValueError("invalid resource snapshot time")
+    n = native.require_native()
+    for source in ("host", "gpu"):
+        part = dict(host=snapshot["host"] if source == "host" else None,
+                    devices=snapshot["devices"] if source == "gpu" else [],
+                    processes=snapshot["processes"] if source == "host" else [],
+                    device_discovery=snapshot["device_discovery"] if source == "gpu" else None)
+        n._validate_source_json(source, json.dumps(part, allow_nan=False))
+    for point in snapshot["processes"]:
+        if point["node_id"] != node_id or point["pid"] != member.get("process_pid") or point["role"] != member.get("process_role") or parse_utc(point["started_at"]) != parse_utc(member.get("process_started_at")) or (member.get("process_start_token") and point["start_token"] != member["process_start_token"]):
+            raise ValueError("resource process does not match registered child")
+    def timestamps(value):
+        if isinstance(value, dict):
+            if value.get("status") == "measured" and value.get("unit") == "percent_machine":
+                start, end = parse_utc(value["interval_start"]), parse_utc(value["interval_end"])
+                if start < now - WINDOW or end > now + timedelta(seconds=30):
+                    raise ValueError("CPU observation interval outside accepted window")
+            if isinstance(value.get("observed_at"), str):
+                at = parse_utc(value["observed_at"])
+                if at > now + timedelta(seconds=30) or at < now - WINDOW:
+                    raise ValueError("resource observation outside accepted window")
+            for item in value.values():
+                timestamps(item)
+        elif isinstance(value, list):
+            for item in value:
+                timestamps(item)
+    timestamps(snapshot)
+    # Totals are derived, never trusted as independent worker claims.
+    expected = usage_probe.memory_totals(snapshot["host"], snapshot)
+    if snapshot["totals"] != expected or any(
+        total["value"] is not None and (type(total["value"]) is not int or total["value"] < 0)
+        for total in snapshot["totals"].values()
+    ):
+        raise ValueError("resource totals do not match physical pools")
+    if not isinstance(snapshot["collector"], dict) or snapshot["collector"] != dict(kind="native", platform=snapshot["collector"].get("platform")) or snapshot["collector"]["platform"] not in ("win32", "darwin", "linux"):
+        raise ValueError("invalid resource collector metadata")
+
+
+def resource_freshness(snapshot, connected, now, residence=0.0):
+    if not snapshot:
+        return None, "unavailable"
+    observed = []
+    def walk(value, key=""):
+        if isinstance(value, dict):
+            if value.get("status") == "measured" and value.get("value") is not None and key != "total":
+                observed.append(parse_utc(value["observed_at"]))
+            for k, v in value.items():
+                walk(v, k)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+    for name in ("host", "devices", "processes"):
+        walk(snapshot[name])
+    if not observed:
+        return None, "unavailable"
+    age = max(0.0, (now - min(observed)).total_seconds(),
+              (parse_utc(snapshot["completed_at"]) - min(observed)).total_seconds() + residence)
+    return age, "fresh" if connected and age < 10 else "stale"
 
 
 def utc(value: datetime | float) -> str:
@@ -157,11 +315,68 @@ def validate(node_id: str, point: dict[str, Any], *, now: datetime,
 
 
 class Sampler:
-    def __init__(self):
+    def __init__(self, resource_probe=None):
         self._previous: tuple[int, str] | None = None
         self._process: psutil.Process | None = None
+        self._resource_probe = resource_probe
+        self.resources = None
+        self._sensor_lock = threading.Lock()
+        self._sensor_inflight = False
+        self._sensor_values = []
+        self._sensor_observed = None
+
+    def _optional_sensors(self, state):
+        # Only CUDA's legacy provider has extra sensors; avoid duplicate WDDM memory probes.
+        if (state.members.get(state.node_id) or {}).get("backend") != "cuda":
+            return [], None
+        def collect():
+            try:
+                observed = utc(datetime.now(timezone.utc))
+                devices = _devices(state)
+                for device in devices:
+                    device.update(used_bytes=None, total_bytes=None,
+                                  unavailable_reason=((device.get("unavailable_reason") or "") + "; memory is reported by native device readings").strip("; ")[:256])
+                with self._sensor_lock:
+                    self._sensor_values = devices
+                    self._sensor_observed = observed
+            finally:
+                with self._sensor_lock:
+                    self._sensor_inflight = False
+        with self._sensor_lock:
+            if not self._sensor_inflight:
+                self._sensor_inflight = True
+                threading.Thread(target=collect, name="kllm-optional-sensors", daemon=True).start()
+            return list(self._sensor_values), self._sensor_observed
 
     def sample(self, state, *, now: datetime | None = None) -> dict[str, Any] | None:
+        if self._resource_probe is not None:
+            selections = []
+            for child in runtime.load().children:
+                if child.pid == state.process_pid and child.start_token and child.started_at and state.process_role in ("master", "worker"):
+                    selections.append(dict(pid=child.pid, role=state.process_role, start_token=child.start_token, started_at=child.started_at))
+            self.resources = self._resource_probe(node_id=state.node_id, managed_processes=selections)
+            reconcile_resources(self.resources, (state.members.get(state.node_id) or {}).get("devices") or [])
+            points = self.resources["processes"]
+            if not points or not points[0]["identity_verified"] or points[0]["state"] != "running":
+                return None
+            point = points[0]
+            host = self.resources["host"]
+            metrics = [point["cpu"], point["rss"], host["cpu"], host["memory"]["used"], host["memory"]["total"]]
+            observed = min((m["observed_at"] for m in metrics if m["value"] is not None), default=self.resources["completed_at"])
+            mapped_ids = {d["device_id"] for d in project_resource_devices(self.resources, state)}
+            devices, sensor_time = self._optional_sensors(state) if mapped_ids else ([], None)
+            devices = [d for d in devices if d["device_id"] in mapped_ids]
+            if sensor_time and parse_utc(sensor_time) >= parse_utc(point["started_at"]) and (datetime.now(timezone.utc) - parse_utc(sensor_time)).total_seconds() < 10:
+                observed = min(observed, sensor_time)
+            else:
+                devices = []
+            sensors = {d["device_id"]: d for d in devices}
+            devices = project_resource_devices(self.resources, state, sensors)
+            return dict(lifetime_id=point["lifetime_id"], pid=point["pid"], process_started_at=point["started_at"],
+                process_role=point["role"], observed_at=observed,
+                process=dict(cpu_percent_machine=point["cpu"]["value"], rss_bytes=point["rss"]["value"]),
+                host=dict(cpu_percent=host["cpu"]["value"], used_bytes=host["memory"]["used"]["value"], total_bytes=host["memory"]["total"]["value"]),
+                devices=devices, availability=dict(process_cpu=point["cpu"]["status"], process_rss=point["rss"]["status"], host_cpu=host["cpu"]["status"], host_memory=host["memory"]["used"]["status"]))
         if state.role not in ("master", "worker") or not state.process_pid or state.process_role not in ("master", "worker"):
             self._previous = None
             self._process = None
@@ -197,6 +412,110 @@ class Sampler:
                              "host_cpu": "measured" if host_cpu is not None else "error",
                              "host_memory": "measured" if host["used_bytes"] is not None else "error"},
         }
+
+
+def _normalized_device_name(name: object) -> str:
+    text = re.sub(r"\((?:tm|r)\)", "", str(name or ""), flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _copy_byte_metric(previous: dict, *, value: int | None, status: str, reason: str | None, source: str, detail: str | None) -> dict:
+    metric = dict(previous)
+    metric.update(value=value, unit="bytes", scope="device", status=status, reason=reason,
+                  detail=None if detail is None else str(detail)[:256],
+                  interval_start=None, interval_end=None, duration_ms=None, source=source)
+    return metric
+
+
+def reconcile_resources(snapshot, inventory) -> None:
+    """Link native devices to llama inventory and use that total as capacity.
+
+    A normalized display name (casefold, collapsed whitespace, ``(TM)``/``(R)`` removed)
+    links only when it is unique on both sides. The previous OS total stays in ``detail``.
+    """
+    if not isinstance(snapshot, dict) or not isinstance(inventory, list):
+        return
+    devices = snapshot.get("devices")
+    if not isinstance(devices, list):
+        return
+    inventory_names: dict[str, list] = {}
+    for item in inventory:
+        if isinstance(item, dict):
+            key = _normalized_device_name(item.get("name"))
+            if key:
+                inventory_names.setdefault(key, []).append(item)
+    snapshot_names: dict[str, list] = {}
+    for device in devices:
+        if isinstance(device, dict):
+            key = _normalized_device_name(device.get("name"))
+            if key:
+                snapshot_names.setdefault(key, []).append(device)
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        key = _normalized_device_name(device.get("name"))
+        candidates = inventory_names.get(key, [])
+        if len(candidates) != 1 or len(snapshot_names.get(key, [])) != 1:
+            continue
+        item = candidates[0]
+        index = item.get("index")
+        if type(index) is not int or index < 0:
+            continue
+        device["inventory_device_id"] = str(index)
+        vram = item.get("vram_bytes")
+        if type(vram) is not int or vram <= 0:
+            continue
+        for view in device.get("memory") or []:
+            if not isinstance(view, dict) or view.get("kind") != "dedicated":
+                continue
+            total = view.get("total")
+            if not isinstance(total, dict):
+                continue
+            view["total"] = _copy_byte_metric(
+                total, value=vram, status="measured", reason=None,
+                source="inventory.llama_list_devices",
+                detail=f"{total.get('source')}={total.get('value')}")
+            used = view.get("used") if isinstance(view.get("used"), dict) else {}
+            used_value = used.get("value")
+            previous_free = view.get("free") if isinstance(view.get("free"), dict) else total
+            if type(used_value) is int and 0 <= used_value <= vram:
+                view["free"] = _copy_byte_metric(
+                    previous_free, value=vram - used_value, status="measured", reason=None,
+                    source="inventory.capacity_minus_usage", detail=None)
+            else:
+                view["free"] = _copy_byte_metric(
+                    previous_free, value=None, status="error", reason="ambiguous_pool",
+                    source="inventory.capacity_minus_usage", detail=None)
+    if isinstance(snapshot.get("host"), dict):
+        snapshot["totals"] = usage_probe.memory_totals(snapshot["host"], snapshot)
+
+
+def project_resource_devices(snapshot, state, sensors=None):
+    """Require the inventory link from ``reconcile_resources``; a name match here is not proof."""
+    inventory = (state.members.get(state.node_id) or {}).get("devices") or []
+    result = []
+    for device in snapshot["devices"]:
+        link = device.get("inventory_device_id")
+        if not isinstance(link, str) or not link:
+            continue
+        matches = [d for d in inventory if type(d.get("index")) is int and str(d["index"]) == link]
+        if len(matches) != 1:
+            continue
+        index = matches[0].get("index")
+        if type(index) is not int or index < 0 or sum(d.get("index") == index for d in inventory) != 1:
+            continue
+        device_id = str(index)
+        dedicated = next((view for view in device["memory"] if view["kind"] == "dedicated"), None)
+        optional = (sensors or {}).get(device_id) or {}
+        row = dict(device_id=device_id, scope="device",
+                   utilization_percent=optional.get("utilization_percent"),
+                   temperature_c=optional.get("temperature_c"), power_w=optional.get("power_w"),
+                   used_bytes=dedicated["used"]["value"] if dedicated else None,
+                   total_bytes=dedicated["total"]["value"] if dedicated else None)
+        row["unavailable_reason"] = "some device counters unavailable" if any(
+            row[key] is None for key in ("utilization_percent", "temperature_c", "power_w", "used_bytes", "total_bytes")) else None
+        result.append(row)
+    return result
 
 
 def _devices(state) -> list[dict[str, Any]]:

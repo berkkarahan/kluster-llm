@@ -72,22 +72,23 @@
   }
 
   function cpuText(node: UsageNode): string {
-    const value = finitePercent(node.reading?.host.cpu_percent);
+    const value = finitePercent(node.resources ? node.resources.host.cpu.value : node.reading?.host.cpu_percent);
     if (value != null) return `${Math.round(value)}%`;
+    if (node.resources) return node.resources.host.cpu.status;
     return node.reading ? availabilityText(node, 'host_cpu') : 'unavailable';
   }
 
   function ramFill(node: UsageNode): number {
-    const used = node.reading?.host.used_bytes;
-    const total = node.reading?.host.total_bytes;
+    const used = node.resources ? node.resources.host.memory.used.value : node.reading?.host.used_bytes;
+    const total = node.resources ? node.resources.host.memory.total.value : node.reading?.host.total_bytes;
     if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) return 0;
     if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) return 0;
     return Math.min(100, Math.max(0, (used / total) * 100));
   }
 
   function ramText(node: UsageNode): string {
-    const used = node.reading?.host.used_bytes;
-    const total = node.reading?.host.total_bytes;
+    const used = node.resources ? node.resources.host.memory.used.value : node.reading?.host.used_bytes;
+    const total = node.resources ? node.resources.host.memory.total.value : node.reading?.host.total_bytes;
     const usedOk = typeof used === 'number' && Number.isFinite(used) && used >= 0;
     const totalOk = typeof total === 'number' && Number.isFinite(total) && total > 0;
     const shared = node.unified_memory ? ' · shared' : '';
@@ -106,6 +107,13 @@
   type DeviceRow = { id: string; label: string; util: string; mem: string; reason: string | null };
 
   function deviceRows(node: UsageNode): DeviceRow[] {
+    if (node.resources) return node.resources.devices.map((device) => ({
+      id: device.device_key, label: device.name, util: 'unavailable',
+      mem: device.memory.map((memory) => memory.kind === 'dedicated'
+        ? `${memory.kind}: ${formatGib(memory.used.value)} / ${formatGib(memory.total.value)} · ${formatGib(memory.free.value)} free`
+        : `${memory.kind}: ${formatGib(memory.used.value)} used · ${formatGib(memory.free.value)} free${memory.backing_pool_id === 'host:ram' ? ' · shares host RAM' : ''}`).join(' / '),
+      reason: device.memory.find((memory) => memory.used.reason)?.used.reason ?? null
+    }));
     const rows = new Map<string, DeviceRow>();
     for (const device of node.devices ?? []) {
       const id = String(device.index);
@@ -138,6 +146,8 @@
   }
 
   function gpuAbsence(node: UsageNode): string {
+    if (node.resources) return node.resources.device_discovery.status === 'measured'
+      ? 'No GPUs reported' : `GPU discovery ${node.resources.device_discovery.status}: ${node.resources.device_discovery.reason ?? 'unavailable'}`;
     return (node.backend ?? '').toLowerCase().includes('cpu')
       ? 'CPU backend · no GPUs reported'
       : 'GPU information unavailable';
@@ -145,6 +155,7 @@
 
   function stateText(node: UsageNode): string {
     const connection = node.connected ? 'connected' : 'disconnected';
+    if (node.resources) return `${connection} · ${node.resource_freshness ?? 'unavailable'}${node.resource_age_seconds != null ? ` · ${Math.round(node.resource_age_seconds)}s ago` : ''}`;
     const age = typeof node.age_seconds === 'number' ? ` · ${Math.round(node.age_seconds)}s ago` : '';
     return `${connection} · ${node.freshness}${age}`;
   }

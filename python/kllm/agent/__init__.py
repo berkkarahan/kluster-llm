@@ -561,7 +561,12 @@ def _inference_activity() -> dict[str, Any]:
             return dict(_activity_cached)
         running = bool(STATE.process_pid and STATE.process_role == "master")
         load = load_progress.sample(STATE.infer_port) if running else None
-        activity = inference_activity.sample(STATE.infer_port, running=running, load=load)
+        activity = inference_activity.sample(
+            STATE.infer_port,
+            running=running,
+            load=load,
+            client=http_clients.control_client() if running else None,
+        )
         STATE.inference_activity = activity
         _activity_cached = dict(activity)
         _activity_sampled_at = now
@@ -861,7 +866,8 @@ def _refresh_local_capacity() -> None:
         return
     try:
         cap = native.probe_capacity()
-        selected = _resolve_gpu_selection(STATE.gpu_ids)
+        # probe_capacity already contains the matching llama.cpp inventory.
+        selected = _resolve_gpu_selection(STATE.gpu_ids, listed=cap)
         member.update({k: cap[k] for k in ("total_ram_bytes", "available_ram_bytes", "requested_backend", "unified_memory", "binary_version") if k in cap})
         member.update(backend=selected["backend"], actual_backend=selected["backend"], devices=selected["gpus"],
                       vram_bytes=selected["vram_bytes"])

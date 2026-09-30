@@ -20,7 +20,9 @@ def client(tmp_path, monkeypatch):
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod
+    test_client.close()
 
 
 def test_health(client):
@@ -111,8 +113,10 @@ def test_discover_includes_key_id(client, monkeypatch):
     assert r2.json()["masters"][0]["host"] == "192.168.1.10"
 
 
+@pytest.mark.unit
 def test_join_discovers_master_by_key(client, monkeypatch):
     c, agent = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     from unittest.mock import patch
 
     from kllm.discovery import DiscoveredMaster, join_key_id

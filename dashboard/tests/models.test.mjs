@@ -3,10 +3,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer as createHttpServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'vite';
+import { removeBrowserProfile } from './browser-profile.mjs';
 
 const chrome = [process.env.CHROME_BIN, 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
@@ -319,17 +320,18 @@ test('models search keeps the bar and opens downloadable results for keywords an
       assert.equal(await evaluate("document.activeElement?.getAttribute('aria-label')?.startsWith('Download')"), true);
     } finally {
       try { ws?.close(); } catch { /* ignore */ }
-      try { browser?.kill(); } catch { /* ignore */ }
       if (browser) {
-        await new Promise((resolve) => {
-          const timer = setTimeout(resolve, 2000);
+        await new Promise((resolve, reject) => {
+          if (browser.exitCode !== null) { resolve(); return; }
+          const timer = setTimeout(() => reject(new Error('Chrome did not exit')), 2000);
           browser.once('exit', () => { clearTimeout(timer); resolve(); });
+          browser.kill();
         });
       }
       if (server) await new Promise((resolve) => server.close(resolve));
       try { await vite?.watcher?.close(); } catch { /* ignore */ }
       try { await vite?.close(); } catch { /* ignore */ }
-      try { rmSync(profile, { recursive: true, force: true }); } catch { /* Windows may still hold the profile */ }
+      await removeBrowserProfile(profile);
       process.chdir(cwd);
     }
   });

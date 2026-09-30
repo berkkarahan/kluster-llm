@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 import threading
 import time
 import uuid
@@ -32,6 +33,36 @@ def _encoded(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
+def _fit_log_suffix(
+    snapshot: dict[str, Any], budget_bytes: int, log_result_prefix: dict[str, Any]
+) -> tuple[list[Any], dict[str, Any]]:
+    """Keep the maximal newest suffix fitting the complete logs result envelope."""
+    original = list(snapshot.get("lines") or [])
+    # Validate every source row before omission so truncation cannot hide bad data.
+    _encoded({**log_result_prefix, "snapshot": snapshot})
+    envelope = lambda lines, gap, reason: _encoded({
+        **log_result_prefix,
+        "snapshot": {**snapshot, "lines": lines, "gap": gap, "gap_reason": reason},
+    })
+    if len(envelope(original, snapshot.get("gap", False), snapshot.get("gap_reason"))) <= budget_bytes:
+        return original, {"gap": snapshot.get("gap", False), "gap_reason": snapshot.get("gap_reason")}
+
+    reason = "retention" if snapshot.get("gap_reason") == "retention" else "batch_limit"
+    if len(envelope([], True, reason)) > budget_bytes:
+        raise OverflowError
+    low, high = 1, len(original)
+    while low < high:
+        omitted = (low + high) // 2
+        if len(envelope(original[omitted:], True, reason)) <= budget_bytes:
+            high = omitted
+        else:
+            low = omitted + 1
+    snapshot["lines"] = original[low:]
+    snapshot["gap"] = True
+    snapshot["gap_reason"] = reason
+    return snapshot["lines"], {"gap": True, "gap_reason": reason}
+
+
 class LiveFeed:
     """A short-lived, single-in-flight cache over the agent's existing read paths."""
 
@@ -41,8 +72,12 @@ class LiveFeed:
         logs: Callable[[str | None], Any],
         upstream_success: Callable[[str], str | None] | None = None,
         scope: Callable[[], Any] | None = None,
+        wait_budget: float = 2.0,
     ) -> None:
         self.epoch = str(uuid.uuid4())
+        self._wait_budget = float(wait_budget)
+        if not math.isfinite(self._wait_budget) or self._wait_budget < 0:
+            raise ValueError("wait_budget must be a finite nonnegative number")
         self._sources = sources
         self._logs = logs
         self._upstream_success = upstream_success or (lambda _topic: None)
@@ -172,7 +207,7 @@ class LiveFeed:
 
         if not owner:
             # Wait outside the shared lock; a stalled source cannot hold up another area.
-            if flight.wait(2):
+            if flight.wait(self._wait_budget):
                 with self._lock:
                     latest = self._areas.get(topic)
                     if latest is not None:
@@ -281,7 +316,7 @@ class LiveFeed:
                 self._log_flights[cache_key] = flight
 
         if not owner:
-            if flight.wait(2):
+            if flight.wait(self._wait_budget):
                 with self._lock:
                     cached = self._log_cache.get(cache_key)
                     if cached is not None:
@@ -298,19 +333,16 @@ class LiveFeed:
                 snapshot["gap"] = True
                 snapshot["gap_reason"] = snapshot.get("gap_reason") or "feed_reset"
                 snapshot["discontinuity"] = {"id": snapshot["continuity_id"], "reason": "coverage_change", "detected_at": server_time()}
+            result_prefix = {"availability": "available", "sampled_at": server_time(), "error": None}
+            _encoded({**result_prefix, "snapshot": snapshot})
             all_lines = list(snapshot.get("lines") or [])
             lines = all_lines[-500:]
             snapshot["lines"] = lines
             if len(all_lines) > len(lines):
                 snapshot["gap"] = True
                 snapshot["gap_reason"] = snapshot.get("gap_reason") or "batch_limit"
-            while lines and len(_encoded(snapshot)) > _LOG_LIMIT:
-                lines.pop(0)
-                snapshot["gap"] = True
-                snapshot["gap_reason"] = "batch_limit"
-            if len(_encoded(snapshot)) > _LOG_LIMIT:
-                raise OverflowError
-            result = {"availability": "available", "sampled_at": server_time(), "snapshot": snapshot, "error": None}
+            _fit_log_suffix(snapshot, _LOG_LIMIT, result_prefix)
+            result = {**result_prefix, "snapshot": snapshot}
         except ValueError as exc:
             failure = exc
             result = {"availability": "unavailable", "sampled_at": None, "snapshot": None,
@@ -345,7 +377,7 @@ class LiveFeed:
                 self._leases.update({topic: time.monotonic() + 5 for topic in topics})
         flights = {topic: self._schedule_area(topic) for topic in topics}
         log_future = self._schedule_log(after, continuity_id) if logs else None
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + self._wait_budget
         areas = {}
         for topic, future in flights.items():
             if future is not None:

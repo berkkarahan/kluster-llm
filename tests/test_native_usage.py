@@ -18,7 +18,7 @@ import pytest
 
 from kllm import native
 
-pytestmark = pytest.mark.skipif(not native.resource_probe_available(), reason="requires rebuilt native extension")
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(not native.resource_probe_available(), reason="requires rebuilt native extension")]
 PYTHON = (getattr(sys, "_base_executable", None) or sys.executable) if sys.platform == "win32" else sys.executable
 
 

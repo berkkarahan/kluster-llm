@@ -21,7 +21,9 @@ def client(tmp_path, monkeypatch):
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod
+    test_client.close()
 
 
 FAKE_GPUS = {
@@ -374,8 +376,10 @@ def test_gpu_visibility_env():
     assert _gpu_visibility_env("cuda", []) == {}
 
 
+@pytest.mark.unit
 def test_join_passes_gpu_env(client, monkeypatch):
     c, agent = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     from kllm.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")
@@ -465,6 +469,28 @@ def test_probe_capacity_vram_is_the_llama_device_total(monkeypatch):
     assert native_mod.probe_capacity()["vram_bytes"] == LLAMA_VRAM
 
 
+def test_probe_capacity_reuses_one_native_gpu_observation(monkeypatch):
+    import kllm.native as native_mod
+
+    calls = []
+
+    class Native:
+        def _probe_capacity_and_gpus(self):
+            calls.append("bundle")
+            return _snap(), [SimpleNamespace(index=0)], "vulkan"
+
+        def list_gpus(self):
+            raise AssertionError("bundle must avoid a second native GPU probe")
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: Native())
+    monkeypatch.setattr(native_mod, "_list_gpus_from_probe", lambda devices, backend: {
+        "backend": backend, "gpus": [{"vram_bytes": LLAMA_VRAM}],
+    })
+    result = native_mod.probe_capacity()
+    assert calls == ["bundle"]
+    assert result["vram_bytes"] == LLAMA_VRAM
+
+
 def test_probe_capacity_without_a_gpu_is_unknown(monkeypatch):
     import kllm.native as native_mod
 
@@ -497,9 +523,10 @@ def test_refresh_local_capacity_updates_member_vram(client):
         patch.object(agent, "_resolve_gpu_selection", return_value={
             "backend": "vulkan", "gpu_ids": [0], "vram_bytes": LLAMA_VRAM,
             "gpus": [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM}],
-        }),
+        }) as resolve,
     ):
         agent._refresh_local_capacity()
+    assert resolve.call_args.kwargs["listed"]["binary_version"] == "v"
     member = agent.STATE.members[agent.STATE.node_id]
     assert member["vram_bytes"] == LLAMA_VRAM
     assert member["devices"][0]["vram_bytes"] == LLAMA_VRAM

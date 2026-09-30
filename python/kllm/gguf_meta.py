@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import struct
 import re
 from functools import lru_cache
@@ -62,16 +64,24 @@ def _read_string(f) -> str:
     return f.read(n).decode("utf-8", errors="replace")
 
 
+def _skip_string(f) -> None:
+    (n,) = struct.unpack("<Q", f.read(8))
+    if n > 10_000_000:
+        raise ValueError("GGUF string length too large")
+    if len(f.read(n)) != n:
+        raise ValueError("truncated GGUF string")
+
+
 def _skip_value(f, vtype: int) -> None:
     if vtype == _STRING:
-        _read_string(f)
+        _skip_string(f)
         return
     if vtype == _ARRAY:
         (etype,) = struct.unpack("<I", f.read(4))
         (n,) = struct.unpack("<Q", f.read(8))
         if etype == _STRING:
             for _ in range(n):
-                _read_string(f)
+                _skip_string(f)
             return
         size = _SCALAR_SIZE.get(etype)
         if size is None:
@@ -127,12 +137,43 @@ def sniff_reasoning_flags(chat_template: str) -> dict[str, Any]:
 
 
 def read_inference_metadata(path: Path | str, *, include_template: bool = False) -> dict[str, Any] | None:
+    """Return bounded stat-keyed metadata without rescanning unchanged GGUF files."""
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    result = _read_inference_metadata(
+        str(p.resolve()), st.st_size, st.st_mtime_ns, st.st_ctime_ns, include_template
+    )
+    # Cached metadata is shared by inventory, defaults, and planning callers.
+    # Return an isolated value so a caller cannot poison subsequent results.
+    return copy.deepcopy(result)
+
+
+@lru_cache(maxsize=32)
+def _read_inference_metadata(
+    path: str, size: int, mtime: int, ctime: int, include_template: bool
+) -> dict[str, Any] | None:
     """Read architecture, context_length, sampling, and reasoning flags from a GGUF.
 
     Returns None if the file is not a readable GGUF. Does not retain the full
     chat template string — only sniffed reasoning flags.
     """
+    del size, mtime, ctime
     p = Path(path)
+    try:
+        # Optional native fast path: tokenizer string tables can contain
+        # hundreds of thousands of entries, making the bounded Python fallback
+        # expensive even though their contents are intentionally skipped.
+        from kllm import _native
+
+        native_reader = getattr(_native, "_read_gguf_metadata_json", None)
+        if native_reader is not None:
+            encoded = native_reader(path, include_template)
+            return json.loads(encoded) if encoded is not None else None
+    except ImportError:
+        pass
     try:
         with p.open("rb") as f:
             magic = f.read(4)

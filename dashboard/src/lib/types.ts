@@ -370,6 +370,15 @@ export type LogEntry = {
 };
 
 /** Bounded recent snapshot plus a resumable receiver-local checkpoint. */
+/** Stable producer identity used only by explicitly negotiated log streams. */
+export type LogPosition = { slot: number; generation: number; sequence: number };
+export type PositionedLogEvent = LogEntry & { position: LogPosition };
+export type PositionFrontier = {
+  domain_id: string;
+  frontier_revision: number;
+  retired_through: { slot: number; generation: number; sequence: number }[];
+};
+
 export type LogSnapshot = {
   lines: LogEntry[];
   source: 'cluster' | 'local';

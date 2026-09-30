@@ -3,10 +3,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer as createHttpServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'vite';
+import { removeBrowserProfile } from './browser-profile.mjs';
 
 const GIB = 1024 ** 3;
 
@@ -113,13 +114,14 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
     let browser, vite, server, ws;
     try {
       let mode = 'sixteen';
-      const counts = { lifetimes: 0, series: 0, readings: 0 };
+      const counts = { lifetimes: 0, series: 0, readings: 0, live: 0 };
       let logsWrites = 0;
       let logsFailure = false;
       let logsWarning = '';
       let logsBulk = false;
       let logsEmpty = false;
       let liveIncrementalReads = 0;
+      let allowNewLog = false;
       const json = (res, payload, status = 200) =>
         res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
 
@@ -143,10 +145,11 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         const usage = { nodes: mode === 'empty' ? {} : nodes,
           relationships: mode === 'empty' ? [] : relationships, recording: recorder };
         if (path === '/v1/dashboard/live') {
+          counts.live++;
           const after = new URL(req.url, 'http://x').searchParams.get('after');
           const lines = logsEmpty
             ? []
-            : after && ++liveIncrementalReads === 1
+            : after && (++liveIncrementalReads === 1 || !allowNewLog)
             ? []
             : after
             ? [{ event_id: '00000000-0000-4000-8000-000000000003', ts: 3, node_id: 'w1', source: 'rpc', line: '<b>three</b>' }]
@@ -315,6 +318,14 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
               t: Math.min(...cards.map((c) => c.top)), b: Math.max(...cards.map((c) => c.bottom)) } }; })()`);
       }
       async function countsSnapshot() { return (await fetch(`${base}/__counts`)).json(); }
+      async function waitForLiveRead(after) {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+          if ((await countsSnapshot()).live >= after) return;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        assert.fail(`No completed live refresh reached count ${after}`);
+      }
       async function shellMetrics() {
         return evaluate(`(() => { const header = document.querySelector('.dashboard-header').getBoundingClientRect();
           const workspace = document.querySelector('.usage-workspace').getBoundingClientRect();
@@ -423,12 +434,13 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         'healthy overlay status must not look like a warning');
 
       // --- US1: manual navigation survives polling, Fit restores automatic ------------------
+      const pollsBeforePan = (await countsSnapshot()).live;
       const fitted = await transform();
       await evaluate("document.querySelector('[aria-label=\"Pan right\"]').focus()");
       await enter();
       const panned = await transform();
       assert.notEqual(panned, fitted, 'pan must change the transform');
-      await new Promise((resolve) => setTimeout(resolve, 2400));
+      await waitForLiveRead(pollsBeforePan + 1);
       assert.equal(await transform(), panned, 'routine polling must retain the manual transform');
       await evaluate("document.querySelector('[aria-label=\"Zoom out\"]').focus()");
       await enter();
@@ -440,19 +452,20 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
 
       // --- US2/US3: keyboard selection defers history until asked --------------------------
       const beforeSelect = await countsSnapshot();
-      assert.deepEqual(beforeSelect, { lifetimes: 0, series: 0, readings: 0 },
+      assert.deepEqual({ lifetimes: beforeSelect.lifetimes, series: beforeSelect.series, readings: beforeSelect.readings }, { lifetimes: 0, series: 0, readings: 0 },
         'initial polling must not fetch history');
       await evaluate("document.querySelectorAll('.node-map-card')[2].focus()");
       await enter();
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      assert.deepEqual(await countsSnapshot(), { lifetimes: 0, series: 0, readings: 0 },
+      const afterSelect = await countsSnapshot();
+      assert.deepEqual({ lifetimes: afterSelect.lifetimes, series: afterSelect.series, readings: afterSelect.readings }, { lifetimes: 0, series: 0, readings: 0 },
         'selecting a node with History closed must not fetch history');
 
       // --- FR-008/SC-007: selection survives polling and navigation ------------------------
+      const pollsBeforeSelectionCheck = (await countsSnapshot()).live;
       const selectedNode = await evaluate(
         `document.querySelector('.node-map-card[aria-pressed="true"]')?.dataset.nodeId ?? null`);
       assert.ok(selectedNode, 'a node must be selected after keyboard activation');
-      await new Promise((resolve) => setTimeout(resolve, 2400));
+      await waitForLiveRead(pollsBeforeSelectionCheck + 1);
       assert.equal(await evaluate(
         `document.querySelector('.node-map-card[aria-pressed="true"]')?.dataset.nodeId ?? null`),
       selectedNode, 'routine polling must preserve the selection');
@@ -679,12 +692,14 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       assert.equal(await evaluate("document.querySelector('iframe').contentDocument.querySelectorAll('.logs-row').length"), 2,
         'display-only Clear must not affect another browsing context');
       assert.equal(await evaluate("document.querySelector('input[name=refresh]:checked').value"), 'live');
-      assert.match(await evaluate("document.querySelector('[role=status]').textContent"), /cleared/i);
+      await wait("document.querySelector('.logs-page [role=status]').textContent.toLowerCase().includes('cleared')");
+      assert.match(await evaluate("document.querySelector('.logs-page [role=status]').textContent"), /cleared/i);
       await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = ''; s.dispatchEvent(new Event('change')); })()");
       assert.equal(await evaluate("document.body.textContent.includes('boot ok')"), false,
         'Clear removes rows that were hidden by the tag filter');
 
       // New entries resume after Clear; the message renders as inert text.
+      allowNewLog = true;
       await wait("document.querySelectorAll('.logs-row').length === 1");
       assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg').textContent"), '<b>three</b>');
       assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg').innerHTML"), '&lt;b&gt;three&lt;/b&gt;');
@@ -759,12 +774,18 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       await wait("document.body.textContent.includes('usage denied: Access denied · last success never')");
     } finally {
       ws?.close();
-      browser?.kill();
-      if (browser) await new Promise((resolve) => browser.once('exit', resolve));
+      if (browser) {
+        await new Promise((resolve, reject) => {
+          if (browser.exitCode !== null) { resolve(); return; }
+          const timer = setTimeout(() => reject(new Error('Chrome did not exit')), 2000);
+          browser.once('exit', () => { clearTimeout(timer); resolve(); });
+          browser.kill();
+        });
+      }
       if (server) await new Promise((resolve) => server.close(resolve));
       try { await vite?.watcher?.close(); } catch { /* no watcher */ }
       await vite?.close();
-      rmSync(profile, { recursive: true, force: true });
+      await removeBrowserProfile(profile);
       process.chdir(cwd);
     }
   });

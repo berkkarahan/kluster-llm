@@ -1,3 +1,4 @@
+mod gguf;
 mod hw;
 mod planner;
 mod process;
@@ -11,8 +12,8 @@ use planner::{NodeCapacity, PlanRequest, PlanResult};
 use process::{LaunchConfig, LaunchResult, ProcessHandle};
 
 #[pyfunction]
-fn _process_identity(pid: u32) -> PyResult<(String, String)> {
-    usage::process_counters(pid)
+fn _process_identity(py: Python<'_>, pid: u32) -> PyResult<(String, String)> {
+    py.allow_threads(|| usage::process_counters(pid))
         .map(|p| (p.token, p.started))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
@@ -23,14 +24,31 @@ fn _validate_source_json(source: &str, payload: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn probe_capacity() -> PyResult<CapacitySnapshot> {
-    Ok(hw::probe_capacity())
+fn _read_gguf_metadata_json(
+    py: Python<'_>,
+    path: String,
+    include_template: bool,
+) -> Option<String> {
+    py.allow_threads(|| gguf::inference_metadata_json(&path, include_template))
 }
 
 #[pyfunction]
-fn list_gpus() -> PyResult<(Vec<GpuDevice>, String)> {
-    let (devices, backend) = hw::list_gpus();
+fn probe_capacity(py: Python<'_>) -> PyResult<CapacitySnapshot> {
+    Ok(py.allow_threads(hw::probe_capacity))
+}
+
+#[pyfunction]
+fn list_gpus(py: Python<'_>) -> PyResult<(Vec<GpuDevice>, String)> {
+    let (devices, backend) = py.allow_threads(hw::list_gpus);
     Ok((devices, backend.as_str().to_string()))
+}
+
+#[pyfunction]
+fn _probe_capacity_and_gpus(
+    py: Python<'_>,
+) -> PyResult<(CapacitySnapshot, Vec<GpuDevice>, String)> {
+    let (snapshot, devices, backend) = py.allow_threads(hw::probe_capacity_with_gpus);
+    Ok((snapshot, devices, backend.as_str().to_string()))
 }
 
 #[pyfunction]
@@ -53,27 +71,27 @@ fn resolve_rpc_server(repo_root: Option<String>) -> PyResult<Option<String>> {
 }
 
 #[pyfunction]
-fn start_master(config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
+fn start_master(py: Python<'_>, config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::master_from_pydict(config)?;
-    process::start_process(&cfg)
+    py.allow_threads(|| process::start_process(&cfg))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pyfunction]
-fn start_worker(config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
+fn start_worker(py: Python<'_>, config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::worker_from_pydict(config)?;
-    process::start_process(&cfg)
+    py.allow_threads(|| process::start_process(&cfg))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pyfunction]
-fn stop_process(pid: u32, force: bool) -> PyResult<bool> {
-    Ok(process::stop_process(pid, force))
+fn stop_process(py: Python<'_>, pid: u32, force: bool) -> PyResult<bool> {
+    Ok(py.allow_threads(|| process::stop_process(pid, force)))
 }
 
 #[pyfunction]
-fn process_alive(pid: u32) -> PyResult<bool> {
-    Ok(process::process_alive(pid))
+fn process_alive(py: Python<'_>, pid: u32) -> PyResult<bool> {
+    Ok(py.allow_threads(|| process::process_alive(pid)))
 }
 
 #[pymodule]
@@ -81,8 +99,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<usage::UsageCollector>()?;
     m.add_function(wrap_pyfunction!(_process_identity, m)?)?;
     m.add_function(wrap_pyfunction!(_validate_source_json, m)?)?;
+    m.add_function(wrap_pyfunction!(_read_gguf_metadata_json, m)?)?;
     m.add_function(wrap_pyfunction!(probe_capacity, m)?)?;
     m.add_function(wrap_pyfunction!(list_gpus, m)?)?;
+    m.add_function(wrap_pyfunction!(_probe_capacity_and_gpus, m)?)?;
     m.add_function(wrap_pyfunction!(plan_split, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_llama_server, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_rpc_server, m)?)?;

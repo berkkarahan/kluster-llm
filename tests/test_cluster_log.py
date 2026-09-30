@@ -36,7 +36,29 @@ def client(tmp_path, monkeypatch):
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
     log_mod.reset_for_tests()
-    return TestClient(agent_mod.app), agent_mod, log_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod, log_mod
+    test_client.close()
+
+
+def _fail_master_log_request(monkeypatch, agent):
+    import httpx
+
+    class OfflineClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, **_kwargs):
+            request = httpx.Request("GET", url)
+            raise httpx.ConnectError("controlled master outage", request=request)
+
+    monkeypatch.setattr(agent.httpx, "Client", OfflineClient)
 
 
 def test_ring_cap_and_filter(tmp_path, monkeypatch):
@@ -163,20 +185,11 @@ def test_worker_relay_posts_to_master(tmp_path, monkeypatch):
         status_code = 200
 
     class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def post(self, url, json=None, headers=None):
+        def post(self, url, json=None, headers=None, timeout=None):
             posted.append({"url": url, "json": json, "headers": headers})
             return _Resp()
 
-    with patch("kllm.cluster_log.httpx.Client", _Client):
+    with patch("kllm.cluster_log.http_clients.control_client", return_value=_Client()):
         HUB.relay_tick(
             node_id="w1",
             role="worker",
@@ -235,6 +248,8 @@ def test_master_ingest_and_get_snapshot(client):
     assert snap.status_code == 200
     body = snap.json()
     assert body["source"] == "cluster"
+    assert {"lines", "source", "cursor", "reset", "gap", "gap_reason"} <= body.keys()
+    assert all(str(uuid.UUID(event["event_id"])) == event["event_id"] for event in body["lines"])
     lines = [ev["line"] for ev in body["lines"]]
     assert "hello rpc" in lines
     filtered = c.get("/v1/logs", params={"source": "rpc"})
@@ -246,8 +261,10 @@ def test_master_ingest_and_get_snapshot(client):
     assert "hello rpc" in journal.read_text(encoding="utf-8")
 
 
-def test_worker_get_falls_back_to_local(client):
+@pytest.mark.unit
+def test_worker_get_falls_back_to_local(client, monkeypatch):
     c, agent, log_mod = client
+    _fail_master_log_request(monkeypatch, agent)
     agent.STATE.role = "worker"
     agent.STATE.node_id = "w1"
     agent.STATE.master_host = "127.0.0.1"
@@ -373,20 +390,11 @@ def test_relay_carries_event_id(tmp_path, monkeypatch):
         status_code = 200
 
     class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def post(self, url, json=None, headers=None):
+        def post(self, url, json=None, headers=None, timeout=None):
             posted.append(json)
             return _Resp()
 
-    with patch("kllm.cluster_log.httpx.Client", _Client):
+    with patch("kllm.cluster_log.http_clients.control_client", return_value=_Client()):
         HUB.relay_tick(node_id="w1", role="worker", master_base="http://x:1", join_key="k")
     line = posted[0]["lines"][0]
     assert line["event_id"]
@@ -419,8 +427,10 @@ def test_get_logs_incremental_and_cursor_validation(client):
     assert legacy["lines"] and "source" in legacy
 
 
-def test_worker_local_fallback_reports_cursor(client):
+@pytest.mark.unit
+def test_worker_local_fallback_reports_cursor(client, monkeypatch):
     c, agent, log_mod = client
+    _fail_master_log_request(monkeypatch, agent)
     agent.STATE.role = "worker"
     agent.STATE.node_id = "w1"
     agent.STATE.master_host = "127.0.0.1"

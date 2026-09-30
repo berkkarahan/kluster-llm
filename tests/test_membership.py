@@ -69,7 +69,9 @@ def client(tmp_path, monkeypatch):
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod
+    test_client.close()
 
 
 def _start_master(c, agent, *, node_id="testnode"):
@@ -249,8 +251,10 @@ def test_failed_join_does_not_write_member(client):
     assert "w1" not in agent.STATE.members
 
 
+@pytest.mark.unit
 def test_join_applies_cluster_members(client, monkeypatch):
     c, agent = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     from kllm.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")

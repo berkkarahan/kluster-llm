@@ -23,7 +23,9 @@ def client(tmp_path, monkeypatch):
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod, netsec_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod, netsec_mod
+    test_client.close()
 
 
 def test_pick_rpc_bind_host_explicit_wins():
@@ -336,8 +338,10 @@ def test_join_missing_native_returns_503(client):
         assert "--backend metal" not in r.text
 
 
-def test_join_binds_private_host_not_wildcard(client):
+@pytest.mark.unit
+def test_join_binds_private_host_not_wildcard(client, monkeypatch):
     c, agent, netsec_mod = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     captured = {}
 
     def fake_start_worker(**kwargs):
@@ -399,8 +403,10 @@ def test_join_binds_private_host_not_wildcard(client):
     assert r.json()["rpc_bind"] == "192.168.10.2"
 
 
-def test_join_honors_rpc_bind_hint_from_master(client):
+@pytest.mark.unit
+def test_join_honors_rpc_bind_hint_from_master(client, monkeypatch):
     c, agent, netsec_mod = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     captured = {}
 
     def fake_start_worker(**kwargs):
@@ -458,8 +464,10 @@ def test_join_honors_rpc_bind_hint_from_master(client):
     assert any("corrected" in w for w in (r.json().get("netsec_warnings") or []))
 
 
-def test_join_ignores_rpc_bind_hint_that_is_not_local(client):
+@pytest.mark.unit
+def test_join_ignores_rpc_bind_hint_that_is_not_local(client, monkeypatch):
     c, agent, netsec_mod = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     captured = {}
 
     def fake_start_worker(**kwargs):

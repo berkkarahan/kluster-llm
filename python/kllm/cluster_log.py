@@ -12,8 +12,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterator
 
-import httpx
-
+from kllm import http_clients
 from kllm.state import home_dir
 
 RING_MAX = 8000
@@ -513,8 +512,9 @@ class LogHub:
                 ],
             }
             try:
-                with httpx.Client(timeout=5.0) as client:
-                    resp = client.post(url, json=payload, headers=headers)
+                resp = http_clients.control_client().post(
+                    url, json=payload, headers=headers, timeout=5.0
+                )
                 if resp.status_code != 200:
                     raise RuntimeError(f"ingest {resp.status_code}")
             except Exception:

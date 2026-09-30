@@ -751,48 +751,58 @@ class UsageStore:
         now = now or datetime.now(timezone.utc)
         with self.lock:
             start, end = self._filters(node_id, life_id, window, now)
-            step = {"15m": 2, "1h": 5, "24h": 120}[window]
-            length = int(WINDOWS[window].total_seconds() / step)
-            buckets = [{"start": utc(parse_utc(start) + timedelta(seconds=i * step)),
-                        "end": utc(parse_utc(start) + timedelta(seconds=(i + 1) * step)),
-                        "count": 0, "process_cpu_min": None, "process_cpu_max": None,
-                        "process_rss_min": None, "process_rss_max": None,
-                        "host_cpu_min": None, "host_cpu_max": None, "host_used_bytes_min": None,
-                        "host_used_bytes_max": None, "devices": []} for i in range(length)]
-            for stamp, payload in self.db.execute(
+            rows = self.db.execute(
                 "SELECT observed_at,payload FROM readings WHERE node_id=? AND lifetime_id=? AND observed_at>=? AND observed_at<=? ORDER BY observed_at,id",
                 (node_id, life_id, start, end),
-            ):
-                index = min(int((_parse_saved_utc(stamp) - parse_utc(start)).total_seconds() // step), length - 1)
-                if index < 0:
-                    continue
-                bucket = buckets[index]
-                point = _decode_reading(payload)
-                bucket["count"] += 1
-                for field, value in (("process_cpu", point["process"]["cpu_percent_machine"]),
-                                     ("process_rss", point["process"]["rss_bytes"]),
-                                     ("host_cpu", point["host"]["cpu_percent"]),
-                                     ("host_used_bytes", point["host"]["used_bytes"])):
+            ).fetchall()
+            coverage = self.coverage(node_id)
+
+        # JSON decoding and aggregation can be expensive at 24-hour scale; do
+        # it after the immutable query snapshot is fetched so ingestion and
+        # live reads are not blocked on chart preparation.
+        step = {"15m": 2, "1h": 5, "24h": 120}[window]
+        length = int(WINDOWS[window].total_seconds() / step)
+        start_at = parse_utc(start)
+        buckets = [{"start": utc(start_at + timedelta(seconds=i * step)),
+                    "end": utc(start_at + timedelta(seconds=(i + 1) * step)),
+                    "count": 0, "process_cpu_min": None, "process_cpu_max": None,
+                    "process_rss_min": None, "process_rss_max": None,
+                    "host_cpu_min": None, "host_cpu_max": None, "host_used_bytes_min": None,
+                    "host_used_bytes_max": None, "devices": []} for i in range(length)]
+        devices_by_bucket: list[dict[str, dict[str, Any]]] = [{} for _ in range(length)]
+        for stamp, payload in rows:
+            index = min(int((_parse_saved_utc(stamp) - start_at).total_seconds() // step), length - 1)
+            if index < 0:
+                continue
+            bucket = buckets[index]
+            point = _decode_reading(payload)
+            bucket["count"] += 1
+            for field, value in (("process_cpu", point["process"]["cpu_percent_machine"]),
+                                 ("process_rss", point["process"]["rss_bytes"]),
+                                 ("host_cpu", point["host"]["cpu_percent"]),
+                                 ("host_used_bytes", point["host"]["used_bytes"])):
+                if value is not None:
+                    low, high = field + "_min", field + "_max"
+                    bucket[low] = value if bucket[low] is None else min(value, bucket[low])
+                    bucket[high] = value if bucket[high] is None else max(value, bucket[high])
+            for device in point["devices"]:
+                device_id = device["device_id"]
+                entry = devices_by_bucket[index].get(device_id)
+                if entry is None:
+                    entry = {"device_id": device_id, "scope": "device", "total_bytes": None,
+                             "unavailable_reason": None}
+                    devices_by_bucket[index][device_id] = entry
+                    bucket["devices"].append(entry)
+                entry["total_bytes"] = device.get("total_bytes") or entry["total_bytes"]
+                entry["unavailable_reason"] = device.get("unavailable_reason") or entry["unavailable_reason"]
+                for field in ("utilization_percent", "used_bytes", "temperature_c", "power_w"):
+                    value = device.get(field)
                     if value is not None:
                         low, high = field + "_min", field + "_max"
-                        bucket[low] = value if bucket[low] is None else min(value, bucket[low])
-                        bucket[high] = value if bucket[high] is None else max(value, bucket[high])
-                for device in point["devices"]:
-                    entry = next((d for d in bucket["devices"] if d["device_id"] == device["device_id"]), None)
-                    if entry is None:
-                        entry = {"device_id": device["device_id"], "scope": "device", "total_bytes": None,
-                                 "unavailable_reason": None}
-                        bucket["devices"].append(entry)
-                    entry["total_bytes"] = device.get("total_bytes") or entry["total_bytes"]
-                    entry["unavailable_reason"] = device.get("unavailable_reason") or entry["unavailable_reason"]
-                    for field in ("utilization_percent", "used_bytes", "temperature_c", "power_w"):
-                        value = device.get(field)
-                        if value is not None:
-                            low, high = field + "_min", field + "_max"
-                            entry[low] = value if entry.get(low) is None else min(value, entry[low])
-                            entry[high] = value if entry.get(high) is None else max(value, entry[high])
-            return {"buckets": buckets, "window_start": start, "window_end": end, "time_zone": "UTC",
-                    **self.coverage(node_id)}
+                        entry[low] = value if entry.get(low) is None else min(value, entry[low])
+                        entry[high] = value if entry.get(high) is None else max(value, entry[high])
+        return {"buckets": buckets, "window_start": start, "window_end": end, "time_zone": "UTC",
+                **coverage}
 
     def readings(self, node_id: str, life_id: str, window: str, *, limit: int = 500,
                  cursor: str | None = None, now: datetime | None = None) -> dict[str, Any]:

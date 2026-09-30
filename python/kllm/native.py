@@ -102,8 +102,13 @@ def _inventory_vram_bytes(devices: dict[str, Any], fallback: int | None) -> int 
 
 def probe_capacity() -> dict[str, Any]:
     n = require_native()
-    snap = n.probe_capacity()
-    devices = list_gpus()
+    if hasattr(n, "_probe_capacity_and_gpus"):
+        snap, raw_devices, probed = n._probe_capacity_and_gpus()
+        devices = _list_gpus_from_probe(raw_devices, probed)
+    else:
+        # Compatibility with an older installed extension during source upgrades.
+        snap = n.probe_capacity()
+        devices = list_gpus()
     return {
         **devices,
         "unified_memory": snap.backend == "metal",
@@ -115,22 +120,16 @@ def probe_capacity() -> dict[str, Any]:
     }
 
 
-def list_gpus() -> dict[str, Any]:
-    """Return ``{backend, probed_backend, gpus: [{index, name, vram_bytes}, ...]}``."""
-    if _NATIVE is None or not hasattr(_NATIVE, "list_gpus"):
-        error = (
-            _missing_native_message()
-            if _NATIVE is None
-            else "kllm._native has no list_gpus"
-        )
-        return {"backend": "cpu", "probed_backend": "cpu", "gpus": [], "error": error}
-    devices, backend = _NATIVE.list_gpus()
+def _list_gpus_from_probe(devices: Any, backend: Any) -> dict[str, Any]:
+    """Combine one native topology observation with llama.cpp capabilities."""
+    devices = list(devices)
     probed = str(backend or "cpu").lower()
     requested = requested_backend()
     try:
         # Deferred import: state walks the kllm package, which must not import native at load time.
         from kllm.state import repo_root
-        binary = resolve_llama_server(str(repo_root()) if repo_root() else None)
+        root = repo_root()
+        binary = resolve_llama_server(str(root) if root else None)
         if not binary:
             raise RuntimeError("llama-server is not installed")
         capabilities = binary_capabilities(binary, Path(binary).stat().st_mtime_ns, int(time.monotonic() // 30))
@@ -181,6 +180,18 @@ def list_gpus() -> dict[str, Any]:
                 "installed_backends": [],
                 "error": str(exc),
                 "probed_device_count": len(devices)}
+
+
+def list_gpus() -> dict[str, Any]:
+    """Return ``{backend, probed_backend, gpus: [{index, name, vram_bytes}, ...]}``."""
+    if _NATIVE is None or not hasattr(_NATIVE, "list_gpus"):
+        error = (
+            _missing_native_message()
+            if _NATIVE is None
+            else "kllm._native has no list_gpus"
+        )
+        return {"backend": "cpu", "probed_backend": "cpu", "gpus": [], "error": error}
+    return _list_gpus_from_probe(*_NATIVE.list_gpus())
 
 
 def _fit_status_from_bytes(needed: int, budget: int) -> tuple[str, str]:

@@ -51,6 +51,16 @@ fn children() -> &'static Mutex<Vec<TrackedChild>> {
     CELL.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+fn reap_exited(children: &mut Vec<TrackedChild>) {
+    children.retain_mut(|tracked| match tracked.child.try_wait() {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        // Keep an unqueryable handle so stop_process still gets a chance to
+        // terminate/wait it instead of silently losing ownership.
+        Err(_) => true,
+    });
+}
+
 pub struct LaunchConfig {
     pub role: String,
     pub binary: PathBuf,
@@ -614,10 +624,11 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
     let child = cmd.spawn()?;
     let pid = child.id();
     let identity = crate::usage::process_counters(pid).ok();
-    children()
+    let mut tracked = children()
         .lock()
-        .map_err(|_| ProcessError::Message("process lock poisoned".into()))?
-        .push(TrackedChild { child });
+        .map_err(|_| ProcessError::Message("process lock poisoned".into()))?;
+    reap_exited(&mut tracked);
+    tracked.push(TrackedChild { child });
 
     Ok(LaunchResult {
         process_start_token: identity.as_ref().map(|p| p.token.clone()),
@@ -633,11 +644,16 @@ pub fn stop_process(pid: u32, force: bool) -> bool {
     if let Ok(mut guard) = children().lock() {
         if let Some(idx) = guard.iter().position(|c| c.child.id() == pid) {
             let mut tracked = guard.remove(idx);
+            if tracked.child.try_wait().ok().flatten().is_some() {
+                reap_exited(&mut guard);
+                return true;
+            }
             let _ = tracked.child.kill();
             let _ = tracked.child.wait();
             let _ = force;
             return true;
         }
+        reap_exited(&mut guard);
     }
 
     #[cfg(windows)]
@@ -661,6 +677,19 @@ pub fn stop_process(pid: u32, force: bool) -> bool {
 pub fn process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
+    }
+    if let Ok(mut guard) = children().lock() {
+        if let Some(idx) = guard.iter().position(|c| c.child.id() == pid) {
+            return match guard[idx].child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => {
+                    guard.remove(idx);
+                    false
+                }
+                Err(_) => false,
+            };
+        }
+        reap_exited(&mut guard);
     }
     #[cfg(windows)]
     {
@@ -686,6 +715,21 @@ pub fn process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reaps_completed_tracked_children() {
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        #[cfg(unix)]
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        child.wait().unwrap();
+        let mut tracked = vec![TrackedChild { child }];
+        reap_exited(&mut tracked);
+        assert!(tracked.is_empty());
+    }
 
     #[test]
     fn resolve_does_not_panic() {

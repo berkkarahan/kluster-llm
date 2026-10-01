@@ -247,7 +247,7 @@ uv run kllm logs
 uv run kllm status
 ```
 
-The dashboard **Logs** page (`/logs`) reads the same stream for master and workers. Interpret its status text before assuming a problem:
+The dashboard **Logs** page (`/logs`) reads the same stream for master and workers. **Stop logging** on the master stops diagnostic collection and file output across updated nodes while inference continues. **Resume logging** records new output; the stopped interval is discarded. A partial result lists pending, unreachable, unsupported or failed nodes. Upgrade/relaunch an unsupported node once to attach its independent output drain. Interpret its status text before assuming a problem:
 
 - **Connected — no log entries** is a healthy empty poll, not an outage.
 - **No entries for the selected tag** or **No entries match the selected node and tag** means this visit still holds other rows. Change **All tags**, **UI**, **Inference**, or **Unclassified**, or the node filter. That empty selection is not an outage, a cleared display, or a history gap.
@@ -281,6 +281,21 @@ The endpoint is a dashboard read, not an authentication mechanism. Keep it on th
 
 ### Native resource readings
 
+macOS GPU utilization and GPU-used shared RAM come from IORegistry PerformanceStatistics,
+matched to the Metal device's registry ID. Host available RAM describes the shared pool;
+it is not dedicated VRAM or GPU-free memory. Windows utilization uses PDH GPU Engine
+counters, summing process instances for each physical engine and reporting the busiest
+engine. Device totals still use the reconciled llama.cpp capacity. Unknown driver counters
+remain unsupported or failed with a source and reason in Details; zero is a measured value.
+Resource schema 2 carries utilization. Updated workers negotiate schema 1 with older masters
+and omit only the new field until the master is upgraded.
+
+Run real device acceptance after rebuilding on each M1/M5/RX 9070 node:
+`KLLM_TEST_HARDWARE=1 uv run python -m pytest -n 0 tests/test_native_usage.py`.
+On PowerShell set `$env:KLLM_TEST_HARDWARE='1'` before running the pytest command.
+The macOS reference test takes 30 paired IORegistry/native samples. A Windows compile check
+does not establish RX 9070 counter accuracy; that requires its driver and hardware tests.
+
 - **Initializing CPU** needs a second observation, normally two seconds later. Reset process
   identity, suspended/discontinuous timing, and CPU-count changes invalidate old baselines.
 - **Unsupported** is not zero usage. Windows free RAM is distinct from available RAM; macOS
@@ -295,7 +310,7 @@ The endpoint is a dashboard read, not an authentication mechanism. Keep it on th
 - If an updated Python wrapper cannot find the native collector, rebuild with
   `uv run python scripts/build.py --skip-ui`. Check the actual loaded file with
   `uv run python -c "from kllm import native; print(native.require_native().__file__)"`.
-  Checkout tests use `python/` and can load an older in-tree `.pyd` instead of a rebuilt wheel.
+  Checkout tests use `src/` and can load an older in-tree `.pyd` instead of a rebuilt wheel.
   For that specific editable-build mismatch, `uv run maturin develop` refreshes the in-tree
   extension. Windows error 32 means a process still maps it: stop that owning agent safely
   before rebuilding; do not force-delete or overwrite a loaded DLL.

@@ -25,7 +25,7 @@ def _log_config() -> dict:
     path = agent_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     config["handlers"]["kllm_file"] = {
-        "class": "logging.FileHandler",
+        "class": "kllm.log_sink.PolicyFileHandler",
         "filename": str(path),
         "formatter": "default",
         "encoding": "utf-8",
@@ -47,7 +47,7 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_CONTROL_PORT)
     args = parser.parse_args()
-    runtime.register_agent(os.getpid(), args.port)
+    runtime.register_agent(os.getpid(), args.port, os.getpid() if sys.stderr.isatty() else None)
     uvicorn.run(
         "kllm.agent:app",
         host=args.host,

@@ -9,12 +9,13 @@ from kllm.agent.services.log_relay import LogRelayService
 def test_log_relay_tick_loads_master_journal_and_relays_current_identity():
     calls: list[tuple[str, object]] = []
     hub = SimpleNamespace(
+        set_enabled=lambda enabled: calls.append(("enabled", enabled)),
         ensure_journal_loaded=lambda: calls.append(("load", None)),
         relay_tick=lambda **kwargs: calls.append(("relay", kwargs)),
     )
     service = LogRelayService(
         state=lambda: SimpleNamespace(
-            node_id="master-1", role="master", master_host=None, join_key="secret"
+            node_id="master-1", role="master", master_host=None, join_key="secret", logging_enabled=True
         ),
         stop=threading.Event(),
         master_control_base=lambda: "http://unused",
@@ -24,6 +25,7 @@ def test_log_relay_tick_loads_master_journal_and_relays_current_identity():
     service.tick()
 
     assert calls == [
+        ("enabled", True),
         ("load", None),
         (
             "relay",
@@ -40,6 +42,7 @@ def test_log_relay_tick_loads_master_journal_and_relays_current_identity():
 def test_log_relay_worker_uses_master_control_route():
     calls: list[dict[str, object]] = []
     hub = SimpleNamespace(
+        set_enabled=lambda enabled: calls.append({"enabled": enabled}),
         ensure_journal_loaded=lambda: (_ for _ in ()).throw(
             AssertionError("workers do not load the master journal")
         ),
@@ -47,7 +50,7 @@ def test_log_relay_worker_uses_master_control_route():
     )
     service = LogRelayService(
         state=lambda: SimpleNamespace(
-            node_id="worker-1", role="worker", master_host="master", join_key="secret"
+            node_id="worker-1", role="worker", master_host="master", join_key="secret", logging_enabled=False
         ),
         stop=threading.Event(),
         master_control_base=lambda: "http://master:18765",
@@ -57,6 +60,7 @@ def test_log_relay_worker_uses_master_control_route():
     service.tick()
 
     assert calls == [
+        {"enabled": False},
         {
             "node_id": "worker-1",
             "role": "worker",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import copy
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -63,6 +64,7 @@ class ResourcePublisher:
             ):
                 raise ValueError("invalid resource capability response")
             self._remote["supported"] = 1 in versions
+            self._remote["schema_version"] = 2 if 2 in versions else 1
             self._remote["capability_checked_at"] = time.monotonic()
         if not self._remote["supported"]:
             return
@@ -126,6 +128,11 @@ class ResourcePublisher:
             generation=self._remote["generation"],
             sequence=self._remote["sequence"],
         )
+        if outgoing["schema_version"] == 2 and self._remote.get("schema_version", 1) == 1:
+            outgoing = copy.deepcopy(outgoing)
+            outgoing["schema_version"] = 1
+            for device in outgoing["devices"]:
+                device.pop("utilization", None)
         outgoing["snapshot_id"] = f"{outgoing['generation']}:{outgoing['sequence']}"
         response = client.post(
             f"{base}/v2/telemetry/ingest",

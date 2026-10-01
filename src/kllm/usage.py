@@ -133,6 +133,7 @@ def resource_observations(snapshot: dict[str, Any]) -> dict[tuple[str, ...], dat
 
     metrics(("host",), snapshot.get("host"))
     for device in snapshot.get("devices", []):
+        metrics(("device", device["device_key"], "utilization"), device.get("utilization"))
         for view in device["memory"]:
             metrics(("device", device["device_key"], view["kind"]), view)
     for point in snapshot.get("processes", []):
@@ -160,7 +161,7 @@ def validate_resources(node_id: str, snapshot: Any, member: dict[str, Any], now:
     seq, generation = snapshot["sequence"], snapshot["generation"]
     if (
         type(snapshot["schema_version"]) is not int
-        or snapshot["schema_version"] != 1
+        or snapshot["schema_version"] not in (1, 2)
         or snapshot["node_id"] != node_id
         or isinstance(seq, bool)
         or not isinstance(seq, int)
@@ -174,6 +175,8 @@ def validate_resources(node_id: str, snapshot: Any, member: dict[str, Any], now:
     if requested > completed or completed > now + timedelta(seconds=30) or requested < now - WINDOW:
         raise ValidationError("invalid resource snapshot time")
     n = native.require_native()
+    if snapshot["schema_version"] == 1 and any("utilization" in device for device in snapshot["devices"]):
+        raise ValidationError("utilization requires resource schema 2")
     for source in ("host", "gpu"):
         part = dict(
             host=snapshot["host"] if source == "host" else None,

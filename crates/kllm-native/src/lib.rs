@@ -1,4 +1,5 @@
 mod gguf;
+mod network;
 mod hw;
 mod planner;
 mod process;
@@ -96,6 +97,18 @@ fn process_alive(py: Python<'_>, pid: u32) -> PyResult<bool> {
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("RESOURCE_SCHEMA_VERSION", 2u32)?;
+    m.add_function(wrap_pyfunction!(network::arp_conflict::probe_ipv4_conflict, m)?)?;
+    #[cfg(unix)]
+    {
+        m.add_class::<network::arp_conflict::IPv4ConflictObserver>()?;
+        m.add_function(wrap_pyfunction!(network::arp_conflict::start_ipv4_conflict_observer, m)?)?;
+    }
+    m.add_class::<network::address_events::AddressObserver>()?;
+    m.add_function(wrap_pyfunction!(network::address_events::start_address_observer, m)?)?;
+    m.add_class::<network::relay::NetworkBridge>()?;
+    m.add_function(wrap_pyfunction!(network::relay::start_network_bridge, m)?)?;
+    m.add_function(wrap_pyfunction!(network::rpc_probe::probe_network_rpc, m)?)?;
     m.add_class::<usage::UsageCollector>()?;
     m.add_function(wrap_pyfunction!(_process_identity, m)?)?;
     m.add_function(wrap_pyfunction!(_validate_source_json, m)?)?;

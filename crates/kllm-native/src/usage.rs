@@ -109,9 +109,22 @@ impl Metric {
         m
     }
 
+    pub fn device_percent(value: f64, source: &str) -> Self {
+        let mut metric = Self::unavailable("percent_device", "device", "invalid_counter", source);
+        if value.is_finite() && (0.0..=100.0).contains(&value) {
+            metric.value = serde_json::Number::from_f64(value);
+            metric.status = "measured".into();
+            metric.reason = None;
+        }
+        metric
+    }
+
     fn validate(&self) -> Result<(), String> {
         if !matches!(self.scope.as_str(), "host" | "process" | "device")
-            || !matches!(self.unit.as_str(), "bytes" | "percent_machine")
+            || !matches!(
+                self.unit.as_str(),
+                "bytes" | "percent_machine" | "percent_device"
+            )
             || !matches!(
                 self.status.as_str(),
                 "measured" | "initializing" | "unsupported" | "error"
@@ -158,6 +171,15 @@ impl Metric {
                     .is_some_and(|v| v.is_finite() && (0.0..=100.0).contains(&v))
                 {
                     return Err("invalid CPU percentage".into());
+                }
+                // Driver GPU gauges do not expose a sampling interval. Do not invent one.
+                if self.unit == "percent_device"
+                    && self.scope == "device"
+                    && self.interval_start.is_none()
+                    && self.interval_end.is_none()
+                    && self.duration_ms.is_none()
+                {
+                    return Ok(());
                 }
                 let start = DateTime::parse_from_rfc3339(
                     self.interval_start
@@ -281,6 +303,8 @@ pub struct MemoryView {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Device {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<Metric>,
     pub device_key: String,
     pub name: String,
     pub vendor: String,
@@ -391,6 +415,9 @@ impl SourceResult {
         let mut seen = HashSet::new();
         let mut pools = HashMap::new();
         for d in &self.devices {
+            if let Some(utilization) = &d.utilization {
+                validate_metric(utilization, "percent_device", "device")?;
+            }
             if d.device_key.is_empty()
                 || d.device_key.len() > 128
                 || !seen.insert(&d.device_key)
@@ -732,6 +759,9 @@ fn observe_devices(previous: &mut HashMap<String, Device>, result: &mut SourceRe
         } else {
             "source_error"
         };
+        if let Some(metric) = &mut unavailable.utilization {
+            *metric = Metric::unavailable("percent_device", "device", reason, &metric.source);
+        }
         for view in &mut unavailable.memory {
             for metric in [&mut view.total, &mut view.used, &mut view.free] {
                 *metric = Metric::unavailable("bytes", "device", reason, &metric.source);
@@ -765,6 +795,22 @@ mod tests {
         assert!(m.validate().is_err());
         m.value = None;
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn device_percent_preserves_zero_and_rejects_invalid_counters() {
+        for value in [0.0, 43.5, 100.0] {
+            let metric = Metric::device_percent(value, "test.gpu");
+            assert_eq!(metric.status, "measured");
+            assert_eq!(metric.value.as_ref().and_then(|v| v.as_f64()), Some(value));
+            assert!(metric.validate().is_ok());
+        }
+        for value in [-1.0, 100.1, f64::NAN, f64::INFINITY] {
+            let metric = Metric::device_percent(value, "test.gpu");
+            assert_eq!(metric.reason.as_deref(), Some("invalid_counter"));
+            assert!(metric.value.is_none());
+            assert!(metric.validate().is_ok());
+        }
     }
 
     #[test]
@@ -805,6 +851,7 @@ mod tests {
     fn removed_devices_are_reported_once_and_rediscovered_without_old_values() {
         let missing = Metric::unavailable("bytes", "device", "unsupported_counter", "test");
         let device = Device {
+            utilization: None,
             device_key: "gpu:1".into(),
             name: "test".into(),
             vendor: "test".into(),
@@ -854,6 +901,7 @@ mod tests {
             let mut result = SourceResult::unavailable("gpu");
             result.devices = (0..32)
                 .map(|index| Device {
+                    utilization: None,
                     device_key: format!("gpu:{batch}:{index}"),
                     name: "test".into(),
                     vendor: "unknown".into(),

@@ -1,8 +1,9 @@
 {
-  "ai": "opencode",
+  "ai": "codex",
+  "ai_skills": true,
   "feature_numbering": "sequential",
   "here": true,
-  "integration": "opencode",
-  "script": "py",
+  "integration": "codex",
+  "script": "sh",
   "speckit_version": "1.0.8"
 }

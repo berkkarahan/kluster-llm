@@ -100,6 +100,24 @@ function buildCluster(mode) {
           host_cpu: 'measured', host_memory: 'measured' }
       }
     };
+    if (mode === 'four') {
+      const metric = (value, unit = 'bytes') => ({ value, unit, scope: 'device',
+        status: value === null ? 'unsupported' : 'measured', reason: value === null ? 'unsupported_counter' : null,
+        source: 'test.driver', observed_at: new Date().toISOString() });
+      nodes[id].resources = { schema_version: 2, node_id: id, generation: 'a'.repeat(32), sequence: 1,
+        snapshot_id: `${'a'.repeat(32)}:1`, requested_at: new Date().toISOString(), completed_at: new Date().toISOString(),
+        host: { cpu: metric(10 + i, 'percent_machine'), memory: { used: metric(8 * GIB), total: metric(32 * GIB),
+          available: metric(16 * GIB), free: metric(12 * GIB) } },
+        devices: [{ device_key: `gpu:${id}`, name: i === 1 ? 'AMD Radeon RX 9070 XT' : i === 2 ? 'Apple M5 Pro' : 'Apple M1 Pro',
+          memory_kind: i === 1 ? 'dedicated' : 'shared', utilization: metric(i === 0 ? 0 : 43, 'percent_device'),
+          memory: [{ kind: i === 1 ? 'dedicated' : 'shared', backing_pool_id: i === 1 ? null : 'host:ram',
+            used: metric(i === 1 ? 15 * GIB : .5 * GIB), total: metric(i === 1 ? 16 * GIB : null),
+            free: metric(i === 1 ? GIB : null) }] }],
+        processes: [], device_discovery: { status: 'measured', reason: null },
+        totals: { physical_capacity: metric(i === 1 ? 48 * GIB : 32 * GIB) } };
+      nodes[id].resource_freshness = 'fresh';
+      nodes[id].resource_age_seconds = 1;
+    }
   });
   const relationships = ids.filter((id) => id !== 'master')
     .map((id) => ({ from_node_id: 'master', to_node_id: id, kind: 'master-worker' }));
@@ -627,6 +645,16 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       await navigate('four', 4);
       assertContained(await cardBounds(), 'four-node initial fit');
       assert.match(await evaluate("document.querySelector('.node-map-graph').textContent"), /Host CPU/);
+
+      const nativeText = await evaluate("document.querySelector('.node-map-graph').textContent");
+      assert.match(nativeText, /GPU utilization/);
+      assert.match(nativeText, /GPU shared RAM/);
+      assert.match(nativeText, /AMD Radeon RX 9070 XT/);
+      const brokenLabels = await evaluate(`(() => [...document.querySelectorAll('.node-map-card .node-metric .k')]
+        .filter(label => { const range = document.createRange(); range.selectNodeContents(label);
+          return new Set([...range.getClientRects()].map(rect => Math.round(rect.top))).size > 1; })
+        .map(label => label.textContent))()`);
+      assert.deepEqual(brokenLabels, [], 'native metric labels must remain on one line');
 
       // --- Logs: master+worker trail, refresh modes, display-only Clear ---------------------
       mode = 'four';

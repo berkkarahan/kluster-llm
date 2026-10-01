@@ -20,6 +20,8 @@ dependencies = [
     "huggingface_hub>=0.24",
     "psutil>=5.9",
     "pydantic>=2.7",
+    "cryptography>=44",
+    "websockets>=14",
 ]
 
 [project.urls]

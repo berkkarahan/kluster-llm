@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from kllm import usage
+from kllm import usage, native
 from kllm.exceptions import ExternalServiceError
 from kllm.state import ClusterState
 
@@ -108,7 +108,7 @@ class UsageOverviewService:
                 "nodes": nodes,
                 "relationships": relationships,
                 "recording": recording,
-                "resource_schema_versions": [1] if resource_schema_supported else [],
+                "resource_schema_versions": native.resource_schema_versions() if resource_schema_supported else [],
             }
         except (OSError, sqlite3.Error) as exc:
             with self._resources.lock:
@@ -140,7 +140,7 @@ class UsageOverviewService:
             return {
                 "nodes": nodes,
                 "relationships": [],
-                "resource_schema_versions": [1],
+                "resource_schema_versions": native.resource_schema_versions(),
                 "recording": {
                     "recording": "failed",
                     "error": "usage history unavailable; live resources retained",

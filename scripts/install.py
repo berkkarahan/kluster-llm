@@ -997,7 +997,7 @@ def _discard_stale_cmake_build(
     install_llama_source.discard_stale_cmake_build(source_dir, build_dir, signature)
 
 
-def build_llama_from_source(backend: str, tag: str | None = None) -> tuple[bool, str]:
+def build_llama_from_source(backend: str, tag: str | None = None, *, rpc_tcp_only: bool = False) -> tuple[bool, str]:
     """Compile the pinned llama.cpp.
 
     Returns ``(ok, https)`` where ``https`` is ``"on"`` normally and ``"off"``
@@ -1011,6 +1011,8 @@ def build_llama_from_source(backend: str, tag: str | None = None) -> tuple[bool,
     clone_or_update_llama(tag)
     build_dir = VENDOR_LLAMA / "build"
     flags = _cmake_backend_flags(backend)
+    if rpc_tcp_only:
+        flags.append("-DGGML_RPC_RDMA=OFF")
     cmake_env: dict[str, str] | None = None
     if _is_macos() and backend != "cpu":
         cmake_env = ensure_vulkan_macos()
@@ -1428,6 +1430,7 @@ def install_llama(
     force: bool = False,
     tag: str | None = None,
     expected: str | None = None,
+    rpc_tcp_only: bool = False,
 ) -> None:
     backend = detect_backend(backend)
     stamp_be = expected or stamp_backend_for_install(backend)
@@ -1442,6 +1445,7 @@ def install_llama(
         llama
         and rpc
         and not force
+        and not rpc_tcp_only
         and stamp_matches(tag, stamp_be)
         and llama_install_status(tag, expected=stamp_be)["ok"]
     ):
@@ -1454,6 +1458,12 @@ def install_llama(
         current = read_install_stamp().get("tag") or "unknown"
         print(f"Installed llama.cpp is {current}; upgrading to pin {tag}")
 
+    # Invalidate old proof before staging another runtime. This never asserts
+    # that an upstream release archive was compiled with TCP-only transport.
+    (BIN_DIR / "rpc-transport.json").unlink(missing_ok=True)
+    if rpc_tcp_only:
+        prefer_prebuilt = False
+
     ok = False
     built_from_source = False
     https_state = "on"
@@ -1462,7 +1472,7 @@ def install_llama(
     if macos_multi:
         # macOS must ship Metal + Vulkan in one binary, so there is no prebuilt
         # path: --prefer-prebuilt is rejected before reaching here.
-        ok, https_state = build_llama_from_source(backend, tag=tag)
+        ok, https_state = build_llama_from_source(backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {}))
         built_from_source = ok
         if not ok:
             # Never downgrade the advertised Metal+Vulkan contract to a
@@ -1475,14 +1485,16 @@ def install_llama(
     elif prefer_prebuilt:
         ok = install_llama_prebuilt(backend, tag=tag, stamp_backend=stamp_be)
         if not ok:
-            ok, https_state = build_llama_from_source(backend, tag=tag)
+            ok, https_state = build_llama_from_source(backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {}))
             built_from_source = ok
     else:
-        ok, https_state = build_llama_from_source(backend, tag=tag)
+        ok, https_state = build_llama_from_source(backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {}))
         built_from_source = ok
-        if not ok:
+        if not ok and not rpc_tcp_only:
             ok = install_llama_prebuilt(backend, tag=tag, stamp_backend=stamp_be)
 
+    if rpc_tcp_only and not built_from_source:
+        raise SystemExit("error: TCP-only RPC source build failed; no prebuilt fallback is eligible")
     stage_built_binaries()
     llama = _resolve_runtime_binary("llama-server")
     rpc = _resolve_runtime_binary("rpc-server")
@@ -1513,6 +1525,41 @@ def install_llama(
         stamp = read_install_stamp()
         if not stamp_matches(tag, stamp_be) or stamp.get("https") != https_state:
             write_install_stamp(tag=tag, backend=stamp_be, asset="source", https=https_state)
+    if built_from_source and llama and rpc:
+        _write_rpc_transport_evidence(tag)
+
+
+def _write_rpc_transport_evidence(tag: str) -> None:
+    """Bind CMake transport flags to the exact staged binaries and shared libs."""
+    import hashlib
+    import json
+    def sha(path: Path) -> str:
+        result = hashlib.sha256()
+        with path.open('rb') as source:
+            while chunk := source.read(1024 * 1024):
+                result.update(chunk)
+        return result.hexdigest()
+    cache_path = VENDOR_LLAMA / 'build' / 'CMakeCache.txt'
+    if not cache_path.is_file():
+        return
+    text = cache_path.read_text(encoding='utf-8')
+    rpc_flag = re.search(r'^GGML_RPC:BOOL=(ON|OFF)$', text, re.M)
+    rdma_flag = re.search(r'^GGML_RPC_RDMA:BOOL=(ON|OFF)$', text, re.M)
+    artifacts = {}
+    for name in ('llama-server', 'rpc-server'):
+        built = _find_build_tree_binary(name)
+        staged = BIN_DIR / (name + ('.exe' if _is_windows() else ''))
+        if built is None or not staged.is_file() or sha(built) != sha(staged):
+            return
+        artifacts[staged.name] = sha(staged)
+    for path in BIN_DIR.iterdir():
+        if path.is_file() and ('ggml' in path.name or 'llama' in path.name) and path.suffix in ('.dll', '.so', '.dylib'):
+            artifacts[path.name] = sha(path)
+    evidence = {'schema': 1, 'tag': tag, 'source_build': True, 'ggml_rpc': rpc_flag.group(1) if rpc_flag else 'unknown', 'ggml_rpc_rdma': rdma_flag.group(1) if rdma_flag else 'unknown', 'artifacts': artifacts}
+    destination = BIN_DIR / 'rpc-transport.json'
+    temporary = destination.with_suffix('.tmp')
+    temporary.write_text(json.dumps(evidence, sort_keys=True), encoding='utf-8')
+    os.replace(temporary, destination)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -1607,6 +1654,7 @@ def verify_llama_installed(tag: str, *, expected: str | None = None) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
     p.add_argument("--skip-ui", action="store_true", help="Skip dashboard npm build")
+    p.add_argument("--rpc-tcp-only", action="store_true", help="Source-build RPC with RDMA disabled for managed private networks")
     p.add_argument("--skip-rust", action="store_true", help="Skip maturin / Python package build")
     p.add_argument("--skip-npm-install", action="store_true", help="Skip `npm install` (build only)")
     p.add_argument("--skip-llama", action="store_true", help="Skip llama-server / rpc-server")
@@ -1752,6 +1800,7 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 tag=tag,
                 expected=expected_stamp,
+                **({"rpc_tcp_only": True} if args.rpc_tcp_only else {}),
             )
 
         stages.append(("llama.cpp (llama-server + rpc-server)", install_llama_stage))

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kllm.state import ClusterState
+from kllm.logging_control import local_status
 
 
 class HeartbeatPayloadBuilder:
@@ -61,4 +62,5 @@ class HeartbeatPayloadBuilder:
             "process_role": state.process_role,
             "process_started_at": self._process_started_at(),
             "process_start_token": self._process_start_token(),
+            "logging_ack": local_status(state),
         }

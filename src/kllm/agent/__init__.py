@@ -46,6 +46,8 @@ from kllm.hf_token import hf_token_status, save_hf_token
 from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
 from kllm import cluster_log
+from kllm import logging_control
+from kllm.agent.schemas import LoggingBody, LoggingPolicyBody
 from kllm.agent.live import (
     LiveFeed,
     SourceDenied,
@@ -168,6 +170,7 @@ from kllm.run_launch import build_master_launch
 from kllm.run_settings import PlanBody, RunBody
 from kllm import membership as membership_mod
 from kllm.state import (
+    DEFAULT_CONTROL_PORT,
     DEFAULT_RPC_PORT,
     ClusterState,
     generate_join_key,
@@ -426,6 +429,8 @@ def _tracked_process_token() -> str | None:
 
 
 def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
+    if isinstance(data.get("logging"), dict):
+        logging_control.apply(STATE, data["logging"])
     snapshot = data.get("cluster_members")
     if isinstance(snapshot, dict):
         STATE.members = dict(snapshot)
@@ -862,6 +867,53 @@ async def anthropic_messages(
         except FileNotFoundError:
             model_path = None
     return await gateway.proxy_anthropic_messages(STATE.infer_port, request, model_path=model_path)
+
+
+async def responses(request: Request, _: None = Depends(_require_api_token)) -> Any:
+    return await gateway.proxy_responses(STATE.infer_port, request)
+
+
+async def response_tokens(request: Request, _: None = Depends(_require_api_token)) -> Any:
+    return await gateway.proxy_responses(STATE.infer_port, request, count_tokens=True)
+
+
+async def inference_models(request: Request, _: None = Depends(_require_api_token)) -> Any:
+    return await gateway.served_models(STATE.infer_port, request.app.state.inference_client)
+
+
+def get_logging() -> dict[str, Any]:
+    return logging_control.overview(STATE)
+
+
+def apply_logging(body: LoggingPolicyBody, x_kllm_key: str | None = Header(default=None)) -> dict[str, Any]:
+    if STATE.role != "worker" or not STATE.join_key or x_kllm_key != STATE.join_key:
+        raise HTTPException(401, "invalid worker control key")
+    logging_control.apply(STATE, body.model_dump())
+    return logging_control.local_status(STATE)
+
+
+async def put_logging(body: LoggingBody, request: Request, _: None = Depends(_require_api_token)) -> dict[str, Any]:
+    if STATE.role != "master":
+        raise HTTPException(409, "change logging on the master dashboard")
+    policy = logging_control.change(STATE, body.enabled)
+
+    async def update(node_id: str, member: dict[str, Any]) -> None:
+        host = member.get("lan_host") or member.get("host")
+        if not host:
+            return
+        try:
+            response = await request.app.state.inference_client.put(
+                f"http://{host}:{member.get('control_port') or DEFAULT_CONTROL_PORT}/v2/node/logging",
+                json=policy, headers={"X-Kllm-Key": STATE.join_key or ""}, timeout=2)
+            if response.status_code == 200 and node_id in STATE.members and STATE.logging_generation == policy["generation"]:
+                STATE.members[node_id]["logging_ack"] = response.json()
+        except (httpx.HTTPError, ValueError):
+            pass  # Heartbeats retry the persisted desired policy.
+
+    # Existing membership traffic is the fallback if a node cannot be reached now.
+    await asyncio.gather(*(update(nid, dict(member)) for nid, member in list(STATE.members.items()) if nid != STATE.node_id))
+    STATE.save()
+    return get_logging()
 
 
 def _settings_handlers() -> SettingsHandlers:
@@ -1537,6 +1589,12 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "list_models": list_models,
     "chat_completions": chat_completions,
     "anthropic_messages": anthropic_messages,
+    "responses": responses,
+    "response_tokens": response_tokens,
+    "inference_models": inference_models,
+    "get_logging": get_logging,
+    "put_logging": put_logging,
+    "apply_logging": apply_logging,
     "search_models": search_models,
     "download_model": download_model,
     "download_progress": download_progress,

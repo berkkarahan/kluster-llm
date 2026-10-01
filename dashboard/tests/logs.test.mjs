@@ -135,6 +135,50 @@ function snapshot(lines, { cursor = `${EPOCH}:1`, reset = null, gap = false, gap
 const master = { event_id: eventId(1), ts: 1, node_id: 'master', source: 'agent', line: '<b>one</b>' };
 const worker = { event_id: eventId(2), ts: 2, node_id: 'w1', source: 'rpc', line: 'two' };
 
+test('cluster stop aborts reads, retains history, and resumes from its cursor', async () => {
+  const f = install();
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const trail = new LogTrail();
+    trail.start();
+    f.respond(f.calls[0], snapshot([master]));
+    await f.flush();
+    f.advance(1000);
+    assert.equal(f.calls.length, 2);
+    trail.setEnabled(false);
+    assert.equal(f.calls[1].opts.signal.aborted, true);
+    await f.flush();
+    f.advance(60000);
+    assert.equal(f.calls.length, 2, 'stopped page must not poll');
+    assert.deepEqual(trail.entries.map(row => row.event_id), [master.event_id]);
+    assert.equal(trail.cursor, `${EPOCH}:1`);
+    trail.setEnabled(true);
+    assert.equal(f.calls.length, 3);
+    assert.match(f.calls[2].url, /after=/);
+    f.respond(f.calls[2], snapshot([worker], { cursor: `${EPOCH}:2` }));
+    await f.flush();
+    assert.deepEqual(trail.entries.map(row => row.event_id), [master.event_id, worker.event_id]);
+    trail.stop();
+  } finally { f.restore(); }
+});
+
+test('a visit while logging is stopped reads saved history once without subscribing', async () => {
+  const f = install();
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const trail = new LogTrail();
+    trail.setEnabled(false);
+    trail.start();
+    assert.equal(f.calls.length, 1);
+    f.respond(f.calls[0], snapshot([master]));
+    await f.flush();
+    f.advance(60000);
+    assert.equal(f.calls.length, 1);
+    assert.deepEqual(trail.entries.map(row => row.event_id), [master.event_id]);
+    trail.stop();
+  } finally { f.restore(); }
+});
+
 test('US1: loads, dedupes by id, filters by node, and times out stalled reads', async () => {
   const f = install();
   try {

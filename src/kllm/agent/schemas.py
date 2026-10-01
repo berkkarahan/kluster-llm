@@ -48,6 +48,14 @@ class JoinBody(BaseModel):
     gpu_ids: list[int] | None = None
 
 
+class LoggingAcknowledgement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = Field(strict=True)
+    generation: str = Field(max_length=64)
+    supported: bool = Field(strict=True)
+    status: Literal["applied", "pending", "unsupported", "error"]
+
+
 class RegisterBody(BaseModel):
     node_id: str
     host: str
@@ -74,6 +82,16 @@ class RegisterBody(BaseModel):
     process_started_at: str | None = None
     process_start_token: str | None = None
     resource_session: dict[str, Any] | None = None
+    logging_ack: LoggingAcknowledgement | None = None
+
+
+class LoggingBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = Field(strict=True)
+
+
+class LoggingPolicyBody(LoggingBody):
+    generation: str = Field(min_length=1, max_length=64)
 
 
 class UnregisterBody(BaseModel):

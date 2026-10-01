@@ -128,6 +128,9 @@ class LogHandlers:
     def ingest(self, body: LogsIngestBody) -> dict[str, Any]:
         if self._state().role != "master":
             raise HTTPException(403, "only the master accepts log ingest")
+        self._hub.set_enabled(self._state().logging_enabled)
+        if not self._state().logging_enabled:
+            return {"ok": True, "ingested": 0, "logging_enabled": False}
         self.ensure_journal()
         events = [
             cluster_log.make_event(

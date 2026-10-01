@@ -17,7 +17,6 @@ from kllm.membership import (
 )
 from kllm.state import ClusterState
 
-
 STATUS_KEYS = (
     "role",
     "node_id",
@@ -48,8 +47,14 @@ def test_usage_identity_survives_membership_snapshot_and_disconnect():
     state = ClusterState(role="master", node_id="master")
     state.members = {
         "master": {"node_id": "master", "role": "master", "last_seen": 100},
-        "w1": {"node_id": "w1", "role": "worker", "host": "same", "process_pid": 12,
-               "process_started_at": "2026-09-28T12:00:00Z", "last_seen": 100},
+        "w1": {
+            "node_id": "w1",
+            "role": "worker",
+            "host": "same",
+            "process_pid": 12,
+            "process_started_at": "2026-09-28T12:00:00Z",
+            "last_seen": 100,
+        },
     }
     assert cluster_snapshot(state.members)["w1"]["process_started_at"] == "2026-09-28T12:00:00Z"
     assert sweep_liveness(state, now=121) == ["w1"]
@@ -61,8 +66,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.state as state_mod
     import kllm.agent as agent_mod
+    import kllm.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -108,7 +113,11 @@ def _start_master(c, agent, *, node_id="testnode"):
 
 
 def _register_worker(c, *, node_id="w1", key="secret-key"):
-    body = {**REGISTER_BODY, "node_id": node_id, "host": f"10.0.0.{node_id[-1] if node_id[-1].isdigit() else 2}"}
+    body = {
+        **REGISTER_BODY,
+        "node_id": node_id,
+        "host": f"10.0.0.{node_id[-1] if node_id[-1].isdigit() else 2}",
+    }
     return c.post("/v1/register", json=body, headers={"X-Kllm-Key": key})
 
 
@@ -187,7 +196,10 @@ def test_idle_status_clears_stale_last_plan(client):
     c, agent = client
     agent.STATE.role = "idle"
     agent.STATE.members = {}
-    agent.STATE.last_plan = {"node_ids": [agent.STATE.node_id, "phantom"], "tensor_split": [0.6, 0.4]}
+    agent.STATE.last_plan = {
+        "node_ids": [agent.STATE.node_id, "phantom"],
+        "tensor_split": [0.6, 0.4],
+    }
     agent.STATE.save()
     r = c.get("/v1/status")
     assert r.status_code == 200
@@ -233,6 +245,33 @@ def test_heartbeat_snapshot_contract(client):
     assert "last_plan" in body
     assert "apply_error" in body
     assert "apply_warning" in body
+
+
+def test_heartbeat_saves_cluster_state_once(client, monkeypatch):
+    c, agent = client
+    _start_master(c, agent)
+    _register_worker(c)
+
+    saves = 0
+    state_type = type(agent.STATE)
+    original_save = state_type.save
+
+    def count_save(state):
+        nonlocal saves
+        if state is agent.STATE:
+            saves += 1
+        original_save(state)
+
+    monkeypatch.setattr(state_type, "save", count_save)
+    response = c.post(
+        "/v1/heartbeat",
+        json=REGISTER_BODY,
+        headers={"X-Kllm-Key": "secret-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    assert saves == 1
 
 
 def test_failed_join_does_not_write_member(client):
@@ -295,6 +334,17 @@ def test_join_applies_cluster_members(client, monkeypatch):
 
         def __exit__(self, *a):
             return False
+
+        def get(self, *a, **k):
+            return type(
+                "HealthResponse",
+                (),
+                {
+                    "status_code": 200,
+                    "raise_for_status": lambda self: None,
+                    "json": lambda self: {"control_protocol": 2},
+                },
+            )()
 
         def post(self, url, *a, **k):
             assert "192.168.10.1:18765" in url
@@ -461,7 +511,12 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
         members={"master1": {"node_id": "master1", "host": "10.0.0.1", "role": "master"}},
         last_settings={"model": "toy.gguf", "context": 4096, "threads": 8},
     )
-    tight_plan = _fake_plan(node_ids=["master1"], fit_status="tight", hint="tight against budget", warning="tight against budget")
+    tight_plan = _fake_plan(
+        node_ids=["master1"],
+        fit_status="tight",
+        hint="tight against budget",
+        warning="tight against budget",
+    )
     with (
         patch("kllm.membership.execute_plan", return_value=tight_plan),
         patch("kllm.membership.native.stop_process"),
@@ -487,7 +542,9 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
         members={"master1": {"node_id": "master1", "host": "10.0.0.1", "role": "master"}},
         last_settings={"model": "toy.gguf", "context": 4096, "threads": 8},
     )
-    overflow_plan = _fake_plan(node_ids=["master1"], fit_status="overflow", hint="does not fit remaining machines")
+    overflow_plan = _fake_plan(
+        node_ids=["master1"], fit_status="overflow", hint="does not fit remaining machines"
+    )
     with (
         patch("kllm.membership.execute_plan", return_value=overflow_plan),
         patch("kllm.membership.native.stop_process") as sp,
@@ -508,16 +565,27 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
 
 def test_manual_worker_loss_does_not_relaunch_or_show_stale_devices(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
-    state = ClusterState(role="master", node_id="master1", process_pid=111, process_role="master",
-                         members={"master1": {"node_id": "master1", "role": "master"}},
-                         last_settings={"model": "toy.gguf", "node_shares": {"master1": .5, "worker": .5}},
-                         last_plan={"node_ids": ["worker", "master1"],
-                                    "device_allocations": [{"node_id": "worker"}],
-                                    "rpc_endpoints": ["worker:50052"]})
-    with (patch("kllm.membership.execute_plan", side_effect=ValueError("node shares must match members")),
-          patch("kllm.membership.native.stop_process") as stopped,
-          patch("kllm.membership.native.start_master") as started,
-          patch("kllm.membership.runtime.clear_children")):
+    state = ClusterState(
+        role="master",
+        node_id="master1",
+        process_pid=111,
+        process_role="master",
+        members={"master1": {"node_id": "master1", "role": "master"}},
+        last_settings={"model": "toy.gguf", "node_shares": {"master1": 0.5, "worker": 0.5}},
+        last_plan={
+            "node_ids": ["worker", "master1"],
+            "device_allocations": [{"node_id": "worker"}],
+            "rpc_endpoints": ["worker:50052"],
+        },
+    )
+    with (
+        patch(
+            "kllm.membership.execute_plan", side_effect=ValueError("node shares must match members")
+        ),
+        patch("kllm.membership.native.stop_process") as stopped,
+        patch("kllm.membership.native.start_master") as started,
+        patch("kllm.membership.runtime.clear_children"),
+    ):
         on_membership_shrink(state)
     stopped.assert_called_once()
     started.assert_not_called()
@@ -706,8 +774,12 @@ def test_worker_heartbeat_precedes_capacity_refresh(client):
     events: list[str] = []
 
     with (
-        patch.object(agent, "_worker_post_heartbeat", side_effect=lambda: events.append("heartbeat")),
-        patch.object(agent, "_schedule_local_capacity_refresh", side_effect=lambda: events.append("refresh")),
+        patch.object(
+            agent, "_worker_post_heartbeat", side_effect=lambda: events.append("heartbeat")
+        ),
+        patch.object(
+            agent, "_schedule_local_capacity_refresh", side_effect=lambda: events.append("refresh")
+        ),
     ):
         agent._tick_membership()
 
@@ -721,7 +793,11 @@ def test_master_liveness_sweep_does_not_wait_for_shrink_maintenance(client, monk
     _, agent = client
     agent.STATE.role = "master"
     agent.STATE.members = {
-        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        agent.STATE.node_id: {
+            "node_id": agent.STATE.node_id,
+            "role": "master",
+            "last_seen": time.time(),
+        },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
     }
     entered = threading.Event()
@@ -757,7 +833,11 @@ def test_expired_worker_disconnection_reaches_live_feed_within_25_seconds(client
     last_contact = time.time() - 22
     agent.STATE.role = "master"
     agent.STATE.members = {
-        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        agent.STATE.node_id: {
+            "node_id": agent.STATE.node_id,
+            "role": "master",
+            "last_seen": time.time(),
+        },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": last_contact},
     }
     agent.app.state.live_feed = agent._new_live_feed()
@@ -774,11 +854,15 @@ def test_failed_liveness_maintenance_does_not_strand_future_removals(client, mon
     _, agent = client
     agent.STATE.role = "master"
     agent.STATE.members = {
-        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        agent.STATE.node_id: {
+            "node_id": agent.STATE.node_id,
+            "role": "master",
+            "last_seen": time.time(),
+        },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
     }
-    monkeypatch.setattr(agent, "_membership_pending", {})
-    monkeypatch.setattr(agent, "_membership_maintenance_inflight", False)
+    monkeypatch.setattr(agent._membership_maintenance, "_pending", {})
+    monkeypatch.setattr(agent._membership_maintenance, "_inflight", False)
     first_done = threading.Event()
     second_done = threading.Event()
     count = 0
@@ -808,11 +892,15 @@ def test_liveness_maintenance_discards_obsolete_removal(client, monkeypatch, tra
     _, agent = client
     agent.STATE.role = "master"
     agent.STATE.members = {
-        agent.STATE.node_id: {"node_id": agent.STATE.node_id, "role": "master", "last_seen": time.time()},
+        agent.STATE.node_id: {
+            "node_id": agent.STATE.node_id,
+            "role": "master",
+            "last_seen": time.time(),
+        },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
     }
-    monkeypatch.setattr(agent, "_membership_pending", {})
-    monkeypatch.setattr(agent, "_membership_maintenance_inflight", False)
+    monkeypatch.setattr(agent._membership_maintenance, "_pending", {})
+    monkeypatch.setattr(agent._membership_maintenance, "_inflight", False)
     entered = threading.Event()
     release = threading.Event()
     end_calls = []
@@ -828,21 +916,27 @@ def test_liveness_maintenance_discards_obsolete_removal(client, monkeypatch, tra
         return Store()
 
     monkeypatch.setattr(agent, "_usage_store", waiting_store)
-    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", lambda _state: replans.append(True))
+    monkeypatch.setattr(
+        agent.membership_mod, "on_membership_shrink", lambda _state: replans.append(True)
+    )
     try:
         assert agent._sync_master_liveness() == ["w1"]
         assert entered.wait(2)
         if transition == "rejoin":
-            agent.STATE.members["w1"] = {"node_id": "w1", "role": "worker", "last_seen": time.time()}
+            agent.STATE.members["w1"] = {
+                "node_id": "w1",
+                "role": "worker",
+                "last_seen": time.time(),
+            }
         else:
             agent.STATE.role = "idle"
     finally:
         release.set()
 
     deadline = time.monotonic() + 2
-    while agent._membership_maintenance_inflight and time.monotonic() < deadline:
+    while agent._membership_maintenance._inflight and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert not agent._membership_maintenance_inflight
+    assert not agent._membership_maintenance._inflight
     assert end_calls == []
     assert replans == []
 
@@ -858,7 +952,7 @@ def test_capacity_refresh_allows_only_one_probe(client):
         def start(self):
             started.append(self.target)
 
-    agent._capacity_refresh_inflight = False
+    assert not agent._capacity_refresh_scheduler.inflight
     with patch.object(agent.threading, "Thread", FakeThread):
         agent._schedule_local_capacity_refresh()
         agent._schedule_local_capacity_refresh()
@@ -867,7 +961,7 @@ def test_capacity_refresh_allows_only_one_probe(client):
     # Finish the captured background task so it resets module state for tests.
     with patch.object(agent, "_refresh_local_capacity"):
         started[0]()
-    assert not agent._capacity_refresh_inflight
+    assert not agent._capacity_refresh_scheduler.inflight
 
 
 def test_worker_accepted_false_local_leave(client):

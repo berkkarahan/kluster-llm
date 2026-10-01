@@ -38,7 +38,7 @@ export type DownloadProgress = {
   pct: number;
 };
 
-/** Live download job view from /v1/models/download-progress. */
+/** Live download job view from /v2/models/downloads/current. */
 export type DownloadJob = {
   state: 'idle' | 'running' | 'complete' | 'error' | 'cancelled' | 'unknown';
   filename?: string;
@@ -55,7 +55,7 @@ export type DownloadJob = {
   finished_at?: string | null;
 };
 
-/** Live inference load view from /v1/load-progress. */
+/** Live inference load view from /v2/inference/load. */
 export type LoadProgress = {
   phase: 'starting' | 'loading' | 'ready' | 'error' | 'cancelled' | 'unknown' | null;
   model: string | null;
@@ -84,7 +84,7 @@ export type InferenceActivity = {
   detail?: string | null;
 };
 
-/** Per-model run settings as stored by PUT /v1/model-settings/{model}. */
+/** Per-model run settings as stored by PUT /v2/inference/model-settings/{model}. */
 export type ParameterSet = Record<string, unknown>;
 
 export type ModelSettingsDoc = {
@@ -359,7 +359,7 @@ export type LogSource = 'agent' | 'llama' | 'rpc' | 'unknown';
 /** Producer tag. `ui` is the control application, `inference` is model serving, `unclassified` is an unknown producer. */
 export type LogTag = 'ui' | 'inference' | 'unclassified';
 
-/** One recorded cluster log line from GET /v1/logs. */
+/** One recorded cluster log line from GET /v2/logs. */
 export type LogEntry = {
   event_id: string;
   ts: number;

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
 
 from kllm.placement import MIB, plan_devices
+from kllm.core.placement_models import ModelLayout, PlacementSettings
 from kllm.run_planning import cluster_nodes
 from kllm.run_planning import resolve_launch_settings
 from kllm.run_settings import RunBody
@@ -25,7 +25,7 @@ def _layout():
 
 
 def _settings():
-    return resolve_launch_settings(RunBody(model="test.gguf"))
+    return resolve_launch_settings(RunBody(model="test.gguf")).to_mapping()
 
 
 def test_cluster_nodes_synthesizes_unified_vulkan_device():
@@ -60,8 +60,8 @@ def test_cluster_nodes_synthesizes_unified_vulkan_device():
         },
     }
     nodes = cluster_nodes(members)
-    assert nodes[0]["devices"][0]["device"] == "Vulkan0"
-    assert nodes[1]["is_master"] is True
+    assert nodes[0].devices[0].device == "Vulkan0"
+    assert nodes[1].is_master is True
 
 
 def test_plan_with_healed_master_and_mixed_workers():
@@ -111,18 +111,18 @@ def test_plan_with_healed_master_and_mixed_workers():
     }
     nodes = cluster_nodes(members)
     result = plan_devices(
-        nodes,
+        tuple(nodes),
         500 * MIB,
-        _layout(),
-        _settings(),
+        ModelLayout.from_mapping(_layout()),
+        PlacementSettings.from_mapping(_settings()),
         context=512,
         headroom=1,
         device="gpu",
         vram_weight=0.6,
         latency_weight=0.4,
     )
-    assert result["fit_status"] != "overflow"
-    assert any(n["is_master"] for n in nodes)
+    assert result.fit_status != "overflow"
+    assert any(n.is_master for n in nodes)
 
 
 def test_ensure_master_member_repairs_missing_row(tmp_path, monkeypatch):

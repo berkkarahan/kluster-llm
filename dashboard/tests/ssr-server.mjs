@@ -9,7 +9,7 @@ export function createSsrServer() {
     root: process.cwd(),
     plugins: [svelte({ preprocess: vitePreprocess() })],
     resolve: { alias: { '$lib': resolve(process.cwd(), 'src/lib') } },
-    server: { middlewareMode: true, hmr: false, watch: null },
+    server: { middlewareMode: true, hmr: false, ws: false, watch: null },
     appType: 'custom'
   });
 }

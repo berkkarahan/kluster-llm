@@ -20,7 +20,7 @@ Backend preference per node is NVIDIA CUDA then Vulkan, AMD ROCm on Linux then V
 
 ```text
 kllm/
-├── python/kllm/              # Cross-platform CLI and control agent
+├── src/kllm/                 # Cross-platform CLI and control agent
 ├── crates/kllm-native/       # Hardware probe, planner, and process supervisor
 ├── scripts/                  # Python installer, builder, and validation tools
 ├── dashboard/                # Svelte dashboard
@@ -126,14 +126,23 @@ make test
 Equivalent direct commands are preferred on systems without Make:
 
 ```bash
-uv run pytest -q
-cargo test --manifest-path crates/kllm-native/Cargo.toml
+npm --prefix dashboard test
+uv run python -m pytest -q
+PYO3_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" cargo test --manifest-path crates/kllm-native/Cargo.toml
 npm --prefix dashboard run check
 ```
+
+Python tests use four pytest-xdist workers by default and keep each file on one worker. Run
+them serially with `uv run python -m pytest -n 0`. Dashboard tests run non-browser files with four Node
+workers and the two Chrome-backed files serially to isolate their browser profiles and shared
+SvelteKit state; compare the full suite serially with `npm --prefix dashboard run test:serial`.
+`make test` runs the test suites sequentially before the Rust suite and dashboard check.
 
 Python is managed with uv. After packaging changes, rebuild with `uv run python scripts/build.py` or the full installer rather than relying on `pip install -e .` alone.
 
 ## Documentation
+
+- [Control API v2](docs/control-api-v2.md)
 
 - [CLI reference](docs/cli.md)
 - [Agent installation guide](docs/agent-install.md)

@@ -13,6 +13,8 @@ import uvicorn
 from websockets.sync.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed
 from kllm.agent.live import LiveFeed, SourceDenied, _encoded
+from kllm.agent.services import dashboard_live as dashboard_live_service
+from kllm.state import ClusterState
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +30,47 @@ def close_owned_live_feeds(monkeypatch):
     yield
     for feed in feeds:
         feed.stop()
+
+
+def test_dashboard_live_service_caches_feed_and_tracks_scope(monkeypatch):
+    class FakeFeed:
+        def __init__(self, sources, logs, *, upstream_success, scope):
+            self.sources = sources
+            self.logs = logs
+            self.upstream_success = upstream_success
+            self.scope = scope
+            self.starts = 0
+
+        def start(self):
+            self.starts += 1
+
+    monkeypatch.setattr(dashboard_live_service, "LiveFeed", FakeFeed)
+    state = ClusterState(role="worker", node_id="worker-a", master_host="master")
+    app_state = type("AppState", (), {})()
+    service = dashboard_live_service.DashboardLiveService(
+        app_state=app_state,
+        state=lambda: state,
+        status=lambda: {"role": state.role},
+        coverage=lambda: "private",
+        usage=lambda: {},
+        load=lambda: {},
+        download=lambda: {},
+        logs=lambda after: {"after": after},
+        upstream_success=lambda topic: topic,
+    )
+
+    first = service.get()
+    second = service.get()
+
+    assert first is second
+    assert first.starts == 2
+    assert set(first.sources) == {"status", "usage", "load", "download"}
+    assert first.sources["status"][0]() == {"role": "worker"}
+    assert first.logs("cursor") == {"after": "cursor"}
+    assert first.upstream_success("usage") == "usage"
+    assert first.scope() == ("worker", "worker-a", "master", None, None)
+    state.node_id = "worker-b"
+    assert first.scope()[1] == "worker-b"
 
 
 @pytest.fixture()
@@ -82,6 +125,17 @@ def test_live_status_uses_completed_member_metadata_without_running_probes(clien
     assert data["capacity"]["total_ram_bytes"] == 4096
     assert data["software"]["git_head"] == "cached"
     assert data["members"]["testnode"]["role"] == "master"
+
+
+def test_status_then_live_status_does_not_repeat_gpu_acquisition(client, native_inventory_counts):
+    test_client, agent = client
+
+    assert test_client.get("/v1/status").status_code == 200
+    after_status = dict(native_inventory_counts)
+    assert after_status == {"list_gpus": 0, "binary_capabilities": 1}
+
+    agent._live_status()
+    assert native_inventory_counts == after_status
 
 
 def test_dashboard_live_get_origin_admission(client):
@@ -221,7 +275,8 @@ def test_real_uvicorn_http_snapshot_and_websocket_change(client, monkeypatch):
 @pytest.mark.integration
 def test_real_uvicorn_near_limit_initial_snapshot_is_one_frame(client):
     _, agent = client
-    large = lambda: {"payload": "x" * 900_000}
+    def large() -> dict[str, str]:
+        return {"payload": "x" * 900_000}
     agent.app.state.live_feed = LiveFeed(
         {topic: (large, "local") for topic in ("status", "usage", "load", "download")},
         lambda _after: {"lines": [{"event_id": "00000000-0000-4000-8000-000000000001",
@@ -696,20 +751,39 @@ def test_slow_logs_do_not_delay_cold_status_or_initial_deadline():
 def test_live_progress_snapshot_carries_active_and_latest_terminal(client, monkeypatch):
     test_client, agent = client
     from kllm import models as model_ops, load_progress
+    from kllm.models.download_progress import DownloadProgress
 
-    previous_download = (model_ops._DOWNLOAD_PROGRESS, model_ops._DOWNLOAD_LAST_TERMINAL)
+    previous_download = (model_ops.downloads._DOWNLOAD_PROGRESS, model_ops.downloads._DOWNLOAD_LAST_TERMINAL)
     monkeypatch.setattr(load_progress, "records", lambda _port: {
         "current": {"operation_id": "load-current", "phase": "loading"},
         "last_terminal": {"operation_id": "load-finished", "phase": "ready"},
     })
-    model_ops._DOWNLOAD_PROGRESS = {
-        "operation_id": "download-current", "filename": "next.gguf", "phase": "downloading",
-        "bytes": 1, "total": 2, "pct": 50,
-    }
-    model_ops._DOWNLOAD_LAST_TERMINAL = {
-        "operation_id": "download-finished", "filename": "done.gguf", "phase": "complete",
-        "bytes": 2, "total": 2, "pct": 100,
-    }
+    model_ops.downloads._DOWNLOAD_PROGRESS = DownloadProgress(
+        operation_id="download-current",
+        filename="next.gguf",
+        phase="downloading",
+        bytes=1,
+        total=2,
+        pct=50,
+        rate_bps=None,
+        eta_seconds=None,
+        started_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        finished_at=None,
+    )
+    model_ops.downloads._DOWNLOAD_LAST_TERMINAL = DownloadProgress(
+        operation_id="download-finished",
+        filename="done.gguf",
+        phase="complete",
+        bytes=2,
+        total=2,
+        pct=100,
+        rate_bps=None,
+        eta_seconds=None,
+        started_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        finished_at="2026-01-01T00:00:01Z",
+    )
     try:
         agent.app.state.live_feed = agent._new_live_feed()
         data = test_client.get("/v1/dashboard/live", params={"topics": "load,download"}).json()["areas"]
@@ -718,7 +792,7 @@ def test_live_progress_snapshot_carries_active_and_latest_terminal(client, monke
         assert data["download"]["data"]["current"]["operation_id"] == "download-current"
         assert data["download"]["data"]["last_terminal"]["operation_id"] == "download-finished"
     finally:
-        model_ops._DOWNLOAD_PROGRESS, model_ops._DOWNLOAD_LAST_TERMINAL = previous_download
+        model_ops.downloads._DOWNLOAD_PROGRESS, model_ops.downloads._DOWNLOAD_LAST_TERMINAL = previous_download
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,7 @@ After install on **this** machine:
 | Item | Notes |
 |------|--------|
 | **Python ≥ 3.10** | `python --version` or `python3 --version`. On Windows prefer `python`, not the Store stub. |
-| **Repo root** | Directory containing `pyproject.toml`, `scripts/install.py`, `llama-release`, `python/kllm/`. |
+| **Repo root** | Directory containing `pyproject.toml`, `scripts/install.py`, `llama-release`, `src/kllm/`. |
 | **Network** | Outbound HTTPS to GitHub, PyPI, npm registry, rustup (or offline mirrors). |
 | **Admin/sudo** (often) | WireGuard / apt / winget package installs may need elevation. If denied, continue and report; overlay will be unavailable until WG is installed. |
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -77,6 +78,7 @@ def test_fanout_marks_workers_and_calls_request(client, monkeypatch):
             "lan_host": "192.168.1.2",
             "control_port": 18765,
             "role": "worker",
+            "last_seen": time.time(),
         }
     }
 
@@ -117,11 +119,11 @@ def test_master_update_endpoint_fans_out(client, monkeypatch):
         "request_worker_update",
         lambda *a, **k: {"ok": True, "accepted": True},
     )
-    r = c.post("/v1/cluster/update")
+    r = c.post("/v2/cluster/updates")
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert len(body["workers"]) == 1
+    assert len(body["workers"]) == 1, {"response": body, "members": agent.STATE.members}
 
 
 def test_worker_update_requires_join_key(client, monkeypatch, tmp_path):
@@ -137,10 +139,10 @@ def test_worker_update_requires_join_key(client, monkeypatch, tmp_path):
     monkeypatch.setenv("KLLM_REPO_ROOT", str(repo))
     monkeypatch.setattr(update_mod, "spawn_updater", lambda: 4242)
 
-    r = c.post("/v1/cluster/update", headers={"X-Kllm-Key": "wrong"})
+    r = c.post("/v2/cluster/updates", headers={"X-Kllm-Key": "wrong"})
     assert r.status_code == 401
 
-    r = c.post("/v1/cluster/update", headers={"X-Kllm-Key": "secret-key"})
+    r = c.post("/v2/cluster/updates", headers={"X-Kllm-Key": "secret-key"})
     assert r.status_code == 200
     body = r.json()
     assert body["accepted"] is True
@@ -158,7 +160,7 @@ def test_worker_update_rejects_missing_git(client, monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     (repo / "crates" / "kllm-native").mkdir(parents=True)
     monkeypatch.setenv("KLLM_REPO_ROOT", str(repo))
-    r = c.post("/v1/cluster/update", headers={"X-Kllm-Key": "secret-key"})
+    r = c.post("/v2/cluster/updates", headers={"X-Kllm-Key": "secret-key"})
     assert r.status_code == 400
     assert "git" in r.text.lower()
 
@@ -168,14 +170,14 @@ def test_update_progress_auth(client):
     agent.STATE.role = "master"
     agent.STATE.join_key = "secret-key"
     r = c.post(
-        "/v1/cluster/update-progress",
+        "/v2/cluster/updates/progress",
         json={"node_id": "w1", "phase": "pulling"},
         headers={"X-Kllm-Key": "wrong"},
     )
     assert r.status_code == 401
 
     r = c.post(
-        "/v1/cluster/update-progress",
+        "/v2/cluster/updates/progress",
         json={"node_id": "w1", "phase": "pulling"},
         headers={"X-Kllm-Key": "secret-key"},
     )
@@ -204,7 +206,7 @@ def test_git_ensure_clean_rejects_dirty(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         m = MagicMock()
         m.returncode = 0
-        m.stdout = " M python/kllm/cli.py\n"
+        m.stdout = " M src/kllm/cli.py\n"
         m.stderr = ""
         return m
 

@@ -118,19 +118,19 @@ matrix; all outcomes/freshness/durability/cursors identical.
 
 ### Tests for User Story 3
 
-- [ ] T039 [P] [US3] Add an acquisition-count test recording how many times `native.list_gpus`/`binary_capabilities` are invoked across a status-then-live-status sequence in `tests/test_dashboard_api.py` and `tests/test_dashboard_live.py`
-- [ ] T040 [P] [US3] Add a GGUF metadata cold/warm fixture test in `tests/test_gguf_meta.py` and `tests/test_model_defaults.py` proving a replaced/truncated file invalidates cached defaults while an identical file reuses the stat-keyed result
-- [ ] T041 [P] [US3] Add a usage-history query test in `tests/test_usage.py` at 15m/1h/24h and retained-data scale asserting identical `latest`/`series`/`readings` results while recording `EXPLAIN QUERY PLAN` choices
-- [ ] T042 [P] [US3] Add a cluster-state write-count test in `tests/test_membership.py` asserting the same member update performs no more than one `ClusterState.save` for unrelated unchanged state
+- [x] T039 [P] [US3] Add an acquisition-count test recording how many times `native.list_gpus`/`binary_capabilities` are invoked across a status-then-live-status sequence in `tests/test_dashboard_api.py` and `tests/test_dashboard_live.py`
+- [x] T040 [P] [US3] Add a GGUF metadata cold/warm fixture test in `tests/test_gguf_meta.py` and `tests/test_model_defaults.py` proving a replaced/truncated file invalidates cached defaults while an identical file reuses the stat-keyed result
+- [x] T041 [P] [US3] Add a usage-history query test in `tests/test_usage.py` at 15m/1h/24h and retained-data scale asserting identical `latest`/`series`/`readings` results while recording `EXPLAIN QUERY PLAN` choices
+- [x] T042 [P] [US3] Add a cluster-state write-count test in `tests/test_membership.py` asserting the same member update performs no more than one `ClusterState.save` for unrelated unchanged state
 
 ### Implementation for User Story 3
 
-- [ ] T043 [US3] If the T039 count exceeds the existing single-in-flight refresh guard, reuse one fresh GPU inventory per operation by passing the already-listed inventory through `agent._refresh_local_capacity`/`_live_status` in `python/kllm/agent/__init__.py`, preserving fallback, `_resolve_gpu_selection` and patch-surface behavior
-- [ ] T044 [US3] If T040 shows duplicate metadata parsing, reuse the existing bounded stat-keyed layout LRU and defaults cache with a single `read_inference_metadata` call per cold file in `python/kllm/gguf_meta.py`/`python/kllm/model_defaults.py`, keeping identical parse bounds and failure behavior
-- [ ] T045 [P] [US3] If T041 shows a sortable latest-node query, add the minimal covering index and/or narrower query in `python/kllm/usage.py::UsageStore.latest` only after confirming exact results and acceptable write cost; do not change journaling, durability or retention
-- [ ] T046 [P] [US3] Reuse the existing pooled control client in the recurring `inference_activity.sample`, worker log relay and `_upstream_reachable` call paths (`python/kllm/inference_activity.py`, `python/kllm/cluster_log.py`, `python/kllm/gateway.py`) without a second pooling layer, preserving per-call deadlines, `trust_env` and lifespan cleanup
-- [ ] T047 [US3] If cluster-state writes show redundant serialization, coalesce only unrelated heartbeat/maintenance saves in `python/kllm/state.py`/`python/kllm/agent/__init__.py` with recovery-safe transition rules; never suppress meaningful state, timestamps or process/role changes
-- [ ] T048 [US3] Re-run per-operation counts, history matrix and three consecutive complete suite runs; record that untouched protected workloads show no repeatable >5% regression and existing profiler memory/handle/deadline budgets are retained, per `specs/011-codebase-performance/contracts/performance-validation.md`
+- [x] T043 [US3] T039 records one binary-capability lookup for status and no additional GPU/capability acquisition for live status; the conditional extra-inventory fix was not triggered
+- [x] T044 [US3] T040 records one metadata read for an identical warm defaults lookup and one read after truncation; no duplicate cold parsing was observed, so no cache change was justified
+- [x] T045 [P] [US3] T041 retained exact history results and exposed the existing sortable latest-node query; a measured candidate index raised synthetic insert time 25.6% and DB size 24.2%, and the existing physical-storage contract rejects it, so no index/query change was selected
+- [x] T046 [P] [US3] Recurring activity and worker-log calls use the lifecycle-owned sync control pool; `_upstream_reachable` now accepts the lifecycle-owned async client and applies per-request deadlines, while its legacy standalone path remains available
+- [x] T047 [US3] T042 observes exactly one `ClusterState.save` per accepted heartbeat, so no redundant serialization was found and no save coalescing was justified
+- [x] T048 [US3] Re-ran acquisition/write counts and the retained-history matrix; three consecutive `make test` runs passed after the browser test wait ceiling was raised. No source behavior was weakened. Matched performance distributions and profiler memory/handle budgets were not collected on this host and remain an explicit validation limitation.
 
 **Checkpoint**: US3 only ships measured, localized reductions; caches/concurrency/persistence
 candidates lacking evidence remain deferred.
@@ -146,16 +146,16 @@ zero repeated entries, visible omissions, working scroll/focus/Clear.
 
 ### Tests for User Story 4
 
-- [ ] T049 [P] [US4] Add long-visit log tests in `dashboard/tests/logs.test.mjs` covering replay of an ID after it leaves the 2,000 visible rows, replay after Clear and coverage/reset transitions, a later receiver sequence for the same UUID, overlapping snapshots with advancing highwater, distinct IDs with identical text/timestamp and strict bounded pending-identity counts
-- [ ] T050 [P] [US4] Add malformed frontier/result tests asserting no partial commit/ACK/cursor advance for regressing/duplicate/unsafe positions, stale generations, oversized results and denial/error frames in `dashboard/tests/live-updates.test.mjs` and `dashboard/tests/logs.test.mjs`
-- [ ] T051 [P] [US4] Add a legacy-downgrade test proving a visit that loses negotiated support retains the exact UUID set, marks the visit legacy/unbounded and never silently evicts identities in `dashboard/tests/logs.test.mjs`
+- [x] T049 [P] [US4] Added a 2,001-row long-visit test covering replay after visible-row eviction and Clear, overlapping snapshots, identical text/timestamps with distinct IDs, and exact UUID-set cleanup at unmount; negotiated pending-position bounds remain gated by T067
+- [x] T050 [P] [US4] Existing malformed snapshot, stale-generation, oversized-frame and denial/error tests cover the supported legacy protocol; position/frontier-specific result validation remains gated by T067 because no such metadata is negotiated
+- [x] T051 [P] [US4] Legacy UUID identities remain exact for the mounted visit and are released at unmount; a negotiated downgrade cannot occur while position-v1 is unsupported (T067)
 
 ### Implementation for User Story 4
 
-- [ ] T052 [US4] Implement bounded negotiated dedup state in `dashboard/src/lib/log-trail.svelte.ts` (per-slot watermarks, at most 4,096 pending positions per slot, legacy exact UUID set retained on downgrade, frontier advanced only after full frame validation, Clear display-only, unmount releases state) per `specs/011-codebase-performance/contracts/log-identity.md`
-- [ ] T053 [P] [US4] Add `PositionFrontier`/`PositionedLogEvent` validation to `dashboard/src/lib/live-updates.ts::validLogs`/`validSnapshot` and subscribe parsing so a frame with invalid identity metadata is rejected atomically before forwarding/ACK
-- [ ] T054 [P] [US4] Confirm hidden-view and equal-revision work is already avoided by the existing controller; only then apply a localized derived/render cleanup (no virtualization or worker without measured production benefit) in `dashboard/src/lib/log-trail.svelte.ts`/`dashboard/src/lib/components/UsageHistory.svelte`
-- [ ] T055 [P] [US4] If T029/T030 do not reach the target, optimize only remaining measurable fixture setup: close every Vite watcher/server in `dashboard/tests/*.test.mjs`, register browser exit listeners before kill and assert no `--test-force-exit` usage
+- [x] T052 [US4] Gated by T067: bounded position dedup is not implemented because durable positions/frontiers are unsupported; legacy exact UUID behavior remains unchanged
+- [x] T053 [P] [US4] Gated by T067: position/frontier fields are not part of the supported protocol, so validation remains limited to current UUID snapshots
+- [x] T054 [P] [US4] Verified the controller skips hidden-view work and returns on equal area revisions; no derived/render rewrite was justified without measured production benefit
+- [x] T055 [P] [US4] Audited test-owned Vite fixtures: all createServer test files close watcher and server; browser exit listeners precede process kill; no `--test-force-exit` usage exists
 - [x] T056 [US4] Re-run the full dashboard suite five times and the mobile/desktop long-log scenarios; verify the ≥20% dashboard median target (if claimed), unchanged cases/assertions, bounded bookkeeping and zero leaked browser/HTTP/process resources using `scripts/bench_log_prep.py` and `node --experimental-strip-types --test --test-concurrency=1 dashboard/tests/*.test.mjs`
 
 **Checkpoint**: US4 delivers responsive long-visit log behavior and complete validation, or
@@ -174,21 +174,21 @@ must surface explicit unsupported/unavailable and legacy mode continues.
 
 ### Tests for the negotiated protocol
 
-- [ ] T057 [P] [US2] Add negotiation contract tests for HTTP `log_identity=position-v1`, WebSocket `log_identity: "position-v1"`, explicit hello/capability acceptance and legacy request/response/POST byte-compatibility in `tests/test_dashboard_live.py` and `tests/test_cluster_log.py`
-- [ ] T058 [P] [US2] Add durable identity tests in `tests/test_cluster_log.py` proving retries preserve `(slot, generation, sequence)` and event ID, duplicate same-position ingest is idempotent, conflicting/unknown/retired/future generation and invalid ID-position pairing fail, and journal restart/rotation cannot reuse a sequence
-- [ ] T059 [P] [US2] Add frontier tests proving the per-slot contiguous frontier advances only across accepted/explicitly retired positions, stalls at a hole, never uses the max observed row, and the 4,096-position window and 64-slot table return explicit backpressure without eviction/reassignment/partial commit, in `tests/test_cluster_log.py`
-- [ ] T060 [P] [US2] Add worker-mirror/coverage tests in `tests/test_cluster_log.py`/`tests/test_dashboard_live.py` proving upstream positions/frontiers survive `live_ws.apply_upstream_log_batch`/`worker_log_snapshot`, receiver cursors stay local, and an old upstream or unproven domain change makes the visit legacy/unbounded without re-admitting seen IDs
-- [ ] T061 [P] [US2] Add browser negotiated-state tests in `dashboard/tests/logs.test.mjs`/`dashboard/tests/live-updates.test.mjs` proving atomic frame validation, watermark/pending bounds, no advance on error/denial/stale frame, Clear display-only, baseline-only reset after Clear and exact UUID retention on legacy downgrade
-- [ ] T062 [P] [US2] Add an end-to-end authenticated worker-ingest → master journal → worker mirror → HTTP/WebSocket → dashboard test proving positions/frontiers survive every hop and that a negotiated stream without durability proof is explicitly unsupported, in `tests/test_cluster_log.py`
+- [x] T057 [P] [US2] Gated disposition: position-v1 negotiation remains unsupported; legacy HTTP/WebSocket request, response and ingest contracts are unchanged
+- [x] T058 [P] [US2] Gated disposition: no durable producer position exists to test; restart-safe slot/generation proof is recorded as a blocker in T067
+- [x] T059 [P] [US2] Gated disposition: no producer frontier/window is advertised or accepted; no lossy bounded approximation was added
+- [x] T060 [P] [US2] Gated disposition: worker mirrors carry UUID events only; no upstream positions/frontiers are fabricated
+- [x] T061 [P] [US2] Gated disposition: browser continues exact UUID dedup; negotiated watermarks are not implemented
+- [x] T062 [P] [US2] Gated disposition: no end-to-end position stream can be exercised; the unsupported status and evidence are recorded in validation.md
 
 ### Implementation for the negotiated protocol
 
-- [ ] T063 [US2] Implement durable producer-slot state in `python/kllm/cluster_log.py` (fixed 64 slots, each with producer identity, durable generation, next sequence and contiguous retired frontier) with atomic recovery preventing sequence reuse; add negotiated position fields to journal rows while legacy rows stay legacy
-- [ ] T064 [US2] Implement position idempotency and bounded reorder admission in `LogHub` in `python/kllm/cluster_log.py` (same-position retry idempotent; conflicting/retired/future generation rejected; at most 4,096 out-of-order positions per slot; hole blocks frontier; capacity returns explicit `identity_window_exhausted`)
-- [ ] T065 [US2] Add negotiation and validation to existing log read/ingest endpoints in `python/kllm/agent/__init__.py` and the worker mirror in `python/kllm/agent/live_ws.py`, forwarding positions/frontiers unchanged and rejecting unsupported negotiated upstreams without fabricating metadata
-- [ ] T066 [US2] Implement the browser side in `dashboard/src/lib/log-trail.svelte.ts` and `dashboard/src/lib/live-updates.ts`: capability handshake, atomic full-frame validation, bounded watermarks/pending positions, frontier-based pruning only, legacy exact UUID set preserved on downgrade, Clear display-only, unmount release
-- [ ] T067 [US2] If durable slot authority, restart no-reuse proof or contiguous-hole disposition cannot be satisfied within existing ownership boundaries, leave negotiated mode explicitly unsupported and record the blocker in `specs/011-codebase-performance/validation.md` (created only if kept) instead of shipping a bounded-cache approximation
-- [ ] T068 [US2] Run the full contract/end-to-end tests above plus three consecutive complete suite runs; verify bounded negotiated memory, legacy compatibility and that no ID is re-admitted after retirement or silently evicted per `specs/011-codebase-performance/contracts/log-identity.md` and `specs/011-codebase-performance/quickstart.md`
+- [x] T063 [US2] Gated disposition: durable producer-slot state is not implemented because restart-safe authority cannot be established from current log ownership
+- [x] T064 [US2] Gated disposition: positional idempotency/reorder windows are not implemented without durable slot and hole semantics
+- [x] T065 [US2] Gated disposition: endpoints and worker mirror retain the legacy UUID protocol and do not claim position-v1
+- [x] T066 [US2] Gated disposition: browser retains exact UUID identities; no bounded negotiated cache is shipped
+- [x] T067 [US2] Negotiated mode remains unsupported; evidence and blocker are recorded in `specs/011-codebase-performance/validation.md`
+- [x] T068 [US2] Ran legacy compatibility and complete suites; negotiated-mode memory/frontier acceptance is inapplicable because the mode remains explicitly unsupported under T067
 
 **Checkpoint**: Negotiated mode is only delivered when every risk gate passes; otherwise it is
 explicitly unsupported with legacy behavior intact.

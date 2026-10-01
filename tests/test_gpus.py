@@ -4,8 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 import typer
+from fastapi.testclient import TestClient
+
+from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.core.gpu_selection import GpuDeviceInput, GpuSelection
 
 
 @pytest.fixture()
@@ -13,8 +16,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.state as state_mod
     import kllm.agent as agent_mod
+    import kllm.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -407,6 +410,9 @@ def test_join_passes_gpu_env(client, monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def get(self, *a, **k):
+            return type("HealthResponse", (), {"status_code": 200, "raise_for_status": lambda self: None, "json": lambda self: {"control_protocol": 2}})()
+
         def post(self, url, *a, **k):
             captured["payload"] = k.get("json")
             return FakeResp()
@@ -520,10 +526,18 @@ def test_refresh_local_capacity_updates_member_vram(client):
             "total_ram_bytes": 32 * 1024**3, "available_ram_bytes": 8 * 1024**3,
             "requested_backend": None, "unified_memory": False, "binary_version": "v",
         }),
-        patch.object(agent, "_resolve_gpu_selection", return_value={
-            "backend": "vulkan", "gpu_ids": [0], "vram_bytes": LLAMA_VRAM,
-            "gpus": [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM}],
-        }) as resolve,
+        patch.object(
+            agent,
+            "_resolve_gpu_selection",
+            return_value=ResolvedGpuSelection(
+                GpuSelection((0,), "vulkan", LLAMA_VRAM),
+                (
+                    GpuDeviceInput(
+                        index=0, name="AMD Radeon RX 9070 XT", vram_bytes=LLAMA_VRAM
+                    ),
+                ),
+            ),
+        ) as resolve,
     ):
         agent._refresh_local_capacity()
     assert resolve.call_args.kwargs["listed"]["binary_version"] == "v"

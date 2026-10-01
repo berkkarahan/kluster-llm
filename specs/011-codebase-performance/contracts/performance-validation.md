@@ -63,9 +63,14 @@ uv run pytest -q tests/test_dashboard_live.py tests/test_cluster_log.py tests/te
 node --experimental-strip-types --test --test-concurrency=1 dashboard/tests/logs.test.mjs dashboard/tests/live-updates.test.mjs
 ```
 
-No new worker/concurrency dependency is selected. If separately approved after serial
-optimization, compare serial and 2/4 workers with process/state/port isolation and three
-repeat complete runs; keep serial complete validation.
+Python uses pytest-xdist with four workers and file-level distribution by default; use
+`uv run python -m pytest -n 0` for a serial comparison. Dashboard uses Node's built-in test runner with
+four concurrent test files by default; use `npm --prefix dashboard run test:serial` for a
+serial comparison. Dashboard non-browser files run with four workers, while the Chrome-backed
+files run serially to isolate browser profiles and shared SvelteKit state. Test-created Vite
+servers disable the unused WebSocket listener. Compare serial and parallel runs on the same
+checkout with five complete repetitions and preserve all cases, skips, and browser checks;
+keep the root `make test` steps sequential.
 
 ## Lifecycle and boundary matrix
 

@@ -18,8 +18,8 @@ is implemented or that targets have passed. Run from repository root. Follow
 ## Complete regression commands
 
 ```powershell
-uv run pytest -q
-node --experimental-strip-types --test --test-concurrency=1 "dashboard/tests/*.test.mjs"
+npm --prefix dashboard test
+uv run python -m pytest -q
 cargo test --manifest-path crates/kllm-native/Cargo.toml
 npm --prefix dashboard run check
 npm --prefix dashboard run build
@@ -28,6 +28,12 @@ npm --prefix dashboard run build
 Run dashboard typecheck, Node tests and build sequentially. Every complete run keeps all
 existing non-opt-in test cases and original explicit skip reasons. `-m unit` and `-m
 integration` are convenience selections, not complete validation.
+
+For serial timing comparisons, use `uv run python -m pytest -n 0` and
+`npm --prefix dashboard run test:serial`. Python defaults to four xdist workers with
+file-level distribution. Dashboard non-browser files run with four workers; Chrome-backed
+browser files run serially to isolate profiles and shared SvelteKit state. The root `make test`
+invocation runs the test suites sequentially.
 
 ## Matched suite timing
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,9 +15,9 @@ def kllm_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     home.mkdir()
     (home / "models").mkdir()
-    models._reset_download_state()
+    models.downloads._reset_download_state()
     yield home
-    models._reset_download_state()
+    models.downloads._reset_download_state()
 
 
 def test_normalize_quant_strips_separators_and_gguf():
@@ -86,7 +85,7 @@ def test_download_quant_passes_token_to_hub(kllm_home, monkeypatch):
         stream_headers.update(kwargs.get("headers") or {})
         return _FakeResp(b"gguf")
 
-    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     path = models.download_model("org/repo:q4-k-m")
     assert listed == [("org/repo", "hf_test_token")]
     assert path.name == "model.Q4_K_M.gguf"
@@ -139,7 +138,7 @@ def test_stream_progress_callback(kllm_home, monkeypatch):
     def fake_stream(*_args, **_kwargs):
         return _FakeResp(payload)
 
-    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     path = models.download_model(
         "https://example.test/toy.gguf",
         on_progress=snapshots.append,
@@ -154,12 +153,12 @@ def test_stream_progress_callback(kllm_home, monkeypatch):
 
 
 def test_download_in_progress_rejected(kllm_home):
-    assert models._DOWNLOAD_LOCK.acquire(blocking=False)
+    assert models.downloads._DOWNLOAD_LOCK.acquire(blocking=False)
     try:
         with pytest.raises(models.DownloadInProgressError):
             models.download_model("https://example.test/toy.gguf")
     finally:
-        models._DOWNLOAD_LOCK.release()
+        models.downloads._DOWNLOAD_LOCK.release()
 
 
 def test_hf_token_file_beats_env(kllm_home, monkeypatch):
@@ -192,28 +191,28 @@ def test_hf_token_clear(kllm_home):
 
 def test_parse_search_query_repo_and_search():
     repo = models.parse_model_search_query("orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
-    assert repo["kind"] == "repo"
-    assert repo["repo_id"] == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
-    assert repo["suffix"] == "Q4_K_M"
+    assert repo.kind == "repo"
+    assert repo.repo_id == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+    assert repo.suffix == "Q4_K_M"
 
     named = models.parse_model_search_query("Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
-    assert named["kind"] == "search"
-    assert named["search_term"] == "Qwen3.8-27B-Uncensored-GGUF"
-    assert named["suffix"] == "Q4_K_M"
+    assert named.kind == "search"
+    assert named.search_term == "Qwen3.8-27B-Uncensored-GGUF"
+    assert named.suffix == "Q4_K_M"
 
     all_quants = models.parse_model_search_query("Qwen3.8-27B-Uncensored-GGUF")
-    assert all_quants["kind"] == "search"
-    assert all_quants["suffix"] is None
+    assert all_quants.kind == "search"
+    assert all_quants.suffix is None
 
     url = models.parse_model_search_query(
         "https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-GGUF/resolve/main/Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
     )
-    assert url["kind"] == "url"
-    assert url["repo_id"] == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
-    assert url["filename"] == "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
-    assert url["revision"] == "main"
-    assert url["suffix"] is None
-    assert url["folder"] is None
+    assert url.kind == "url"
+    assert url.repo_id == "orcarouter/Qwen3.8-27B-Uncensored-GGUF"
+    assert url.filename == "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    assert url.revision == "main"
+    assert url.suffix is None
+    assert url.folder is None
 
 
 UNSLOTH_REPO = "unsloth/Qwen3.5-122B-A10B-GGUF"
@@ -225,27 +224,27 @@ UNSLOTH_SHOW_FILE_INFO = (
 
 def test_parse_search_query_show_file_info():
     parsed = models.parse_model_search_query(UNSLOTH_SHOW_FILE_INFO)
-    assert parsed["kind"] == "url"
-    assert parsed["repo_id"] == UNSLOTH_REPO
-    assert parsed["filename"] == UNSLOTH_FILE
-    assert parsed["suffix"] is None
-    assert parsed["revision"] is None
+    assert parsed.kind == "url"
+    assert parsed.repo_id == UNSLOTH_REPO
+    assert parsed.filename == UNSLOTH_FILE
+    assert parsed.suffix is None
+    assert parsed.revision is None
 
     encoded = models.parse_model_search_query(
         f"https://huggingface.co/{UNSLOTH_REPO}?show_file_info=gguf%2F{UNSLOTH_FILE}"
     )
-    assert encoded["filename"] == f"gguf/{UNSLOTH_FILE}"
+    assert encoded.filename == f"gguf/{UNSLOTH_FILE}"
 
     repo_only = models.parse_model_search_query(f"https://huggingface.co/{UNSLOTH_REPO}")
-    assert repo_only["repo_id"] == UNSLOTH_REPO
-    assert repo_only["suffix"] is None
-    assert repo_only["filename"] is None
+    assert repo_only.repo_id == UNSLOTH_REPO
+    assert repo_only.suffix is None
+    assert repo_only.filename is None
 
     resolve_wins = models.parse_model_search_query(
         f"https://huggingface.co/{UNSLOTH_REPO}/resolve/main/other.Q8_0.gguf"
         f"?show_file_info={UNSLOTH_FILE}"
     )
-    assert resolve_wins["filename"] == "other.Q8_0.gguf"
+    assert resolve_wins.filename == "other.Q8_0.gguf"
 
 
 def test_parse_search_query_empty():
@@ -412,7 +411,7 @@ def test_download_show_file_info_url_uses_hf_hub_url(kllm_home, monkeypatch):
         return _FakeResp(payload)
 
     monkeypatch.setattr(models, "hf_hub_url", fake_hub_url)
-    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     path = models.download_model(UNSLOTH_SHOW_FILE_INFO)
     assert path.name == UNSLOTH_FILE
     assert path.read_bytes() == payload
@@ -425,7 +424,7 @@ def test_download_writes_sha256_sidecar(kllm_home, monkeypatch):
     def fake_stream(*_args, **_kwargs):
         return _FakeResp(payload)
 
-    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     path = models.download_model("https://example.test/sidecar.gguf")
     assert models.read_sha256_sidecar(path) == models.sha256_file(path)
 
@@ -507,60 +506,60 @@ def test_parse_hf_url_grammar_and_rejections():
     tree = models.parse_model_search_query(
         "  https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf/?download=true#files  "
     )
-    assert tree["raw"] == "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf/?download=true#files"
-    assert tree["kind"] == "url"
-    assert tree["repo_id"] == DEMO_REPO
-    assert tree["revision"] == "release/v2"
-    assert tree["folder"] == "gguf"
-    assert tree["filename"] is None
-    assert tree["suffix"] is None
+    assert tree.raw == "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf/?download=true#files"
+    assert tree.kind == "url"
+    assert tree.repo_id == DEMO_REPO
+    assert tree.revision == "release/v2"
+    assert tree.folder == "gguf"
+    assert tree.filename is None
+    assert tree.suffix is None
 
     unencoded = models.parse_model_search_query(
         "https://hf.co/demo/model-GGUF/tree/release/v2"
     )
-    assert unencoded["revision"] == "release"
-    assert unencoded["folder"] == "v2"
+    assert unencoded.revision == "release"
+    assert unencoded.folder == "v2"
 
     blob = models.parse_model_search_query(
         "HTTPS://www.HuggingFace.co:443/models/demo/model-GGUF/blob/main/gguf/model.Q4_K_M.gguf"
     )
-    assert blob["repo_id"] == DEMO_REPO
-    assert blob["filename"] == "gguf/model.Q4_K_M.gguf"
-    assert blob["folder"] is None
+    assert blob.repo_id == DEMO_REPO
+    assert blob.filename == "gguf/model.Q4_K_M.gguf"
+    assert blob.folder is None
 
     plus = models.parse_model_search_query(
         "https://huggingface.co/demo/model-GGUF/resolve/main/gguf/a+b.Q6_K.gguf"
     )
-    assert plus["filename"] == "gguf/a+b.Q6_K.gguf"
+    assert plus.filename == "gguf/a+b.Q6_K.gguf"
 
     literal = models.parse_model_search_query(
         "https://huggingface.co/demo/model-GGUF/raw/main/gguf/a%252Fb.Q6_K.gguf"
     )
-    assert literal["filename"] == "gguf/a%2Fb.Q6_K.gguf"
+    assert literal.filename == "gguf/a%2Fb.Q6_K.gguf"
 
     info = models.parse_model_search_query(
         "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf?show_file_info=Q4_K_M.gguf"
     )
-    assert info["filename"] == "Q4_K_M.gguf"
-    assert info["folder"] is None
-    assert info["revision"] == "release/v2"
+    assert info.filename == "Q4_K_M.gguf"
+    assert info.folder is None
+    assert info.revision == "release/v2"
 
     query_plus = models.parse_model_search_query(
         "https://huggingface.co/demo/model-GGUF?show_file_info=my+model.Q6_K.gguf"
     )
-    assert query_plus["filename"] == "my model.Q6_K.gguf"
+    assert query_plus.filename == "my model.Q6_K.gguf"
     encoded_plus = models.parse_model_search_query(
         "https://huggingface.co/demo/model-GGUF?show_file_info=a%2Bb.Q6_K.gguf"
     )
-    assert encoded_plus["filename"] == "a+b.Q6_K.gguf"
+    assert encoded_plus.filename == "a+b.Q6_K.gguf"
 
     direct = models.parse_model_search_query(
         "https://cdn.example/file.gguf?X-Amz-Signature=abc"
     )
-    assert direct["kind"] == "url"
-    assert direct["repo_id"] is None
-    assert direct["url"] == "https://cdn.example/file.gguf?X-Amz-Signature=abc"
-    assert direct["filename"] is None
+    assert direct.kind == "url"
+    assert direct.repo_id is None
+    assert direct.url == "https://cdn.example/file.gguf?X-Amz-Signature=abc"
+    assert direct.filename is None
 
     for bad in (
         "https://huggingface.co/datasets/demo/model-GGUF",
@@ -616,7 +615,7 @@ def test_explicit_tree_folder_lists_eligible_revision_files(monkeypatch):
     unknown = by_path["gguf/a%2Fb.Q6_K.gguf"]
     assert unknown["size_bytes"] == 0
     assert unknown["fit"] == "unknown"
-    blob = json_mod = __import__("json").dumps(out)
+    blob = __import__("json").dumps(out)
     assert "hf_SUPERSECRET" not in blob
     assert out["warnings"] == []
     root = models.search_hub_ggufs(
@@ -781,7 +780,7 @@ def test_direct_signed_url_keeps_source_and_skips_hub_credentials(kllm_home, mon
         return _FakeResp(b"signed-bytes")
 
     monkeypatch.setattr(models, "_url_size_bytes", fake_head)
-    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     monkeypatch.setattr(models, "resolve_hf_token", lambda: "hf_SUPERSECRET")
     monkeypatch.setattr(models, "model_info", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no hub")))
     source = "https://cdn.example/file.gguf?X-Amz-Signature=abc"
@@ -804,7 +803,7 @@ def test_download_hub_url_uses_revision_and_rejects_tree(kllm_home, monkeypatch)
         streamed.append(url)
         return _FakeResp(b"rev-bytes")
 
-    monkeypatch.setattr(models.httpx, "stream", fake_stream)
+    monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     monkeypatch.setattr(models, "list_repo_files", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no listing")))
     source = models.hf_hub_url(DEMO_REPO, "gguf/model.Q4_K_M.gguf", revision="release/v2")
     path = models.download_model(source)

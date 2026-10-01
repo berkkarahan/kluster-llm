@@ -288,7 +288,7 @@ input[type='range']:disabled {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 6px 8px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   position: relative;

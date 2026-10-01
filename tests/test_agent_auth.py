@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,8 +10,8 @@ def client(tmp_path, monkeypatch):
     # Re-import agent state against the temp home
     import importlib
 
-    import kllm.state as state_mod
     import kllm.agent as agent_mod
+    import kllm.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -158,6 +156,9 @@ def test_join_discovers_master_by_key(client, monkeypatch):
 
         def __exit__(self, *a):
             return False
+
+        def get(self, *a, **k):
+            return type("HealthResponse", (), {"status_code": 200, "raise_for_status": lambda self: None, "json": lambda self: {"control_protocol": 2}})()
 
         def post(self, url, *a, **k):
             assert "192.168.10.1:18765" in url

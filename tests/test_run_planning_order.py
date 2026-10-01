@@ -9,13 +9,13 @@ from fastapi import HTTPException
 
 from kllm.membership import cluster_snapshot
 from kllm.run_planning import (
-    build_master_launch,
     cluster_nodes,
     ensure_rpc_peers_reachable,
     member_rpc_host,
     ordered_members,
     rpc_server_endpoints,
 )
+from kllm.run_launch import build_master_launch
 from kllm.run_settings import RunBody, RunSettingsFields
 
 
@@ -53,9 +53,9 @@ def test_cluster_nodes_carries_latency_and_master_flag():
         },
     }
     nodes = cluster_nodes(members)
-    assert nodes[0]["node_id"] == "w"
-    assert nodes[0]["latency_ms"] == 12.5
-    assert nodes[1]["is_master"] is True
+    assert nodes[0].node_id == "w"
+    assert nodes[0].latency_ms == 12.5
+    assert nodes[1].is_master is True
 
 
 def test_build_master_launch_rpc_aligns_with_worker_order():

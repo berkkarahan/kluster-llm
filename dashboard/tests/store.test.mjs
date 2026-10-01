@@ -16,27 +16,27 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
   const mockFetch = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, method: options.method ?? 'GET', body });
-    if (path === '/v1/config' && options.method === 'PUT') {
+    if (path === '/v2/node/config' && options.method === 'PUT') {
       savedMode = body.split_mode;
       if ('gpu_ids' in body) savedGpuIds = body.gpu_ids;
       if (body.gpu_ids?.length === 1) plannedBudget = 15.2 * 1024 ** 3;
     }
-    const data = path === '/v1/usage/live'
+    const data = path === '/v2/telemetry'
       ? { nodes: { master: { node_id: 'master', host: 'example', role: 'master', connected: true,
           freshness: 'unavailable', reading: null } }, relationships: [],
           recording: { recording: 'interrupted', last_successful_save: null } }
-      : path === '/v1/config'
+      : path === '/v2/node/config'
       ? { device: 'gpu', vram_percent: 95, ram_percent: 80, split_mode: savedMode }
-      : path === '/v1/models'
+      : path === '/v2/models'
         ? { data: [{ id: 'fixture.gguf' }] }
-      : path === '/v1/plan' || path === '/v1/plan?preview=true'
+      : path === '/v2/inference/plans' || path === '/v2/inference/plans?preview=true'
         ? { split_mode: body.split_mode ?? savedMode, fit_status: 'fits',
           estimated_bytes: 1024, budget_bytes: plannedBudget }
-        : path === '/v1/run'
+        : path === '/v2/inference/runs'
           ? { plan: { split_mode: body.split_mode ?? savedMode, fit_status: 'fits' } }
-          : path === '/v1/status'
+          : path === '/v2/node'
             ? { role: 'master', node_id: 'master', members: statusMembers, last_plan: lastPlan }
-            : path === '/v1/gpus' ? gpuInventory : {};
+            : path === '/v2/node/devices' ? gpuInventory : {};
     return new Response(JSON.stringify(data), { status: 200 });
   };
   let server;
@@ -45,7 +45,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     process.chdir(fileURLToPath(new URL('..', import.meta.url)));
     server = await createServer({
       // Prefer no watcher; SvelteKit may still attach one — closed explicitly below.
-      server: { middlewareMode: true, hmr: false, watch: null },
+      server: { middlewareMode: true, hmr: false, ws: false, watch: null },
       appType: 'custom'
     });
     globalThis.fetch = mockFetch;
@@ -66,9 +66,9 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
       assert.equal(appStore.planRunBlockedReason(), null);
       assert.equal(appStore.validateRunSettings(), true, JSON.stringify(appStore.fieldErrors));
       await appStore.run();
-      assert.ok(requests.some(({ path }) => path === '/v1/plan'));
-      assert.ok(requests.some(({ path }) => path === '/v1/run'));
-      for (const { path, body } of requests.filter(({ path }) => path === '/v1/plan' || path === '/v1/run')) {
+      assert.ok(requests.some(({ path }) => path === '/v2/inference/plans'));
+      assert.ok(requests.some(({ path }) => path === '/v2/inference/runs'));
+      for (const { path, body } of requests.filter(({ path }) => path === '/v2/inference/plans' || path === '/v2/inference/runs')) {
         assert.equal(body.split_mode, 'layer', path);
       }
       assert.equal(appStore.planResult.split_mode, 'layer');
@@ -202,7 +202,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     await appStore.refreshUsage();
     await appStore.refresh();
     assert.equal(appStore.selectedNodeId, 'master');
-    assert.deepEqual(requests.map(({ path }) => path), ['/v1/usage/live', '/v1/status']);
+    assert.deepEqual(requests.map(({ path }) => path), ['/v2/telemetry', '/v2/node']);
     assert.equal(appStore.planPayload().split_mode, 'layer');
     // Regression: heartbeat-only liveness churn must not blank the live plan view.
     appStore.planResult = { fit_status: 'fits', estimated_bytes: 1024, budget_bytes: 4096 };
@@ -211,14 +211,14 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     statusMembers.master.latency_ms = 3;
     await appStore.refresh();
     assert.equal(appStore.planResult?.fit_status, 'fits', 'heartbeat cleared the plan');
-    assert.equal(requests.filter(({ path }) => path === '/v1/plan?preview=true').length, 0,
+    assert.equal(requests.filter(({ path }) => path === '/v2/inference/plans?preview=true').length, 0,
       'heartbeat triggered a re-estimate');
     // A real membership change still refreshes it.
     statusMembers.worker = { node_id: 'worker', role: 'worker' };
     await appStore.refresh();
     t.mock.timers.tick(300);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(requests.some(({ path }) => path === '/v1/plan?preview=true'),
+    assert.ok(requests.some(({ path }) => path === '/v2/inference/plans?preview=true'),
       'membership change did not re-estimate');
     // A newer running download must not hide the prior terminal reconciliation.
     const originalLoadModels = appStore.loadModels.bind(appStore);
@@ -257,7 +257,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     appStore.loadModels = originalLoadModels;
     appStore.liveUsage.nodes.master.reading = { observed_at: '2020-01-01T00:00:00Z' };
     appStore.liveUsage.nodes.master.freshness = 'fresh';
-    globalThis.fetch = async (path) => path === '/v1/usage/live'
+    globalThis.fetch = async (path) => path === '/v2/telemetry'
       ? new Response(JSON.stringify({ detail: { message: 'master unavailable', last_successful_save: '2026-09-28T12:00:00Z' } }), { status: 503 })
       : mockFetch(path);
     await appStore.refreshUsage();
@@ -297,7 +297,7 @@ test('model search keeps one in-flight request and forwards the selected source'
   const mockFetch = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     requests.push({ path, method: options.method ?? 'GET', body });
-    if (path === '/v1/models/search') {
+    if (path === '/v2/models/search') {
       if (mode === 'held') await searchGate;
       if (mode === 'error') {
         return new Response(JSON.stringify({ detail: 'Supply a supported model repository, tree, or file link.' }), { status: 400 });
@@ -331,7 +331,7 @@ test('model search keeps one in-flight request and forwards the selected source'
         warnings: []
       }), { status: 200 });
     }
-    if (path === '/v1/models/download') {
+    if (path === '/v2/models/downloads') {
       return new Response(JSON.stringify({ ok: true, accepted: true, source: body.source }), { status: 200 });
     }
     return new Response('{}', { status: 200 });
@@ -341,7 +341,7 @@ test('model search keeps one in-flight request and forwards the selected source'
   try {
     process.chdir(fileURLToPath(new URL('..', import.meta.url)));
     server = await createServer({
-      server: { middlewareMode: true, hmr: false, watch: null },
+      server: { middlewareMode: true, hmr: false, ws: false, watch: null },
       appType: 'custom'
     });
     globalThis.fetch = mockFetch;
@@ -357,7 +357,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     appStore.modelSource = 'unsubmitted edit';
     assert.equal(appStore.searchQuery, 'https://huggingface.co/demo/model-GGUF/tree/main');
     assert.equal(await appStore.searchModels(), null);
-    assert.equal(requests.filter(({ path }) => path === '/v1/models/search').length, 1);
+    assert.equal(requests.filter(({ path }) => path === '/v2/models/search').length, 1);
     assert.equal(requests[0].body.query, 'https://huggingface.co/demo/model-GGUF/tree/main');
     releaseSearch();
     const accepted = await first;
@@ -367,7 +367,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     assert.equal(appStore.searchQuery, 'https://huggingface.co/demo/model-GGUF/tree/main');
     appStore.modelSource = 'edited after results';
     assert.equal(appStore.searchQuery, 'https://huggingface.co/demo/model-GGUF/tree/main');
-    assert.equal(requests.filter(({ path }) => path === '/v1/models/download').length, 0);
+    assert.equal(requests.filter(({ path }) => path === '/v2/models/downloads').length, 0);
 
     mode = 'legacy';
     appStore.modelSource = 'legacy keyword';
@@ -387,7 +387,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     assert.equal(appStore.searchQuery, 'https://huggingface.co/datasets/demo/set');
     appStore.modelSource = 'edited during error';
     assert.equal(appStore.searchQuery, 'https://huggingface.co/datasets/demo/set');
-    assert.equal(requests.filter(({ path }) => path === '/v1/models/download').length, 0);
+    assert.equal(requests.filter(({ path }) => path === '/v2/models/downloads').length, 0);
 
     mode = 'partial';
     appStore.modelSource = 'qwen partial';
@@ -401,7 +401,7 @@ test('model search keeps one in-flight request and forwards the selected source'
 
     const source = 'https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/gguf/model.Q4_K_M.gguf';
     await appStore.downloadModel(source);
-    const download = requests.filter(({ path }) => path === '/v1/models/download');
+    const download = requests.filter(({ path }) => path === '/v2/models/downloads');
     assert.equal(download.length, 1);
     assert.equal(download[0].body.source, source);
 
@@ -422,7 +422,7 @@ test('model search keeps one in-flight request and forwards the selected source'
       recording: { recording: 'interrupted', last_successful_save: null },
     };
     await appStore.leaveCluster();
-    assert.ok(requests.some((req) => req.path === '/v1/leave' && req.method === 'POST'));
+    assert.ok(requests.some((req) => req.path === '/v2/cluster/membership' && req.method === 'DELETE'));
     assert.equal(appStore.status.role, 'idle');
     assert.deepEqual(appStore.status.members, {});
     assert.equal(appStore.status.join_key, null);
@@ -443,7 +443,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     };
     appStore.selectedNodeId = 'master';
     await appStore.stopCluster();
-    assert.ok(requests.some((req) => req.path === '/v1/stop' && req.method === 'POST'));
+    assert.ok(requests.some((req) => req.path === '/v2/cluster' && req.method === 'DELETE'));
     assert.equal(appStore.status.role, 'idle');
     assert.deepEqual(appStore.status.members, {});
     assert.equal(appStore.status.join_key, null);
@@ -457,7 +457,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     appStore.chatStreaming = true;
     await appStore.stopInference();
     assert.equal(appStore.chatStreaming, false);
-    assert.ok(requests.some((req) => req.path === '/v1/inference/stop' && req.method === 'POST'));
+    assert.ok(requests.some((req) => req.path === '/v2/inference/runs/stop' && req.method === 'POST'));
   } finally {
     appStore?.stop();
     t.mock.timers.reset();

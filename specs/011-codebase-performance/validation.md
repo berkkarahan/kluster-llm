@@ -107,3 +107,57 @@ throughput claim.
   Updating the checkout's loaded `.pyd` remains pending because the running `kllm.agent` process
   holds it open on Windows; source and isolated-wheel validation passed without stopping that
   user-owned service.
+
+## Retained-history and state-write checks (2026-10-01)
+
+- Added a 7,201-reading retained-data fixture that verifies latest, series and readings
+  behavior at 15m/1h/24h windows, including order, pagination and aggregate endpoints. The
+  latest-node `EXPLAIN QUERY PLAN` uses `readings_filter` and a temporary B-tree for ordering.
+- A local 7,201-row SQLite comparison measured 1,000 latest queries at 1.473 ms median
+  without a new index and 0.0056 ms with `(node_id, observed_at DESC, id DESC)`. The index
+  increased bulk insert time from 16.5 ms to 20.8 ms (+25.6%) and database size from
+  2,269,184 to 2,818,048 bytes (+24.2%). The candidate also violates the existing 64 KiB
+  minimum physical-storage contract; it was rejected, with schema, durability and retention
+  unchanged.
+- A same-member accepted heartbeat invokes `ClusterState.save` exactly once. No state-write
+  coalescing was warranted.
+- The recurring activity sampler and worker-log relay use the lifecycle-owned sync control
+  client. `_upstream_reachable` accepts the lifespan-owned async client and keeps a 1-second
+  deadline per probe. Its currently unused standalone form remains for compatibility; the
+  proxy path continues to use the application-scoped inference client.
+- Targeted verification: retained-history and heartbeat-count tests passed; pooled-client
+  reachability test passed. Three consecutive complete `make test` runs then passed: Python
+  (664 passed, 6 skipped), dashboard (50 passed including browser checks), Rust (38 passed),
+  and Svelte check (0 errors, 0 warnings). The usage-workspace browser readiness wait was
+  extended from 12s to 30s after a full-run-only timeout; all assertions remain intact. A
+  preceding full-run failure at 30s occurred once and passed on the next three sequential
+  attempts, so browser flakiness is reduced but not proven absent. This host did not run matched
+  before/after workload distributions or profiler memory/handle budgets; those acceptance
+  measurements remain open.
+
+## Negotiated position-v1 protocol gate (2026-10-01)
+
+Position-v1 remains explicitly unsupported. Current log events carry UUID IDs; missing IDs are
+assigned with `uuid.uuid4()` in `cluster_log.py`. Worker relay and journal rows preserve those
+IDs, while receiver cursors use a journal epoch and local sequence. The inspected ownership
+path has no durable producer-slot allocation, generation recovery, next-sequence authority,
+explicit retirement operation or contiguous-hole ledger. A bounded UUID eviction policy would
+therefore admit old retries after eviction, and deriving frontiers from maximum observed rows
+would skip holes. No positional capability is advertised or accepted, and legacy exact UUID
+deduplication remains unbounded for the mounted visit. T049 covers row eviction/Clear/replay and
+unmount cleanup for that legacy behavior. Negotiated cache, endpoint and end-to-end tests are
+gated off rather than approximated; reconsider only after durable slot ownership and recovery
+semantics are designed and tested across producer restart and journal rotation.
+
+## Final repeat and static checks (2026-10-01)
+
+- After the final source/test changes, `uv run python scripts/reverse_pytest.py -q --tb=long -x`
+  passed 664 tests with 6 hardware skips. Its first reverse-order attempt had one transient
+  failure in `test_master_update_endpoint_fans_out`; the isolated test and complete reverse-order
+  rerun both passed.
+- `node --experimental-strip-types scripts/reverse_node_tests.mjs` passed all 50 dashboard
+  tests including the browser scenario. Three consecutive complete `make test` runs passed
+  after the final browser wait-ceiling change.
+- `uv run ruff check .`, `uv run mypy src` (144 files), `git diff --check`, and
+  `uv run python scripts/build.py --skip-ui --skip-llama --skip-wireguard --skip-toolchains`
+  passed. The build produced and installed the local CPython 3.12 macOS arm64 wheel.

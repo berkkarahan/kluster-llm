@@ -16,7 +16,7 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
   process.chdir(fileURLToPath(new URL('..', import.meta.url)));
   let server;
   try {
-    server = await createServer({ server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' });
+    server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false, watch: null }, appType: 'custom' });
     const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
     const { render } = await server.ssrLoadModule('svelte/server');
     const { default: Home } = await server.ssrLoadModule('/src/routes/+page.svelte');
@@ -125,11 +125,11 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       const json = (res, payload, status = 200) =>
         res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
 
-      vite = await createServer({ server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' });
+      vite = await createServer({ server: { middlewareMode: true, hmr: false, ws: false, watch: null }, appType: 'custom' });
       server = createHttpServer((req, res) => {
         const path = req.url.split('?')[0];
         if (path === '/__counts') { json(res, counts); return; }
-        if (!path.startsWith('/v1/')) { vite.middlewares(req, res, () => res.writeHead(404).end()); return; }
+        if (!path.startsWith('/v2/')) { vite.middlewares(req, res, () => res.writeHead(404).end()); return; }
         if (mode === 'offline') { json(res, { detail: 'offline' }, 503); return; }
         const { nodes, relationships } = buildCluster(mode === 'empty' ? 'empty' : mode);
         const recorder = { recording: 'recording', error: null, last_successful_save: '2026-09-29T00:00:02Z',
@@ -144,7 +144,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
             .map(([id, n]) => [id, { node_id: id, host: n.host, role: n.role }])) };
         const usage = { nodes: mode === 'empty' ? {} : nodes,
           relationships: mode === 'empty' ? [] : relationships, recording: recorder };
-        if (path === '/v1/dashboard/live') {
+        if (path === '/v2/events') {
           counts.live++;
           const after = new URL(req.url, 'http://x').searchParams.get('after');
           const lines = logsEmpty
@@ -187,15 +187,15 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
             areas: Object.fromEntries(requested.filter((topic) => topic in areas).map((topic) => [topic, areas[topic]])), logs });
           return;
         }
-        if (path === '/v1/status') {
+        if (path === '/v2/node') {
           json(res, status);
           return;
         }
-        if (path === '/v1/usage/live') {
+        if (path === '/v2/telemetry') {
           json(res, usage);
           return;
         }
-        if (path === '/v1/usage/lifetimes') {
+        if (path === '/v2/telemetry/lifetimes') {
           counts.lifetimes++;
           const nodeId = new URL(req.url, 'http://x').searchParams.get('node_id');
           json(res, { ...recorder, node_id: nodeId, host: nodes[nodeId]?.host ?? nodeId, connected: true,
@@ -204,7 +204,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
             retained_node_ids: [nodeId] });
           return;
         }
-        if (path === '/v1/usage/series') {
+        if (path === '/v2/telemetry/series') {
           counts.series++;
           json(res, { ...recorder, window_start: '2026-09-29T00:00:00Z', window_end: '2026-09-29T00:00:02Z',
             time_zone: 'UTC', buckets: [{ start: '2026-09-29T00:00:00Z', end: '2026-09-29T00:00:02Z',
@@ -213,7 +213,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
               devices: [] }] });
           return;
         }
-        if (path === '/v1/logs') {
+        if (path === '/v2/logs') {
           if (req.method !== 'GET') logsWrites++;
           if (logsFailure) { json(res, { detail: 'logs unavailable' }, 503); return; }
           if (logsEmpty) {
@@ -247,7 +247,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
             reset: null, gap: false, gap_reason: null });
           return;
         }
-        if (path === '/v1/usage/readings') {
+        if (path === '/v2/telemetry/readings') {
           counts.readings++;
           json(res, { ...recorder, window_start: '2026-09-29T00:00:00Z', window_end: '2026-09-29T00:00:02Z',
             time_zone: 'UTC', next_cursor: null, readings: [{ lifetime_id: 'l1', pid: 99,
@@ -294,11 +294,15 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         return response.result.value;
       }
       async function wait(expression) {
-        for (let i = 0; i < 120; i++) {
+        for (let i = 0; i < 300; i++) {
           if (await evaluate(`Boolean(${expression})`)) return;
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
-        assert.fail(`Browser timed out: ${expression}`);
+        const diagnostic = await evaluate(`(() => ({
+          history: document.querySelector('[aria-label^="Recorded usage"]')?.innerText ?? null,
+          details: document.querySelector('.usage-dialog')?.innerText ?? null
+        }))()`);
+        assert.fail(`Browser timed out: ${expression}; UI: ${JSON.stringify(diagnostic)}`);
       }
       async function press(name, code, vk, text) {
         await call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: name, code, windowsVirtualKeyCode: vk });

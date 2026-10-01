@@ -75,6 +75,12 @@ def test_metadata_cache_is_stat_keyed_and_returns_isolated_values(tmp_path: Path
     path.write_bytes(_minimal_gguf(arch="llama", context_length=4096))
     assert read_context_length(path) == 4096
 
+    path.write_bytes(b"GGUF\x03\x00")
+    before_truncated_read = gguf_meta._read_inference_metadata.cache_info()
+    assert read_inference_metadata(path) is None
+    after_truncated_read = gguf_meta._read_inference_metadata.cache_info()
+    assert after_truncated_read.misses == before_truncated_read.misses + 1
+
 
 def test_read_context_length_invalid_returns_none(tmp_path: Path):
     path = tmp_path / "bad.gguf"

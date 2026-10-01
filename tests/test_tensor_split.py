@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from kllm.core.placement_models import PlacementDeviceCandidate
 
 from kllm.tensor_split import (
     device_can_hold,
@@ -10,6 +11,24 @@ from kllm.tensor_split import (
     select_routing_devices,
     tensor_split_proportions,
 )
+
+
+def candidate(
+    *, local: bool, budget_bytes: int, score: float, node_id: str = "node"
+) -> PlacementDeviceCandidate:
+    return PlacementDeviceCandidate(
+        node_id=node_id,
+        device="GPU0",
+        backend="cuda",
+        local=local,
+        budget_bytes=budget_bytes,
+        latency_ms=0.0,
+        rpc_endpoint=None if local else f"{node_id}:50052",
+        rpc_index=0,
+        rpc_device_count=1,
+        unified_memory=False,
+        score=score,
+    )
 
 
 def test_tensor_split_proportions_example():
@@ -30,36 +49,39 @@ def test_layer_counts_from_weights_3_to_1():
 
 def test_select_routing_prefers_local_when_fit():
     devices = [
-        {"local": False, "budget_bytes": 10_000, "score": 1.0},
-        {"local": True, "budget_bytes": 5_000, "score": 0.5},
+        candidate(local=False, budget_bytes=10_000, score=1.0),
+        candidate(local=True, budget_bytes=5_000, score=0.5),
     ]
-    mode, chosen = select_routing_devices(
+    selection = select_routing_devices(
         devices, model_bytes=100, overhead=10, cpu_base=1, cpu_budget=10, locals_fit=True
     )
-    assert mode == "local"
-    assert all(d["local"] for d in chosen)
+    assert selection.mode == "local"
+    assert all(d.local for d in selection.devices)
 
 
 def test_select_routing_single_remote():
     devices = [
-        {"local": True, "budget_bytes": 100, "score": 0.2},
-        {"local": False, "budget_bytes": 10_000, "score": 0.9, "node_id": "big"},
-        {"local": False, "budget_bytes": 500, "score": 0.5, "node_id": "small"},
+        candidate(local=True, budget_bytes=100, score=0.2),
+        candidate(local=False, budget_bytes=10_000, score=0.9, node_id="big"),
+        candidate(local=False, budget_bytes=500, score=0.5, node_id="small"),
     ]
-    mode, chosen = select_routing_devices(
+    selection = select_routing_devices(
         devices, model_bytes=1_000, overhead=10, cpu_base=1, cpu_budget=10, locals_fit=False
     )
-    assert mode == "single_remote"
-    assert chosen == [devices[1]]
+    assert selection.mode == "single_remote"
+    assert selection.devices == (devices[1],)
 
 
 def test_device_can_hold():
-    assert device_can_hold({"budget_bytes": 100}, model_bytes=80, overhead=20)
-    assert not device_can_hold({"budget_bytes": 99}, model_bytes=80, overhead=20)
+    assert device_can_hold(candidate(local=True, budget_bytes=100, score=1), model_bytes=80, overhead=20)
+    assert not device_can_hold(candidate(local=True, budget_bytes=99, score=1), model_bytes=80, overhead=20)
 
 
 def test_proportional_weights_mib():
     mib = 1024**2
     assert proportional_weights(
-        [{"budget_bytes": 24 * 1024 * mib}, {"budget_bytes": 8 * 1024 * mib}]
+        [
+            candidate(local=True, budget_bytes=24 * 1024 * mib, score=1),
+            candidate(local=False, budget_bytes=8 * 1024 * mib, score=1),
+        ]
     ) == [24.0, 8.0]

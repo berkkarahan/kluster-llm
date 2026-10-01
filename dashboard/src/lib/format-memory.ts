@@ -6,6 +6,13 @@ export function formatGib(bytes: number | null | undefined): string {
     : `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
+export function formatMemoryComponent(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(2)} MiB` : formatGib(bytes);
+}
+
 export function selectedCapacity(gpus: GpuInfo[], selectedIds: number[]): number | null {
   if (!selectedIds.length) return null;
   const byIndex = new Map(gpus.map((gpu) => [gpu.index, gpu]));

@@ -101,7 +101,7 @@ function validateSnapshot(value: unknown): LogSnapshot {
 /**
  * Page-owned log-trail state and lifecycle.
  *
- * Polls the existing `GET /v1/logs` snapshot endpoint on a fixed cadence, keeps
+ * Polls the `GET /v2/logs` snapshot endpoint on a fixed cadence, keeps
  * a bounded recent buffer, and deduplicates by stable `event_id`. Clear is
  * display-only: it never mutates stored logs, and before the first successful
  * snapshot it is a no-op so an in-flight load is not discarded.
@@ -316,13 +316,13 @@ export class LogTrail {
         : new URLSearchParams({ n: String(this.cursor === null ? INITIAL_N : POLL_N) });
       if (this.cursor !== null) params.set('after', this.cursor);
       if (liveFallback && this.continuityId) params.set('continuity_id', this.continuityId);
-      let response = await fetch(`${liveFallback ? '/v1/dashboard/live' : '/v1/logs'}?${params}`, { signal: controller.signal });
+      let response = await fetch(`${liveFallback ? '/v2/events' : '/v2/logs'}?${params}`, { signal: controller.signal });
       if (liveFallback && (response.status === 401 || response.status === 403)) this.denied = true;
       let legacyHandoff = false;
       if (liveFallback && !response.ok && response.status !== 401 && response.status !== 403) {
         const legacy = new URLSearchParams({ n: String(this.cursor === null ? INITIAL_N : POLL_N) });
         if (this.cursor && !this.continuityId) legacy.set('after', this.cursor);
-        response = await fetch(`/v1/logs?${legacy}`, { signal: controller.signal });
+        response = await fetch(`/v2/logs?${legacy}`, { signal: controller.signal });
         if (response.status === 401 || response.status === 403) this.denied = true;
         legacyHandoff = this.continuityId !== null;
       }

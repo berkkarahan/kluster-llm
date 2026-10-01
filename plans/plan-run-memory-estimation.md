@@ -1,7 +1,7 @@
 # PLAN & RUN memory estimation plan
 
 > **Created:** 2026-09-30
-> **Status:** Planned
+> **Status:** Implemented (2026-09-30)
 > **Repo / scope:** kluster-llm — PLAN & RUN inference-memory estimation
 
 ## Conventions captured at creation

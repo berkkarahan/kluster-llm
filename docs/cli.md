@@ -20,7 +20,7 @@ python scripts/install.py --llama-only
 python scripts/install.py --check
 ```
 
-Run the CLI without activating the venv: `uv run kllm …` or `uvx --from . kllm …` from the repo root.
+After install, run **`kllm …` from any directory** (shim in `~/.local/bin`, same as `uv run kllm …` for this repo). Without the shim: `uv run kllm …` or `uvx --from . kllm …` from the repo root. Use `python scripts/install.py --skip-path-shim` to omit the global launcher.
 
 CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA_SERVER` / `KLLM_RPC_SERVER` if binaries live outside `vendor/`.
 

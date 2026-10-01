@@ -567,6 +567,48 @@ pub fn start(interface_index: u32, epoch: String) -> io::Result<AddressObserver>
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{parse, Shared};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::Mutex;
+
+    fn shared() -> Shared {
+        Shared {
+            epoch: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            index: 1,
+            queue: Mutex::new(VecDeque::new()),
+            sequence: AtomicU64::new(0),
+            lost: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            barrier_request: AtomicU64::new(0),
+            barrier_ack: AtomicU64::new(0),
+        }
+    }
+
+    fn route_message(flags: u32) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        bytes[0..2].copy_from_slice(&16u16.to_ne_bytes());
+        bytes[2] = 5;
+        bytes[3] = 1;
+        bytes[4..6].copy_from_slice(&1u16.to_ne_bytes());
+        bytes[8..12].copy_from_slice(&flags.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn neighbor_cache_routes_are_not_route_changes() {
+        let state = shared();
+        parse(&route_message(0x400), &state).unwrap();
+        assert!(state.queue.lock().unwrap().is_empty());
+        parse(&route_message(0x1), &state).unwrap();
+        let event = state.queue.lock().unwrap().pop_front().unwrap();
+        assert_eq!(event.kind, "route_change");
+        assert!(state.queue.lock().unwrap().is_empty());
+    }
+}
+
 #[cfg(feature = "python-bindings")]
 #[pyfunction]
 pub fn start_address_observer(

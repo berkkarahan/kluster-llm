@@ -17,6 +17,42 @@ fn failure(message: &str) -> io::Error {
 }
 
 #[cfg(unix)]
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(all(unix, feature = "python-bindings"))]
+fn python_io(error: io::Error) -> PyErr {
+    if error.kind() == io::ErrorKind::InvalidInput {
+        pyo3::exceptions::PyValueError::new_err(error.to_string())
+    } else {
+        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+    }
+}
+
+#[cfg(unix)]
+fn parse_probe(mac: &str, address: &str) -> io::Result<([u8; 6], Ipv4Addr)> {
+    let values = mac
+        .split(':')
+        .map(|b| u8::from_str_radix(b, 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid("invalid Ethernet MAC"))?;
+    let mac: [u8; 6] = values
+        .try_into()
+        .map_err(|_| invalid("invalid Ethernet MAC"))?;
+    if mac == [0; 6] || mac[0] & 1 != 0 {
+        return Err(invalid("unicast Ethernet MAC required"));
+    }
+    let address: Ipv4Addr = address
+        .parse()
+        .map_err(|_| invalid("literal IPv4 required"))?;
+    if !super::relay::private(address) {
+        return Err(invalid("private IPv4 required"));
+    }
+    Ok((mac, address))
+}
+
+#[cfg(unix)]
 fn frame(mac: [u8; 6], address: Ipv4Addr) -> [u8; 60] {
     let mut frame = [0u8; 60];
     frame[..6].fill(255);
@@ -282,14 +318,8 @@ pub fn probe_ipv4_conflict(
     }
     #[cfg(unix)]
     {
-        py.allow_threads(|| probe_native(&interface, &mac, &address)).map_err(|error| {
-            match error.to_string().as_str() {
-                "invalid MAC" | "invalid IPv4" | "private address and unicast MAC required" => {
-                    pyo3::exceptions::PyValueError::new_err(error.to_string())
-                }
-                _ => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
-            }
-        })
+        py.allow_threads(|| probe_native(&interface, &mac, &address))
+            .map_err(python_io)
     }
 }
 
@@ -351,8 +381,7 @@ pub fn start_ipv4_conflict_observer(
     mac: String,
     address: String,
 ) -> PyResult<IPv4ConflictObserver> {
-    py.allow_threads(|| start_native(interface, mac, address))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    py.allow_threads(|| start_native(interface, mac, address)).map_err(python_io)
 }
 
 #[cfg(unix)]
@@ -361,20 +390,7 @@ pub fn start_native(
     mac: String,
     address: String,
 ) -> io::Result<IPv4ConflictObserver> {
-    let values = mac
-        .split(':')
-        .map(|b| u8::from_str_radix(b, 16))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| failure("invalid Ethernet MAC"))?;
-    let mac: [u8; 6] = values
-        .try_into()
-        .map_err(|_| failure("invalid Ethernet MAC"))?;
-    let address: Ipv4Addr = address
-        .parse()
-        .map_err(|_| failure("literal IPv4 required"))?;
-    if mac == [0; 6] || mac[0] & 1 != 0 || !super::relay::private(address) {
-        return Err(failure("private IPv4 and unicast MAC required"));
-    }
+    let (mac, address) = parse_probe(&mac, &address)?;
     let socket = open(&interface)?;
     let state = std::sync::Arc::new(ConflictState {
         conflict: std::sync::atomic::AtomicBool::new(false),
@@ -416,15 +432,30 @@ pub fn start_native(
 
 #[cfg(unix)]
 pub fn probe_native(interface: &str, mac: &str, address: &str) -> io::Result<bool> {
-    let values = mac
-        .split(':')
-        .map(|b| u8::from_str_radix(b, 16))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| failure("invalid MAC"))?;
-    let mac: [u8; 6] = values.try_into().map_err(|_| failure("invalid MAC"))?;
-    let address: Ipv4Addr = address.parse().map_err(|_| failure("invalid IPv4"))?;
-    if mac == [0; 6] || mac[0] & 1 != 0 || !super::relay::private(address) {
-        return Err(failure("private address and unicast MAC required"));
-    }
+    let (mac, address) = parse_probe(mac, address)?;
     probe(interface, mac, address)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::probe_native;
+
+    #[test]
+    fn probe_native_rejects_invalid_inputs_before_opening_a_socket() {
+        let cases = [
+            ("zz", "10.0.0.1", "invalid Ethernet MAC"),
+            (
+                "01:00:00:00:00:00",
+                "10.0.0.1",
+                "unicast Ethernet MAC required",
+            ),
+            ("02:00:00:00:00:01", "nope", "literal IPv4 required"),
+            ("02:00:00:00:00:01", "8.8.8.8", "private IPv4 required"),
+        ];
+        for (mac, address, message) in cases {
+            let error = probe_native("lo0", mac, address).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), message);
+        }
+    }
 }

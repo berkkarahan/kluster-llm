@@ -193,13 +193,22 @@ def test_macos_inspection_maps_service_and_parses_media(monkeypatch):
         ("ifconfig", "en3"): "en3: flags=8863<UP>\n\tinet 192.168.10.1 netmask 0xffffff00\n\tstatus: active",
         ("networksetup", "-getinfo", "10Gb Ethernet"): "Manual Configuration\nIP address: 192.168.10.1",
         ("networksetup", "-getmedia", "10Gb Ethernet"): "Current: autoselect\nActive: 10Gbase-T <full-duplex>",
-        ("netstat", "-rn", "-f", "inet"): "Routing tables\nInternet:\nDestination Gateway Flags Netif\n172.16.0.0/16 link#1 U en2",
+        ("netstat", "-rn", "-f", "inet"): (
+            "Routing tables\nInternet:\nDestination Gateway Flags Netif\n"
+            "172.16.0.0/16 link#1 UCS en2\n"
+            "172.16.0.9 aa:bb:cc:dd:ee:ff UHLWI en2\n"
+            "10.1.1.9 10.1.1.1 UGHS en0"
+        ),
     }
     monkeypatch.setattr(net, "_run", lambda args, **_kwargs: outputs[tuple(args)])
     inspected = net._inspect_macos("en3")
     assert inspected.connected and inspected.physical_ethernet
     assert inspected.speed_mbps == 10_000 and inspected.dhcp is False
     assert inspected.addresses == (ipaddress.ip_interface("192.168.10.1/24"),)
+    assert inspected.routes == (
+        ipaddress.ip_network("172.16.0.0/16"),
+        ipaddress.ip_network("10.1.1.9/32"),
+    )
 
 
 def test_linux_inspection_reads_speed_and_address(monkeypatch, tmp_path):

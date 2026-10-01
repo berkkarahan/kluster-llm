@@ -105,6 +105,17 @@ def _mac_service(interface: str, run) -> tuple[str, str]:
     raise NetworkError(f"no network service maps to interface {interface!r}")
 
 
+def _macos_route_destinations(netstat_output: str) -> list[str]:
+    """Connected and static routes. Neighbor-cache rows use RTF_LLINFO (`L`)."""
+    destinations = []
+    for line in netstat_output.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or "L" in parts[2]:
+            continue
+        destinations.append(parts[0])
+    return destinations
+
+
 def _inspect_macos(interface: str, run) -> InterfaceState:
     service, hardware = _mac_service(interface, run)
     output = run(["ifconfig", interface])
@@ -120,7 +131,7 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
                 mask = socket.inet_ntoa(int(mask, 16).to_bytes(4, "big"))
             addresses.append(ipaddress.IPv4Interface(f"{match.group(1)}/{mask}"))
     routes_out = run(["netstat", "-rn", "-f", "inet"])
-    routes = _v4_routes([line.split()[0] for line in routes_out.splitlines()[2:] if line.split()])
+    routes = _v4_routes(_macos_route_destinations(routes_out))
     dhcp = True if "DHCP Configuration" in info or "BOOTP Configuration" in info else False if "Manual Configuration" in info or "off" in info.lower() else None
     return InterfaceState(
         interface,

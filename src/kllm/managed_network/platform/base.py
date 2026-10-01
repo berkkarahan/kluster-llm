@@ -225,6 +225,8 @@ class PlatformAdapter(ABC):
                 if event['address'] == prepared.assignment.address:
                     if event['kind'] == 'address_add' and event['prefix_length'] == prepared.assignment.prefix_length:
                         expected_adds += 1
+                        if expected_adds == 1:
+                            prepared.owns_resource = True
                     elif event['kind'] == 'address_change' and event['prefix_length'] == prepared.assignment.prefix_length and event['dad_state'] in (0, 1, 4):
                         pass  # native Windows DAD lifecycle of the observed exact add
                     else:
@@ -270,7 +272,7 @@ class PlatformAdapter(ABC):
         if batch['health'] != 'continuous' or snapshot.fingerprint != prepared.snapshot.fingerprint:
             prepared.ownership_conflict = True
         for event in batch['events']:
-            if event['address'] == prepared.assignment.address and (event['kind'] in ('address_add', 'address_delete') or event['prefix_length'] != prepared.assignment.prefix_length or event['dad_state'] == 2):
+            if event['address'] == prepared.assignment.address and (event['kind'] in ('address_add', 'address_delete') or event['prefix_length'] != prepared.assignment.prefix_length):
                 prepared.ownership_conflict = True
         return snapshot
 

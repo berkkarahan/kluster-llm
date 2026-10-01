@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 import os
 import asyncio
+import sqlite3
 from contextlib import asynccontextmanager
 import httpx
 from kllm import http_clients, rpc_cache
@@ -70,7 +71,7 @@ from .origin import (
 from kllm.agent.live_ws import (
     log_result_signature,
 )
-from kllm.agent.routes.v2 import build_router as _build_v2_router
+from kllm.agent.routes.v2 import build_router as _build_v2_router, build_network_router
 from kllm.agent.routes.dashboard import mount_dashboard as _mount_dashboard_routes
 from kllm.agent.routes.v1 import build_router as _build_v1_router
 from kllm.agent.errors import (
@@ -277,10 +278,55 @@ def _close_usage_store(app: FastAPI) -> None:
     _usage_runtime().close_store(app)
 
 
+async def _start_managed_network(app: FastAPI) -> None:
+    from kllm.agent.services.managed_network import ManagedNetworkService
+    try:
+        service = ManagedNetworkService(home_dir(), lambda: STATE, _master_control_base)
+        await service.start()
+        app.state.managed_network = service
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        app.state.managed_network_error = "Managed network identity/store is unavailable; local recovery required"
+
+
+async def _stop_managed_network(app: FastAPI) -> None:
+    service = getattr(app.state, 'managed_network', None)
+    if service is not None:
+        # A managed run is coupled to these bridge instances. Legacy runs keep
+        # their existing lifecycle when no durable network reservation exists.
+        for network in service.store.networks():
+            for run in service.store.runs(network.network_id):
+                if run.state == 'active' and run.child_pid == STATE.process_pid and run.child_pid:
+                    registered = native.registered_process_identity(run.child_pid)
+                    if registered and registered.get('start_token') == run.child_start_token:
+                        await asyncio.to_thread(membership_mod._stop_inference, STATE)
+        try:
+            await service.admission.release_stopped()
+        except (RuntimeError, ValueError):
+            # Abrupt/ambiguous process ownership remains durable for review.
+            pass
+        finally:
+            await service.close()
+        del app.state.managed_network
+
+
+def _managed_network_service():
+    service = getattr(app.state, 'managed_network', None)
+    if service is None:
+        raise HTTPException(503, detail={'code': 'UNSUPPORTED_CAPABILITY', 'message': 'Managed network service has not started'})
+    return service
+
+
+def _managed_network_summaries() -> list[dict[str, Any]]:
+    service = getattr(app.state, 'managed_network', None)
+    return service.summaries() if service is not None else []
+
+
 def _agent_lifespan() -> AgentLifespan:
     return AgentLifespan(
         AgentLifecycleDependencies(
             state=lambda: STATE,
+            start_managed_network=_start_managed_network,
+            stop_managed_network=_stop_managed_network,
             replace_state=_replace_state,
             upgrade_pending=ClusterState.upgrade_pending,
             stop_children=runtime.stop_children,
@@ -475,6 +521,7 @@ def _worker_local_leave() -> None:
         STATE.process_pid = None
         STATE.process_role = None
         runtime.clear_children()
+    _managed_network_before_reset()
     _reset_netsec_state()
     membership_mod.clear_membership_fields(STATE)
     STATE.role = "idle"
@@ -766,6 +813,8 @@ def health() -> dict[str, Any]:
         "node_id": STATE.node_id,
         "pid": os.getpid(),
     }
+    if getattr(app.state, 'managed_network', None) is not None:
+        out['capabilities'] = ['managed-network-v1']
     # Non-secret fingerprint (same as mDNS ``kid``) so Join-by-key can HTTP-probe
     # when Bonjour/mDNS is unavailable on the LAN.
     if STATE.role == "master" and STATE.join_key:
@@ -975,6 +1024,7 @@ def _dashboard_status_service() -> DashboardStatusService:
         update_progress=cluster_update.get_update_progress,
         software_identity=cluster_update.software_identity,
         default_device=kllm_config.DEFAULT_DEVICE,
+        managed_networks=_managed_network_summaries,
     )
 
 
@@ -1076,6 +1126,13 @@ def _unregister_worker() -> None:
         )
 
 
+def _managed_network_before_reset() -> None:
+    service = getattr(app.state, 'managed_network', None)
+    if service is not None:
+        from kllm.managed_network.recovery import before_reset
+        service.admission.call(before_reset(service))
+
+
 def _cluster_lifecycle_handlers() -> ClusterLifecycleHandlers:
     return ClusterLifecycleHandlers(
         state=lambda: STATE,
@@ -1088,6 +1145,7 @@ def _cluster_lifecycle_handlers() -> ClusterLifecycleHandlers:
         reset_network=_reset_netsec_state,
         clear_membership=membership_mod.clear_membership_fields,
         unregister_worker=_unregister_worker,
+        before_network_reset=lambda: _managed_network_before_reset(),
     )
 
 
@@ -1541,6 +1599,21 @@ def _inference_handlers() -> InferenceHandlers:
             ),
             stop_managed_inference=lambda: membership_mod._stop_inference(STATE),
             inference_idle=inference_activity.idle,
+            network_diagnostics=lambda network_id: _managed_network_service().admission.diagnostics(network_id),
+            network_members=lambda network_id: _managed_network_service().admission.members(network_id),
+            network_run=lambda network_id: (
+                _managed_network_service().admission.context(network_id)
+                if getattr(app.state, 'managed_network', None) is not None
+                else (_managed_network_service() if network_id else __import__('contextlib').nullcontext(STATE.members))
+            ),
+            network_stop=lambda: (
+                _managed_network_service().admission.stop_context()
+                if getattr(app.state, 'managed_network', None) is not None else __import__('contextlib').nullcontext()
+            ),
+            network_release=lambda: (
+                _managed_network_service().admission.call(_managed_network_service().admission.release_stopped(lock_held=True))
+                if getattr(app.state, 'managed_network', None) is not None else None
+            ),
         )
     )
 
@@ -1624,6 +1697,7 @@ _route_handlers: dict[str, Callable[..., Any]] = {
 legacy_v1_router = _build_v1_router(_route_handlers)
 app.include_router(legacy_v1_router)
 app.include_router(_build_v2_router(_route_handlers))
+app.include_router(build_network_router(_managed_network_service))
 _mount_dashboard()
 
 

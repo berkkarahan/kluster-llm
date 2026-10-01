@@ -29,6 +29,9 @@ def require_tcp_runtime(repo: Path, llama: Path, rpc: Path) -> dict:
             raise ValueError('unknown or RDMA-capable build')
         if any(os.environ.get(key) for key in ('LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH')):
             raise ValueError('unverified dynamic-library override')
+        installed_at = evidence['installed_at']
+        if isinstance(installed_at, bool) or not isinstance(installed_at, (int, float)) or installed_at <= 0:
+            raise ValueError('unknown installation timestamp')
         artifacts = evidence['artifacts']
         for binary in (llama, rpc):
             if binary.resolve().parent != manifest.parent.resolve() or binary.name not in artifacts:

@@ -69,6 +69,7 @@ pub fn source_connect(source: Ipv4Addr, target: SocketAddrV4, timeout: Duration)
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     socket.bind(&SocketAddrV4::new(source, 0).into())?;
     socket.connect_timeout(&target.into(), timeout)?;
+    socket.set_nonblocking(false)?;
     socket.set_nodelay(true)?;
     Ok(socket.into())
 }
@@ -81,6 +82,7 @@ struct Status {
     target: String,
     generation: u64,
     admission_live: bool,
+    admission_consumed: bool,
     active_streams: u32,
     pending_connects: u32,
     bytes_to_target: u64,
@@ -199,6 +201,15 @@ impl NetworkBridge {
                 if worker.state.lock().unwrap_or_else(|e| e.into_inner()).closed { break; }
                 match listener.accept() {
                     Ok((client, peer)) => {
+                        // BSD accept inherits the nonblocking listener flag.
+                        // Forwarding owns blocking directional threads; a quiet
+                        // stream must wait rather than fail with WouldBlock.
+                        if let Err(error) = client.set_nonblocking(false) {
+                            let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
+                            state.error = Some(error.kind().to_string());
+                            drop(client);
+                            continue;
+                        }
                         let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
                         if peer.ip() != std::net::IpAddr::V4(worker.config.allowed_peer) || state.closed || state.active || state.connecting || state.consumed || !state.deadline.is_some_and(|d| d > Instant::now()) {
                             drop(client);
@@ -230,7 +241,7 @@ impl NetworkBridge {
 
     pub fn grant_native(&self, generation: u64, ttl_ms: u64, renewal: bool) -> io::Result<()> {
         let mut state = self.inner.state.lock().map_err(|_| invalid("bridge lock failed"))?;
-        if state.closed || generation <= state.generation || generation > (1u64 << 53)-1 || ttl_ms == 0 || ttl_ms > 15000 {
+        if state.closed || (!renewal && generation <= state.generation) || (renewal && generation != state.generation) || generation > (1u64 << 53)-1 || ttl_ms == 0 || ttl_ms > 15000 {
             return Err(invalid("stale/invalid admission generation"));
         }
         if !renewal && (state.active || state.connecting || state.deadline.is_some()) { return Err(invalid("RPC_BUSY")); }
@@ -248,7 +259,7 @@ impl NetworkBridge {
     }
     pub fn status_native(&self) -> io::Result<String> {
         let state = self.inner.state.lock().map_err(|_| invalid("bridge lock failed"))?;
-        serde_json::to_string(&Status { instance_id: self.inner.config.instance_id.clone(), listener: self.inner.listener.to_string(), source_host: self.inner.config.source_host.to_string(), target: SocketAddrV4::new(self.inner.config.target_host, self.inner.config.target_port).to_string(), generation: state.generation, admission_live: !state.closed && state.deadline.is_some_and(|d| d > Instant::now()), active_streams: state.active as u32, pending_connects: state.connecting as u32, bytes_to_target: state.to_target, bytes_to_client: state.to_client, last_error: state.error.clone(), closed: state.closed }).map_err(|_| invalid("bridge status encoding failed"))
+        serde_json::to_string(&Status { instance_id: self.inner.config.instance_id.clone(), listener: self.inner.listener.to_string(), source_host: self.inner.config.source_host.to_string(), target: SocketAddrV4::new(self.inner.config.target_host, self.inner.config.target_port).to_string(), generation: state.generation, admission_live: !state.closed && state.deadline.is_some_and(|d| d > Instant::now()), admission_consumed: state.consumed, active_streams: state.active as u32, pending_connects: state.connecting as u32, bytes_to_target: state.to_target, bytes_to_client: state.to_client, last_error: state.error.clone(), closed: state.closed }).map_err(|_| invalid("bridge status encoding failed"))
     }
 }
 

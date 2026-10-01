@@ -8,6 +8,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from kllm import netsec
+from kllm.managed_network import allocation as network_allocation
+from kllm.managed_network.recovery import CleanupDecision
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT
 
 
@@ -160,3 +162,10 @@ class TemplateCheckBody(BaseModel):
 
 class ModelSettingsBody(BaseModel):
     parameter_set: dict[str, Any] = Field(default_factory=dict)
+
+# Additive managed-network schemas retain their strict feature contracts.
+ManagedNetworkAdapterSelection = network_allocation.AdapterSelection
+ManagedNetworkCancelBody = network_allocation.CancelRequest
+ManagedNetworkOperationBody = network_allocation.OperationRequest
+ManagedNetworkStartBody = network_allocation.StartRequest
+ManagedNetworkCleanupBody = CleanupDecision

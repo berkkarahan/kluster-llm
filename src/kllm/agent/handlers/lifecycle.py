@@ -107,6 +107,7 @@ class ClusterLifecycleHandlers:
         reset_network: Callable[[], None],
         clear_membership: Callable[[ClusterState], None],
         unregister_worker: Callable[[], None],
+        before_network_reset: Callable[[], None] | None = None,
     ) -> None:
         self._state = state
         self._end_usage = end_usage
@@ -118,6 +119,7 @@ class ClusterLifecycleHandlers:
         self._reset_network = reset_network
         self._clear_membership = clear_membership
         self._unregister_worker = unregister_worker
+        self._before_network_reset = before_network_reset
 
     def stop(self) -> dict[str, str]:
         state = self._state()
@@ -135,6 +137,8 @@ class ClusterLifecycleHandlers:
         if state.role == "master":
             self._stop_advertiser()
             state.join_key = None
+        if self._before_network_reset:
+            self._before_network_reset()
         self._reset_network()
         self._clear_membership(state)
         state.role = "idle"
@@ -155,6 +159,8 @@ class ClusterLifecycleHandlers:
             state.process_pid = None
             state.process_role = None
             self._clear_children()
+        if self._before_network_reset:
+            self._before_network_reset()
         self._reset_network()
         self._clear_membership(state)
         state.role = "idle"

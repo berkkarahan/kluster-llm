@@ -2,6 +2,7 @@
   import { appStore } from '$lib/store.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import InferenceActivity from '$lib/components/InferenceActivity.svelte';
+  import ManagedNetwork from '$lib/components/ManagedNetwork.svelte';
   import NodeMap from '$lib/components/NodeMap.svelte';
   import NodeUsageDetails from '$lib/components/NodeUsageDetails.svelte';
   import UsageHistory from '$lib/components/UsageHistory.svelte';
@@ -273,6 +274,10 @@
       {/if}
     </div>
   </div>
+
+  {#if appStore.status?.managed_networks !== undefined && !idle}
+    <ManagedNetwork />
+  {/if}
 
   <dialog bind:this={inspectorDialog} class="usage-dialog panel"
     aria-label={inspectorMode === 'history' ? 'Recorded usage' : 'Node details'}

@@ -257,3 +257,13 @@ Keep this rule on the Private profile and restrict it to trusted LAN/WireGuard n
 | Thunderbolt IP Bridge | 0.05-0.2 ms | 40 Gbps | Best performance |
 
 For distributed inference, **Thunderbolt IP bridge is strongly recommended** due to lowest latency and highest bandwidth.
+
+## App-managed setup
+
+For temporary dedicated addressing, use the Home → Private 10GbE network panel. Follow the supported agent installation, install a TCP-only RPC source build with `uv run python scripts/install.py --llama-only --rpc-tcp-only` on every node, and restart the agents. Run them with administrator/root privileges. The selected interfaces must be dedicated physical Ethernet, DHCP disabled, link up and negotiated at least 10 Gbps.
+
+Pair public identities explicitly in each node's local app; workers pin the master's fingerprint and public cluster binding. Select adapters locally, then start all selected nodes from the master. The operation prepares every participant before applying any exact temporary IPv4 address. LAN/WireGuard management, DNS, default gateways and persistent profiles remain in use. The manual script below remains available for operator-managed configuration.
+
+Readiness includes dedicated source/interface checks, signed bidirectional TCP diagnostics and a bounded valid idle RPC probe. The original worker RPC process remains the sole GPU owner. Inference must explicitly select the network on Plan & Run; launch endpoints are master-local loopback relays whose outbound source is the assigned dedicated IP. The default and saved model settings do not select this network.
+
+Stop dependent inference before network stop, retry or adding participants. Unreachable cleanup is pending; lost address-observer continuity requires local review rather than automatic deletion. Preserve addresses you consider operator-owned with “Keep address and release app ownership.” Only “Confirm app ownership and remove exact address” authorizes deletion of the reviewed delta. Do not expose unauthenticated upstream RPC port 50052 publicly. Real multi-node generation, cable-loss and mixed-OS acceptance must be recorded separately from local contract/socket tests.

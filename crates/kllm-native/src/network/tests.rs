@@ -31,21 +31,29 @@ fn source_bound_forwarding_half_close_and_refusal() {
     assert!(NetworkBridge::start(invalid).is_err());
     let bridge = NetworkBridge::start(config).unwrap();
     let status: serde_json::Value = serde_json::from_str(&bridge.status_native().unwrap()).unwrap();
+    assert_eq!(status["admission_consumed"], false);
     let listener = status["listener"].as_str().unwrap();
     // An unadmitted connection closes without ever opening the upstream.
     let mut rejected = TcpStream::connect(listener).unwrap();
     rejected.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     assert_eq!(rejected.read(&mut [0;1]).unwrap(),0);
     bridge.grant_native(1,15000,false).unwrap();
+    bridge.grant_native(1,15000,true).unwrap();
     let mut client = TcpStream::connect(listener).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    // Quiet admitted streams must survive BSD nonblocking accept inheritance.
+    thread::sleep(Duration::from_millis(30));
     client.write_all(&vec![17;200_000]).unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut reply = Vec::new(); client.read_to_end(&mut reply).unwrap(); assert_eq!(reply,b"complete");
     upstream_thread.join().unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     while !bridge.release_native(1).unwrap() { assert!(Instant::now() < deadline); thread::sleep(Duration::from_millis(5)); }
+    let drained: serde_json::Value = serde_json::from_str(&bridge.status_native().unwrap()).unwrap();
+    assert_eq!(drained["admission_consumed"], true);
+    assert_eq!(drained["active_streams"], 0);
     assert!(bridge.grant_native(1,15000,false).is_err());
+    assert!(bridge.grant_native(1,15000,true).is_err());
     #[cfg(unix)]
     {
         #[cfg(target_os="macos")] let name = std::ffi::CString::new("lo0").unwrap();

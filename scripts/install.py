@@ -1555,7 +1555,8 @@ def _write_rpc_transport_evidence(tag: str) -> None:
     for path in BIN_DIR.iterdir():
         if path.is_file() and ('ggml' in path.name or 'llama' in path.name) and path.suffix in ('.dll', '.so', '.dylib'):
             artifacts[path.name] = sha(path)
-    evidence = {'schema': 1, 'tag': tag, 'source_build': True, 'ggml_rpc': rpc_flag.group(1) if rpc_flag else 'unknown', 'ggml_rpc_rdma': rdma_flag.group(1) if rdma_flag else 'unknown', 'artifacts': artifacts}
+    import time
+    evidence = {'installed_at': time.time(), 'schema': 1, 'tag': tag, 'source_build': True, 'ggml_rpc': rpc_flag.group(1) if rpc_flag else 'unknown', 'ggml_rpc_rdma': rdma_flag.group(1) if rdma_flag else 'unknown', 'artifacts': artifacts}
     destination = BIN_DIR / 'rpc-transport.json'
     temporary = destination.with_suffix('.tmp')
     temporary.write_text(json.dumps(evidence, sort_keys=True), encoding='utf-8')

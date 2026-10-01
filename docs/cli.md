@@ -272,3 +272,19 @@ kllm cluster update
 3. `kllm join --key …` on worker; `kllm status` on master shows the member + device inventory.
 4. Download model on master only (`~/.kllm/models`); do **not** copy GGUF to workers.
 5. `kllm run --model …`; hit `http://<master>:8080` for inference.
+
+### App-managed dedicated Ethernet
+
+The app's Home → Private 10GbE network panel pairs public node identities, selects local adapters, and starts the selected participants from the master. On each node, first follow [agent installation](agent-install.md), join the intended cluster, and run the agent with administrator/root privileges. Use a dedicated physical Ethernet adapter with DHCP disabled and a negotiated link of at least 10 Gbps. Unknown hardware, permissions, DHCP or route facts refuse preparation.
+
+Both runtime binaries require a recorded TCP-only source build. On each participating node, use the supported installer and then restart its worker/agent:
+
+```bash
+uv run python scripts/install.py --llama-only --rpc-tcp-only
+```
+
+Copy each node's public identity JSON from its local panel. Pair the master on each worker and the workers on the master; the master supplies the public cluster binding. Join-key possession does not replace fingerprint pairing. Replacement requires settled networking and explicit local selection.
+
+Select each worker's adapter in that worker's local app, then select participants and a private subnet on the master. Start creates a queryable operation. All participants must prepare before any temporary address is added. The app preserves existing LAN/WireGuard control routes, DHCP/DNS profiles and the original RPC child. Readiness requires signed dedicated path verification and a released valid RPC protocol probe. `RPC_BUSY` leaves the address configured with verification pending.
+
+On Plan & Run, choose the dedicated network explicitly for that request. The default remains LAN/WireGuard. The selector is excluded from remembered model settings. Run diagnostics expose logical dedicated endpoints and the actual master loopback bridge endpoints. Stop inference before stopping or changing a dependent network. Retry/add/cancel and local cleanup review are available in the network panel. Temporary addresses survive only as long as the host OS retains them; they are not persistent adapter profiles. Keep upstream RPC port 50052 off public networks.

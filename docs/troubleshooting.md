@@ -328,3 +328,15 @@ Runtime logs live under `~/.kllm/logs`. Include:
 - Model filename, quantization, context, and the `kllm plan` result
 
 See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-constraints.md](memory-constraints.md) for supported behavior.
+
+### Managed private-network preparation and recovery
+
+Use Home → Private 10GbE network → Refresh prerequisites and status. Every worker must be paired locally to the displayed master fingerprint/binding and must select its own adapter before master setup. `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`) followed by an agent/worker restart. Installing over an already running RPC child does not prove that child's transport capabilities.
+
+`RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN/WireGuard.
+
+`INFERENCE_ACTIVE` blocks network stop/add/retry while a reservation, active run or unresolved admission owns its assignments. Stop inference first, then let the app obtain drain acknowledgements. Missing acknowledgements stay uncertain; they are not reported as successful cleanup. Cleanup pending on an unreachable worker is retained and retried after control connectivity returns.
+
+After an abrupt agent restart, prior address observations and readiness are invalid. Present addresses with lost ownership remain untouched. Open that node's local cleanup review: inspect the current exact address and adapter snapshot, then either keep the address and release app ownership or explicitly confirm that exact delta for removal. A changed snapshot refuses removal and requires another review. Never delete all addresses from an adapter to resolve one journal. Graceful shutdown stops a matching dependent managed inference before closing bridges; unrelated legacy inference is identified separately.
+
+Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.

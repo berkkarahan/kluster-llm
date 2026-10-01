@@ -21,7 +21,7 @@ dependencies = [
     "psutil>=5.9",
     "pydantic>=2.7",
     "cryptography>=44",
-    "websockets>=14",
+    "websockets>=15",
 ]
 
 [project.urls]

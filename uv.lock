@@ -587,7 +587,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
-    { name = "websockets", specifier = ">=14" },
+    { name = "websockets", specifier = ">=15" },
     { name = "zeroconf", specifier = ">=0.132" },
 ]
 provides-extras = ["dev"]

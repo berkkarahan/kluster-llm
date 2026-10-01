@@ -1,6 +1,6 @@
 # Validation Guide: App-Managed Private 10GbE Network
 
-This is a guide for the planned implementation. New routes, network panel and test files are not implemented by speckit-plan. Execute the steps after those surfaces exist; no commands in this planning turn change host networking.
+The routes, network panel, explicit inference selector, reservations and local ownership review are implemented. Local verification separates real HTTP/WebSocket/SQLite and native socket checks from controlled hardware/runtime facts. The physical acceptance journey below remains pending on this machine.
 
 ## Minimal Critical Verification Scope
 
@@ -8,7 +8,7 @@ The user's task-generation instruction is to keep end-to-end checks and some tes
 
 ## Prerequisites
 
-- Follow [agent install guide](../../docs/agent-install.md) on every participating machine. Use the committed stable llama-release and run `python scripts/install.py --check` on each node; synchronize with `python scripts/install.py --llama-only` when needed.
+- Follow [agent install guide](../../docs/agent-install.md) on every participating machine. Use the committed stable llama-release and run `python scripts/install.py --check` on each node; install recorded TCP-only binaries with `uv run python scripts/install.py --llama-only --rpc-tcp-only` and restart the agents/workers. An older running RPC process is ineligible even when files on disk have been replaced.
 - Dedicated connected physical Ethernet adapters, reported negotiated speed >=10 Gbps, DHCP disabled, and ordinary cluster management connectivity on a separate unaffected path.
 - Windows elevated local agent or POSIX root local agent; no passwordless general shell helper. Use an explicit test KLLM_HOME and the existing supported agent invocation; arrange elevation locally before starting the operation.
 - One master and two workers for the primary acceptance, connected through a dedicated switch; a direct cable suffices for the one-worker subset. Windows, Linux and macOS hardware coverage must be recorded, including one mixed-platform pair.
@@ -81,3 +81,25 @@ For each hardware run record OS/version, adapter/driver, negotiated speed, maste
 SC-001 requires one master plus two workers on idle eligible hardware; active-run waits are reported separately. SC-004 requires a real multi-node generation and endpoint/path evidence, not just a successful plan. For SC-006, distinguish cleanup proven, absent after reboot, and ambiguous ownership requiring local review; never mark pending as success. Review local cleanup through the contract's loopback resolve control only after inspecting the exact current resource.
 
 Measure dedicated transfer/bridge and inference latency against the same model/backend/hardware and workload over the previous path. Optional iperf3 measures the physical link separately; it does not validate RPC correctness or claim a guaranteed 10GbE application rate. No improvement target is claimed by this plan. Publish outstanding hardware checks and failed/unsupported configurations with exact follow-up steps.
+
+## Local implementation checks (2026-10-01)
+
+- Five compact critical Python cases cover authority/replay, durable restart uncertainty, preparation refusal, frozen run reservations/blocked stop, and exact owned-versus-user/ambiguous cleanup with stale review refusal.
+- One actual three-agent refusal/retry/cancel/stop test exercises the installed RDMA-enabled runtime's safe refusal before host mutation.
+- One shared native-agent journey covers ready setup, selected inference through actual native relays, original RPC PID/start identities, frozen endpoints, active health/lease renewal without a competing RPC probe, blocked stop, actual LAN behavior with omitted selection, RPC_BUSY preserving a legacy run, worker restart after partial application, address preservation after observation loss, local exact review and distributed cleanup.
+- **Controlled boundaries in that native lab**: dedicated adapters/aliases, OS routes/address observations and permissions are simulated; logical addresses map onto one real private host IP plus separate socket ports. TCP-only RPC/GPU binaries, process socket inventory and model workload use controlled serial RPC/inference subprocesses. HTTP/WebSocket/signatures/SQLite, native relays/probes, native process identity, signed diagnostic sockets and stream drain are actual. Production code has no lab mapping or eligibility bypass.
+- Two native real-socket cases additionally prove selected source, byte forwarding/half-close, quiet-stream survival, same-generation renewal, bind/allowlist refusal, invalidated observation, and valid serial RPC probe release followed by another connection.
+- One serial Chrome journey passes local pairing/selection -> cancelled setup -> retry -> add participant -> selected run -> blocked stop -> inference stop -> cleanup. HTTP platform/runtime/status receipts are controlled; app requests/actions are actual.
+- `make test`: 697 Python passed, 11 existing skips; all dashboard tests (51 non-browser plus four serial cases), 41 native tests and Svelte check passed. Supported rebuild/editable refresh and dashboard production build pass. Linux/Windows native compile checks pass; these are compilation evidence, not OS lifecycle acceptance.
+- Scoped Ruff and mypy pass (23 changed modules). Full-package `uv run mypy` retains six existing errors in src/kllm/log_sink.py:73,74,137; src/kllm/connect.py:68; and src/kllm/commands/connect.py:46 (two argument errors). Those unrelated modules were not changed.
+
+```bash
+uv run python -m pytest -q -n 0 tests/test_managed_network_critical.py tests/test_managed_network_e2e.py tests/test_configure_10gbe.py tests/test_install_script.py tests/test_inference_overrides.py tests/test_dashboard_api.py
+PYO3_PYTHON="$PWD/.venv/bin/python" cargo test --manifest-path crates/kllm-native/Cargo.toml network::tests -- --nocapture
+node --experimental-strip-types --test dashboard/tests/managed-network.test.mjs
+uv run python scripts/build.py --skip-ui --skip-llama --skip-wireguard --skip-toolchains
+uv sync --reinstall-package kllm
+make test
+```
+
+T011/T023/T030 are complete with the documented controlled OS/runtime boundaries; only T039 physical acceptance remains pending. This machine has no isolated three-node 10GbE lab, Windows/Linux runtime hosts or privileged temporary-address test environment. Do not mark SC-001–SC-008, physical timing, real-model generation, ARP/DAD behavior, cable-loss or mixed-OS cleanup passed from local tests.

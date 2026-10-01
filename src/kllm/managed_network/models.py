@@ -43,6 +43,17 @@ class Record(BaseModel):
         field = cls.model_fields[info.field_name]
         if info.field_name == 'version' and isinstance(value, bool):
             raise ValueError('integer version required')
+        if field.annotation == list[UUID] and isinstance(value, list):
+            parsed_values = []
+            for item in value:
+                if isinstance(item, str):
+                    parsed = UUID(item)
+                    if str(parsed) != item:
+                        raise ValueError('canonical UUID required')
+                    parsed_values.append(parsed)
+                else:
+                    parsed_values.append(item)
+            return parsed_values
         if isinstance(value, str) and field.annotation is datetime:
             return datetime.fromisoformat(value.replace('Z', '+00:00'))
         if isinstance(value, str) and (field.annotation is UUID or field.annotation == UUID | None):
@@ -247,6 +258,7 @@ class RunNetworkReservation(Record):
 
 
 class AdmissionLease(Record):
+    expected_rpc_child_identity: RPCChildIdentity
     lease_id: UUID
     network_id: UUID
     node_id: Identifier
@@ -272,9 +284,9 @@ class AdmissionLease(Record):
 
 NETWORK_TRANSITIONS: dict[str, set[str]] = {
     'preparing': {'applying', 'failed'},
-    'applying': {'verifying', 'cleanup_pending', 'failed'},
-    'verifying': {'ready', 'cleanup_pending', 'failed', 'stopping', 'degraded'},
-    'ready': {'degraded', 'stopping'},
+    'applying': {'degraded', 'verifying', 'cleanup_pending', 'failed'},
+    'verifying': {'applying', 'ready', 'cleanup_pending', 'failed', 'stopping', 'degraded'},
+    'ready': {'verifying', 'degraded', 'stopping'},
     'degraded': {'verifying', 'stopping'},
     'failed': {'preparing', 'stopping'},
     'stopping': {'stopped', 'cleanup_pending'},

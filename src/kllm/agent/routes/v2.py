@@ -72,3 +72,9 @@ def build_router(handlers: Mapping[str, Endpoint]) -> APIRouter:
         else:
             router.add_api_route(path, endpoint, methods=[method], operation_id=operation_id)
     return router
+
+
+def build_network_router(service: Callable[..., Any]) -> APIRouter:
+    """Keep the paired node socket and operator resources on v2 only."""
+    from kllm.agent.handlers.managed_network import build_router as build_network
+    return build_network(service)

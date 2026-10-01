@@ -99,6 +99,21 @@
   {/if}
 
   <div class="panel p-3 flex flex-col gap-3" style="border-color: var(--border)">
+    {#if appStore.status?.managed_networks !== undefined}
+      <label class="mono text-[11px]" for="run-network">Inference network</label>
+      <select id="run-network" class="field mono" bind:value={appStore.selectedNetworkId} disabled={!!appStore.busy} onchange={bumpEstimate}>
+        <option value="">LAN / WireGuard</option>
+        {#if appStore.selectedNetworkId && !appStore.status.managed_networks.some((network) => network.network_id === appStore.selectedNetworkId && network.observed_state !== 'stopped')}
+          <option value={appStore.selectedNetworkId}>Selected network unavailable · {appStore.selectedNetworkId}</option>
+        {/if}
+        {#each appStore.status.managed_networks.filter((network) => network.observed_state !== 'stopped') as network}
+          <option value={network.network_id}>{network.subnet} · {network.observed_state}</option>
+        {/each}
+      </select>
+      {#if appStore.selectedNetworkId}
+        <p class="mono text-[11px]">This run requires the selected dedicated network. Refresh or retry its verification if admission fails.</p>
+      {/if}
+    {/if}
     <label class="mono text-[11px]" style="color: var(--muted)" for="run-model">Model</label>
     <select
       id="run-model"

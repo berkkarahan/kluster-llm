@@ -31,6 +31,7 @@ _SNAPSHOT_OPTIONAL = (
     "process_role",
     "process_started_at",
     "process_start_token",
+    "logging_ack",
 )
 
 _UNREACHABLE_WARNING = "master heartbeat unreachable"
@@ -95,6 +96,7 @@ def snapshot_payload(
         "apply_error": state.apply_error,
         "apply_warning": state.apply_warning,
         "inference_activity": inference_activity or state.inference_activity,
+        "logging": {"enabled": state.logging_enabled, "generation": state.logging_generation},
     }
 
 

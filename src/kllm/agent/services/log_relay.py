@@ -50,6 +50,7 @@ class LogRelayService:
     def tick(self) -> None:
         """Perform one role-aware log relay iteration."""
         state = self._state()
+        self._hub.set_enabled(state.logging_enabled)
         if state.role == "master":
             self._hub.ensure_journal_loaded()
         master_base = (

@@ -365,8 +365,46 @@ def test_hardware_macos_metal_scope_is_truthful():
                     assert view["pool_id"] == view["backing_pool_id"] == "host:ram"
                 else:
                     assert view["backing_pool_id"] is None
-                assert view["used"]["status"] == view["free"]["status"] == "unsupported"
-                assert view["used"]["value"] is None
+                assert view["free"]["status"] == "unsupported"
+                assert view["free"]["value"] is None
+                if device["memory_kind"] == "shared":
+                    assert view["used"]["status"] == "measured"
+                    assert view["used"]["value"] >= 0
+                    assert view["used"]["source"] == "mac.iokit.in_use_system_memory"
+            assert device["utilization"]["status"] == "measured"
+            assert 0 <= device["utilization"]["value"] <= 100
+    finally:
+        native.close_resource_probes()
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or os.environ.get("KLLM_TEST_HARDWARE") != "1", reason="opt-in IORegistry reference acceptance")
+def test_hardware_macos_gpu_matches_ioreg_reference():
+    import plistlib
+
+    def reference():
+        entries = plistlib.loads(subprocess.check_output(["ioreg", "-a", "-r", "-c", "IOAccelerator"], timeout=3))
+        return {f"metal:{entry['IORegistryEntryID']:x}": entry["PerformanceStatistics"]
+            for entry in entries if "PerformanceStatistics" in entry}
+
+    native.close_resource_probes()
+    try:
+        for _ in range(30):
+            before = reference()
+            sample = native.probe_resources(node_id="ioreg-reference")
+            after = reference()
+            assert sample["schema_version"] == 2
+            for device in sample["devices"]:
+                key = device["device_key"]
+                assert key in before and key in after, "GPU identity must match IORegistry, never list order"
+                util = device["utilization"]
+                assert util["status"] == "measured"
+                bounds = [before[key]["Device Utilization %"], after[key]["Device Utilization %"]]
+                assert min(bounds) - 10 <= util["value"] <= max(bounds) + 10
+                used = device["memory"][0]["used"]
+                assert used["status"] == "measured"
+                bounds = [before[key]["In use system memory"], after[key]["In use system memory"]]
+                assert min(bounds) - 8 * 1024**2 <= used["value"] <= max(bounds) + 8 * 1024**2
+            time.sleep(.05)
     finally:
         native.close_resource_probes()
 
@@ -533,6 +571,42 @@ exit 0
             time.sleep(.2)
         print(json.dumps(dict(gpu=device["name"], reference_capacity=capacity, passing_pairs=passed, observations=30, pairs=pairs)))
         assert passed >= 29
+    finally:
+        native.close_resource_probes()
+
+
+@pytest.mark.skipif(os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform != "win32", reason="opt-in Windows GPU Engine reference acceptance")
+def test_hardware_windows_gpu_utilization_reference():
+    """Compare overlapping one-second driver windows under idle or steady load."""
+    native.close_resource_probes()
+    passed = 0
+    pairs = []
+    script = r"(Get-Counter '\GPU Engine(*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 2 | Select-Object -Last 1).CounterSamples | Select-Object InstanceName,CookedValue | ConvertTo-Json -Compress"
+    try:
+        for _ in range(30):
+            native.probe_resources(node_id="engine-reference")
+            reference = json.loads(subprocess.check_output(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, timeout=8))
+            reference = reference if isinstance(reference, list) else [reference]
+            engines = {}
+            for row in reference:
+                name = row["InstanceName"].lower()
+                if "luid_" in name:
+                    key = name[name.index("luid_"):].split("#", 1)[0]
+                    engines[key] = engines.get(key, 0.0) + float(row["CookedValue"])
+            sample = native.probe_resources(node_id="engine-reference")
+            assert sample["devices"], "driver exposes no GPU for acceptance"
+            valid = True
+            for device in sample["devices"]:
+                prefix = device["device_key"].removeprefix("win:") + "_eng_"
+                values = [value for key, value in engines.items() if key.startswith(prefix)]
+                assert values, "GPU engine reference identity is missing"
+                measured = device["utilization"]
+                expected = max(values)
+                valid &= measured["status"] == "measured" and abs(measured["value"] - expected) <= 10
+                pairs.append(dict(device=device["name"], native=measured["value"], reference=expected))
+            passed += int(valid)
+        assert passed >= 29, pairs
     finally:
         native.close_resource_probes()
 

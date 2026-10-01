@@ -21,6 +21,8 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     ("/v1/models/delete", "POST", "delete_model"),
     ("/v1/chat/completions", "POST", "chat_completions"),
     ("/v1/messages", "POST", "anthropic_messages"),
+    ("/v1/responses", "POST", "responses"),
+    ("/v1/responses/input_tokens", "POST", "response_tokens"),
     ("/v1/api-token", "GET", "get_api_token"),
     ("/v1/hf-token", "GET", "get_hf_token"),
     ("/v1/hf-token", "PUT", "put_hf_token"),

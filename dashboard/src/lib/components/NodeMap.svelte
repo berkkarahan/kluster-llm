@@ -104,15 +104,21 @@
     return 'unavailable';
   }
 
-  type DeviceRow = { id: string; label: string; util: string; mem: string; reason: string | null };
+  type DeviceRow = { id: string; label: string; util: string; mem: string; reason: string | null;
+    memoryRows?: { label: string; value: string }[] };
 
   function deviceRows(node: UsageNode): DeviceRow[] {
     if (node.resources) return node.resources.devices.map((device) => ({
-      id: device.device_key, label: device.name, util: 'unavailable',
-      mem: device.memory.map((memory) => memory.kind === 'dedicated'
-        ? `${memory.kind}: ${formatGib(memory.used.value)} / ${formatGib(memory.total.value)} · ${formatGib(memory.free.value)} free`
-        : `${memory.kind}: ${formatGib(memory.used.value)} used · ${formatGib(memory.free.value)} free${memory.backing_pool_id === 'host:ram' ? ' · shares host RAM' : ''}`).join(' / '),
-      reason: device.memory.find((memory) => memory.used.reason)?.used.reason ?? null
+      id: device.device_key, label: device.name,
+      util: device.utilization?.status === 'measured' ? percentText(device.utilization.value) : device.utilization?.status ?? 'unsupported',
+      memoryRows: device.memory.flatMap((memory) => memory.kind === 'dedicated'
+        ? [{ label: 'Dedicated', value: memory.used.value != null
+            ? `${formatGib(memory.used.value)} / ${formatGib(memory.total.value)}${memory.free.value != null ? ` · ${formatGib(memory.free.value)} free` : ''}`
+            : memory.used.status }]
+        : [{ label: 'GPU shared RAM', value: memory.used.value != null ? `${formatGib(memory.used.value)} used` : memory.used.status },
+           ...(memory.backing_pool_id === 'host:ram' && node.resources!.host.memory.available.value != null
+             ? [{ label: 'Host available', value: `${formatGib(node.resources!.host.memory.available.value)} · shared pool` }] : [])]),
+      mem: '', reason: null
     }));
     const rows = new Map<string, DeviceRow>();
     for (const device of node.devices ?? []) {
@@ -161,8 +167,9 @@
   }
 
   function estimateHeight(node: UsageNode | undefined): number {
-    const devices = node ? Math.max(1, deviceRows(node).length) : 1;
-    return 126 + devices * 20;
+    const devices = node ? deviceRows(node) : [];
+    return 126 + (devices.length ? devices.reduce((sum, device) =>
+      sum + (device.memoryRows ? 25 + (1 + device.memoryRows.length) * 20 : 20), 0) : 20);
   }
 
   function applyFit() {
@@ -276,10 +283,17 @@
     <span class="node-metric"><span class="k">Host CPU</span><span class="v">{cpuText(node)}</span></span>
     <span class="node-metric"><span class="k">Host RAM</span><span class="v">{ramText(node)}</span></span>
     {#each deviceRows(node) as device (device.id)}
-      <span class="node-metric node-metric-device">
+      {#if device.memoryRows}
+        <span class="node-device-name">{device.label}</span>
+        <span class="node-metric"><span class="k">GPU utilization</span><span class="v">{device.util}</span></span>
+        {#each device.memoryRows as memory}
+          <span class="node-metric"><span class="k">{memory.label}</span><span class="v">{memory.value}</span></span>
+        {/each}
+      {:else}<span class="node-metric node-metric-device">
         <span class="k">{device.label}</span>
         <span class="v">{device.util} · {device.mem}{device.reason ? ` (${device.reason})` : ''}</span>
       </span>
+      {/if}
     {/each}
     {#if !deviceRows(node).length}
       <span class="node-metric node-metric-device"><span class="k">GPU</span><span class="v">{gpuAbsence(node)}</span></span>

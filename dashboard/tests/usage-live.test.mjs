@@ -30,6 +30,45 @@ function node(id, over = {}) {
   };
 }
 
+test('native topology shows measured GPU counters and separates shared pools', async () => {
+  const cwd = process.cwd();
+  process.chdir(fileURLToPath(new URL('..', import.meta.url)));
+  const server = await createSsrServer();
+  const metric = (value, unit = 'bytes') => ({ value, unit, scope: 'device', status: value === null ? 'unsupported' : 'measured',
+    reason: value === null ? 'unsupported_counter' : null, source: 'test.driver', observed_at: '2026-09-29T00:00:02Z' });
+  try {
+    const { render } = await server.ssrLoadModule('svelte/server');
+    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/components/NodeMap.svelte');
+    const { default: Details } = await server.ssrLoadModule('/src/lib/components/NodeUsageDetails.svelte');
+    const resources = {
+      schema_version: 2, host: { cpu: metric(11, 'percent_machine'), memory: {
+        used: metric(16 * GIB), total: metric(32 * GIB), available: metric(12 * GIB), free: metric(8 * GIB) } },
+      devices: [{ device_key: 'metal:1', name: 'Apple M5 Pro', memory_kind: 'shared', utilization: metric(0, 'percent_device'),
+        memory: [{ kind: 'shared', backing_pool_id: 'host:ram', used: metric(.5 * GIB), free: metric(null), total: metric(null) }] },
+      { device_key: 'dxgi:2', name: 'AMD Radeon RX 9070 XT', memory_kind: 'dedicated', utilization: metric(43, 'percent_device'),
+        memory: [{ kind: 'dedicated', used: metric(15 * GIB), free: metric(1 * GIB), total: metric(16 * GIB) }] }],
+      processes: [], device_discovery: { status: 'measured', reason: null }, totals: { physical_capacity: metric(48 * GIB) }
+    };
+    const native = node('native', { resources, resource_freshness: 'fresh', resource_age_seconds: 1 });
+    const map = render(NodeMap, { props: { nodes: { native }, relationships: [], selectedId: '', onselect: () => {} } }).body;
+    assert.match(map, /GPU utilization/);
+    assert.match(map, /0%/);
+    assert.match(map, /43%/);
+    assert.match(map, /GPU shared RAM/);
+    assert.match(map, /0\.5 GiB used/);
+    assert.match(map, /Host available/);
+    assert.match(map, /12\.0 GiB · shared pool/);
+    assert.match(map, /15\.0 GiB \/ 16\.0 GiB · 1\.0 GiB free/);
+    assert.doesNotMatch(map, /unsupported_counter|unavailable|— free/);
+    const details = render(Details, { props: { node: native, assignment: false, activity: null } }).body;
+    assert.match(details, /test\.driver/);
+    assert.match(details, /unsupported_counter/);
+  } finally {
+    await server.close();
+    process.chdir(cwd);
+  }
+});
+
 test('node summaries expose host CPU, RAM and per-device readings before selection', async () => {
   const cwd = process.cwd();
   process.chdir(fileURLToPath(new URL('..', import.meta.url)));

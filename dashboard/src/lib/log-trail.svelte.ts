@@ -131,6 +131,7 @@ export class LogTrail {
   private generation = 0;
   private inFlight = false;
   private disposed = false;
+  paused = $state(false);
   private timer: ReturnType<typeof setTimeout> | null = null;
   private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private abort: AbortController | null = null;
@@ -148,6 +149,10 @@ export class LogTrail {
 
   start(): void {
     if (this.disposed) return;
+    if (this.paused) {
+      if (this.cursor === null) void this.read(true);
+      return;
+    }
     if (typeof document !== 'undefined' && !appStore.setLogVisibilityListener(this.visibilityListener)) {
       this.onVisibility = this.visibilityListener;
       document.addEventListener('visibilitychange', this.onVisibility);
@@ -189,6 +194,7 @@ export class LogTrail {
   setMode(mode: RefreshMode): void {
     if (mode === this.refreshMode) return;
     this.refreshMode = mode;
+    if (this.paused) return;
     if (mode === 'live') this.denied = false;
     this.deadline = nowMs() + REFRESH_MS[mode];
     this.cancelActiveRead();
@@ -211,6 +217,25 @@ export class LogTrail {
 
   setNode(id: string): void {
     this.selectedNodeId = id;
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.disposed || this.paused === !enabled) return;
+    this.paused = !enabled;
+    if (enabled) {
+      this.start();
+      return;
+    }
+    this.generation += 1;
+    this.abort?.abort();
+    this.abort = null;
+    this.inFlight = false;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+    this.timer = this.fallbackTimer = null;
+    if (this.usingLive) appStore.setLogListener(null);
+    this.usingLive = false;
+    if (this.cursor === null) void this.read(true);
   }
 
   /** Display-only clear. No-op until a snapshot has been committed. */
@@ -239,7 +264,7 @@ export class LogTrail {
   }
 
   private handleVisibility(): void {
-    if (this.disposed || typeof document === 'undefined') return;
+    if (this.disposed || this.paused || typeof document === 'undefined') return;
     if (document.visibilityState === 'hidden') {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
@@ -266,7 +291,7 @@ export class LogTrail {
   }
 
   private armLiveFallback(): void {
-    if (this.disposed || !this.usingLive || this.fallbackTimer
+    if (this.disposed || this.paused || !this.usingLive || this.fallbackTimer
       || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
     const tick = () => {
       this.fallbackTimer = null;
@@ -279,7 +304,7 @@ export class LogTrail {
   }
 
   private arm(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.paused) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     if (this.timer) clearTimeout(this.timer);
     const interval = REFRESH_MS[this.refreshMode];
@@ -297,8 +322,8 @@ export class LogTrail {
     }, Math.max(0, delay));
   }
 
-  private async read(): Promise<void> {
-    if (this.disposed || this.inFlight || (this.usingLive && this.denied)) return;
+  private async read(retainedHistory = false): Promise<void> {
+    if (this.disposed || (this.paused && !retainedHistory) || this.inFlight || (this.usingLive && this.denied)) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     this.inFlight = true;
     const gen = ++this.generation;
@@ -356,7 +381,7 @@ export class LogTrail {
   }
 
   private receiveLive(result: LiveLogs): void {
-    if (this.disposed || !this.usingLive) return;
+    if (this.disposed || this.paused || !this.usingLive) return;
     if (result.availability === 'denied') this.denied = true;
     if (result.availability !== 'available' || !result.snapshot) {
       this.errorText = result.error?.message ?? 'Live logs unavailable';

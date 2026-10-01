@@ -17,7 +17,7 @@ def test_dashboard_command_starts_agent_and_can_skip_browser(monkeypatch):
 
 def test_connect_dry_run_builds_and_displays_launch_plan(monkeypatch):
     calls: list[object] = []
-    plan = SimpleNamespace(agent="claude")
+    plan = SimpleNamespace(agent="claude", cleanup_dirs=[])
     monkeypatch.setattr(connect, "_ensure_agent", lambda port: calls.append(("agent", port)))
 
     def build(agent_name: str, **kwargs: object) -> SimpleNamespace:

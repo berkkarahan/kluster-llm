@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -29,6 +29,8 @@ pub struct ProcessHandle {
 #[derive(Clone, Debug)]
 pub struct LaunchResult {
     #[pyo3(get)]
+    pub log_sink_pid: Option<u32>,
+    #[pyo3(get)]
     pub process_start_token: Option<String>,
     #[pyo3(get)]
     pub process_started_at: Option<String>,
@@ -44,6 +46,18 @@ pub struct LaunchResult {
 
 struct TrackedChild {
     child: Child,
+    sink: Option<Child>,
+}
+
+impl Drop for TrackedChild {
+    fn drop(&mut self) {
+        if let Some(mut sink) = self.sink.take() {
+            // Reap the helper after EOF without blocking the runtime registry.
+            std::thread::spawn(move || {
+                let _ = sink.wait();
+            });
+        }
+    }
 }
 
 fn children() -> &'static Mutex<Vec<TrackedChild>> {
@@ -53,7 +67,12 @@ fn children() -> &'static Mutex<Vec<TrackedChild>> {
 
 fn reap_exited(children: &mut Vec<TrackedChild>) {
     children.retain_mut(|tracked| match tracked.child.try_wait() {
-        Ok(Some(_)) => false,
+        Ok(Some(_)) => {
+            if let Some(sink) = tracked.sink.as_mut() {
+                let _ = sink.try_wait();
+            }
+            false
+        }
         Ok(None) => true,
         // Keep an unqueryable handle so stop_process still gets a chance to
         // terminate/wait it instead of silently losing ownership.
@@ -69,6 +88,7 @@ pub struct LaunchConfig {
     pub env: HashMap<String, String>,
     /// When set, child stdout and stderr are appended to this file.
     pub log_path: Option<PathBuf>,
+    pub log_helper_argv: Vec<String>,
 }
 
 fn extract_env(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, String>> {
@@ -401,6 +421,7 @@ impl LaunchConfig {
             argv,
             env,
             log_path,
+            log_helper_argv: opt_string_list(dict, "log_helper_argv")?,
         })
     }
 
@@ -461,6 +482,7 @@ impl LaunchConfig {
             argv,
             env,
             log_path,
+            log_helper_argv: opt_string_list(dict, "log_helper_argv")?,
         })
     }
 }
@@ -611,9 +633,43 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
         cmd.env(path_key, merged);
     }
     cmd.stdin(Stdio::null());
+    let mut sink = None;
     match &cfg.log_path {
         Some(path) => {
-            let (out, err) = stdio_for_log(path)?;
+            let (out, err) = if let Some(executable) = cfg.log_helper_argv.first() {
+                let mut helper = Command::new(executable);
+                helper
+                    .args(&cfg.log_helper_argv[1..])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    helper.process_group(0);
+                }
+                let mut process = helper.spawn()?;
+                let input = process
+                    .stdin
+                    .take()
+                    .ok_or_else(|| ProcessError::Message("missing log sink input".into()))?;
+                #[cfg(unix)]
+                let writer = File::from(std::os::fd::OwnedFd::from(input));
+                #[cfg(windows)]
+                let writer = File::from(std::os::windows::io::OwnedHandle::from(input));
+                let cloned = match writer.try_clone() {
+                    Ok(cloned) => cloned,
+                    Err(error) => {
+                        let _ = process.kill();
+                        let _ = process.wait();
+                        return Err(error.into());
+                    }
+                };
+                sink = Some(process);
+                (Stdio::from(writer), Stdio::from(cloned))
+            } else {
+                stdio_for_log(path)?
+            };
             cmd.stdout(out).stderr(err);
         }
         None => {
@@ -621,16 +677,27 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
         }
     }
 
-    let child = cmd.spawn()?;
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(helper) = sink.as_mut() {
+                let _ = helper.kill();
+                let _ = helper.wait();
+            }
+            return Err(error.into());
+        }
+    };
+    let log_sink_pid = sink.as_ref().map(Child::id);
     let pid = child.id();
     let identity = crate::usage::process_counters(pid).ok();
     let mut tracked = children()
         .lock()
         .map_err(|_| ProcessError::Message("process lock poisoned".into()))?;
     reap_exited(&mut tracked);
-    tracked.push(TrackedChild { child });
+    tracked.push(TrackedChild { child, sink });
 
     Ok(LaunchResult {
+        log_sink_pid,
         process_start_token: identity.as_ref().map(|p| p.token.clone()),
         process_started_at: identity.map(|p| p.started),
         pid,
@@ -726,7 +793,7 @@ mod tests {
         #[cfg(unix)]
         let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
         child.wait().unwrap();
-        let mut tracked = vec![TrackedChild { child }];
+        let mut tracked = vec![TrackedChild { child, sink: None }];
         reap_exited(&mut tracked);
         assert!(tracked.is_empty());
     }

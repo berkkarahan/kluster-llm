@@ -80,6 +80,59 @@ async def proxy_chat_completions(
     return await _proxy(request, port, "/v1/chat/completions", body)
 
 
+async def proxy_responses(port: int, request: Request, *, count_tokens: bool = False) -> Response:
+    """llama.cpp owns Responses conversion, tool events and token accounting."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    body = _coalesce_response_instructions(body)
+    return await _proxy(request, port, "/v1/responses/input_tokens" if count_tokens else "/v1/responses", body)
+
+
+def _coalesce_response_instructions(body: dict[str, Any]) -> dict[str, Any]:
+    """One leading instruction block for templates requiring a single system turn.
+
+    llama.cpp maps each leading developer input to a system message. Combine
+    only that prefix, preserving its order, all tools and the remaining input.
+    Non-text instructions stay untouched for native protocol validation.
+    """
+    inputs = body.get("input")
+    instructions = body.get("instructions", "")
+    if not isinstance(inputs, list) or not isinstance(instructions, str):
+        return body
+    prefix = [instructions] if instructions else []
+    count = 0
+    for item in inputs:
+        if not isinstance(item, dict) or item.get("role") not in ("system", "developer"):
+            break
+        content = item.get("content")
+        if isinstance(content, str):
+            prefix.append(content)
+        elif isinstance(content, list) and all(isinstance(part, dict) and part.get("type") in ("input_text", "text") and isinstance(part.get("text"), str) for part in content):
+            prefix.append("\n".join(part["text"] for part in content))
+        else:
+            return body
+        count += 1
+    if not count:
+        return body
+    return {**body, "instructions": "\n\n".join(prefix), "input": inputs[count:]}
+
+
+async def served_models(port: int, client: httpx.AsyncClient) -> dict[str, Any]:
+    try:
+        health = await client.get(f"{infer_base(port)}/health", timeout=2)
+        if health.status_code != 200:
+            raise HTTPException(503, "inference is loading or unavailable")
+        response = await client.get(f"{infer_base(port)}/v1/models", timeout=2)
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            raise HTTPException(502, "invalid upstream model catalog")
+        return result
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(503, "inference not ready") from exc
+
+
 async def _proxy(request: Request, port: int, path: str, body: dict[str, Any]) -> Response:
     client = request.app.state.inference_client
     try:

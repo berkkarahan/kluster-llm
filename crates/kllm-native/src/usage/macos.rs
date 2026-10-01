@@ -1,6 +1,119 @@
 use super::{now, Device, Discovery, Host, MemoryView, Metric, SourceResult};
 use objc2_metal::{MTLCopyAllDevices, MTLDevice};
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void};
 use std::time::Instant;
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+    fn IOServiceGetMatchingServices(port: u32, matching: *mut c_void, iterator: *mut u32) -> i32;
+    fn IOIteratorNext(iterator: u32) -> u32;
+    fn IOObjectRelease(object: u32) -> i32;
+    fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
+    fn IORegistryEntryCreateCFProperty(
+        entry: u32,
+        key: *const c_void,
+        allocator: *const c_void,
+        options: u32,
+    ) -> *const c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFStringCreateWithCString(
+        allocator: *const c_void,
+        string: *const c_char,
+        encoding: u32,
+    ) -> *const c_void;
+    fn CFRelease(object: *const c_void);
+    fn CFGetTypeID(object: *const c_void) -> usize;
+    fn CFDictionaryGetTypeID() -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+    fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> u8;
+}
+
+struct Cf(*const c_void);
+impl Drop for Cf {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                CFRelease(self.0);
+            }
+        }
+    }
+}
+struct Io(u32);
+impl Drop for Io {
+    fn drop(&mut self) {
+        unsafe {
+            IOObjectRelease(self.0);
+        }
+    }
+}
+
+fn cf_string(value: &'static [u8]) -> Cf {
+    Cf(unsafe { CFStringCreateWithCString(std::ptr::null(), value.as_ptr().cast(), 0x08000100) })
+}
+
+/// IORegistry identities match Metal registryID; no name/order-based attribution.
+fn gpu_statistics() -> Result<HashMap<u64, HashMap<&'static str, i64>>, &'static str> {
+    let matching = unsafe { IOServiceMatching(b"IOAccelerator\0".as_ptr().cast()) };
+    if matching.is_null() {
+        return Err("source_error");
+    }
+    let mut iterator = 0;
+    if unsafe { IOServiceGetMatchingServices(0, matching, &mut iterator) } != 0 {
+        return Err("permission_denied");
+    }
+    let iterator = Io(iterator);
+    let statistics_key = cf_string(b"PerformanceStatistics\0");
+    let mut result = HashMap::new();
+    if statistics_key.0.is_null() {
+        return Err("source_error");
+    }
+    for _ in 0..32 {
+        let entry = unsafe { IOIteratorNext(iterator.0) };
+        if entry == 0 {
+            return Ok(result);
+        }
+        let entry = Io(entry);
+        let mut id = 0;
+        if unsafe { IORegistryEntryGetRegistryEntryID(entry.0, &mut id) } != 0 {
+            continue;
+        }
+        let statistics = Cf(unsafe {
+            IORegistryEntryCreateCFProperty(entry.0, statistics_key.0, std::ptr::null(), 0)
+        });
+        if statistics.0.is_null() || unsafe { CFGetTypeID(statistics.0) != CFDictionaryGetTypeID() }
+        {
+            continue;
+        }
+        let mut counters = HashMap::new();
+        for (name, bytes) in [
+            ("utilization", b"Device Utilization %\0".as_slice()),
+            ("used", b"In use system memory\0".as_slice()),
+        ] {
+            let key = cf_string(bytes);
+            if key.0.is_null() {
+                continue;
+            }
+            let number = unsafe { CFDictionaryGetValue(statistics.0, key.0) };
+            let mut value: i64 = 0;
+            if !number.is_null()
+                && unsafe {
+                    CFGetTypeID(number) == CFNumberGetTypeID()
+                        && CFNumberGetValue(number, 4, (&mut value as *mut i64).cast()) != 0
+                }
+            {
+                counters.insert(name, value);
+            }
+        }
+        result.insert(id, counters);
+    }
+    Err("enumeration_limit")
+}
 
 // libc exposes the sampling calls but not this send-right cleanup function.
 extern "C" {
@@ -246,6 +359,7 @@ impl Collector {
         objc2::rc::autoreleasepool(|_| {
             let mut result = SourceResult::unavailable("gpu");
             let devices = MTLCopyAllDevices();
+            let statistics = gpu_statistics();
             for i in 0..devices.count().min(32) {
                 let device = devices.objectAtIndex(i);
                 let shared = device.hasUnifiedMemory();
@@ -257,7 +371,52 @@ impl Collector {
                     "unsupported_counter",
                     "mac.metal.device_wide_memory",
                 );
+                let counters = statistics
+                    .as_ref()
+                    .ok()
+                    .and_then(|all| all.get(&device.registryID()));
+                let utilization = match counters.and_then(|c| c.get("utilization")) {
+                    Some(value) => {
+                        Metric::device_percent(*value as f64, "mac.iokit.device_utilization")
+                    }
+                    None => Metric::unavailable(
+                        "percent_device",
+                        "device",
+                        statistics
+                            .as_ref()
+                            .err()
+                            .copied()
+                            .unwrap_or("unsupported_counter"),
+                        "mac.iokit.device_utilization",
+                    ),
+                };
+                let used = if shared {
+                    match counters.and_then(|c| c.get("used")) {
+                        Some(value) if *value >= 0 => {
+                            Metric::bytes(*value as u64, "device", "mac.iokit.in_use_system_memory")
+                        }
+                        Some(_) => Metric::unavailable(
+                            "bytes",
+                            "device",
+                            "invalid_counter",
+                            "mac.iokit.in_use_system_memory",
+                        ),
+                        None => Metric::unavailable(
+                            "bytes",
+                            "device",
+                            statistics
+                                .as_ref()
+                                .err()
+                                .copied()
+                                .unwrap_or("unsupported_counter"),
+                            "mac.iokit.in_use_system_memory",
+                        ),
+                    }
+                } else {
+                    missing.clone()
+                };
                 result.devices.push(Device {
+                    utilization: Some(utilization),
                     device_key: key.clone(),
                     name: device.name().to_string(),
                     vendor: "unknown".into(),
@@ -272,7 +431,7 @@ impl Collector {
                         },
                         backing_pool_id: shared.then(|| "host:ram".into()),
                         total: missing.clone(),
-                        used: missing.clone(),
+                        used,
                         free: missing,
                     }],
                 });

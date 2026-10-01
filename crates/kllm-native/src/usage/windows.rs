@@ -157,12 +157,59 @@ impl Query {
         }
         values
     }
+
+    fn percentages(&self, index: usize) -> HashMap<String, f64> {
+        let mut bytes = 0;
+        let mut count = 0;
+        unsafe {
+            PdhGetFormattedCounterArrayW(
+                self.counters[index],
+                PDH_FMT_DOUBLE,
+                &mut bytes,
+                &mut count,
+                None,
+            );
+        }
+        if bytes == 0 || bytes > 1024 * 1024 {
+            return HashMap::new();
+        }
+        let mut buffer = vec![0u64; (bytes as usize + 7) / 8];
+        let ptr = buffer.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        if unsafe {
+            PdhGetFormattedCounterArrayW(
+                self.counters[index],
+                PDH_FMT_DOUBLE,
+                &mut bytes,
+                &mut count,
+                Some(ptr),
+            )
+        } != 0
+            || count as usize * std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>()
+                > buffer.len() * 8
+        {
+            return HashMap::new();
+        }
+        let mut values = HashMap::new();
+        for item in unsafe { std::slice::from_raw_parts(ptr, count as usize) } {
+            if item.FmtValue.CStatus > 1 {
+                continue;
+            }
+            if let Ok(name) = unsafe { item.szName.to_string() } {
+                values.insert(name.to_lowercase(), unsafe {
+                    item.FmtValue.Anonymous.doubleValue
+                });
+            }
+        }
+        values
+    }
 }
 
 #[derive(Default)]
 pub struct Collector {
     cpu: Option<Query>,
     gpu: Option<Query>,
+    gpu_engine: Option<Query>,
+    gpu_engine_previous: Option<Instant>,
     cpu_previous: Option<(Instant, String)>,
     last_cpu: Option<Metric>,
     cpu_count: Option<u32>,
@@ -324,6 +371,33 @@ impl Collector {
             Some(q) if unsafe { PdhCollectQueryData(q.handle) } == 0 => (q.array(0), q.array(1)),
             _ => (HashMap::new(), HashMap::new()),
         };
+        if self.gpu_engine.is_none() {
+            self.gpu_engine = Query::new(&[w!("\\GPU Engine(*)\\Utilization Percentage")]);
+            self.gpu_engine_previous = None;
+        }
+        let mut engines: HashMap<String, f64> = HashMap::new();
+        let engine_reason = match &self.gpu_engine {
+            None => Some("unsupported_counter"),
+            Some(query) if unsafe { PdhCollectQueryData(query.handle) } != 0 => {
+                self.gpu_engine_previous = None;
+                Some("source_error")
+            }
+            Some(query) => {
+                let interval = self.gpu_engine_previous.replace(Instant::now());
+                if interval.is_some_and(|previous| previous.elapsed().as_millis() >= 200) {
+                    for (name, value) in query.percentages(0) {
+                        // Separate PID instances of one physical engine share its capacity.
+                        if let Some(start) = name.find("luid_") {
+                            let engine = name[start..].split('#').next().unwrap_or("");
+                            *engines.entry(engine.to_string()).or_default() += value;
+                        }
+                    }
+                    None
+                } else {
+                    Some("baseline_required")
+                }
+            }
+        };
         let mut ambiguous_topology = false;
         for index in 0..33 {
             let adapter = match unsafe { factory.EnumAdapters1(index) } {
@@ -471,6 +545,45 @@ impl Collector {
                     });
                 }
                 result.devices.push(Device {
+                    utilization: Some(match engine_reason {
+                        Some(reason) => Metric::unavailable(
+                            "percent_device",
+                            "device",
+                            reason,
+                            "win.pdh.gpu_engine",
+                        ),
+                        None => {
+                            let prefix = format!("{key}_eng_");
+                            let values: Vec<f64> = engines
+                                .iter()
+                                .filter(|(name, _)| name.starts_with(&prefix))
+                                .map(|(_, value)| *value)
+                                .collect();
+                            if values.is_empty() {
+                                Metric::unavailable(
+                                    "percent_device",
+                                    "device",
+                                    "unsupported_counter",
+                                    "win.pdh.gpu_engine",
+                                )
+                            } else if values
+                                .iter()
+                                .any(|value| !value.is_finite() || !(0.0..=100.0).contains(value))
+                            {
+                                Metric::unavailable(
+                                    "percent_device",
+                                    "device",
+                                    "invalid_counter",
+                                    "win.pdh.gpu_engine",
+                                )
+                            } else {
+                                Metric::device_percent(
+                                    values.into_iter().fold(0.0, f64::max),
+                                    "win.pdh.gpu_engine",
+                                )
+                            }
+                        }
+                    }),
                     device_key,
                     name: String::from_utf16_lossy(
                         &desc.Description[..desc

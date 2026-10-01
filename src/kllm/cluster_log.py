@@ -162,7 +162,7 @@ class LogHub:
         self.ring_max = ring_max
         self.journal_max_bytes = journal_max_bytes
         self.journal = journal or LogJournal(cluster_journal_path, journal_max_bytes)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._ring: deque[dict[str, Any]] = deque(maxlen=ring_max)
         self._seqs: deque[int] = deque(maxlen=ring_max)
         self._seq_counter = 0
@@ -172,10 +172,29 @@ class LogHub:
             lambda: http_clients.control_client()
         )
         self._journal_loaded = False
+        self.enabled = True
         self.tailer = tailer or LocalLogTailer(_log_file, LOCAL_SOURCES, make_event)
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            if self.enabled == enabled:
+                return
+            self.enabled = enabled
+            self.forwarder.clear()
+            self.tailer.reset()
+            self.tailer.prime_offsets()
+            if not enabled:
+                for subscriber in self._subs:
+                    try:
+                        subscriber.put_nowait(None)
+                    except queue.Full:
+                        subscriber.get_nowait()
+                        subscriber.put_nowait(None)
+                self._subs.clear()
 
     def reset(self) -> None:
         with self._lock:
+            self.enabled = True
             self._ring = deque(maxlen=self.ring_max)
             self._seqs = deque(maxlen=self.ring_max)
             self._seq_counter = 0
@@ -251,6 +270,8 @@ class LogHub:
         if not cleaned:
             return 0
         with self._lock:
+            if not self.enabled:
+                return 0
             for event in cleaned:
                 self._append_locked(event)
             if persist:
@@ -326,7 +347,10 @@ class LogHub:
     def subscribe(self) -> queue.Queue[dict[str, Any] | None]:
         q: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=1000)
         with self._lock:
-            self._subs.append(q)
+            if self.enabled:
+                self._subs.append(q)
+            else:
+                q.put_nowait(None)
         return q
 
     def unsubscribe(self, q: queue.Queue[dict[str, Any] | None]) -> None:
@@ -347,14 +371,19 @@ class LogHub:
         master_base: str | None,
         join_key: str | None,
     ) -> None:
-        events = self.tail_new_events(node_id)
-        persist = role == "master"
-        if events:
-            self.ingest(events, persist=persist)
-            if role == "worker":
-                self.forwarder.enqueue(events)
-        if role == "worker" and master_base and join_key:
-            self.forwarder.flush(master_base, join_key)
+        # Serialize policy transitions with collection and forwarding, including
+        # clearing pending batches. A completed stop has no in-flight local relay.
+        with self._lock:
+            if not self.enabled:
+                return
+            events = self.tail_new_events(node_id)
+            persist = role == "master"
+            if events:
+                self.ingest(events, persist=persist)
+                if role == "worker":
+                    self.forwarder.enqueue(events)
+            if role == "worker" and master_base and join_key:
+                self.forwarder.flush(master_base, join_key)
 
     def iter_sse(
         self,
@@ -365,7 +394,7 @@ class LogHub:
     ) -> Iterator[bytes]:
         for event in self.recent(n, node, source):
             yield encode_sse(event)
-        if not follow:
+        if not follow or not self.enabled:
             return
         q = self.subscribe()
         try:

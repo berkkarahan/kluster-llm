@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import time
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -150,11 +151,21 @@ class ClusterState:
     apply_warning: str | None = None
     # Latest master inference state, mirrored to workers through heartbeats.
     inference_activity: dict[str, Any] | None = None
+    logging_enabled: bool = True
+    logging_generation: str = ""
     schema_version: int = CLUSTER_STATE_SCHEMA_VERSION
 
     def save(self) -> None:
         ensure_home()
-        state_path().write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        # Output sinks read the policy independently; never expose partial JSON.
+        fd, name = tempfile.mkstemp(prefix=".cluster-", dir=home_dir())
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(asdict(self), handle, indent=2)
+            os.replace(name, state_path())
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
 
     @classmethod
     def upgrade_pending(cls) -> bool:

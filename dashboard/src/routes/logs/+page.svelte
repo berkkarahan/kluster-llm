@@ -28,8 +28,26 @@
   import { appStore } from '$lib/store.svelte';
   import { LogTrail, REFRESH_MODES, REFRESH_MS } from '$lib/log-trail.svelte';
   import type { RefreshMode } from '$lib/types';
+  import { pushToast } from '$lib/toast';
 
   const trail = new LogTrail();
+  let changingLogging = $state(false);
+  const logging = $derived(appStore.status?.logging);
+  $effect(() => { trail.setEnabled(logging?.enabled !== false); });
+
+  async function toggleLogging() {
+    changingLogging = true;
+    try {
+      const response = await fetch('/v2/cluster/logging', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${appStore.apiToken}` },
+        body: JSON.stringify({ enabled: logging?.enabled === false })
+      });
+      if (!response.ok) throw new Error(`Logging control failed (${response.status})`);
+      const result = await response.json();
+      if (appStore.status) appStore.status = { ...appStore.status, logging: result };
+    } catch (error) { pushToast('danger', String(error)); }
+    finally { changingLogging = false; }
+  }
 
   const MODE_LABELS: Record<RefreshMode, string> = {
     live: 'Live',
@@ -132,6 +150,7 @@
   }
 
   function statusText(): string {
+    if (trail.paused) return logging?.status === 'applied' ? 'Logging stopped' : 'Stopping logging — some nodes have not acknowledged';
     if (trail.state === 'error') {
       const lastSuccess = trail.lastSuccessAt === null
         ? 'never'
@@ -151,13 +170,20 @@
     <div>
       <h1 class="text-[15px] font-semibold tracking-wide m-0">Cluster Log Trail</h1>
       <p class="m-0 text-[11px]" style="color: var(--muted)">
-        Master and worker activity · times in UTC
+        Master and worker activity · times in UTC · Stop logging discards new output across the cluster; inference continues.
       </p>
     </div>
     <span class="chip chip-muted mono">{trail.entries.length} buffered</span>
   </header>
 
   <section class="panel p-2 flex flex-wrap items-end gap-3" aria-label="Log controls">
+    <button class="btn" disabled={changingLogging || !logging || appStore.status?.role !== 'master'} onclick={toggleLogging}>
+      {logging?.enabled === false ? 'Resume logging' : 'Stop logging'}
+    </button>
+    {#if appStore.status?.role === 'worker'}<span class="text-[11px]">Change cluster logging on the master dashboard.</span>{/if}
+    {#if logging?.status === 'partial'}<span class="text-[11px]" role="status">
+      {Object.entries(logging.nodes).filter(([, node]) => node.status !== 'applied').map(([id, node]) => `${id}: ${node.status}`).join(' · ')}
+    </span>{/if}
     <label class="flex flex-col gap-1">
       <span class="text-[10px] uppercase tracking-wider" style="color: var(--muted)">Node</span>
       <select class="field mono" aria-label="Filter by node" bind:value={trail.selectedNodeId}>
@@ -213,7 +239,7 @@
   </section>
 
   <div class="flex items-center gap-2 flex-wrap text-[12px]">
-    {#if trail.refreshMode === 'live'}
+    {#if trail.refreshMode === 'live' && !trail.paused}
       <span class="chip chip-muted mono" title="Connection delivery is separate from log source coverage">
         updates {appStore.deliveryHealth}
       </span>

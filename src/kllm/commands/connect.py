@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Optional
+import os
+import shutil
 
 import typer
 
@@ -24,9 +26,13 @@ def connect_cmd(
     persist: bool = typer.Option(False, "--persist/--no-persist"),
     yolo: bool = typer.Option(False, "--yolo"),
     context: int = typer.Option(4096, "--context"),
+    url: Optional[str] = typer.Option(None, "--url", envvar="KLLM_URL"),
+    timeout: float = typer.Option(600, "--timeout", min=1),
 ) -> None:
     """Launch a coding harness with the kllm API baked in (Unsloth-style)."""
-    _ensure_agent(port)
+    remote = isinstance(url, str) and bool(url) or bool(os.environ.get("KLLM_URL"))
+    if not remote:
+        _ensure_agent(port)
     plan = build_launch_plan(
         agent,
         port=port,
@@ -37,9 +43,16 @@ def connect_cmd(
         yolo=yolo,
         context=context,
         extra=list(ctx.args),
+        **({"url": url if isinstance(url, str) else None,
+            "timeout": timeout if isinstance(timeout, (int, float)) else 600}
+           if isinstance(url, str) or isinstance(timeout, (int, float)) else {}),
     )
     if not launch:
-        print_plan(plan)
+        try:
+            print_plan(plan)
+        finally:
+            for directory in plan.cleanup_dirs:
+                shutil.rmtree(directory, ignore_errors=True)
         return
     console.print(f"[dim]Starting {plan.agent}…[/dim]")
     code = run_plan(plan)

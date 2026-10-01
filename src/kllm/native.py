@@ -17,7 +17,7 @@ from kllm.core.placement_api import plan_from_settings
 from pathlib import Path
 import time
 import sys
-from kllm import usage_probe
+from kllm import usage_probe, log_sink
 
 if TYPE_CHECKING:
     from kllm.core.placement_models import PlacementNodeInput
@@ -42,6 +42,10 @@ def resource_probe_available() -> bool:
         and hasattr(_NATIVE, "_UsageCollector")
         and hasattr(_NATIVE, "_validate_source_json")
     )
+
+
+def resource_schema_versions() -> list[int]:
+    return [1, 2] if getattr(_NATIVE, "RESOURCE_SCHEMA_VERSION", 1) >= 2 else [1]
 
 
 def probe_resources(*, node_id: str, managed_processes: list[dict] | None = None) -> dict:
@@ -70,11 +74,13 @@ def _launch_record(result: Any) -> dict[str, Any]:
     _launched_identities.clear()  # The existing runtime owns one managed child per node.
     if token and started:
         _launched_identities[result.pid] = dict(
-            pid=result.pid, role=result.role, start_token=token, started_at=started
+            pid=result.pid, role=result.role, start_token=token, started_at=started,
+            log_sink_pid=getattr(result, "log_sink_pid", None),
         )
     record = dict(pid=result.pid, binary=result.binary, argv=list(result.argv), role=result.role)
     if token and started:
         record.update(process_start_token=token, process_started_at=started)
+    record["log_sink_pid"] = getattr(result, "log_sink_pid", None)
     return record
 
 
@@ -347,6 +353,8 @@ def plan_split(
 
 def start_master(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    if kwargs.get("log_path"):
+        kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if kwargs.get("env") is None:
         kwargs.pop("env", None)
     # Installed pyd extracts micro_batch as i32; Python used to pass str "2".
@@ -362,6 +370,8 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    if kwargs.get("log_path"):
+        kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if "devices" not in kwargs:
         # Deferred import: config reads ~/.kllm only when the caller omitted devices.
         from kllm import config
@@ -399,3 +409,60 @@ def resolve_llama_server(repo_root: str | None = None) -> str | None:
 def resolve_rpc_server(repo_root: str | None = None) -> str | None:
     path = require_native().resolve_rpc_server(repo_root)
     return path if isinstance(path, str) else None
+
+
+# These operations deliberately have no Python networking fallback: host mutation
+# and run readiness must fail closed when the native boundary is unavailable.
+def managed_network_available() -> bool:
+    return _NATIVE is not None and all(hasattr(_NATIVE, name) for name in (
+        "start_network_bridge", "probe_network_rpc", "start_address_observer", "probe_ipv4_conflict",
+    ))
+
+
+def _managed_native():
+    if not managed_network_available():
+        raise RuntimeError("managed-network native support is unavailable; rebuild the agent")
+    return _NATIVE
+
+
+def start_network_bridge(config: dict):
+    import json
+    return _managed_native().start_network_bridge(json.dumps(config, allow_nan=False))
+
+
+def network_bridge_status(handle) -> dict:
+    import json
+    return json.loads(handle.status())
+
+
+def stop_network_bridge(handle, expected_instance_id: str, *, terminate: bool = False) -> bool:
+    return bool(handle.stop(expected_instance_id, terminate))
+
+
+def probe_network_rpc(endpoint: str, source: str, installed_tag: str, timeout_ms: int = 2000) -> dict:
+    import json
+    return json.loads(_managed_native().probe_network_rpc(endpoint, source, installed_tag, timeout_ms))
+
+
+def start_address_observer(interface_index: int, epoch: str):
+    return _managed_native().start_address_observer(interface_index, epoch)
+
+
+def address_observer_events(handle) -> dict:
+    import json
+    return json.loads(handle.events())
+
+
+def stop_address_observer(handle) -> None:
+    handle.close()
+
+
+def probe_ipv4_conflict(interface: str, mac: str, address: str) -> bool:
+    return bool(_managed_native().probe_ipv4_conflict(interface, mac, address))
+
+
+def start_ipv4_conflict_observer(interface: str, mac: str, address: str):
+    backend = _managed_native()
+    if not hasattr(backend, 'start_ipv4_conflict_observer'):
+        raise RuntimeError('native Ethernet conflict observation is unavailable')
+    return backend.start_ipv4_conflict_observer(interface, mac, address)

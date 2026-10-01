@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import typer
 
-from kllm import config as kllm_config, runtime
+from kllm import config as kllm_config, runtime, log_sink
 from kllm.commands.ui import console
 from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, home_dir
 
@@ -91,14 +91,23 @@ def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
     console.print("[dim]Starting local kllm-agent…[/dim]")
     log = home_dir() / "logs" / "agent.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a", encoding="utf-8") as lf:
+    sink = subprocess.Popen(log_sink.command(log), stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "kllm.agent", "--host", "0.0.0.0", "--port", str(port)],
-            stdout=lf,
-            stderr=lf,
+            stdout=sink.stdin,
+            stderr=sink.stdin,
             start_new_session=True,
         )
-    runtime.register_agent(proc.pid, port)
+    except BaseException:
+        sink.terminate()
+        sink.wait(timeout=5)
+        raise
+    finally:
+        if sink.stdin:
+            sink.stdin.close()
+    runtime.register_agent(proc.pid, port, sink.pid)
     for _ in range(40):
         try:
             with httpx.Client(timeout=0.5) as client:

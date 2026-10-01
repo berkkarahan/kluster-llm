@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kllm.state import ClusterState
+from kllm.logging_control import overview as logging_overview
 
 StatusPayload = dict[str, Any]
 ConfigLoader = Callable[[], dict[str, Any]]
@@ -127,6 +128,7 @@ class DashboardStatusService:
     @staticmethod
     def _common_state_fields(state: ClusterState) -> StatusPayload:
         return {
+            "logging": logging_overview(state),
             "control_port": state.control_port,
             "rpc_port": state.rpc_port,
             "infer_port": state.infer_port,

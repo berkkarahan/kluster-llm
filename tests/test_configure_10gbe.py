@@ -320,3 +320,15 @@ def test_verify_rejects_unsupported_os(monkeypatch):
     monkeypatch.setattr(net.platform, "system", lambda: "FreeBSD")
     with pytest.raises(net.NetworkError, match="unsupported operating system"):
         net.verify("em0", "192.168.10.2")
+
+
+def test_linux_dhcp_reads_active_connection_profile(monkeypatch):
+    calls = []
+    connection = "12345678-1234-1234-1234-123456789abc"
+    monkeypatch.setattr(net.shutil, "which", lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    def run(args, **kwargs):
+        calls.append(args)
+        return connection if "GENERAL.CON-UUID" in args else "manual"
+    monkeypatch.setattr(net, "_run", run)
+    assert net._linux_dhcp("eth0") is False
+    assert calls[-1] == ["/usr/bin/nmcli", "-g", "ipv4.method", "connection", "show", "uuid", connection]

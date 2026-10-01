@@ -446,6 +446,8 @@ input[type='range']:disabled {
   overflow-wrap: anywhere;
 }
 .usage-workspace .node-metric .v { min-width: 0; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.usage-workspace .node-metric:not(.node-metric-device) .k { flex: 0 0 auto; max-width: none; }
+.usage-workspace .node-device-name { margin-top: 5px; color: var(--muted); overflow-wrap: anywhere; }
 .usage-workspace .node-assignment { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .usage-workspace .node-map-list { display: none; }
 

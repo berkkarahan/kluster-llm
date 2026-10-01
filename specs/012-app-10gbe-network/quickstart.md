@@ -1,0 +1,83 @@
+# Validation Guide: App-Managed Private 10GbE Network
+
+This is a guide for the planned implementation. New routes, network panel and test files are not implemented by speckit-plan. Execute the steps after those surfaces exist; no commands in this planning turn change host networking.
+
+## Minimal Critical Verification Scope
+
+The user's task-generation instruction is to keep end-to-end checks and some tests minimal, checking only critical things. Follow [tasks.md](tasks.md)'s six verification tasks: authority/preparation refusal, the shared setup/admission/recovery integration fixture, compact native transport checks and one serial browser journey. Reuse existing checks rather than add a suite for every row below. The failure matrix is a diagnostic/reference menu; it is not an exhaustive automated-testing requirement. The final physical journey proves real-model distributed inference and safe cleanup, with one loss/recovery drill.
+
+## Prerequisites
+
+- Follow [agent install guide](../../docs/agent-install.md) on every participating machine. Use the committed stable llama-release and run `python scripts/install.py --check` on each node; synchronize with `python scripts/install.py --llama-only` when needed.
+- Dedicated connected physical Ethernet adapters, reported negotiated speed >=10 Gbps, DHCP disabled, and ordinary cluster management connectivity on a separate unaffected path.
+- Windows elevated local agent or POSIX root local agent; no passwordless general shell helper. Use an explicit test KLLM_HOME and the existing supported agent invocation; arrange elevation locally before starting the operation.
+- One master and two workers for the primary acceptance, connected through a dedicated switch; a direct cable suffices for the one-worker subset. Windows, Linux and macOS hardware coverage must be recorded, including one mixed-platform pair.
+- Paired node fingerprints and selected adapters through the local app on each node. Workers must support managed-network-v1; unsupported nodes remain legacy cluster members but cannot participate.
+- Stop inference for initial full readiness/protocol verification. Separately exercise setup while a legacy run is active to verify explicit pending status and preserved connections.
+
+## Baseline and Build Checks
+
+Repository commands that already exist:
+
+```bash
+uv run python scripts/build.py --skip-ui --skip-llama --skip-wireguard --skip-toolchains
+uv run python -m pytest -q
+uv run ruff check .
+uv run mypy src
+npm --prefix dashboard test
+npm --prefix dashboard run check
+npm --prefix dashboard run build
+cargo test --manifest-path crates/kllm-native/Cargo.toml
+git diff --check
+```
+
+The build is required after dependency/native changes. Root make test remains sequential; use the dashboard runner's existing browser isolation. If a native test requires platform linker configuration, follow the existing build guide and record the command/environment; do not count a failed or skipped check as passed. Targeted tests may be used while implementing, then run the relevant broader integration suite.
+
+Before physical setup, save each node's selected adapter addresses, default routes, DNS/DHCP facts, route to the master, current RPC PID/start identity, and installed tag. Available read-only commands:
+
+| OS | Snapshot commands |
+|---|---|
+| Linux | `ip -j -4 address show`, `ip -j -4 route show table all`; inspect active manager DHCP configuration and DNS separately. |
+| macOS | `ifconfig`, `netstat -rn -f inet`, `scutil --dns`, `networksetup -getinfo '<selected service>'`. |
+| Windows (PowerShell) | `Get-NetAdapter`, `Get-NetIPAddress -AddressFamily IPv4`, `Get-NetRoute -AddressFamily IPv4`, `Get-DnsClientServerAddress`, `Get-NetIPInterface -AddressFamily IPv4`. |
+
+Use timestamps and retain output in a test evidence directory outside tracked source. Do not publish tokens/join keys/private identity files. Verify these commands on the host OS version before relying on parsed output.
+
+## End-to-End Operator Scenario
+
+1. Start/join an ordinary cluster using existing controls and verify every management connection. Open each node's local app, compare master/worker public fingerprints over a trusted local channel and pair them; select the dedicated adapter. Missing permissions or pairing must show a prerequisite failure before mutations.
+2. On the master overview, open Managed Network. Select the master and two workers, inspect adapter evidence, and accept a conflict-checked private subnet proposal or select an unused one. Click Start once.
+3. Expect preparing, applying, verifying, then ready within 60s on an idle eligible cluster. Query the accepted operation via [control API](contracts/control-api.md); every node must have a distinct address and current bidirectional/protocol evidence. Confirm existing management/default route/DNS/DHCP remain unchanged.
+4. On Run, explicitly choose this network and a locally available model that fits the cluster. Start distributed inference, then perform a real generation through existing inference controls. Inspect run diagnostics: logical endpoints are dedicated worker addresses; actual launch endpoints are master loopback bridges; bridge outbound sources equal the assigned master dedicated address. Confirm worker RPC PID/start identity remains the original one and bridge traffic traverses the selected interfaces.
+5. Attempt Stop Network while the run is active: expect INFERENCE_ACTIVE and the run ID; inference continues. Stop inference through existing controls, then Stop Network. Reachable nodes must show stopped and app-owned temporary settings removed within 60s; pre-existing snapshot facts must match.
+6. A run with no network selection must still use the pre-existing LAN/WireGuard workflow. Run the manual configure_10gbe script's existing regression checks to verify its arguments and refusal rules remain compatible.
+
+## Failure and Recovery Matrix
+
+| Scenario | Required outcome / spec coverage |
+|---|---|
+| Slow/unknown speed, DHCP on, permission missing, adapter absent | All-node preparation fails before any network delta; affected node and actionable reason (SC-002). |
+| Conflicting VPN/route/subnet, too few addresses, reused adapter index | Explicit preparation failure; no mutation and no management-path loss. |
+| Ten retries, lost ACK, duplicate or altered-body request ID | One assignment per node, no duplicate address; changed-body conflict (SC-003). |
+| Invalid signature, shared-key peer impersonation, stale term/session, replay | Zero host changes; persisted fencing survives restart (SC-007). |
+| Crash before add, after add before confirmation, during removal | Journal recovery never trusts stale ready; absent owned changes confirmed, ambiguous ownership retained, no broad deletion. |
+| User-owned identical address before start; externally changed/replaced setting | Participate only if eligible; never remove user-owned or ambiguous replacement; show ownership conflict. |
+| Node disconnect during prepare/apply/cancel | Prepare has no mutations; partial apply rollback results include cleanup pending. On reconnect, safe cleanup <=60s when prerequisites exist (SC-006). |
+| Cable loss after ready; firewall blocks dedicated diagnostics or RPC | Degraded/unverified <=15s, no new selected-network run or hidden fallback, ordinary management intact (SC-005). |
+| Legacy inference active during start | Address setup preserves current RPC connection; shows verification_pending/RPC_BUSY until idle; no extra upstream protocol probe. |
+| Probe during idle and subsequent managed inference | Valid probe returns and disconnects, original RPC listener remains usable, native bridge drains probe before admission. |
+| Agent restart or reboot after setup | Ready invalidated; OS address re-observed; disappeared temporary settings can be recreated by explicit retry. Managed active run restart handling follows native-network lifecycle contract. |
+| IPv4 collision during ARP preparation or OS address settling | No conflicting address ready; known preflight conflicts cause no mutations; application races trigger rollback. |
+| Observer loss or identical external delete/re-add between polls | Ownership uncertain, no automatic deletion, local review required. |
+| Concurrent start/add/retry/stop/run; leave/eviction/role change | Shared serialization rejects conflicts, run references retained, pending cleanup survives membership resets. |
+| Unsupported/unknown runtime protocol or RDMA transport | Unsupported or unverified before admission; no claim that a generic TCP bridge supports negotiated RDMA. |
+
+Use isolated temporary databases, controlled platform runners and deterministic clocks in the selected critical cases, plus real local sockets/native streams and actual child identity checks. Do not turn every matrix row into additional unit, API and browser tests. Native tests include source binding, exact-address/allowlist refusal, byte preservation, backpressure, half-close, failure cleanup, handle identity and cancellation. Browser checks exercise prerequisite errors, operation progress, expired freshness, blocked stop and explicit run selection.
+
+## Physical Evidence and Timing
+
+For each hardware run record OS/version, adapter/driver, negotiated speed, master/worker roles, ordinary management path, backend, model and llama tag, exact test command/action, timestamps, before/after snapshots, observed socket sources/interfaces and outcomes. A macOS-only mock run does not satisfy mixed-platform acceptance. Verify BOTH runtime ends are TCP-only; zero-capability idle probing alone is insufficient.
+
+SC-001 requires one master plus two workers on idle eligible hardware; active-run waits are reported separately. SC-004 requires a real multi-node generation and endpoint/path evidence, not just a successful plan. For SC-006, distinguish cleanup proven, absent after reboot, and ambiguous ownership requiring local review; never mark pending as success. Review local cleanup through the contract's loopback resolve control only after inspecting the exact current resource.
+
+Measure dedicated transfer/bridge and inference latency against the same model/backend/hardware and workload over the previous path. Optional iperf3 measures the physical link separately; it does not validate RPC correctness or claim a guaranteed 10GbE application rate. No improvement target is claimed by this plan. Publish outstanding hardware checks and failed/unsupported configurations with exact follow-up steps.

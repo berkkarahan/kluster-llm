@@ -38,11 +38,16 @@
         {#if node.process_state === 'unavailable'}<p>Managed-process identity or readings unavailable.</p>{/if}
         {#each resources.devices as device (device.device_key)}
           <div><h4>{device.name} · {device.memory_kind} · {device.device_key}</h4>
+            {#if device.utilization}
+              <p>GPU utilization: {percent(device.utilization.value)} · {device.utilization.reason ?? device.utilization.status}</p>
+              <p>Source {device.utilization.source} · observed {device.utilization.observed_at}</p>
+            {/if}
             {#each device.memory as memory (memory.kind)}
               <p>{memory.kind}: {formatGib(memory.used.value)} used · {formatGib(memory.free.value)} free
                 {memory.backing_pool_id === 'host:ram' ? ' · shares host RAM, counted once' : ` / ${formatGib(memory.total.value)} physical`}</p>
               {#if memory.used.reason || memory.free.reason}<p>{memory.used.reason ?? memory.free.reason}</p>{/if}
               <p>Observed {memory.used.observed_at}</p>
+              <p>Source {memory.used.source}</p>
             {/each}
           </div>
         {/each}

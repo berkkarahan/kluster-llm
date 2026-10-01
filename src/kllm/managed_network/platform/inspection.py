@@ -45,6 +45,13 @@ def _v4_routes(values: Sequence[str]) -> tuple[ipaddress.IPv4Network, ...]:
         if value in {"default", "0.0.0.0/0"}:
             continue
         try:
+            # BSD netstat abbreviates connected networks (e.g. 192.168.68).
+            if re.fullmatch(r"\d+(?:\.\d+){0,3}(?:/\d+)?", value):
+                address, _, prefix = value.partition('/')
+                parts = address.split('.')
+                if len(parts) < 4:
+                    prefix = prefix or str(len(parts) * 8)
+                    value = '.'.join(parts + ['0'] * (4-len(parts))) + '/' + prefix
             route = ipaddress.ip_network(value, strict=False)
         except ValueError:
             continue
@@ -113,7 +120,7 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
             addresses.append(ipaddress.IPv4Interface(f"{match.group(1)}/{mask}"))
     routes_out = run(["netstat", "-rn", "-f", "inet"])
     routes = _v4_routes([line.split()[0] for line in routes_out.splitlines()[2:] if line.split()])
-    dhcp = "DHCP Configuration" in info
+    dhcp = True if "DHCP Configuration" in info or "BOOTP Configuration" in info else False if "Manual Configuration" in info else None
     return InterfaceState(
         interface,
         bool(re.search(r"^\s*status:\s*active$", output, re.MULTILINE | re.IGNORECASE)),

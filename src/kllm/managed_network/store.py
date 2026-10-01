@@ -120,6 +120,10 @@ class NetworkStore:
                 self.db.execute('ROLLBACK')
                 raise
 
+    def set_metadata(self, key: str, value: str) -> None:
+        with self.transaction() as db:
+            db.execute('INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, value))
+
     def close(self) -> None:
         with self.lock:
             self.db.close()
@@ -263,8 +267,15 @@ class NetworkStore:
         with self.lock:
             return [NodeAssignment.model_validate_json(row[0]) for row in self.db.execute('SELECT body FROM assignments WHERE network=? ORDER BY node', (str(network_id),))]
 
+    def operation_for_request(self, binding: UUID, request_id: UUID) -> NetworkOperation | None:
+        with self.lock:
+            row = self.db.execute('SELECT body FROM operations WHERE binding=? AND request=?', (str(binding), str(request_id))).fetchone()
+            return NetworkOperation.model_validate_json(row[0]) if row else None
+
     def put_operation(self, operation: NetworkOperation) -> NetworkOperation:
         with self.transaction() as db:
+            if db.execute('SELECT 1 FROM metadata WHERE key=?', (f'cancel:{operation.cluster_binding_id}:{operation.request_id}',)).fetchone():
+                raise StoreConflict('request ID already names a cancellation')
             row = db.execute('SELECT digest,body FROM operations WHERE binding=? AND request=?', (str(operation.cluster_binding_id), str(operation.request_id))).fetchone()
             if row:
                 if row[0] != operation.proposal_digest:
@@ -291,6 +302,30 @@ class NetworkStore:
             if old.terminal_result is not None and operation != old:
                 raise StoreConflict('terminal operation cannot be revived')
             db.execute('UPDATE operations SET revision=?,body=? WHERE id=?', (operation.operation_revision, operation.model_dump_json(), str(operation.operation_id)))
+
+    def cancel_operation(self, operation_id: UUID, request_id: UUID, expected_revision: int) -> NetworkOperation:
+        """Commit cancellation fence and request idempotency together."""
+        proposal = digest({'operation_id': str(operation_id), 'expected_revision': expected_revision})
+        with self.execution(), self.transaction() as db:
+            row = db.execute('SELECT body FROM operations WHERE id=?', (str(operation_id),)).fetchone()
+            if row is None:
+                raise KeyError('unknown operation')
+            operation = NetworkOperation.model_validate_json(row[0])
+            key = f'cancel:{operation.cluster_binding_id}:{request_id}'
+            previous = db.execute('SELECT value FROM metadata WHERE key=?', (key,)).fetchone()
+            if previous:
+                if previous[0] != proposal:
+                    raise StoreConflict('cancel request ID reused with changed body')
+                return operation
+            if db.execute('SELECT 1 FROM operations WHERE binding=? AND request=?', (str(operation.cluster_binding_id), str(request_id))).fetchone():
+                raise StoreConflict('request ID already names another operation')
+            if operation.operation_revision != expected_revision:
+                raise StoreConflict('operation revision changed')
+            if operation.terminal_result is None:
+                operation.operation_revision += 1
+                db.execute('UPDATE operations SET revision=?,body=? WHERE id=?', (operation.operation_revision, operation.model_dump_json(), str(operation_id)))
+            db.execute('INSERT INTO metadata VALUES (?,?)', (key, proposal))
+            return operation
 
     def result(self, operation_id: UUID | str, result: ParticipantResult) -> None:
         with self.transaction() as db:
@@ -367,6 +402,10 @@ class NetworkStore:
                 if lease.generation < old.generation or (old.network_id, old.node_id, old.kind, old.run_id, old.assignment_revision, old.authority, old.relay_instance_ids) != (lease.network_id, lease.node_id, lease.kind, lease.run_id, lease.assignment_revision, lease.authority, lease.relay_instance_ids):
                     raise StoreConflict('admission fence changed')
             db.execute('INSERT INTO leases VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET generation=excluded.generation,state=excluded.state,body=excluded.body', (str(lease.lease_id), str(lease.network_id), lease.node_id, lease.generation, lease.state, durable.model_dump_json()))
+
+    def leases(self, network_id: UUID | str) -> list[AdmissionLease]:
+        with self.lock:
+            return [AdmissionLease.model_validate_json(row[0]) for row in self.db.execute('SELECT body FROM leases WHERE network=?', (str(network_id),))]
 
     def evidence(self, evidence: VerificationEvidence) -> None:
         durable = evidence.model_copy(update={'live_deadline': 0.0})

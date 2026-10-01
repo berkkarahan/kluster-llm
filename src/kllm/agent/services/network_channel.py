@@ -172,8 +172,9 @@ class NetworkChannelHub:
                 reply = ChannelReply.model_validate(LocalIdentity.verify(raw, peer.public_key, 8192))
                 if peer.cluster_binding_id != authority.cluster_binding_id or reply.sender_node_id != peer.node_id or reply.target_node_id != self.identity.node_id or reply.cluster_binding_id != authority.cluster_binding_id or reply.master_nonce != nonce or reply.master_term != authority.master_term or reply.master_session_id != authority.master_session_id:
                     raise IdentityError('handshake transcript mismatch')
-                accepted = authority.model_copy(update={'accepted_channel_id': uuid4()})
-                response = SessionAccept(version=1, type='session_accept', **authority.model_dump(), worker_node_id=peer.node_id, master_nonce=nonce, worker_nonce=reply.worker_nonce, channel_id=accepted.accepted_channel_id)
+                channel_id = uuid4()
+                accepted = authority.model_copy(update={'accepted_channel_id': channel_id})
+                response = SessionAccept(version=1, type='session_accept', **authority.model_dump(), worker_node_id=peer.node_id, master_nonce=nonce, worker_nonce=reply.worker_nonce, channel_id=channel_id)
                 async with self.handshake_lock:
                     old = self.sessions.pop(peer.node_id, None)
                     if old:

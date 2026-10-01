@@ -432,7 +432,8 @@ def start_network_bridge(config: dict):
 
 def network_bridge_status(handle) -> dict:
     import json
-    return json.loads(handle.status())
+    result: dict = json.loads(handle.status())
+    return result
 
 
 def stop_network_bridge(handle, expected_instance_id: str, *, terminate: bool = False) -> bool:
@@ -441,7 +442,8 @@ def stop_network_bridge(handle, expected_instance_id: str, *, terminate: bool = 
 
 def probe_network_rpc(endpoint: str, source: str, installed_tag: str, timeout_ms: int = 2000) -> dict:
     import json
-    return json.loads(_managed_native().probe_network_rpc(endpoint, source, installed_tag, timeout_ms))
+    result: dict = json.loads(_managed_native().probe_network_rpc(endpoint, source, installed_tag, timeout_ms))
+    return result
 
 
 def start_address_observer(interface_index: int, epoch: str):
@@ -450,7 +452,8 @@ def start_address_observer(interface_index: int, epoch: str):
 
 def address_observer_events(handle) -> dict:
     import json
-    return json.loads(handle.events())
+    result: dict = json.loads(handle.events())
+    return result
 
 
 def stop_address_observer(handle) -> None:

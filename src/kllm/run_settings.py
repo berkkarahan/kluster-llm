@@ -159,11 +159,25 @@ class RunSettingsFields(BaseModel):
         return cls(model=model).normalized_auto_fields()
 
 
-class PlanBody(RunSettingsFields):
+class NetworkRequestFields(RunSettingsFields):
+    # Request-only: normalization and remembered settings deliberately enumerate
+    # the reusable fields above, so this selection never becomes a saved default.
+    network_id: str | None = None
+
+    @field_validator("network_id")
+    @classmethod
+    def canonical_network_id(cls, value: str | None) -> str | None:
+        from uuid import UUID
+        if value is not None and str(UUID(value)) != value:
+            raise ValueError("network_id must be a canonical UUID")
+        return value
+
+
+class PlanBody(NetworkRequestFields):
     pass
 
 
-class RunBody(RunSettingsFields):
+class RunBody(NetworkRequestFields):
     pass
 
 

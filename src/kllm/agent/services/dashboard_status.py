@@ -29,6 +29,7 @@ class DashboardStatusService:
         update_progress: Callable[[], Any],
         software_identity: Callable[[], dict[str, Any]],
         default_device: str,
+        managed_networks: Callable[[], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._state = state
         self._load_config = load_config
@@ -40,6 +41,7 @@ class DashboardStatusService:
         self._update_progress = update_progress
         self._software_identity = software_identity
         self._default_device = default_device
+        self._managed_networks = managed_networks
 
     def status(self) -> StatusPayload:
         """Build the full status response, including a fresh local capacity probe."""
@@ -68,6 +70,7 @@ class DashboardStatusService:
             "software": self._software_identity(),
             "capacity": capacity,
             **self._common_state_fields(state),
+            **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
             "device": config.get("device", self._default_device),
@@ -114,6 +117,7 @@ class DashboardStatusService:
             },
             "capacity": capacity,
             **self._common_state_fields(state),
+            **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
             "device": config.get("device", self._default_device),

@@ -7,7 +7,7 @@ import os
 import sqlite3
 import sys
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -46,6 +46,8 @@ class AgentLifecycleDependencies:
     close_clients: Callable[[], None]
     close_usage_store: Callable[[Any], None]
     stop_live_feed: Callable[[Any], Any]
+    start_managed_network: Callable[[Any], Awaitable[None]] | None = None
+    stop_managed_network: Callable[[Any], Awaitable[None]] | None = None
     platform: str = sys.platform
     async_client_factory: Callable[..., Any] = httpx.AsyncClient
 
@@ -79,6 +81,8 @@ class AgentLifespan:
             member = state.members.get(state.node_id) or {}
             deps.adopt_child_identity(state.process_pid, member.get("process_started_at"))
         deps.ensure_master_member(persist=True)
+        if deps.start_managed_network is not None:
+            await deps.start_managed_network(app)
         app.state.live_feed = deps.create_live_feed()
 
         usage_thread: threading.Thread | None = None
@@ -105,6 +109,8 @@ class AgentLifespan:
                 yield
             finally:
                 deps.background_stop.set()
+                if deps.stop_managed_network is not None:
+                    await deps.stop_managed_network(app)
                 if usage_thread is not None:
                     await asyncio.to_thread(deps.close_resource_probes)
                     await asyncio.to_thread(usage_thread.join, 4)

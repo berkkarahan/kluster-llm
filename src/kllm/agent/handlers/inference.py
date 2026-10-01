@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Protocol
+from contextlib import nullcontext
+from typing import ContextManager
 
 from fastapi import HTTPException
 
@@ -63,6 +65,11 @@ class InferenceDependencies:
     finish_master_launch: MasterLaunchFinisher
     stop_managed_inference: Callable[[], None]
     inference_idle: Callable[[], dict[str, Any]]
+    network_members: Callable[[str], dict[str, Any]] | None = None
+    network_run: Callable[[str | None], ContextManager[dict[str, Any]]] | None = None
+    network_release: Callable[[], None] | None = None
+    network_diagnostics: Callable[[str], dict[str, Any]] | None = None
+    network_stop: Callable[[], ContextManager[None]] | None = None
 
 
 class InferenceHandlers:
@@ -85,7 +92,14 @@ class InferenceHandlers:
         self._deps.ensure_master_member()
         self._guard_context(body)
         self._deps.merge_extra(body)
-        result = self._deps.execute_plan(body, state.members)
+        members = state.members
+        if body.network_id:
+            if self._deps.network_members is None:
+                raise HTTPException(409, detail={"code": "UNSUPPORTED_CAPABILITY"})
+            members = self._deps.network_members(body.network_id)
+        result = self._deps.execute_plan(body, members)
+        if body.network_id and self._deps.network_diagnostics:
+            result.update(self._deps.network_diagnostics(body.network_id))
         if preview:
             return result
         if state.process_pid:
@@ -118,50 +132,61 @@ class InferenceHandlers:
         self._guard_context(body)
         self._deps.merge_extra(body)
         self._deps.validate_vision(body)
-        plan_result = self._deps.execute_plan(body, state.members)
-        if plan_result.get("fit_status") == "overflow":
-            raise HTTPException(
-                400,
-                plan_result.get("hint") or "model and context exceed cluster budget (overflow)",
+        if body.network_id and self._deps.network_run is None:
+            raise HTTPException(409, detail={"code": "UNSUPPORTED_CAPABILITY"})
+        context = self._deps.network_run(body.network_id) if self._deps.network_run else nullcontext(state.members)
+        with context as members:
+            plan_result = self._deps.execute_plan(body, members)
+            if body.network_id and self._deps.network_diagnostics:
+                plan_result.update(self._deps.network_diagnostics(body.network_id))
+            if plan_result.get("fit_status") == "overflow":
+                raise HTTPException(
+                    400,
+                    plan_result.get("hint") or "model and context exceed cluster budget (overflow)",
+                )
+            path = self._deps.resolve_model(body.model)
+            rpc_servers = list(plan_result.get("rpc_endpoints") or [])
+            if not body.network_id:
+                self._deps.ensure_rpc_peers_reachable(rpc_servers)
+            root = self._deps.repository_root()
+            self._deps.stop_previous_master()
+            backend = (state.members.get(state.node_id) or {}).get("backend") or "cpu"
+            gpu_env = self._deps.gpu_visibility_env(backend, state.gpu_ids)
+            extra = self._deps.sanitize_extra_args(body.extra_args) if body.extra_args else []
+            self._debug_launch_inputs(backend, state.gpu_ids, plan_result, rpc_servers, gpu_env)
+            launch_config = self._deps.build_master_launch(
+                body,
+                plan_result,
+                model_path=path,
+                rpc_servers=rpc_servers,
+                infer_port=state.infer_port,
+                repo_root=str(root) if root else None,
+                gpu_env=gpu_env,
+                extra_args=extra,
             )
-        path = self._deps.resolve_model(body.model)
-        rpc_servers = list(plan_result.get("rpc_endpoints") or [])
-        self._deps.ensure_rpc_peers_reachable(rpc_servers)
-        root = self._deps.repository_root()
-        self._deps.stop_previous_master()
-        backend = (state.members.get(state.node_id) or {}).get("backend") or "cpu"
-        gpu_env = self._deps.gpu_visibility_env(backend, state.gpu_ids)
-        extra = self._deps.sanitize_extra_args(body.extra_args) if body.extra_args else []
-        self._debug_launch_inputs(backend, state.gpu_ids, plan_result, rpc_servers, gpu_env)
-        launch_config = self._deps.build_master_launch(
-            body,
-            plan_result,
-            model_path=path,
-            rpc_servers=rpc_servers,
-            infer_port=state.infer_port,
-            repo_root=str(root) if root else None,
-            gpu_env=gpu_env,
-            extra_args=extra,
-        )
-        launched = self._deps.spawn_master(launch_config)
-        self._deps.finish_master_launch(
-            path,
-            plan_result,
-            launched,
-            lambda: self._deps.persist_last_settings(body),
-            lambda: self._deps.remember(body),
-        )
-        return run_response(plan_result, launched)
+            launched = self._deps.spawn_master(launch_config)
+            self._deps.finish_master_launch(
+                path,
+                plan_result,
+                launched,
+                lambda: self._deps.persist_last_settings(body),
+                lambda: self._deps.remember(body),
+            )
+            return run_response(plan_result, launched)
 
     def stop(self) -> dict[str, Any]:
         state = self._deps.state
         if state.role != "master":
             raise HTTPException(400, "stop inference requires master role")
-        self._deps.stop_managed_inference()
-        state.model_name = None
-        state.inference_activity = self._deps.inference_idle()
-        state.save()
-        return {"ok": True, "role": state.role, "model_name": None}
+        context = self._deps.network_stop() if self._deps.network_stop else nullcontext()
+        with context:
+            self._deps.stop_managed_inference()
+            if self._deps.network_release:
+                self._deps.network_release()
+            state.model_name = None
+            state.inference_activity = self._deps.inference_idle()
+            state.save()
+            return {"ok": True, "role": state.role, "model_name": None}
 
     @staticmethod
     def _debug_launch_inputs(

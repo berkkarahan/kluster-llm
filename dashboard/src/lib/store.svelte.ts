@@ -43,7 +43,11 @@ function apiErrorMessage(data: unknown, text: string, status: number, fallback: 
     if (typeof error?.message === 'string') return error.message;
   }
   if (typeof data === 'object' && data !== null && 'detail' in data) {
-    return String((data as { detail: unknown }).detail);
+    const detail = (data as { detail: unknown }).detail;
+    if (typeof detail === 'object' && detail !== null && 'message' in detail && typeof detail.message === 'string') {
+      return `${'code' in detail ? String(detail.code) + ': ' : ''}${detail.message}`;
+    }
+    return String(detail);
   }
   if (typeof data === 'string') return data;
   return text || `${fallback} ${status}`;
@@ -253,6 +257,7 @@ class AppStore {
   }
 
   stop() {
+    this.apiToken = '';
     this.updates?.stop();
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
@@ -493,6 +498,23 @@ class AppStore {
     } catch (error) {
       if (seq === this.historySeq) this.historyError = String(error);
     }
+  }
+
+  async networkRequest<T>(path: string, method = 'GET', value?: unknown, signal?: AbortSignal): Promise<T> {
+    if (!this.apiToken) await this.loadToken();
+    const response = await fetch(path, {
+      method, signal,
+      headers: { Authorization: `Bearer ${this.apiToken}`, 'Content-Type': 'application/json' },
+      ...(value === undefined ? {} : { body: JSON.stringify(value) })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const detail = data?.detail;
+      throw new Error(typeof detail === 'object' && detail !== null
+        ? `${detail.code ?? response.status}: ${detail.message ?? 'Network request failed'}`
+        : String(detail ?? `Network request ${response.status}`));
+    }
+    return data as T;
   }
 
   async loadToken() {
@@ -1116,7 +1138,7 @@ class AppStore {
     try {
       const r = await fetch(path, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(this.apiToken ? {Authorization: `Bearer ${this.apiToken}`} : {}) },
         body: body === undefined ? undefined : JSON.stringify(body)
       });
       const text = await r.text();
@@ -1337,13 +1359,19 @@ class AppStore {
     if (this.selectedModel === name) this.selectedModel = this.models[0]?.id ?? '';
   }
 
+  selectedNetworkId = $state('');
+
+  networkPlanPayload(): Record<string, unknown> {
+    return {...this.planPayload(), ...(this.selectedNetworkId ? {network_id: this.selectedNetworkId} : {})};
+  }
+
   async plan() {
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings()) return;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     ++this.estimateSeq;
-    this.planResult = (await this.post('/v2/inference/plans', this.planPayload())) as Record<string, unknown>;
+    this.planResult = (await this.post('/v2/inference/plans', this.networkPlanPayload())) as Record<string, unknown>;
   }
 
   /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
@@ -1365,7 +1393,7 @@ class AppStore {
     if (!this.validateRunSettings()) return;
     if (this.busy) return;
     const seq = ++this.estimateSeq;
-    const payload = this.planPayload();
+    const payload = this.networkPlanPayload();
     this.estimating = true;
     try {
       const r = await fetch('/v2/inference/plans?preview=true', {
@@ -1441,7 +1469,8 @@ class AppStore {
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     ++this.estimateSeq;
-    const data = (await this.post('/v2/inference/runs', this.planPayload())) as Record<string, unknown>;
+    if (this.selectedNetworkId) await this.loadToken();
+    const data = (await this.post('/v2/inference/runs', this.networkPlanPayload())) as Record<string, unknown>;
     const plan = (data.plan ?? {}) as Record<string, unknown>;
     if (Object.keys(plan).length) {
       this.planResult = plan;

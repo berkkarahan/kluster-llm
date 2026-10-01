@@ -130,7 +130,7 @@ fn open_socket() -> io::Result<std::os::fd::OwnedFd> {
 #[cfg(unix)]
 fn read_events(fd: i32, shared: &Shared) -> io::Result<()> {
     let mut bytes = [0u8; 65536];
-    loop {
+    for _ in 0..1024 {
         let mut iov = libc::iovec { iov_base: bytes.as_mut_ptr().cast(), iov_len: bytes.len() };
         let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
         message.msg_iov = &mut iov;
@@ -145,6 +145,7 @@ fn read_events(fd: i32, shared: &Shared) -> io::Result<()> {
         if size == 0 || message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 { return Err(failure("address observer lost messages")); }
         parse(&bytes[..size as usize], shared)?;
     }
+    Err(failure("address observation exceeded its drain bound"))
 }
 
 #[cfg(target_os="linux")]

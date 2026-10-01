@@ -8,6 +8,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.core.gpu_selection import GpuSelection
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
@@ -163,7 +166,16 @@ def test_join_uses_proxy_base(client, monkeypatch):
     from kllm import cp_proxy
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'{"ok":true,"control_protocol":2}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):  # noqa: N802
+            assert self.path == "/v2/cluster/nodes/register"
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
             body = (
@@ -202,12 +214,9 @@ def test_join_uses_proxy_base(client, monkeypatch):
     monkeypatch.setattr(
         agent,
         "_resolve_gpu_selection",
-        lambda gpu_ids, listed=None: {
-            "gpu_ids": [],
-            "gpus": [],
-            "vram_bytes": 0,
-            "backend": "cpu",
-        },
+        lambda gpu_ids, listed=None: ResolvedGpuSelection(
+            GpuSelection((), "cpu", 0), ()
+        ),
     )
     monkeypatch.setattr(agent.netsec, "ensure_rpc_firewall", lambda *a, **k: {})
     monkeypatch.setattr(agent.netsec, "pick_rpc_bind_host", lambda preferred, toward=None: "10.0.0.2")

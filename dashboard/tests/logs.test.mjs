@@ -6,7 +6,7 @@ import { createServer } from 'vite';
 process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 
 const server = await createServer({
-  server: { middlewareMode: true, hmr: false, watch: null },
+  server: { middlewareMode: true, hmr: false, ws: false, watch: null },
   appType: 'custom'
 });
 
@@ -367,8 +367,45 @@ test('US3: clear is a no-op before first success and display-only afterwards', a
     assert.equal(trail.state, 'ready');
 
     // Clear must never issue a write.
-    assert.ok(f.calls.every((c) => c.url.startsWith('/v1/logs?') && (c.opts.method ?? 'GET') === 'GET'));
+    assert.ok(f.calls.every((c) => c.url.startsWith('/v2/logs?') && (c.opts.method ?? 'GET') === 'GET'));
     trail.stop();
+  } finally {
+    f.restore();
+  }
+});
+
+test('long visits retain exact UUID dedup across row eviction, Clear and overlapping snapshots', async () => {
+  const f = install();
+  const doc = fakeDocument();
+  f.setDocument(doc);
+  try {
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const trail = new LogTrail();
+    trail.setMode('5s');
+    trail.start();
+    const retained = Array.from({ length: 2001 }, (_, index) => ({
+      ...master,
+      event_id: eventId(index + 100),
+      ts: 10,
+      line: 'same text'
+    }));
+    f.respond(f.calls[0], snapshot(retained, { cursor: `${EPOCH}:2001` }));
+    await f.flush();
+    assert.equal(trail.entries.length, 2000);
+    assert.equal(trail.seenIds.size, 2001);
+    assert.equal(trail.omittedRows, 1);
+
+    trail.clear();
+    doc.changeVisibility('hidden');
+    doc.changeVisibility('visible');
+    assert.equal(f.calls.length, 2);
+    const fresh = { ...worker, event_id: eventId(9000), ts: 10, line: 'same text' };
+    f.respond(f.calls[1], snapshot([retained[0], fresh], { cursor: `${EPOCH}:2002` }));
+    await f.flush();
+    assert.deepEqual(trail.entries.map((entry) => entry.event_id), [fresh.event_id]);
+    assert.equal(trail.seenIds.size, 2002);
+    trail.stop();
+    assert.equal(trail.seenIds.size, 0);
   } finally {
     f.restore();
   }
@@ -430,7 +467,7 @@ test('Live fallback owns an independent log GET lane and resets old-server curso
     trail.start();
     f.advance(2000);
     assert.equal(f.calls.length, 1);
-    assert.match(f.calls[0].url, /\/v1\/dashboard\/live\?topics=&logs=1/);
+    assert.match(f.calls[0].url, /\/v2\/events\?topics=&logs=1/);
     const continuity = '00000000-0000-4000-8000-000000000003';
     f.respond(f.calls[0], { version: 1, logs: { availability: 'available', snapshot: {
       ...snapshot([master], { cursor: `${EPOCH}:1` }), continuity_id: continuity, discontinuity: null },
@@ -444,7 +481,7 @@ test('Live fallback owns an independent log GET lane and resets old-server curso
     f.respond(f.calls[1], { detail: 'old route' }, 404);
     await f.flush();
     assert.equal(f.calls.length, 3);
-    assert.match(f.calls[2].url, /\/v1\/logs\?n=5000/);
+    assert.match(f.calls[2].url, /\/v2\/logs\?n=5000/);
     assert.doesNotMatch(f.calls[2].url, /after=/, 'a mirror cursor must not be passed to old-server Logs');
     f.respond(f.calls[2], snapshot([worker], { cursor: `${EPOCH}:2` }));
     await f.flush();

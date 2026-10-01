@@ -77,17 +77,17 @@ test('models search keeps the bar and opens downloadable results for keywords an
         };
       };
 
-      vite = await createServer({ server: { middlewareMode: true, hmr: false, watch: null }, appType: 'custom' });
+      vite = await createServer({ server: { middlewareMode: true, hmr: false, ws: false, watch: null }, appType: 'custom' });
       server = createHttpServer((req, res) => {
         void (async () => {
           const path = req.url.split('?')[0];
           if (path === '/__release') { releaseTree(); json(res, { ok: true }); return; }
-          if (!path.startsWith('/v1/')) {
+          if (!path.startsWith('/v2/')) {
             vite.middlewares(req, res, () => res.writeHead(404).end());
             return;
           }
-          if (path === '/v1/dashboard/live') { json(res, live(req)); return; }
-          if (path === '/v1/models/search' && req.method === 'POST') {
+          if (path === '/v2/events') { json(res, live(req)); return; }
+          if (path === '/v2/models/search' && req.method === 'POST') {
             const body = JSON.parse(await readBody(req) || '{}');
             searches.push(body.query);
             const query = body.query;
@@ -124,16 +124,16 @@ test('models search keeps the bar and opens downloadable results for keywords an
             });
             return;
           }
-          if (path === '/v1/models/download' && req.method === 'POST') {
+          if (path === '/v2/models/downloads' && req.method === 'POST') {
             downloads.push(JSON.parse(await readBody(req) || '{}'));
             json(res, { ok: true, accepted: true, source: downloads.at(-1).source, state: 'running' });
             return;
           }
-          if (path === '/v1/models') { json(res, { data: [] }); return; }
-          if (path === '/v1/status') { json(res, { role: 'idle', node_id: 'local', members: {} }); return; }
-          if (path === '/v1/hf-token') { json(res, { configured: false, source: null }); return; }
-          if (path === '/v1/config') { json(res, { device: 'gpu', split_mode: 'layer' }); return; }
-          if (path === '/v1/gpus') { json(res, { gpus: [], backend: 'cpu' }); return; }
+          if (path === '/v2/models') { json(res, { data: [] }); return; }
+          if (path === '/v2/node') { json(res, { role: 'idle', node_id: 'local', members: {} }); return; }
+          if (path === '/v2/credentials/huggingface') { json(res, { configured: false, source: null }); return; }
+          if (path === '/v2/node/config') { json(res, { device: 'gpu', split_mode: 'layer' }); return; }
+          if (path === '/v2/node/devices') { json(res, { gpus: [], backend: 'cpu' }); return; }
           json(res, {});
         })().catch((error) => {
           if (!res.headersSent) res.writeHead(500);

@@ -19,7 +19,7 @@
 
   onMount(async () => {
     try {
-      const r = await fetch('/v1/home');
+      const r = await fetch('/v2/node/home');
       if (r.ok) home = (await r.json()) as HomePaths;
     } catch {
       /* ignore — data directory stays informational */

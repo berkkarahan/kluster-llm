@@ -234,10 +234,10 @@ test('validated old-server reads keep status and usage usable during socket fail
   const reads = [];
   globalThis.fetch = async (url) => {
     reads.push(String(url));
-    if (String(url).startsWith('/v1/dashboard/live')) return new Response('missing', { status: 404 });
-    const payload = url === '/v1/status'
+    if (String(url).startsWith('/v2/events')) return new Response('missing', { status: 404 });
+    const payload = url === '/v2/node'
       ? { role: 'worker', node_id: 'worker-1', members: {} }
-      : url === '/v1/usage/live'
+      : url === '/v2/telemetry'
         ? { nodes: {}, relationships: [], recording: { recording: 'interrupted' } }
         : url === '/v1/load-progress'
           ? { phase: null } : { state: 'idle' };
@@ -248,7 +248,7 @@ test('validated old-server reads keep status and usage usable during socket fail
   assert.equal(applied.findLast(([topic]) => topic === 'status')[1].data.role, 'worker');
   assert.equal(applied.findLast(([topic]) => topic === 'usage')[1].data.nodes !== undefined, true);
   assert.equal(health.at(-1), 'periodic-refresh');
-  assert.ok(reads.includes('/v1/status') && reads.includes('/v1/usage/live'));
+  assert.ok(reads.includes('/v2/node') && reads.includes('/v2/telemetry'));
 });
 
 test('a confirmed new-route denial never probes old routes as an access bypass', async (t) => {
@@ -261,7 +261,7 @@ test('a confirmed new-route denial never probes old routes as an access bypass',
   sockets[0].close();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(health.at(-1), 'unavailable');
-  assert.equal(reads.some((url) => url === '/v1/status'), false);
+  assert.equal(reads.some((url) => url === '/v2/node'), false);
 });
 
 test('denied area is omitted from retries until an explicit refresh', async (t) => {

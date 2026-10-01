@@ -42,7 +42,7 @@
     error = '';
     checked = '';
     try {
-      const response = await fetch('/v1/chat-template/validate', {
+      const response = await fetch('/v2/models/chat-template/validation', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: draft })
       });

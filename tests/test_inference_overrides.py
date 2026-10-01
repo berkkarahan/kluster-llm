@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import pytest
+import typer
+
+from kllm.commands.inference import (
+    _headroom_override,
+    _parse_node_shares,
+    _read_chat_template_file,
+    _validate_run_payload,
+)
 from kllm.cli_payload import build_plan_run_payload
 from kllm.model_defaults import ModelDefaults, merge_defaults_into_extra_args, overlay_user_inference
 from kllm.run_settings import RunSettingsFields
@@ -142,3 +151,54 @@ def test_cli_payload_omits_null_inference():
         "enable_thinking",
     ):
         assert key not in payload
+
+
+def test_cli_headroom_override_rejects_conflicts_and_wrong_device():
+    with pytest.raises(typer.BadParameter, match="pass only one"):
+        _headroom_override("gpu", 80, 70)
+    with pytest.raises(typer.BadParameter, match="requires GPU"):
+        _headroom_override("cpu", 80, None)
+    with pytest.raises(typer.BadParameter, match="requires CPU"):
+        _headroom_override("gpu", None, 80)
+    assert _headroom_override("gpu", 75, None) == 0.75
+    assert _headroom_override("cpu", None, 65) == 0.65
+
+
+def test_cli_node_share_parser_preserves_node_names_and_values():
+    assert _parse_node_shares(["master=0.6", "worker=0.4"]) == {
+        "master": 0.6,
+        "worker": 0.4,
+    }
+    assert _parse_node_shares(None) is None
+    with pytest.raises(typer.BadParameter, match="--node-share NODE=FRACTION"):
+        _parse_node_shares(["worker"])
+
+
+def test_cli_run_payload_uses_shared_schema_and_reports_invalid_options():
+    payload = _validate_run_payload(build_plan_run_payload(model="m.gguf", batch_size="128"))
+    assert payload["model"] == "m.gguf"
+    assert payload["batch_size"] == 128
+
+    invalid = build_plan_run_payload(
+        model="m.gguf",
+        node_shares={"master": 0.7, "worker": 0.2},
+    )
+    with pytest.raises(typer.BadParameter, match="node shares must total 1"):
+        _validate_run_payload(invalid)
+
+
+def test_custom_chat_template_file_is_read_at_cli_boundary(tmp_path):
+    template_path = tmp_path / "template.jinja"
+    template_path.write_text("{{ messages }}", encoding="utf-8")
+
+    text = _read_chat_template_file(str(template_path))
+    assert text == "{{ messages }}"
+    assert _read_chat_template_file(None) is None
+    assert build_plan_run_payload(
+        model="m.gguf", chat_template_text=text
+    )["chat_template_text"] == text
+
+
+def test_missing_custom_chat_template_is_a_cli_input_error(tmp_path):
+    with pytest.raises(typer.BadParameter, match="could not read chat template file"):
+        _read_chat_template_file(str(tmp_path / "missing.jinja"))

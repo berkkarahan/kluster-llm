@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatGib, selectedCapacity } from '../src/lib/format-memory.ts';
+import { formatGib, formatMemoryComponent, selectedCapacity } from '../src/lib/format-memory.ts';
 
 const gib = 1024 ** 3;
 const gpus = [
   { index: 0, name: '16 GiB', vram_bytes: 16 * gib },
   { index: 1, name: '8 GiB', vram_bytes: 8 * gib }
 ];
+
+test('small estimate components preserve changes hidden by aggregate GiB rounding', () => {
+  assert.equal(formatGib(32 * 1024 ** 2), formatGib(40 * 1024 ** 2));
+  assert.equal(formatMemoryComponent(32 * 1024 ** 2), '32.00 MiB');
+  assert.equal(formatMemoryComponent(40 * 1024 ** 2), '40.00 MiB');
+  assert.equal(formatMemoryComponent(512), '512 B');
+  assert.equal(formatMemoryComponent(4096), '4.0 KiB');
+  assert.equal(formatMemoryComponent(gib), '1.0 GiB');
+  assert.equal(formatMemoryComponent(NaN), '—');
+});
 
 test('measured binary memory displays in one-decimal GiB', () => {
   for (const capacity of [8, 16, 24]) {

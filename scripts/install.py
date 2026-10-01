@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
 import os
 import platform
 import re
@@ -57,9 +56,9 @@ from typing import Any
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-import install_http
-import install_llama_release
-import install_llama_source
+import install_http  # noqa: E402
+import install_llama_release  # noqa: E402
+import install_llama_source  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = ROOT / ".venv"

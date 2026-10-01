@@ -43,8 +43,10 @@ def test_browse_masters_falls_back_to_helper(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "kllm.discovery._browse_via_http",
-        lambda timeout, key, port=18765: (_ for _ in ()).throw(AssertionError("http should not run")),
+        "kllm.discovery_http._browse_via_http",
+        lambda timeout, key, port=18765: (_ for _ in ()).throw(
+            AssertionError("http should not run")
+        ),
     )
     found = browse_masters(timeout=0.1, key="secret")
     assert len(found) == 1
@@ -66,7 +68,7 @@ def test_browse_masters_skips_helper_when_inprocess_finds(monkeypatch):
 
     monkeypatch.setattr("kllm.discovery._browse_via_helper", boom)
     monkeypatch.setattr(
-        "kllm.discovery._browse_via_http",
+        "kllm.discovery_http._browse_via_http",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("http should not run")),
     )
     found = browse_masters(timeout=0.1, key=None)
@@ -80,7 +82,7 @@ def test_browse_masters_falls_back_to_http(monkeypatch):
     monkeypatch.setattr("kllm.discovery._browse_inprocess", lambda timeout=2.0, key=None: [])
     monkeypatch.setattr("kllm.discovery._browse_via_helper", lambda timeout, key: [])
     monkeypatch.setattr(
-        "kllm.discovery._browse_via_http",
+        "kllm.discovery_http._browse_via_http",
         lambda timeout, key, port=18765: [
             DiscoveredMaster(name="kllm-9aaafd02", host="192.168.68.100", port=port, key_id=kid),
         ],
@@ -92,7 +94,7 @@ def test_browse_masters_falls_back_to_http(monkeypatch):
 
 
 def test_probe_http_master_matches_kid(monkeypatch):
-    from kllm.discovery import _probe_http_master
+    from kllm.discovery_http import _probe_http_master
 
     kid = join_key_id("secret")
     payload = json.dumps({"ok": True, "role": "master", "node_id": "abc", "kid": kid}).encode()
@@ -107,7 +109,7 @@ def test_probe_http_master_matches_kid(monkeypatch):
         def read(self):
             return payload
 
-    monkeypatch.setattr("kllm.discovery.urllib.request.urlopen", lambda *a, **k: _Resp())
+    monkeypatch.setattr("kllm.discovery_http.urllib.request.urlopen", lambda *a, **k: _Resp())
     hit = _probe_http_master("192.168.68.100", 18765, kid, 0.2)
     assert hit is not None
     assert hit.host == "192.168.68.100"
@@ -156,4 +158,3 @@ def test_http_probe_hosts_falls_back_to_24(monkeypatch):
     assert "127.0.0.1" in hosts
     assert "192.168.68.64" in hosts
     assert "192.168.69.1" not in hosts
-

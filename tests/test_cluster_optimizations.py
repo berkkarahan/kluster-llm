@@ -10,12 +10,19 @@ from starlette.requests import Request
 
 from kllm import gateway
 from kllm.placement import memory_costs, plan_devices, MIB
-from kllm.run_planning import build_master_launch, resolve_launch_settings
+from kllm.core.placement_models import (
+    ModelLayout,
+    PlacementDeviceCandidate,
+    PlacementNodeInput,
+    PlacementSettings,
+)
+from kllm.run_launch import build_master_launch
+from kllm.run_planning import resolve_launch_settings
 from kllm.run_settings import RunBody
 
 
 def settings(**kwargs):
-    return resolve_launch_settings(RunBody(model="test.gguf", **kwargs))
+    return resolve_launch_settings(RunBody(model="test.gguf", **kwargs)).to_mapping()
 
 
 def test_installed_device_names_include_unnumbered_metal():
@@ -23,6 +30,20 @@ def test_installed_device_names_include_unnumbered_metal():
     devices = parse_devices("Available devices:\n  Metal: Apple M5 Pro (49152 MiB, 40000 MiB free)\n  Vulkan0: AMD GPU (16304 MiB, 15000 MiB free)\n")
     assert [d["device"] for d in devices] == ["Metal", "Vulkan0"]
     assert devices[0]["backend"] == "metal"
+
+
+@pytest.mark.asyncio
+async def test_upstream_reachability_reuses_injected_client():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        assert await gateway._upstream_reachable(8080, client) is True
+
+    assert [request.url.path for request in requests] == ["/health"]
 
 
 @pytest.mark.asyncio
@@ -64,8 +85,9 @@ def node(nid, memory, *, master=False, backend="vulkan", gpus=1, unified=False):
 
 
 def plan(nodes, model=None, **kw):
-    return plan_devices(nodes, 500*MIB, model or layout(), settings(), context=512,
-                        headroom=1, device="gpu", vram_weight=.6, latency_weight=.4, **kw)
+    typed_nodes = tuple(PlacementNodeInput.from_mapping(value) for value in nodes)
+    return plan_devices(typed_nodes, 500*MIB, ModelLayout.from_mapping(model or layout()), PlacementSettings.from_mapping(settings()), context=512,
+                        headroom=1, device="gpu", vram_weight=.6, latency_weight=.4, **kw).to_payload()
 
 
 def test_manual_node_shares_resolve_to_contiguous_layers_and_launch():
@@ -153,7 +175,14 @@ def test_pool_proportional_avoids_even_split_oom():
     for a in result["device_allocations"]:
         assert a["estimated_bytes"] <= a["budget_bytes"]
     weights = proportional_weights(
-        [{"budget_bytes": 24 * 1024 * MIB}, {"budget_bytes": 8 * 1024 * MIB}]
+        [
+            PlacementDeviceCandidate(
+                "master", "GPU0", "metal", True, 24 * 1024 * MIB, 0, None, 0, 1, False
+            ),
+            PlacementDeviceCandidate(
+                "worker", "GPU0", "cuda", False, 8 * 1024 * MIB, 0, "worker:50052", 0, 1, False
+            ),
+        ]
     )
     assert weights == [24.0, 8.0]
 
@@ -161,8 +190,8 @@ def test_pool_proportional_avoids_even_split_oom():
 def test_heterogeneous_multiple_devices_match_runtime_boundaries():
     # Limit master RAM so local+CPU alone cannot fit; remotes are required.
     master = node("master", 510 * MIB, master=True)
-    master["available_ram_bytes"] = 300 * MIB
-    master["total_ram_bytes"] = 300 * MIB
+    master["available_ram_bytes"] = 350 * MIB
+    master["total_ram_bytes"] = 350 * MIB
     result = plan([node("remote", 510 * MIB, backend="metal", gpus=2), master])
     assert result["fit_status"] != "overflow"
     assert result["routing_mode"] == "pool"
@@ -212,19 +241,33 @@ def test_qwen_hybrid_kv_and_state_memory():
         "attention.key_length": 256, "attention.value_length": 256,
         "ssm.inner_size": 8192, "ssm.state_size": 128, "ssm.group_count": 16,
         "ssm.time_step_rank": 64, "ssm.conv_kernel": 4, "full_attention_interval": 4}.items()}
-    costs = memory_costs(m, 500*MIB, 1024, settings(checkpoints=0, cache_type_k="q4_0", cache_type_v="q4_0"))
-    assert costs["kv_bytes"] == 1024 * 2 * 512 * 18 // 32
-    assert costs["state_bytes"] == 3 * 4 * (128*8192 + 3*(8192+2*16*128))
-    two = memory_costs(m, 500*MIB, 1024, settings(checkpoints=0, parallel_slots=2, cache_type_k="q4_0", cache_type_v="q4_0"))
-    assert two["kv_bytes"] == costs["kv_bytes"]
-    assert two["state_bytes"] == 2 * costs["state_bytes"]
+    costs = memory_costs(
+        ModelLayout.from_mapping(m),
+        500 * MIB,
+        1024,
+        PlacementSettings.from_mapping(
+            settings(checkpoints=0, cache_type_k="q4_0", cache_type_v="q4_0")
+        ),
+    )
+    assert costs.kv_bytes == 1024 * 2 * 512 * 18 // 32
+    assert costs.state_bytes == 3 * 4 * (128*8192 + 3*(8192+2*16*128))
+    two = memory_costs(
+        ModelLayout.from_mapping(m),
+        500 * MIB,
+        1024,
+        PlacementSettings.from_mapping(
+            settings(checkpoints=0, parallel_slots=2, cache_type_k="q4_0", cache_type_v="q4_0")
+        ),
+    )
+    assert two.kv_bytes == costs.kv_bytes
+    assert two.state_bytes == 2 * costs.state_bytes
 
 
 def test_explicit_launch_settings_and_overlapping_args():
     body = RunBody(model="test.gguf", context=99840, cache_type_k="q4_0", cache_type_v="q4_0",
                    batch_size=512, micro_batch=512, enable_thinking=True,
                    extra_args=["--flash-attn=on", "--parallel", "2"])
-    resolved = resolve_launch_settings(body)
+    resolved = resolve_launch_settings(body).to_mapping()
     launch = build_master_launch(body, {"ngl": 5, "tensor_split_csv": "5", "resolved_launch_settings": resolved},
                                  model_path=Path("missing.gguf"), rpc_servers=[], infer_port=8080, repo_root=None, gpu_env={}, extra_args=[])
     assert launch["micro_batch"] == 512

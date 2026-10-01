@@ -6,36 +6,105 @@ This guide covers VRAM and RAM budgeting for distributed LLM inference across he
 
 ## Memory Budget Formula
 
-For each device, the total memory budget is:
+PLAN & RUN uses the Python planner behind `/v1/plan` as its canonical estimator.
+Its component total is:
 
 ```
-total_memory = model_weights + kv_cache + overhead
+estimated_bytes = weights_estimate_bytes + auxiliary_weights_bytes
+                + kv_estimate_bytes + recurrent_state_bytes
+                + checkpoint_estimate_bytes + compute_estimate_bytes
+                + auxiliary_runtime_bytes + execution_overhead_bytes
 ```
 
-Where:
-- **model_weights**: GGUF file size (see quantization table below)
-- **kv_cache**: Scales with context length × batch size × model dimensions
-- **overhead**: ~10-20% for runtime, temporary buffers, and system
+The same total equals `cpu_alloc_bytes + vram_alloc_bytes` and the sum of
+`node_alloc_bytes`. Unified memory is one shared capacity; RAM and VRAM are not
+added twice. GGUF tensor spans determine resident weights, including any tied
+embedding copy needed for offloaded output. GGUF metadata/header bytes are not
+weights. The legacy native planner without resolved launch settings remains a
+file-size approximation and reports an incomplete estimate.
+
+Compute is a conservative graph reserve based on physical microbatch, sequence
+outputs, embedding/FFN dimensions, attention masks, Flash Attention, cache
+dequantization and row/tensor split scratch. Each active device and the master
+receive a compute reserve and a 256 MiB execution reserve. Backend allocator
+reuse and hardware-specific workspaces are approximate; this is not a measured
+peak. Row/tensor placement is also approximate and reports a warning.
+
+Recurrent architectures reserve float32 convolution/state buffers per slot and
+host checkpoints per slot and checkpoint count. Draft models include resident
+weights, their own KV/state/compute reserve and speculative rollback buffers.
+Local projector weights include a 512 MiB runtime reserve per slot. Local LoRA
+and control-vector assets contribute their file sizes. Auxiliary reserves are
+currently budgeted on master RAM; hardware-specific auxiliary offload residency
+needs validation on the deployment backend.
+
+`estimate_complete` means every recognized input has been priced with the
+documented approximations. It does not guarantee a measured peak or successful
+backend allocation. Missing metadata/assets, unknown extra-argument memory
+effects and unsupported speculative architectures set it to false and populate
+`estimate_warnings`. Missing or remote assets are not silently priced at zero
+with a complete estimate.
 
 ### KV Cache Estimation (8-bit quantized)
 
 With `--cache-type-k q8_0 --cache-type-v q8_0`:
 
 ```
-kv_cache_gb ≈ (context_length × n_layers × n_heads × head_dim × 2 × 1 byte) / (1024^3)
+kv_bytes = sum_over_attention_layers(cache_tokens ×
+           (GGML_row_bytes(K_dimensions, K_type) + GGML_row_bytes(V_dimensions, V_type)))
 ```
 
-Simplified rule of thumb:
-```
-kv_cache_gb ≈ context_tokens × n_layers × 0.0001  (for 7B models)
-kv_cache_gb ≈ context_tokens × n_layers × 0.0002  (for 13B models)
-kv_cache_gb ≈ context_tokens × n_layers × 0.001   (for 70B models)
-```
+K and V types are independent. `q8_0` uses 34 bytes per 32 elements, `q4_0`
+uses 18; both include block scales. GQA uses KV heads rather than all query
+heads. Modern MLA caches the compressed latent and rotary dimensions in K
+without allocating a separate V cache. Recurrent layers have state rather than
+standard KV. Sliding-window layers can reserve a smaller padded cache unless
+`--swa-full` is supplied.
 
-**Example: 7B model, 4096 context, 32 layers, 8-bit KV cache:**
-```
-kv_cache_gb ≈ 4096 × 32 × 0.0001 = 13.1 GB
-```
+Context is total cache capacity, not automatically multiplied by slots. The
+pinned runtime pads it to 256 tokens, and separate slot streams also pad their
+individual capacities. Consequently an aligned slot-count change keeps standard
+KV bytes constant while compute/output or recurrent buffers may grow.
+
+For example, 4096 tokens, 32 attention layers, 8 KV heads and 128 dimensions for
+each of K/V with `q8_0` reserve 272 MiB of KV, before compute and weights.
+
+### Controls and preview behavior
+
+| Controls | Memory effect |
+|----------|---------------|
+| Context, independent K/V types | KV capacity/storage; attention scratch |
+| Logical batch | Capped by resolved context; affects memory when it changes effective microbatch |
+| Physical microbatch | Capped by effective batch; graph/attention scratch |
+| Parallel slots | Output/compute, recurrent state and checkpoints; cache stream padding |
+| Flash Attention, SWA, checkpoints | Attention workspaces, sliding-window KV, host state snapshots |
+| Draft/projector assets, adapters, speculative mode, split mode | Auxiliary weights/runtime, rollback and transfer scratch |
+| Node shares, GPU selection, device mode, headroom, placement weights | Budgets and placement; active device count can change workspace reserves |
+| Sampling, templates/thinking, threads | No reserved model-memory effect |
+| Cache RAM | Server cache limit, not an eagerly reserved model allocation |
+| mmap/mlock | Primarily host residency rather than model VRAM |
+
+All relevant edits request a new preview. A logical batch edit can legitimately
+leave memory unchanged when effective microbatch stays constant; the dashboard
+reports that it recalculated and explains this case. Aggregate memory retains
+one-decimal GiB formatting, while small components display MiB/KiB so changes
+below 0.1 GiB remain visible. Equivalent allowed extra arguments are resolved
+before both planning and launch. Disabling Flash Attention with quantized V is
+rejected; auto selects on when quantized V requires it. For float V, auto is
+priced conservatively using the non-Flash Attention graph.
+
+The formulas are independently implemented against
+[llama.cpp v0.5.0 context semantics](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/src/llama-context.cpp),
+[KV storage](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/src/llama-kv-cache.cpp) and
+[sliding-window storage](https://github.com/ggml-org/llama.cpp/blob/v0.5.0/src/llama-kv-cache-iswa.cpp).
+
+Run deterministic regressions with `uv run python -m pytest -q tests/test_memory_estimation.py tests/test_plan_run_params.py`
+and `node --test dashboard/tests/memory-estimation.test.mjs`.
+The optional local Qwen3.5 regression uses
+`KLLM_TEST_QWEN_GGUF=/path/to/Qwen3.5-122B.gguf uv run python -m pytest -q tests/test_memory_estimation.py -k optional_local_qwen`.
+It reads metadata without
+loading weights. Backend peak-memory and live RPC validation still require the
+target hardware and a real model run.
 
 ---
 
@@ -107,13 +176,12 @@ Worker VRAM: 12 GB
 Total: 31.2 GB
 
 Can run: 13B Q5_K_M (10.3 GB) → YES (plenty of room)
-Can run: 70B Q4_K_M (48 GB) → YES (with split-mode layer)
+Can run: 70B Q4_K_M (48 GB) → NO (weights alone exceed the combined budget)
 ```
 
-For the 70B model:
-- Mac holds ~68% of layers (48 GB × 0.68 = 32.6 GB)
-- Worker holds ~32% of layers (48 GB × 0.32 = 15.4 GB)
-- Worker spills 3.4 GB to RAM/CPU
+For the 70B model, add capacity or use a smaller quantization. The Python planner
+can spill a contiguous prefix onto master CPU RAM when that RAM budget permits;
+GPU workers do not automatically spill their allocations onto worker RAM.
 
 ---
 

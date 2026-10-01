@@ -122,7 +122,7 @@ def test_preview_never_overwrites_applied_settings_or_remembered_model(client):
     agent.STATE.last_plan = {"fit_status": "fits", "model": "serving.gguf"}
     agent.STATE.model_name = "serving.gguf"
     with patch.object(agent.native, "plan_split", return_value=_fake_plan()):
-        r = c.post("/v1/plan?preview=true", json=_payload(context=8192, flash_attention="off"))
+        r = c.post("/v1/plan?preview=true", json=_payload(context=8192, flash_attention="off", cache_type_v="f16"))
     assert r.status_code == 200, r.text
     assert r.json()["resolved_launch_settings"]["flash_attention"] == "off"
     assert agent.STATE.last_settings["context"] == 2048
@@ -131,13 +131,65 @@ def test_preview_never_overwrites_applied_settings_or_remembered_model(client):
     assert c.get("/v1/model-settings/toy.gguf").json()["updated_at"] is None
 
 
+def test_real_plan_components_auto_context_and_unpriced_arguments(client, monkeypatch):
+    from test_memory_estimation import COMPONENTS, capacity, synthetic_gguf
+    from kllm import run_planning
+
+    c, agent, tmp = client
+    path = _model_file(tmp)
+    synthetic_gguf(path, "qwen35moe")
+    monkeypatch.setattr(run_planning, "cluster_nodes", lambda _: [capacity("master1")])
+    agent.STATE.last_settings = {"model": "serving.gguf", "context": 2048}
+    result = c.post("/v1/plan?preview=true", json=_payload(
+        context_auto=True, context=512, device="cpu", batch_size=16384, micro_batch=16384)).json()
+    assert result["context_effective"] == 8192
+    resolved = result["resolved_launch_settings"]
+    assert resolved["context"] == resolved["batch_size"] == resolved["micro_batch"] == 8192
+    assert result["estimate_complete"] and result["estimate_warnings"] == []
+    assert result["estimated_bytes"] == sum(result[c] for c in COMPONENTS)
+    assert result["estimated_bytes"] == result["cpu_alloc_bytes"] + result["vram_alloc_bytes"]
+    assert agent.STATE.last_settings["context"] == 2048
+    unknown = c.post("/v1/plan?preview=true", json=_payload(device="cpu", extra_args=["--embedding"])).json()
+    assert unknown["estimate_complete"] is False
+    assert any("--embedding" in w for w in unknown["estimate_warnings"])
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/plan?preview=true", "/v1/run"])
+def test_flash_off_quantized_v_rejected_before_launch(client, endpoint):
+    c, agent, tmp = client
+    _model_file(tmp)
+    with patch.object(agent.native, "start_master") as launch:
+        invalid = c.post(endpoint, json=_payload(flash_attention="off", cache_type_v="q8_0"))
+    assert invalid.status_code == 400
+    assert "quantized V cache requires Flash Attention" in invalid.text
+    launch.assert_not_called()
+
+
+def test_equivalent_extra_args_use_same_resolved_estimate(client, monkeypatch):
+    from test_memory_estimation import capacity, synthetic_gguf
+    from kllm import run_planning
+
+    c, _, tmp = client
+    synthetic_gguf(_model_file(tmp))
+    monkeypatch.setattr(run_planning, "cluster_nodes", lambda _: [capacity("master1")])
+    direct = c.post("/v1/plan?preview=true", json=_payload(
+        device="cpu", context=1024, batch_size=2048, micro_batch=1024, parallel_slots=2,
+        cache_type_k="q4_0", cache_type_v="f16", flash_attention="off")).json()
+    extra = c.post("/v1/plan?preview=true", json=_payload(device="cpu", extra_args=[
+        "--ctx-size=1024", "-b", "2048", "-ub", "1024", "-np", "2",
+        "-ctk", "q4_0", "-ctv", "f16", "-fa", "off"])).json()
+    assert direct["estimated_bytes"] == extra["estimated_bytes"]
+    for key in ("context", "parallel_slots", "batch_size", "micro_batch", "flash_attention", "kv_unified"):
+        assert direct["resolved_launch_settings"][key] == extra["resolved_launch_settings"][key]
+
+
 def test_template_selection_and_threads_capabilities(client, monkeypatch):
     c, agent, tmp = client
     _model_file(tmp)
     from kllm.chat_templates import PRESETS
     from kllm.run_settings import available_threads
     from kllm.run_settings import RunBody
-    from kllm.run_planning import build_master_launch
+    from kllm.run_launch import build_master_launch
     info = c.get("/v1/run-capabilities", params={"model": "toy.gguf"})
     assert info.status_code == 200, info.text
     assert info.json()["threads_max"] == available_threads()
@@ -164,7 +216,7 @@ def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
     with pytest.raises(ValueError, match="threads"):
         run_settings.RunBody(model="toy.gguf", threads=5)
     from kllm.run_planning import resolve_launch_settings
-    monkeypatch.setattr("kllm.run_planning.available_threads", lambda: 4)
+    monkeypatch.setattr("kllm.run_settings_resolution.available_threads", lambda: 4)
     from fastapi import HTTPException
     with pytest.raises(HTTPException, match="threads"):
         resolve_launch_settings(run_settings.RunBody(model="toy.gguf", extra_args=["--threads", "5"]))
@@ -179,6 +231,16 @@ def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
     assert restored["flash_attention"] == "off"
     assert restored["chat_template"] == "preset:qwen3-0.6b"
     assert restored["node_shares"] == {"worker": 0.3, "master1": 0.7}
+
+
+def test_run_settings_cannot_be_mutated_after_validation():
+    from pydantic import ValidationError
+
+    from kllm.run_settings import RunBody
+
+    settings = RunBody(model="toy.gguf")
+    with pytest.raises(ValidationError):
+        settings.context = 8192
 
 
 @pytest.mark.parametrize("legacy", ["row", "tensor"])

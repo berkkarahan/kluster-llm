@@ -254,7 +254,7 @@ kllm cluster update
 
 - **Python** owns CLI, FastAPI agent, mDNS, membership, and master-local model download.
 - **Rust (`kllm_native`)** owns HW capacity probe and process supervision.
-- Placement (`python/kllm/placement.py` + `tensor_split.py`) prefers master-local GPUs, then single-device RPC, then VRAM-proportional multi-node pooling. Split mode is always **layer**.
+- Placement (`src/kllm/placement.py` + `tensor_split.py`) prefers master-local GPUs, then single-device RPC, then VRAM-proportional multi-node pooling. Split mode is always **layer**.
 - GGUF lives on the **master** only. Workers contribute memory/compute via `rpc-server -c` (tensor cache). See [plans/rpc-memory-pooling.md](../plans/rpc-memory-pooling.md).
 
 ## Manual two-machine checklist

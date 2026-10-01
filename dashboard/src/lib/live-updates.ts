@@ -5,8 +5,8 @@ const READ_TIMEOUT_MS = 5000;
 const MAX_FRAME_BYTES = 5 * 1024 * 1024;
 const bytes = (value: string) => new TextEncoder().encode(value).length;
 const LEGACY_ROUTES: Record<LiveAreaName, string> = {
-  status: '/v1/status', usage: '/v1/usage/live',
-  load: '/v1/load-progress', download: '/v1/models/download-progress'
+  status: '/v2/node', usage: '/v2/telemetry',
+  load: '/v2/inference/load', download: '/v2/models/downloads/current'
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/;
@@ -25,7 +25,7 @@ type Options = {
 
 function wsUrl(): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.host}/v1/dashboard/live`;
+  return `${protocol}//${location.host}/v2/events`;
 }
 
 function hidden(): boolean {
@@ -425,7 +425,7 @@ export class DashboardUpdates {
         const continuity = this.logListener.continuity();
         if (continuity) params.set('continuity_id', continuity);
       }
-      const response = await fetch(`/v1/dashboard/live?${params}`, { signal: controller.signal });
+      const response = await fetch(`/v2/events?${params}`, { signal: controller.signal });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) throw new Error('Dashboard access denied');
         if (await this.readLegacy(expected, controller)) return true;

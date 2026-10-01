@@ -38,6 +38,10 @@ function isAccelBackend(v: unknown): v is AccelBackend {
 let fingerprint = '';
 
 function apiErrorMessage(data: unknown, text: string, status: number, fallback: string): string {
+  if (typeof data === 'object' && data !== null && 'error' in data) {
+    const error = (data as { error?: { message?: unknown } }).error;
+    if (typeof error?.message === 'string') return error.message;
+  }
   if (typeof data === 'object' && data !== null && 'detail' in data) {
     return String((data as { detail: unknown }).detail);
   }
@@ -188,11 +192,14 @@ class AppStore {
   private settingsBaseline = $state('');
   planResult = $state<Record<string, unknown> | null>(null);
   estimating = $state(false);
+  estimateRecalculations = $state(0);
+  estimateNote = $state('');
+  private lastEstimate: { payload: Record<string, unknown>; result: Record<string, unknown> } | null = null;
   private estimateTimer: ReturnType<typeof setTimeout> | null = null;
   private estimateSeq = 0;
-  /** Live inference load state from /v1/load-progress (null when idle). */
+  /** Live inference load state (null when idle). */
   loadProgress = $state<LoadProgress | null>(null);
-  /** Live HF download job from /v1/models/download-progress (null when idle). */
+  /** Live HF download job (null when idle). */
   downloadJob = $state<DownloadJob | null>(null);
   chat = $state<ChatMessage[]>([]);
   chatInput = $state('');
@@ -382,7 +389,7 @@ class AppStore {
 
   private async refreshDirect() {
     try {
-      const r = await fetch('/v1/status');
+      const r = await fetch('/v2/node');
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = (await r.json()) as Status;
       this.applyStatus(data);
@@ -398,9 +405,10 @@ class AppStore {
       return;
     }
     try {
-      const r = await fetch('/v1/usage/live');
+      const r = await fetch('/v2/telemetry');
       if (!r.ok) {
-        const detail = (await r.json().catch(() => null))?.detail;
+        const payload = await r.json().catch(() => null);
+        const detail = payload?.error ?? payload?.detail;
         const message = detail && typeof detail === 'object'
           ? `${detail.message ?? `usage ${r.status}`} · last saved ${detail.last_successful_save ?? 'never'}`
           : typeof detail === 'string' ? detail : `usage ${r.status}`;
@@ -426,7 +434,7 @@ class AppStore {
     const seq = ++this.historySeq;
     if (!nodeId) return;
     try {
-      const r = await fetch(`/v1/usage/lifetimes?node_id=${encodeURIComponent(nodeId)}`);
+      const r = await fetch(`/v2/telemetry/lifetimes?node_id=${encodeURIComponent(nodeId)}`);
       if (!r.ok) throw new Error(`history ${r.status}`);
       if (seq !== this.historySeq) return;
       this.usageLifetimes = (await r.json()) as UsageLifetimes;
@@ -458,7 +466,7 @@ class AppStore {
     const params = new URLSearchParams({ node_id: nodeId, lifetime_id: lifeId, window: this.usageWindow });
     try {
       const [series, page] = await Promise.all([
-        fetch(`/v1/usage/series?${params}`), fetch(`/v1/usage/readings?${params}`)
+        fetch(`/v2/telemetry/series?${params}`), fetch(`/v2/telemetry/readings?${params}`)
       ]);
       if (!series.ok || !page.ok) throw new Error(`history ${series.status}/${page.status}`);
       if (seq !== this.historySeq) return;
@@ -477,7 +485,7 @@ class AppStore {
     const params = new URLSearchParams({ node_id: this.selectedNodeId, lifetime_id: this.selectedLifetimeId,
       window: this.usageWindow, cursor });
     try {
-      const r = await fetch(`/v1/usage/readings?${params}`);
+      const r = await fetch(`/v2/telemetry/readings?${params}`);
       if (!r.ok) throw new Error(`history ${r.status}`);
       const page = (await r.json()) as UsagePage;
       if (seq !== this.historySeq || this.usagePage?.next_cursor !== cursor) return;
@@ -489,7 +497,7 @@ class AppStore {
 
   async loadToken() {
     try {
-      const r = await fetch('/v1/api-token');
+      const r = await fetch('/v2/credentials/api-token');
       if (!r.ok) return;
       const data = await r.json();
       this.apiToken = data.api_token ?? '';
@@ -500,7 +508,7 @@ class AppStore {
 
   async loadHfToken() {
     try {
-      const r = await fetch('/v1/hf-token');
+      const r = await fetch('/v2/credentials/huggingface');
       if (!r.ok) return;
       const data = (await r.json()) as HfTokenStatus;
       this.hfTokenConfigured = !!data.configured;
@@ -521,9 +529,9 @@ class AppStore {
   }
 
   private async putHfToken(token: string) {
-    this.busy = '/v1/hf-token';
+    this.busy = '/v2/credentials/huggingface';
     try {
-      const r = await fetch('/v1/hf-token', {
+      const r = await fetch('/v2/credentials/huggingface', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token })
@@ -542,7 +550,7 @@ class AppStore {
 
   async loadModels() {
     try {
-      const r = await fetch('/v1/models');
+      const r = await fetch('/v2/models');
       if (!r.ok) return;
       const data = await r.json();
       this.models = data.data ?? [];
@@ -677,7 +685,7 @@ class AppStore {
     await this.loadRunCapabilities();
     if (generation !== this.selectionGeneration) return;
     try {
-      const r = await fetch(`/v1/model-settings/${encodeURIComponent(id)}`);
+      const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(id)}`);
       if (generation !== this.selectionGeneration) return;
       if (!r.ok) {
         this.clampContextToModel();
@@ -705,7 +713,7 @@ class AppStore {
   async loadRunCapabilities() {
     try {
       const model = this.selectedModel;
-      const r = await fetch(`/v1/run-capabilities?model=${encodeURIComponent(model)}`);
+      const r = await fetch(`/v2/inference/capabilities?model=${encodeURIComponent(model)}`);
       if (!r.ok) return;
       const info = await r.json();
       if (model !== this.selectedModel) return;
@@ -742,7 +750,7 @@ class AppStore {
     this.repeatPenalty = this.samplingDefault('repeat_penalty');
   }
 
-  /** Persist the current run settings for this model (PUT /v1/model-settings). */
+  /** Persist the current run settings for this model. */
   async saveModelSettings() {
     if (!this.selectedModel) return;
     if (!this.validateRunSettings()) {
@@ -752,9 +760,9 @@ class AppStore {
     const body = this.planPayload();
     delete body.remember;
     delete body.advanced_open;
-    this.busy = '/v1/model-settings';
+    this.busy = '/v2/inference/model-settings';
     try {
-      const r = await fetch(`/v1/model-settings/${encodeURIComponent(this.selectedModel)}`, {
+      const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(this.selectedModel)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ parameter_set: body })
@@ -887,7 +895,7 @@ class AppStore {
 
   async loadConfig() {
     try {
-      const r = await fetch('/v1/config');
+      const r = await fetch('/v2/node/config');
       if (!r.ok) return;
       const data = await r.json();
       if (data.device === 'cpu' || data.device === 'gpu') this.device = data.device;
@@ -962,7 +970,7 @@ class AppStore {
 
   async loadGpus() {
     try {
-      const r = await fetch('/v1/gpus');
+      const r = await fetch('/v2/node/devices');
       if (!r.ok) return;
       const data = await r.json();
       this.applyGpusPayload(data);
@@ -1038,9 +1046,9 @@ class AppStore {
     } else if (this.accelBackend) {
       body.accel_backend = this.accelBackend;
     }
-    this.busy = '/v1/config';
+    this.busy = '/v2/node/config';
     try {
-      const r = await fetch('/v1/config', {
+      const r = await fetch('/v2/node/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -1103,11 +1111,11 @@ class AppStore {
     await this.saveConfig({ gpu_ids: this.selectedGpuIds });
   }
 
-  async post(path: string, body?: unknown) {
+  async post(path: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') {
     this.busy = path;
     try {
       const r = await fetch(path, {
-        method: 'POST',
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body)
       });
@@ -1122,7 +1130,7 @@ class AppStore {
         pushToast('danger', typeof data === 'string' ? data : JSON.stringify(data));
         throw new Error(String(text));
       }
-      if (path === '/v1/models/download' && data && typeof data === 'object'
+      if (path === '/v2/models/downloads' && data && typeof data === 'object'
         && typeof (data as { operation_id?: unknown }).operation_id === 'string') {
         const operationId = (data as { operation_id: string }).operation_id;
         this.acceptedDownloadIds.add(operationId);
@@ -1170,11 +1178,11 @@ class AppStore {
       body.gpu_ids =
         this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.gpus.map((g) => g.index);
     }
-    await this.post('/v1/start', body);
+    await this.post('/v2/cluster', body);
   }
 
   async stopCluster() {
-    await this.post('/v1/stop');
+    await this.post('/v2/cluster', undefined, 'DELETE');
     this.resetClusterView();
   }
 
@@ -1210,18 +1218,18 @@ class AppStore {
       body.gpu_ids =
         this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.gpus.map((g) => g.index);
     }
-    await this.post('/v1/join', body);
+    await this.post('/v2/cluster/membership', body);
   }
 
   async leaveCluster() {
-    await this.post('/v1/leave');
+    await this.post('/v2/cluster/membership', undefined, 'DELETE');
     this.resetClusterView();
   }
 
   async updateWorkers() {
-    this.busy = '/v1/cluster/update';
+    this.busy = '/v2/cluster/updates';
     try {
-      const r = await fetch('/v1/cluster/update', { method: 'POST' });
+      const r = await fetch('/v2/cluster/updates', { method: 'POST' });
       const text = await r.text();
       let data: unknown = null;
       try {
@@ -1245,7 +1253,7 @@ class AppStore {
   async searchModels(): Promise<ModelSearchResponse | null> {
     const query = this.modelSource.trim();
     if (!query || this.searching) return null;
-    this.busy = '/v1/models/search';
+    this.busy = '/v2/models/search';
     this.searching = true;
     this.searchError = '';
     this.searchResults = [];
@@ -1253,7 +1261,7 @@ class AppStore {
     this.searchWarnings = [];
     this.searchQuery = query;
     try {
-      const r = await fetch('/v1/models/search', {
+      const r = await fetch('/v2/models/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query })
@@ -1300,15 +1308,15 @@ class AppStore {
     const src = source !== undefined ? source : this.modelSource.trim();
     if (!src) return;
     this.modelSource = '';
-    await this.post('/v1/models/download', { source: src });
+    await this.post('/v2/models/downloads', { source: src });
   }
 
-  /** Cancel the in-flight HF download (POST /v1/models/download/cancel). */
+  /** Cancel the in-flight HF download. */
   async cancelDownload() {
     if (!this.downloadJob || this.downloadJob.state !== 'running') return;
-    this.busy = '/v1/models/download/cancel';
+    this.busy = '/v2/models/downloads/cancel';
     try {
-      const r = await fetch('/v1/models/download/cancel', { method: 'POST' });
+      const r = await fetch('/v2/models/downloads/cancel', { method: 'POST' });
       const text = await r.text();
       if (!r.ok) {
         pushToast('danger', text || `cancel ${r.status}`);
@@ -1325,7 +1333,7 @@ class AppStore {
   async deleteModel(name: string) {
     if (!name) return;
     if (!confirm(`Delete ${name} from this node's model store?`)) return;
-    await this.post('/v1/models/delete', { name });
+    await this.post('/v2/models/deletions', { name });
     if (this.selectedModel === name) this.selectedModel = this.models[0]?.id ?? '';
   }
 
@@ -1335,13 +1343,14 @@ class AppStore {
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     ++this.estimateSeq;
-    this.planResult = (await this.post('/v1/plan', this.planPayload())) as Record<string, unknown>;
+    this.planResult = (await this.post('/v2/inference/plans', this.planPayload())) as Record<string, unknown>;
   }
 
   /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
   scheduleEstimate(delayMs = 300) {
     this.planResult = null;
     this.estimateError = '';
+    this.estimateNote = '';
     ++this.estimateSeq;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = setTimeout(() => {
@@ -1356,12 +1365,13 @@ class AppStore {
     if (!this.validateRunSettings()) return;
     if (this.busy) return;
     const seq = ++this.estimateSeq;
+    const payload = this.planPayload();
     this.estimating = true;
     try {
-      const r = await fetch('/v1/plan?preview=true', {
+      const r = await fetch('/v2/inference/plans?preview=true', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this.planPayload())
+        body: JSON.stringify(payload)
       });
       const text = await r.text();
       let data: unknown = null;
@@ -1373,12 +1383,22 @@ class AppStore {
       if (seq !== this.estimateSeq) return;
       if (!r.ok) {
         this.planResult = null;
-        this.estimateError = typeof data === 'object' && data !== null && 'detail' in data
-          ? String((data as { detail: unknown }).detail) : text || `Estimate ${r.status}`;
+        this.estimateError = apiErrorMessage(data, text, r.status, 'Estimate');
         return;
       }
       this.estimateError = '';
       this.planResult = data as Record<string, unknown>;
+      ++this.estimateRecalculations;
+      this.estimateNote = 'Preview recalculated.';
+      const previous = this.lastEstimate;
+      const resolved = this.planResult.resolved_launch_settings as Record<string, unknown> | undefined;
+      const previousResolved = previous?.result.resolved_launch_settings as Record<string, unknown> | undefined;
+      if (previous && previous.payload.model === payload.model && previous.payload.batch_size !== payload.batch_size
+        && previous.result.estimated_bytes === this.planResult.estimated_bytes
+        && resolved?.micro_batch != null && resolved.micro_batch === previousResolved?.micro_batch) {
+        this.estimateNote += ` Total unchanged: logical batch changed, while physical micro-batch remains ${resolved.micro_batch}.`;
+      }
+      this.lastEstimate = { payload, result: this.planResult };
       if (typeof (data as Record<string, unknown>).distributable_bytes === 'number')
         this.distributableBytes = (data as Record<string, number>).distributable_bytes;
     } catch {
@@ -1421,7 +1441,7 @@ class AppStore {
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     ++this.estimateSeq;
-    const data = (await this.post('/v1/run', this.planPayload())) as Record<string, unknown>;
+    const data = (await this.post('/v2/inference/runs', this.planPayload())) as Record<string, unknown>;
     const plan = (data.plan ?? {}) as Record<string, unknown>;
     if (Object.keys(plan).length) {
       this.planResult = plan;
@@ -1439,7 +1459,7 @@ class AppStore {
 
   async stopInference() {
     this.stopChat();
-    await this.post('/v1/inference/stop');
+    await this.post('/v2/inference/runs/stop');
   }
 
   async sendChat() {

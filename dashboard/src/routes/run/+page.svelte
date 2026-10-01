@@ -7,7 +7,7 @@
   import JinjaEditor from '$lib/components/JinjaEditor.svelte';
   import SliderField from '$lib/components/SliderField.svelte';
   import { appStore } from '$lib/store.svelte';
-  import { formatGib } from '$lib/format-memory';
+  import { formatGib, formatMemoryComponent } from '$lib/format-memory';
   import { CONTEXT_STEP, KV_CACHE_TYPES, MIN_CONTEXT } from '$lib/types';
 
   function bumpEstimate() {
@@ -175,7 +175,38 @@
           {/if}
           {#if fitStatus}<span style="color: var(--accent)">{fitStatus}</span>{/if}
           {#if appStore.estimating}<span style="color: var(--muted)"> · updating…</span>{/if}
+          {#if appStore.planResult.weights_estimate_bytes != null}
+            <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2">
+              {#each [
+                ['Model weights', 'weights_estimate_bytes'], ['Auxiliary weights', 'auxiliary_weights_bytes'],
+                ['KV cache', 'kv_estimate_bytes'], ['Recurrent state', 'recurrent_state_bytes'],
+                ['Host checkpoints', 'checkpoint_estimate_bytes'], ['Compute buffers', 'compute_estimate_bytes'],
+                ['Auxiliary runtime', 'auxiliary_runtime_bytes'], ['Execution reserve', 'execution_overhead_bytes']
+              ] as [label, key]}
+                <dt>{label}</dt><dd>{formatMemoryComponent(appStore.planResult[key] as number)}</dd>
+              {/each}
+            </dl>
+          {/if}
+          {#if appStore.planResult.resolved_launch_settings}
+            {@const resolved = appStore.planResult.resolved_launch_settings as Record<string, unknown>}
+            <p class="mt-2">Resolved: context {String(resolved.context)}, batch {String(resolved.batch_size)}, micro-batch {String(resolved.micro_batch)}, {String(resolved.parallel_slots)} slot(s).</p>
+          {/if}
+          {#if appStore.estimateNote}<p class="mt-1" aria-live="polite">{appStore.estimateNote}</p>{/if}
+          {#if appStore.planResult.estimate_complete === false}
+            <p class="mt-2" style="color: var(--danger)">Incomplete estimate: some memory costs are approximate or unpriced.</p>
+          {/if}
+          {#each (appStore.planResult.estimate_warnings as string[] | undefined) ?? [] as warning}
+            <p class="mt-1">{warning}</p>
+          {/each}
         </div>
+        <p class="mono text-[11px] mt-2" style="color: var(--muted)">
+          Memory changes with context, K/V cache types, physical micro-batch, slots, Flash Attention/SWA,
+          checkpoints, draft/vision assets, adapters, split mode and model architecture.
+          Node shares, GPU selection, device mode, headroom and placement weights select where memory is allocated;
+          active device count can change workspace reserves.
+          Sampling, templates/thinking and threads do not reserve model memory.
+          Cache RAM is a server cache limit; mmap/mlock primarily affect host residency.
+        </p>
       {/if}
       {#if appStore.nodeShares}
         <p class="mono text-[11px]" style="color: var(--muted)">Target GPU workload: {workloadBytes ? formatGib(workloadBytes) : 'estimating…'} · 100% across nodes; full layers may round targets.</p>

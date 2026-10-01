@@ -319,8 +319,11 @@ def test_short_cpu_interval_does_not_renew_its_observation():
     try:
         first = native.probe_resources(node_id="cpu-interval")
         assert first["host"]["cpu"]["status"] == "initializing"
-        time.sleep(.25)
-        measured = native.probe_resources(node_id="cpu-interval")["host"]["cpu"]
+        deadline = time.monotonic() + 2.0
+        measured = first["host"]["cpu"]
+        while measured["status"] != "measured" and time.monotonic() < deadline:
+            time.sleep(.05)
+            measured = native.probe_resources(node_id="cpu-interval")["host"]["cpu"]
         assert measured["status"] == "measured"
         repeated = native.probe_resources(node_id="cpu-interval")["host"]["cpu"]
         assert repeated == measured

@@ -1,0 +1,106 @@
+"""Install the pinned llama.cpp runtime and refresh a worker's RPC process."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from kllm.agent.schemas import LlamaSetupBody
+from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.exceptions import NotFoundError, ValidationError
+from kllm.state import DEFAULT_RPC_PORT, ClusterState
+
+PackInstaller = Callable[[str | None, str, bool], dict[str, Any]]
+WorkerStarter = Callable[..., dict[str, Any]]
+GpuSelection = Callable[[list[int] | None], ResolvedGpuSelection]
+
+
+@dataclass(frozen=True)
+class RuntimeSetupResult:
+    """Outcome of pack installation and any required worker relaunch."""
+
+    installation: dict[str, Any]
+    relaunch: dict[str, Any] | None
+
+    def as_payload(self) -> dict[str, Any]:
+        """Return the stable HTTP response payload."""
+        return {**self.installation, "relaunch": self.relaunch}
+
+
+class RuntimeSetupService:
+    """Coordinate local runtime installation and worker process replacement."""
+
+    def __init__(
+        self,
+        state: Callable[[], ClusterState],
+        *,
+        install_pack: PackInstaller,
+        repository_root: Callable[[], Path | None],
+        gpu_visibility_env: Callable[[str, list[int] | None], dict[str, str]],
+        stop_process: Callable[..., Any],
+        clear_children: Callable[[], None],
+        start_worker: WorkerStarter,
+        resolve_gpu_selection: GpuSelection,
+        register_child: Callable[[int, str], None],
+        rpc_log_path: Callable[[], Path],
+    ) -> None:
+        self._state = state
+        self._install_pack = install_pack
+        self._repository_root = repository_root
+        self._gpu_visibility_env = gpu_visibility_env
+        self._stop_process = stop_process
+        self._clear_children = clear_children
+        self._start_worker = start_worker
+        self._resolve_gpu_selection = resolve_gpu_selection
+        self._register_child = register_child
+        self._rpc_log_path = rpc_log_path
+
+    def setup(self, body: LlamaSetupBody) -> RuntimeSetupResult:
+        """Install the selected pack and restart a worker RPC server if needed."""
+        try:
+            result = self._install_pack(body.tag, body.backend, body.force)
+        except FileNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
+        except Exception as exc:
+            raise ValidationError(str(exc)) from exc
+
+        state = self._state()
+        relaunch = None
+        if state.role == "worker" and result.get("ok"):
+            relaunch = self._relaunch_worker(state)
+        return RuntimeSetupResult(result, relaunch)
+
+    def _relaunch_worker(self, state: ClusterState) -> dict[str, Any]:
+        try:
+            root = self._repository_root()
+            member = state.members.get(state.node_id) or {}
+            gpu_env = self._gpu_visibility_env(
+                member.get("backend") or "cpu", state.gpu_ids
+            )
+            if state.process_pid:
+                self._stop_process(state.process_pid, force=True)
+                self._clear_children()
+                state.process_pid = None
+                state.process_role = None
+            launched = self._start_worker(
+                host=state.rpc_bind or "0.0.0.0",
+                port=state.rpc_port or DEFAULT_RPC_PORT,
+                repo_root=str(root) if root else None,
+                env=gpu_env or None,
+                devices=[
+                    device.device
+                    for device in self._resolve_gpu_selection(state.gpu_ids).devices
+                    if device.device is not None
+                ],
+                log_path=str(self._rpc_log_path()),
+            )
+            state.process_pid = launched.get("pid")
+            state.process_role = "worker"
+            if launched.get("pid"):
+                self._register_child(int(launched["pid"]), "rpc-server")
+            state.save()
+            return launched
+        except Exception as exc:
+            return {"error": str(exc)}

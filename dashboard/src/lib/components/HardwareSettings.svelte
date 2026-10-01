@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * System / hardware settings: device (CPU|GPU), accel backend (CUDA/Vulkan/…),
-   * multi-GPU selection, and VRAM/RAM budget. Persists via PUT /v1/config —
+   * multi-GPU selection, and VRAM/RAM budget. Persists via PUT /v2/node/config —
    * no hard reload required (mirrors Unsloth's hardware info + engine toggles).
    */
   import SliderField from '$lib/components/SliderField.svelte';

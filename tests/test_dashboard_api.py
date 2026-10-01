@@ -37,20 +37,51 @@ def test_status_capacity_vram_matches_the_member(client, monkeypatch):
     c, agent, _ = client
     llama = 17_095_983_104
     agent.STATE.role = "master"
-    agent.STATE.members[agent.STATE.node_id] = {"role": "master", "node_id": agent.STATE.node_id, "vram_bytes": None}
-    snap = SimpleNamespace(backend="vulkan", total_ram_bytes=32 * 1024**3, available_ram_bytes=8 * 1024**3,
-                           vram_bytes=llama + 536_870_912, hostname="box")
-    listed = {"backend": "vulkan", "gpus": [
-        {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": llama, "device": "Vulkan0"}],
-              "devices": [{"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": llama, "device": "Vulkan0"}],
-              "unified_memory": False, "requested_backend": None, "binary_version": "v"}
-    monkeypatch.setattr(agent.native, "require_native", lambda: SimpleNamespace(probe_capacity=lambda: snap))
+    agent.STATE.members[agent.STATE.node_id] = {
+        "role": "master",
+        "node_id": agent.STATE.node_id,
+        "vram_bytes": None,
+    }
+    snap = SimpleNamespace(
+        backend="vulkan",
+        total_ram_bytes=32 * 1024**3,
+        available_ram_bytes=8 * 1024**3,
+        vram_bytes=llama + 536_870_912,
+        hostname="box",
+    )
+    listed = {
+        "backend": "vulkan",
+        "gpus": [
+            {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": llama, "device": "Vulkan0"}
+        ],
+        "devices": [
+            {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": llama, "device": "Vulkan0"}
+        ],
+        "unified_memory": False,
+        "requested_backend": None,
+        "binary_version": "v",
+    }
+    monkeypatch.setattr(
+        agent.native, "require_native", lambda: SimpleNamespace(probe_capacity=lambda: snap)
+    )
     monkeypatch.setattr(agent.native, "list_gpus", lambda: listed)
     agent._refresh_local_capacity()
     body = c.get("/v1/status").json()
     node = agent.STATE.node_id
     assert body["capacity"]["vram_bytes"] == llama
     assert body["members"][node]["vram_bytes"] == llama
+
+
+def test_status_then_live_status_counts_hardware_discovery(client, native_inventory_counts):
+    c, agent, _ = client
+
+    response = c.get("/v1/status")
+    assert response.status_code == 200
+    assert native_inventory_counts == {"list_gpus": 0, "binary_capabilities": 1}
+
+    live_status = agent._live_status()
+    assert live_status["capacity"] == {}
+    assert native_inventory_counts == {"list_gpus": 0, "binary_capabilities": 1}
 
 
 def test_list_models_empty(client):
@@ -71,9 +102,15 @@ def test_native_resources_without_process_and_replayed_generations(client, monke
     agent.STATE.role = "master"
     agent.STATE.join_key = "resource-test-key"
     now = datetime.now(timezone.utc)
-    agent.STATE.members["r1"] = dict(node_id="r1", role="worker", host="worker", last_seen=now.timestamp())
+    agent.STATE.members["r1"] = dict(
+        node_id="r1", role="worker", host="worker", last_seen=now.timestamp()
+    )
     headers = {"X-Kllm-Key": "resource-test-key"}
-    reset = dict(node_id="r1", host="worker", resource_session=dict(request_id=uuid.uuid4().hex, previous_generation=None))
+    reset = dict(
+        node_id="r1",
+        host="worker",
+        resource_session=dict(request_id=uuid.uuid4().hex, previous_generation=None),
+    )
     response = c.post("/v1/register", json=reset, headers=headers)
     assert response.status_code == 200
     generation = response.json()["resource_generation"]
@@ -86,21 +123,31 @@ def test_native_resources_without_process_and_replayed_generations(client, monke
         assert first.json()["accepted"] == 0
         assert first.json()["resources_accepted"] is True
         assert agent.app.state.usage_store.count() == 0
-        assert c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"] is False
+        assert (
+            c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"]
+            is False
+        )
         live = c.get("/v1/usage/live").json()
         assert live["nodes"]["r1"]["resources"]["snapshot_id"] == snapshot["snapshot_id"]
         assert live["nodes"]["r1"]["reading"] is None
         import sqlite3
+
         def broken_history():
             raise sqlite3.DatabaseError("test history unavailable")
+
         monkeypatch.setattr(agent, "_usage_store", broken_history)
         snapshot.update(sequence=2, snapshot_id=f"{generation}:2")
-        assert c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"] is True
+        assert (
+            c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"]
+            is True
+        )
         fallback = c.get("/v1/usage/live")
         assert fallback.status_code == 200
         assert fallback.json()["recording"]["recording"] == "failed"
         assert fallback.json()["nodes"]["r1"]["resources"]["sequence"] == 2
-        reset["resource_session"] = dict(request_id=uuid.uuid4().hex, previous_generation=generation)
+        reset["resource_session"] = dict(
+            request_id=uuid.uuid4().hex, previous_generation=generation
+        )
         assert c.post("/v1/register", json=reset, headers=headers).status_code == 200
         assert c.post("/v1/usage/ingest", json=body, headers=headers).status_code == 409
         assert "r1" not in agent._resources.latest
@@ -118,14 +165,19 @@ def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, m
     agent.STATE.join_key = "resource-test-key"
     monkeypatch.setattr(agent, "_master_control_base", lambda: "http://master")
     monkeypatch.setattr(agent, "_tracked_process_token", lambda: None)
-    monkeypatch.setattr(agent, "_heartbeat_payload", lambda: dict(node_id=agent.STATE.node_id, host="worker"))
+    monkeypatch.setattr(
+        agent, "_heartbeat_payload", lambda: dict(node_id=agent.STATE.node_id, host="worker")
+    )
     supported = [False]
     server = usage.ResourceState()
     posted = []
+
     def response(data, status=200):
         return SimpleNamespace(status_code=status, json=lambda: data, raise_for_status=lambda: None)
+
     def get(*args, **kwargs):
         return response(dict(resource_schema_versions=[1] if supported[0] else []))
+
     def post(url, *, json, **kwargs):
         posted.append((url, json))
         if url.endswith("heartbeat"):
@@ -138,7 +190,10 @@ def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, m
                 return response(dict(detail=dict(resource_generation=exc.generation)), 409)
             return response(dict(request_id=reset["request_id"], resource_generation=generation))
         return response(dict(resources_accepted=True))
-    monkeypatch.setattr(agent.http_clients, "control_client", lambda: SimpleNamespace(get=get, post=post))
+
+    monkeypatch.setattr(
+        agent.http_clients, "control_client", lambda: SimpleNamespace(get=get, post=post)
+    )
     original = dict(generation="a" * 32, sequence=1, snapshot_id="a" * 32 + ":1")
     agent._publish_resources(original)
     assert posted == []
@@ -168,15 +223,24 @@ def test_usage_ingest_private_identity_and_durable_ack(client):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     started = usage.utc(now - timedelta(minutes=1))
     agent.STATE.members["w1"] = {
-        "node_id": "w1", "role": "worker", "host": "worker", "last_seen": now.timestamp(),
-        "process_pid": 12, "process_role": "worker", "process_started_at": started,
+        "node_id": "w1",
+        "role": "worker",
+        "host": "worker",
+        "last_seen": now.timestamp(),
+        "process_pid": 12,
+        "process_role": "worker",
+        "process_started_at": started,
     }
     point = {
-        "lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
-        "process_role": "worker", "observed_at": usage.utc(now),
+        "lifetime_id": f"w1:12:{started}",
+        "pid": 12,
+        "process_started_at": started,
+        "process_role": "worker",
+        "observed_at": usage.utc(now),
         "process": {"cpu_percent_machine": 12.5, "rss_bytes": 2 * 1024**3},
         "host": {"cpu_percent": 20, "used_bytes": 4 * 1024**3, "total_bytes": 8 * 1024**3},
-        "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
     }
     body = {"node_id": "w1", "readings": [point]}
     assert c.post("/v1/usage/ingest", json=body).status_code == 401
@@ -186,11 +250,29 @@ def test_usage_ingest_private_identity_and_durable_ack(client):
     assert agent.STATE.members["w1"]["last_seen"] == now.timestamp()
     bad = {**body, "readings": [{**point, "pid": 13}]}
     assert c.post("/v1/usage/ingest", json=bad, headers=headers).status_code == 400
-    assert c.post("/v1/usage/ingest", json={**body, "extra": "secret"}, headers=headers).status_code in (400, 422)
-    assert c.post("/v1/usage/ingest", json={**body, "readings": [point] * 9}, headers=headers).status_code == 400
-    assert c.post("/v1/usage/ingest", content=iter((b" " * 32768, b" " * 32769)),
-                  headers={**headers, "Content-Type": "application/json"}).status_code == 400
-    assert c.post("/v1/usage/ingest", json={"node_id": "unknown", "readings": [point]}, headers=headers).status_code == 400
+    assert c.post(
+        "/v1/usage/ingest", json={**body, "extra": "secret"}, headers=headers
+    ).status_code in (400, 422)
+    assert (
+        c.post(
+            "/v1/usage/ingest", json={**body, "readings": [point] * 9}, headers=headers
+        ).status_code
+        == 400
+    )
+    assert (
+        c.post(
+            "/v1/usage/ingest",
+            content=iter((b" " * 32768, b" " * 32769)),
+            headers={**headers, "Content-Type": "application/json"},
+        ).status_code
+        == 400
+    )
+    assert (
+        c.post(
+            "/v1/usage/ingest", json={"node_id": "unknown", "readings": [point]}, headers=headers
+        ).status_code
+        == 400
+    )
     assert agent.app.state.usage_store.count() == 1
 
     second = {**point, "observed_at": usage.utc(now + timedelta(seconds=2))}
@@ -208,11 +290,15 @@ def test_usage_ingest_private_identity_and_durable_ack(client):
     from unittest.mock import patch as mock_patch
 
     with mock_patch.object(store, "_write", fail_second):
-        failed = c.post("/v1/usage/ingest", json={**body, "readings": [second, third]}, headers=headers)
+        failed = c.post(
+            "/v1/usage/ingest", json={**body, "readings": [second, third]}, headers=headers
+        )
     assert failed.status_code == 503
     assert store.count() == 1
     assert store.last_successful_save == previous_save
-    saved = c.post("/v1/usage/ingest", json={**body, "readings": [point, second]}, headers=headers).json()
+    saved = c.post(
+        "/v1/usage/ingest", json={**body, "readings": [point, second]}, headers=headers
+    ).json()
     assert (saved["accepted"], saved["duplicates"], store.count()) == (1, 1, 2)
 
 
@@ -227,33 +313,60 @@ def test_usage_live_stale_departed_and_worker_proxy(client, monkeypatch):
     agent.STATE.node_id = "master"
     agent.STATE.members = {
         "master": {"node_id": "master", "role": "master", "host": "same"},
-        "w1": {"node_id": "w1", "role": "worker", "host": "same", "backend": "cpu",
-               "process_pid": 12, "process_started_at": started, "last_seen": now.timestamp(),
-               "total_ram_bytes": 8 * 1024**3, "devices": [{"index": 0, "name": "GPU", "vram_bytes": 4 * 1024**3}]},
+        "w1": {
+            "node_id": "w1",
+            "role": "worker",
+            "host": "same",
+            "backend": "cpu",
+            "process_pid": 12,
+            "process_started_at": started,
+            "last_seen": now.timestamp(),
+            "total_ram_bytes": 8 * 1024**3,
+            "devices": [{"index": 0, "name": "GPU", "vram_bytes": 4 * 1024**3}],
+        },
     }
     point = {
-        "lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
-        "process_role": "worker", "observed_at": usage.utc(now - timedelta(seconds=11)),
+        "lifetime_id": f"w1:12:{started}",
+        "pid": 12,
+        "process_started_at": started,
+        "process_role": "worker",
+        "observed_at": usage.utc(now - timedelta(seconds=11)),
         "process": {"cpu_percent_machine": 12.5, "rss_bytes": 2 * 1024**3},
         "host": {"cpu_percent": 20, "used_bytes": 4 * 1024**3, "total_bytes": 8 * 1024**3},
-        "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
     }
-    agent.app.state.usage_store.record("w1", "same", point, now=now,
-                                       context={"backend": "cpu", "total_ram_bytes": 8 * 1024**3,
-                                                "devices": [{"index": 0, "name": "GPU", "vram_bytes": 4 * 1024**3}],
-                                                "assignment": "model.gguf"})
+    agent.app.state.usage_store.record(
+        "w1",
+        "same",
+        point,
+        now=now,
+        context={
+            "backend": "cpu",
+            "total_ram_bytes": 8 * 1024**3,
+            "devices": [{"index": 0, "name": "GPU", "vram_bytes": 4 * 1024**3}],
+            "assignment": "model.gguf",
+        },
+    )
     body = c.get("/v1/usage/live").json()
     assert set(body["nodes"]) == {"master", "w1"}
     assert body["nodes"]["w1"]["freshness"] == "stale"
     assert body["nodes"]["w1"]["reading"]["process"]["rss_bytes"] == 2 * 1024**3
-    assert body["relationships"] == [{"from_node_id": "master", "to_node_id": "w1", "kind": "master-worker"}]
+    assert body["relationships"] == [
+        {"from_node_id": "master", "to_node_id": "w1", "kind": "master-worker"}
+    ]
     agent.STATE.members.pop("w1")
     departed = c.get("/v1/usage/live").json()["nodes"]["w1"]
     assert departed["connected"] is False
     assert departed["backend"] == "cpu" and departed["total_ram_bytes"] == 8 * 1024**3
     assert departed["devices"][0]["name"] == "GPU"
     assert departed["assignment"] == "model.gguf"
-    agent.STATE.members["w1"] = {"node_id": "w1", "role": "worker", "host": "same", "last_seen": now.timestamp()}
+    agent.STATE.members["w1"] = {
+        "node_id": "w1",
+        "role": "worker",
+        "host": "same",
+        "last_seen": now.timestamp(),
+    }
     assert list(c.get("/v1/usage/live").json()["nodes"]).count("w1") == 1
     agent.STATE.members.pop("w1")
     agent.STATE.role = "worker"
@@ -267,6 +380,7 @@ def test_usage_live_stale_departed_and_worker_proxy(client, monkeypatch):
             return SimpleNamespace(status_code=200, json=lambda: body)
 
     from types import SimpleNamespace
+
     monkeypatch.setattr(agent.http_clients, "control_client", lambda: FakeControl())
     assert c.get("/v1/usage/live").json() == body
     assert requests[0][1]["headers"] == {"X-Kllm-Key": "secret-key"}
@@ -283,14 +397,26 @@ def test_usage_live_never_attributes_old_reading_to_stopped_or_new_child(client)
     agent.STATE.node_id = "master"
     agent.STATE.members = {
         "master": {"node_id": "master", "role": "master", "host": "same"},
-        "w1": {"node_id": "w1", "role": "worker", "host": "same", "process_pid": 12,
-               "process_started_at": started, "last_seen": now.timestamp()},
+        "w1": {
+            "node_id": "w1",
+            "role": "worker",
+            "host": "same",
+            "process_pid": 12,
+            "process_started_at": started,
+            "last_seen": now.timestamp(),
+        },
     }
-    point = {"lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
-             "process_role": "worker", "observed_at": usage.utc(now),
-             "process": {"cpu_percent_machine": 10, "rss_bytes": 1024},
-             "host": {"cpu_percent": 5, "used_bytes": 1024, "total_bytes": 4096},
-             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    point = {
+        "lifetime_id": f"w1:12:{started}",
+        "pid": 12,
+        "process_started_at": started,
+        "process_role": "worker",
+        "observed_at": usage.utc(now),
+        "process": {"cpu_percent_machine": 10, "rss_bytes": 1024},
+        "host": {"cpu_percent": 5, "used_bytes": 1024, "total_bytes": 4096},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
     agent.app.state.usage_store.record("w1", "same", point, now=now)
     assert c.get("/v1/usage/live").json()["nodes"]["w1"]["reading"]["pid"] == 12
     for pid in (None, 13):
@@ -309,11 +435,17 @@ def test_stopped_master_still_exposes_retained_history(client):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     started = usage.utc(now - timedelta(minutes=1))
     node = agent.STATE.node_id
-    point = {"lifetime_id": f"{node}:12:{started}", "pid": 12, "process_started_at": started,
-             "process_role": "master", "observed_at": usage.utc(now),
-             "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
-             "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
-             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    point = {
+        "lifetime_id": f"{node}:12:{started}",
+        "pid": 12,
+        "process_started_at": started,
+        "process_role": "master",
+        "observed_at": usage.utc(now),
+        "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
+        "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
     agent.app.state.usage_store.record(node, "local", point, now=now)
     agent.STATE.members.clear()
     agent.STATE.role = "idle"
@@ -322,7 +454,9 @@ def test_stopped_master_still_exposes_retained_history(client):
     assert live["nodes"][node]["connected"] is False
     assert live["nodes"][node]["freshness"] == "stale"
     assert live["recording"]["recording"] == "interrupted"
-    assert c.get("/v1/usage/lifetimes", params={"node_id": node}).json()["lifetimes"][0]["pid"] == 12
+    assert (
+        c.get("/v1/usage/lifetimes", params={"node_id": node}).json()["lifetimes"][0]["pid"] == 12
+    )
 
 
 def test_live_usage_sweeps_expired_members_without_status_poll(client, monkeypatch):
@@ -330,8 +464,12 @@ def test_live_usage_sweeps_expired_members_without_status_poll(client, monkeypat
 
     c, agent, _ = client
     agent.STATE.role = "master"
-    agent.STATE.members["late"] = {"node_id": "late", "role": "worker", "host": "worker",
-                                   "last_seen": time.time() - 30}
+    agent.STATE.members["late"] = {
+        "node_id": "late",
+        "role": "worker",
+        "host": "worker",
+        "last_seen": time.time() - 30,
+    }
     monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", lambda *_: None)
     result = c.get("/v1/usage/live").json()
     assert "late" not in agent.STATE.members
@@ -348,16 +486,25 @@ def test_usage_collector_runs_without_dashboard(client, monkeypatch):
     # This check deliberately exercises the preserved psutil fallback.
     monkeypatch.setattr(agent.native, "resource_probe_available", lambda: False)
     started = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()
-    process = SimpleNamespace(create_time=lambda: started, cpu_percent=lambda interval=None: 80,
-                              memory_info=lambda: SimpleNamespace(rss=2048))
+    process = SimpleNamespace(
+        create_time=lambda: started,
+        cpu_percent=lambda interval=None: 80,
+        memory_info=lambda: SimpleNamespace(rss=2048),
+    )
     monkeypatch.setattr(usage.psutil, "Process", lambda pid: process)
     monkeypatch.setattr(usage.psutil, "cpu_count", lambda logical: 8)
     monkeypatch.setattr(usage.psutil, "cpu_percent", lambda interval=None: 10)
-    monkeypatch.setattr(usage.psutil, "virtual_memory", lambda: SimpleNamespace(used=2048, total=4096))
+    monkeypatch.setattr(
+        usage.psutil, "virtual_memory", lambda: SimpleNamespace(used=2048, total=4096)
+    )
     agent.STATE.role = "master"
     agent.STATE.process_pid = 42
     agent.STATE.process_role = "master"
-    agent.STATE.members[agent.STATE.node_id] = {"node_id": agent.STATE.node_id, "host": "master", "role": "master"}
+    agent.STATE.members[agent.STATE.node_id] = {
+        "node_id": agent.STATE.node_id,
+        "host": "master",
+        "role": "master",
+    }
     ticks = iter((False, False, True))
     monkeypatch.setattr(agent._background_stop, "wait", lambda interval: next(ticks))
     agent._usage_loop()
@@ -377,14 +524,28 @@ def test_worker_ingest_failure_is_visible_without_stopping_inference(client, mon
     agent.STATE.process_pid = 99
     agent.STATE.process_role = "worker"
     monkeypatch.setattr(usage.Sampler, "sample", lambda *_: {"pid": 99})
-    monkeypatch.setattr(agent.http_clients, "control_client", lambda: SimpleNamespace(
-        post=lambda *a, **k: SimpleNamespace(status_code=503)))
+    monkeypatch.setattr(
+        agent.http_clients,
+        "control_client",
+        lambda: SimpleNamespace(post=lambda *a, **k: SimpleNamespace(status_code=503)),
+    )
     ticks = iter((False, True))
     monkeypatch.setattr(agent._background_stop, "wait", lambda _: next(ticks))
     agent._usage_loop()
-    monkeypatch.setattr(agent, "_proxy_master_usage", lambda *a, **k: {
-        "nodes": {agent.STATE.node_id: {"node_id": agent.STATE.node_id, "reading": None, "connected": True}},
-        "recording": {"recording": "recording", "last_successful_save": "2026-09-28T12:00:00Z"}})
+    monkeypatch.setattr(
+        agent,
+        "_proxy_master_usage",
+        lambda *a, **k: {
+            "nodes": {
+                agent.STATE.node_id: {
+                    "node_id": agent.STATE.node_id,
+                    "reading": None,
+                    "connected": True,
+                }
+            },
+            "recording": {"recording": "recording", "last_successful_save": "2026-09-28T12:00:00Z"},
+        },
+    )
     response = c.get("/v1/usage/live").json()
     assert response["recording"]["recording"] == "interrupted"
     assert response["recording"]["last_successful_save"] == "2026-09-28T12:00:00Z"
@@ -393,8 +554,13 @@ def test_worker_ingest_failure_is_visible_without_stopping_inference(client, mon
     assert agent.STATE.process_pid == 99
     from fastapi import HTTPException
 
-    monkeypatch.setattr(agent, "_proxy_master_usage", lambda *a, **k: (_ for _ in ()).throw(
-        HTTPException(503, "master usage history unavailable")))
+    monkeypatch.setattr(
+        agent,
+        "_proxy_master_usage",
+        lambda *a, **k: (_ for _ in ()).throw(
+            HTTPException(503, "master usage history unavailable")
+        ),
+    )
     missing = c.get("/v1/usage/live")
     assert missing.status_code == 503
     assert missing.json()["detail"]["recording"] == "interrupted"
@@ -411,22 +577,43 @@ def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     started = usage.utc(now - timedelta(minutes=1))
     master = ClusterState(node_id="master", role="master", join_key="secret")
-    master.members["w1"] = {"node_id": "w1", "host": "worker", "role": "worker",
-                            "process_pid": 99, "process_started_at": started, "process_role": "worker"}
-    worker = ClusterState(node_id="w1", role="worker", master_host="master", join_key="secret",
-                          process_pid=99, process_role="worker")
-    point = {"lifetime_id": f"w1:99:{started}", "pid": 99, "process_started_at": started,
-             "process_role": "worker", "observed_at": usage.utc(now),
-             "process": {"cpu_percent_machine": None, "rss_bytes": 2048},
-             "host": {"cpu_percent": 0, "used_bytes": 2048, "total_bytes": 4096}, "devices": [],
-             "availability": {"process_cpu": "initializing", "process_rss": "measured"}}
-
+    master.members["w1"] = {
+        "node_id": "w1",
+        "host": "worker",
+        "role": "worker",
+        "last_seen": now.timestamp(),
+        "process_pid": 99,
+        "process_started_at": started,
+        "process_role": "worker",
+    }
+    worker = ClusterState(
+        node_id="w1",
+        role="worker",
+        master_host="master",
+        join_key="secret",
+        process_pid=99,
+        process_role="worker",
+    )
+    point = {
+        "lifetime_id": f"w1:99:{started}",
+        "pid": 99,
+        "process_started_at": started,
+        "process_role": "worker",
+        "observed_at": usage.utc(now),
+        "process": {"cpu_percent_machine": None, "rss_bytes": 2048},
+        "host": {"cpu_percent": 0, "used_bytes": 2048, "total_bytes": 4096},
+        "devices": [],
+        "availability": {"process_cpu": "initializing", "process_rss": "measured"},
+    }
     class PrivateControl:
         def post(self, url, **kwargs):
             assert kwargs["headers"] == {"X-Kllm-Key": "secret"}
             agent.STATE = master
             try:
-                return c.post("/v1/usage/ingest", json=kwargs["json"], headers=kwargs["headers"])
+                response = c.post(
+                    "/v2/telemetry/ingest", json=kwargs["json"], headers=kwargs["headers"]
+                )
+                return response
             finally:
                 agent.STATE = worker
 
@@ -434,7 +621,7 @@ def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
             assert kwargs["headers"] == {"X-Kllm-Key": "secret"}
             agent.STATE = master
             try:
-                return c.get(url[url.index("/v1/"):], params=kwargs.get("params"))
+                return c.get(url[url.index("/v2/") :], params=kwargs.get("params"))
             finally:
                 agent.STATE = worker
 
@@ -446,7 +633,9 @@ def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
     agent.STATE = worker
     agent._usage_loop()
     assert agent.app.state.usage_store.count() == 1
-    response = c.get("/v1/usage/readings", params={"node_id": "w1", "lifetime_id": point["lifetime_id"]})
+    response = c.get(
+        "/v1/usage/readings", params={"node_id": "w1", "lifetime_id": point["lifetime_id"]}
+    )
     assert response.status_code == 200
     assert response.json()["readings"][0]["process"]["rss_bytes"] == 2048
     assert "secret" not in str(response.json())
@@ -473,7 +662,9 @@ def test_failed_liveness_history_save_keeps_last_successful_save(client, monkeyp
 
     monkeypatch.setattr(store, "end_node", fail_close)
     agent._sync_master_liveness(shrink=False)
-    assert "w1" not in agent.STATE.members, "liveness publication must precede slow storage maintenance"
+    assert "w1" not in agent.STATE.members, (
+        "liveness publication must precede slow storage maintenance"
+    )
     assert finished.wait(2), "background liveness maintenance did not run"
     status = c.get("/v1/usage/live").json()["recording"]
     assert status["recording"] == "failed"
@@ -489,15 +680,25 @@ def test_corrupt_saved_usage_is_server_failure_not_bad_browser_input(client):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     started = usage.utc(now - timedelta(minutes=1))
     agent.STATE.role = "master"
-    point = {"lifetime_id": f"worker:12:{started}", "pid": 12, "process_started_at": started,
-             "process_role": "worker", "observed_at": usage.utc(now),
-             "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
-             "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
-             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    point = {
+        "lifetime_id": f"worker:12:{started}",
+        "pid": 12,
+        "process_started_at": started,
+        "process_role": "worker",
+        "observed_at": usage.utc(now),
+        "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
+        "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
     agent.app.state.usage_store.record("worker", "host", point, now=now)
     with agent.app.state.usage_store.db:
-        agent.app.state.usage_store.db.execute("UPDATE readings SET payload='{' WHERE node_id='worker'")
-    response = c.get("/v1/usage/readings", params={"node_id": "worker", "lifetime_id": point["lifetime_id"]})
+        agent.app.state.usage_store.db.execute(
+            "UPDATE readings SET payload='{' WHERE node_id='worker'"
+        )
+    response = c.get(
+        "/v1/usage/readings", params={"node_id": "worker", "lifetime_id": point["lifetime_id"]}
+    )
     assert response.status_code == 503
     assert "history unavailable" in response.json()["detail"]
 
@@ -511,16 +712,24 @@ def test_malformed_saved_usage_times_report_503_not_client_error(client):
     began = usage.utc(now - timedelta(minutes=1))
     agent.STATE.role = "master"
     node = agent.STATE.node_id
-    point = {"lifetime_id": f"{node}:12:{began}", "pid": 12, "process_started_at": began,
-             "process_role": "master", "observed_at": usage.utc(now),
-             "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
-             "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
-             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    point = {
+        "lifetime_id": f"{node}:12:{began}",
+        "pid": 12,
+        "process_started_at": began,
+        "process_role": "master",
+        "observed_at": usage.utc(now),
+        "process": {"cpu_percent_machine": 0, "rss_bytes": 1024},
+        "host": {"cpu_percent": 0, "used_bytes": 1024, "total_bytes": 4096},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
     store = agent.app.state.usage_store
     store.record(node, "master", point, now=now)
     with store.db:
-        store.db.execute("UPDATE readings SET payload=? WHERE node_id=?",
-                         (json.dumps({**point, "observed_at": "invalid"}), node))
+        store.db.execute(
+            "UPDATE readings SET payload=? WHERE node_id=?",
+            (json.dumps({**point, "observed_at": "invalid"}), node),
+        )
     safe = TestClient(agent.app, raise_server_exceptions=False)
     assert safe.get("/v1/usage/live").status_code == 503
     with store.db:
@@ -537,13 +746,21 @@ def test_usage_history_filters_errors_and_departed_node(client, monkeypatch):
     agent.STATE.role = "master"
     now = datetime.now(timezone.utc).replace(microsecond=0)
     started = usage.utc(now - timedelta(minutes=1))
-    point = {"lifetime_id": f"w1:12:{started}", "pid": 12, "process_started_at": started,
-             "process_role": "worker", "observed_at": usage.utc(now - timedelta(seconds=2)),
-             "process": {"cpu_percent_machine": 0, "rss_bytes": 0},
-             "host": {"cpu_percent": 0, "used_bytes": 0, "total_bytes": 1024},
-             "devices": [], "availability": {"process_cpu": "measured", "process_rss": "measured"}}
+    point = {
+        "lifetime_id": f"w1:12:{started}",
+        "pid": 12,
+        "process_started_at": started,
+        "process_role": "worker",
+        "observed_at": usage.utc(now - timedelta(seconds=2)),
+        "process": {"cpu_percent_machine": 0, "rss_bytes": 0},
+        "host": {"cpu_percent": 0, "used_bytes": 0, "total_bytes": 1024},
+        "devices": [],
+        "availability": {"process_cpu": "measured", "process_rss": "measured"},
+    }
     agent.app.state.usage_store.record("w1", "departed", point, now=now)
-    agent.app.state.usage_store.record("w1", "departed", {**point, "observed_at": usage.utc(now - timedelta(seconds=1))}, now=now)
+    agent.app.state.usage_store.record(
+        "w1", "departed", {**point, "observed_at": usage.utc(now - timedelta(seconds=1))}, now=now
+    )
     assert c.get("/v1/usage/lifetimes", params={"node_id": "unknown"}).status_code == 404
     lifetimes = c.get("/v1/usage/lifetimes", params={"node_id": "w1"}).json()
     assert lifetimes["connected"] is False
@@ -559,7 +776,10 @@ def test_usage_history_filters_errors_and_departed_node(client, monkeypatch):
     forged["start"] = usage.utc(now - timedelta(hours=1))
     invalid = base64.urlsafe_b64encode(json.dumps(forged).encode()).decode()
     assert c.get("/v1/usage/readings", params={**filters, "cursor": invalid}).status_code == 400
-    assert c.get("/v1/usage/series", params={**filters, "window": "wrong"}).status_code in (400, 422)
+    assert c.get("/v1/usage/series", params={**filters, "window": "wrong"}).status_code in (
+        400,
+        422,
+    )
     assert c.get("/v1/usage/readings", params={**filters, "limit": 1001}).status_code in (400, 422)
     assert c.get("/v1/usage/readings", params={**filters, "cursor": "broken"}).status_code == 400
     agent.STATE.role = "worker"
@@ -572,6 +792,7 @@ def test_usage_history_filters_errors_and_departed_node(client, monkeypatch):
             return SimpleNamespace(status_code=200, json=lambda: lifetimes)
 
     from types import SimpleNamespace
+
     monkeypatch.setattr(agent.http_clients, "control_client", lambda: FakeControl())
     assert c.get("/v1/usage/lifetimes", params={"node_id": "w1"}).json() == lifetimes
 
@@ -632,11 +853,14 @@ def test_chat_503_when_inference_down(client, monkeypatch):
 
     c, agent, token = client
     requests = []
+
     def unavailable(request):
         requests.append(request.url.path)
         raise httpx.ConnectError("controlled inference outage", request=request)
 
-    agent.app.state.inference_client = httpx.AsyncClient(transport=httpx.MockTransport(unavailable), trust_env=False)
+    agent.app.state.inference_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(unavailable), trust_env=False
+    )
     r = c.post(
         "/v1/chat/completions",
         json={"model": "x", "messages": [{"role": "user", "content": "hi"}]},
@@ -697,7 +921,14 @@ def test_inference_activity_distinguishes_prompt_and_generation(monkeypatch):
         inference_activity.httpx,
         "Client",
         lambda **_: Client(
-            [{"is_processing": True, "n_prompt_tokens": 10, "n_prompt_tokens_processed": 4, "next_token": {"n_decoded": 0}}]
+            [
+                {
+                    "is_processing": True,
+                    "n_prompt_tokens": 10,
+                    "n_prompt_tokens_processed": 4,
+                    "next_token": {"n_decoded": 0},
+                }
+            ]
         ),
     )
     prompt = inference_activity.sample(8080, running=True)
@@ -708,7 +939,14 @@ def test_inference_activity_distinguishes_prompt_and_generation(monkeypatch):
         inference_activity.httpx,
         "Client",
         lambda **_: Client(
-            [{"is_processing": True, "n_prompt_tokens": 10, "n_prompt_tokens_processed": 10, "next_token": {"n_decoded": 3}}]
+            [
+                {
+                    "is_processing": True,
+                    "n_prompt_tokens": 10,
+                    "n_prompt_tokens_processed": 10,
+                    "next_token": {"n_decoded": 3},
+                }
+            ]
         ),
     )
     generating = inference_activity.sample(8080, running=True)
@@ -935,7 +1173,7 @@ def test_status_download_during_mocked_download(client, monkeypatch):
 
     def run():
         try:
-            with patch("kllm.models.httpx.stream", return_value=FakeResp()):
+            with patch("kllm.models.downloads.httpx.stream", return_value=FakeResp()):
                 from kllm import models as model_ops
 
                 model_ops.download_model("https://example.com/model.gguf")
@@ -1085,7 +1323,7 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
     from kllm.state import models_dir
 
     c, agent, _ = client
-    model_ops._reset_download_state()
+    model_ops.downloads._reset_download_state()
     agent.STATE.members = {"n1": {"vram_bytes": 8_000_000_000}}
     streamed: list[str] = []
     calls: list[tuple] = []
@@ -1115,7 +1353,9 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
         if kwargs.get("revision") == "missing":
             request = httpx.Request("GET", "https://huggingface.co/api/models/demo/model-GGUF")
             response = httpx.Response(404, request=request)
-            raise RevisionNotFoundError("missing revision https://huggingface.co/secret", response=response)
+            raise RevisionNotFoundError(
+                "missing revision https://huggingface.co/secret", response=response
+            )
         if kwargs.get("revision") == "release/v2":
             return Info(release)
         return Info([Sibling("main-only.Q4_K_M.gguf", 10)])
@@ -1125,8 +1365,10 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
         return _BytesResp(b"tiny-selected")
 
     monkeypatch.setattr(model_ops, "model_info", fake_info)
-    monkeypatch.setattr(model_ops, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery")))
-    monkeypatch.setattr(model_ops.httpx, "stream", fake_stream)
+    monkeypatch.setattr(
+        model_ops, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery"))
+    )
+    monkeypatch.setattr(model_ops.downloads.httpx, "stream", fake_stream)
     try:
         query = "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf"
         searched = c.post("/v1/models/search", json={"query": query})
@@ -1151,7 +1393,7 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
         assert saved.read_bytes() == b"tiny-selected"
         assert (models_dir() / "model.Q4_K_M.gguf.sha256").is_file()
 
-        model_ops._reset_download_state()
+        model_ops.downloads._reset_download_state()
         exact = "https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/gguf/nested/model.Q5_K_M.gguf"
         found = c.post("/v1/models/search", json={"query": exact})
         assert found.status_code == 200
@@ -1169,7 +1411,9 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
 
         missing = c.post(
             "/v1/models/search",
-            json={"query": "https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/missing.gguf"},
+            json={
+                "query": "https://huggingface.co/demo/model-GGUF/resolve/release%2Fv2/missing.gguf"
+            },
         )
         assert missing.status_code == 400
         assert "unavailable" in missing.json()["detail"]
@@ -1177,13 +1421,17 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
 
         unsupported = c.post(
             "/v1/models/search",
-            json={"query": "https://huggingface.co/demo/model-GGUF/blob/release%2Fv2/gguf/README.md"},
+            json={
+                "query": "https://huggingface.co/demo/model-GGUF/blob/release%2Fv2/gguf/README.md"
+            },
         )
         assert unsupported.status_code == 400
         assert "standalone GGUF" in unsupported.json()["detail"]
 
         calls.clear()
-        bad = c.post("/v1/models/search", json={"query": "https://huggingface.co/datasets/demo/model-GGUF"})
+        bad = c.post(
+            "/v1/models/search", json={"query": "https://huggingface.co/datasets/demo/model-GGUF"}
+        )
         assert bad.status_code == 400
         assert "supported model repository" in bad.json()["detail"]
         assert calls == []
@@ -1205,7 +1453,7 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
         assert "Revision" in detail
         assert "https://" not in detail
     finally:
-        model_ops._reset_download_state()
+        model_ops.downloads._reset_download_state()
 
 
 def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
@@ -1241,7 +1489,9 @@ def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
     assert "hf_SUPERSECRET" not in blob
     assert "signed.example" not in blob
 
-    monkeypatch.setattr(model_ops, "model_info", lambda *a, **k: (_ for _ in ()).throw(OSError("all-down")))
+    monkeypatch.setattr(
+        model_ops, "model_info", lambda *a, **k: (_ for _ in ()).throw(OSError("all-down"))
+    )
     failed = c.post("/v1/models/search", json={"query": "llama"})
     assert failed.status_code == 400
     assert "all-down" in failed.json()["detail"]

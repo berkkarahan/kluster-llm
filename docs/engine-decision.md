@@ -75,4 +75,4 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 - Process argv / split-mode propagation: `crates/kllm-native/src/process.rs`
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
-- RPC bind / optional WireGuard overlay: `python/kllm/netsec.py`
+- RPC bind / optional WireGuard overlay: `src/kllm/netsec.py`

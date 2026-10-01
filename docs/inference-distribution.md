@@ -25,7 +25,7 @@ GGUF metadata provides the block count, tensor spans, attention dimensions and Q
 hybrid recurrent state dimensions. Input tensors and CPU spill belong to the master;
 the output layer is included in GPU-layer counts.
 
-Routing policy (`python/kllm/tensor_split.py` + `placement.py`):
+Routing policy (`src/kllm/tensor_split.py` + `placement.py`):
 
 1. Prefer **master-local** devices when they can hold the model (no `--rpc`).
 2. Else prefer a **single remote** device that alone fits.

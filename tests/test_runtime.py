@@ -81,6 +81,7 @@ def test_stop_local_does_not_start_agent(kllm_home, monkeypatch):
     runtime.register_agent(99, 18765)
 
     import kllm.cli as cli
+    import kllm.commands.agent_runtime as cli_runtime
 
     importlib.reload(cli)
 
@@ -113,23 +114,28 @@ def test_stop_local_does_not_start_agent(kllm_home, monkeypatch):
             calls.append(f"POST {url}")
             return FakeResp()
 
+        def delete(self, url: str):
+            calls.append(f"DELETE {url}")
+            return FakeResp()
+
     monkeypatch.setattr(cli.httpx, "Client", FakeClient)
-    monkeypatch.setattr(cli.runtime, "kill_tracked", lambda: True)
-    monkeypatch.setattr(cli.runtime, "clear", lambda: None)
+    monkeypatch.setattr(cli_runtime.runtime, "kill_tracked", lambda: True)
+    monkeypatch.setattr(cli_runtime.runtime, "clear", lambda: None)
 
     ensure_calls: list[int] = []
-    monkeypatch.setattr(cli, "_ensure_agent", lambda port=18765: ensure_calls.append(port))
+    monkeypatch.setattr(cli_runtime, "_ensure_agent", lambda port=18765: ensure_calls.append(port))
 
     assert cli._stop_local(18765) is True
     assert ensure_calls == []
-    assert any("/v1/stop" in c for c in calls)
+    assert any("/v2/cluster" in c for c in calls)
 
 
 def test_stop_command_nothing_to_stop(kllm_home, monkeypatch, capsys):
+    from kllm.commands import cluster_lifecycle
     import kllm.cli as cli
 
     importlib.reload(cli)
-    monkeypatch.setattr(cli, "_stop_local", lambda port=18765: False)
+    monkeypatch.setattr(cluster_lifecycle, "_stop_local", lambda port=18765: False)
     cli.stop(port=18765)
     out = capsys.readouterr().out
     assert "Nothing to stop" in out

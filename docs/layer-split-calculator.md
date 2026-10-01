@@ -1,6 +1,6 @@
 # Layer Split Calculator
 
-Automatic placement lives in `python/kllm/tensor_split.py` and `python/kllm/placement.py`. You do **not** pass `--tensor-split` on the CLI; `kllm plan` / `kllm run` emit it.
+Automatic placement lives in `src/kllm/tensor_split.py` and `src/kllm/placement.py`. You do **not** pass `--tensor-split` on the CLI; `kllm plan` / `kllm run` emit it.
 
 ## Rules (memory-pooling first)
 

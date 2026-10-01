@@ -380,7 +380,7 @@ def test_gpu_visibility_env():
 
 
 @pytest.mark.unit
-def test_join_passes_gpu_env(client, monkeypatch):
+def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monkeypatch):
     c, agent = client
     monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     from kllm.discovery import DiscoveredMaster, join_key_id
@@ -429,7 +429,9 @@ def test_join_passes_gpu_env(client, monkeypatch):
             "ensure_rpc_firewall",
             return_value={"ok": True, "applied": False, "warning": None},
         ),
-        patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS),
+        patch.object(agent.native, "list_gpus", return_value={**FAKE_GPUS, "gpus": [
+            {**gpu, "device": f"CUDA{gpu['index']}"} for gpu in FAKE_GPUS["gpus"]
+        ]}),
         patch.object(
             agent.native,
             "probe_capacity",
@@ -449,7 +451,12 @@ def test_join_passes_gpu_env(client, monkeypatch):
     assert r.json()["gpu_ids"] == [0]
     assert captured["payload"]["gpu_ids"] == [0]
     assert captured["payload"]["vram_bytes"] == 24 * 1024**3
-    assert captured["worker_kwargs"]["env"] == {"CUDA_VISIBLE_DEVICES": "0"}
+    assert captured["worker_kwargs"]["env"] is None
+    assert captured["worker_kwargs"]["devices"] == ["CUDA0", "CPU"]
+    assert agent.STATE.members[agent.STATE.node_id]["rpc_devices"] == [
+        {"index": 0, "device": "CUDA0", "backend": "cuda", "memory_kind": "gpu"},
+        {"index": 1, "device": "CPU", "backend": "cpu", "memory_kind": "ram"},
+    ]
 
 
 LLAMA_VRAM = 17_095_983_104

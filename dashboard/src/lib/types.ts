@@ -18,6 +18,7 @@ export type Member = {
   actual_backend?: string;
   requested_backend?: string | null;
   devices?: GpuInfo[];
+  rpc_devices?: { index: number; device: string; backend: string; memory_kind: 'gpu' | 'ram' }[];
   unified_memory?: boolean;
   binary_version?: string;
   vram_bytes?: number | null;
@@ -173,6 +174,7 @@ export type Status = {
 };
 
 export type DeviceAllocation = {
+  memory_kind?: 'gpu' | 'ram';
   node_id: string;
   device: string;
   backend: string;
@@ -185,6 +187,11 @@ export type DeviceAllocation = {
 };
 
 export type PlacementPlan = {
+  required_nodes?: string[];
+  node_priority?: string[];
+  node_ram_budget_bytes?: Record<string, number>;
+  node_ram_alloc_bytes?: Record<string, number>;
+  node_vram_alloc_bytes?: Record<string, number>;
   device_allocations?: DeviceAllocation[];
   device_order?: string[];
   estimate_confidence?: string;

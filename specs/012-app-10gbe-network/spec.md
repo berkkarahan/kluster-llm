@@ -14,17 +14,17 @@
 
 ### User Story 1 - Start the private network from the master (Priority: P1)
 
-As a cluster operator, I select a dedicated Ethernet adapter on each participating node and start a private 10GbE network from the master in the app. The master signals the workers, and each worker performs its own local setup and reports its result without separate per-node configuration commands.
+As a beginner cluster operator, I read the administrator notice, enable access once on each participating computer, and start a private 10GbE network from the master in the app. The master signals the workers, and each worker performs its own local setup and reports its result without separate per-node configuration commands.
 
 **Why this priority**: Coordinated setup is the requested capability and removes repetitive manual configuration.
 
-**Independent Test**: With one master and two joined workers on a dedicated 10GbE switch, select their adapters, start setup once, and verify distinct private addresses and readiness on all three nodes.
+**Independent Test**: With one master and two joined workers on a dedicated 10GbE switch, approve access locally, let Kluster select safe adapters and a subnet, start setup once, and verify distinct private addresses and readiness on all three nodes.
 
 **Acceptance Scenarios**:
 
 1. **Given** joined nodes with selected eligible adapters and sufficient permissions, **When** the operator starts setup on the master, **Then** each node applies its assigned local configuration and the app reports every participant's result.
 2. **Given** multiple eligible adapters and no selection on a participant, **When** setup is requested, **Then** the app requires an adapter selection and no participant changes configuration.
-3. **Given** a selected adapter with a slow or unknown negotiated speed, DHCP enabled, or no physical link, **When** setup is requested, **Then** the app identifies the failed prerequisite and no participant changes configuration.
+3. **Given** a selected adapter with a slow or unknown negotiated speed, unreadable DHCP configuration, or no physical link, **When** setup is requested, **Then** the app identifies the failed prerequisite and no participant changes configuration.
 4. **Given** insufficient privileges on a participant, **When** setup is requested, **Then** the app identifies that node and required permission, preserves existing connectivity, and allows retry after the prerequisite is resolved.
 
 ---
@@ -78,12 +78,12 @@ As an operator, I stop or retry the managed network and recover after interrupti
 
 ### Functional Requirements
 
-- **FR-001**: The app MUST let an operator on the current master select joined participants and one dedicated adapter per node, then start, inspect, retry, add nodes to, and stop a managed private network.
+- **FR-001**: The app MUST disclose administrator access before the OS prompt, allow one-time local authorization on each computer, and let an operator on the current master select joined participants; select a single safe dedicated adapter automatically and ask only when multiple eligible adapters exist, then start, inspect, retry, add nodes to, and stop a managed private network.
 - **FR-002**: The master MUST initiate worker setup through an authenticated socket signal over existing cluster management connectivity. Each worker MUST perform its own local setup and report preparation, application, verification, and cleanup results.
 - **FR-003**: Workers MUST accept network-changing signals only from their authenticated current master. Unauthorized, malformed, stale, and conflicting signals MUST fail explicitly without host changes.
-- **FR-004**: Before any participant changes configuration, every selected node MUST pass preparation checks for adapter identity, physical link, OS-reported negotiated speed of at least 10 Gbps, DHCP disabled, platform capability, local permission, and address/route conflicts. Conditions that can change MUST be rechecked before application.
+- **FR-004**: Before any participant changes configuration, every selected node MUST pass preparation checks for adapter identity, physical link, OS-reported negotiated speed of at least 10 Gbps, known DHCP configuration, supported configuration manager, protected helper authorization, platform capability, local permission, and address/route conflicts. Conditions that can change MUST be rechecked before application.
 - **FR-005**: The app MUST offer an unused private IPv4 subnet and allow operator selection of another. The master MUST allocate unique usable addresses, reject detected conflicts and insufficient capacity, and preserve current assignments when adding nodes.
-- **FR-006**: Setup MUST add temporary configuration to selected adapters without changing default routes, DNS, gateways, DHCP settings, unrelated adapters, or user-owned addresses. Prerequisites requiring separate operator action MUST be identified.
+- **FR-006**: Setup MUST add temporary configuration to selected adapters without changing default routes, DNS profiles, gateways, unrelated adapters, or user-owned addresses. It MAY disable IPv4 DHCP on the selected dedicated adapter after saving the original configuration, and MUST restore only owned configuration changes on stop or rollback. Uncertain ownership requires local review.
 - **FR-007**: Setup and recovery MUST preserve the existing management path. Failure of the dedicated link MUST NOT deliberately remove ordinary management connectivity.
 - **FR-008**: Overall and per-node status MUST distinguish preparation, configuration, verification, ready, degraded, failure, and cleanup pending. Status MUST include selected adapter, assigned address, negotiated speed or unknown status, last verification time, and actionable failure reason. Overall ready MUST require all selected participants ready.
 - **FR-009**: Readiness MUST require verified master/worker communication over dedicated addresses and verified connectivity required for inference. Failed or inconclusive checks MUST prevent readiness. Reachability, negotiated speed, and measured throughput MUST be distinct facts.
@@ -108,7 +108,7 @@ As an operator, I stop or retry the managed network and recover after interrupti
 ### Measurable Outcomes
 
 - **SC-001**: With eligible dedicated hardware and permissions available, one master and two workers reach verified readiness within 60 seconds of one in-app start action, with no per-node configuration commands.
-- **SC-002**: Acceptance attempts covering slow or unknown speed, DHCP enabled, insufficient permission, conflicting subnet, and missing adapter identify the node and reason in 100% of cases before any participant changes networking.
+- **SC-002**: Acceptance attempts covering slow or unknown speed, unreadable DHCP configuration, denied administrator authorization, conflicting subnet, and missing adapter identify the node and reason in 100% of cases before any participant changes networking.
 - **SC-003**: Across ten repeated starts/retries and duplicate-signal cases, each node retains one current assignment and every participating address is unique.
 - **SC-004**: Multi-node inference acceptance runs use all selected workers' assigned dedicated endpoints; zero new runs select failed or unverified dedicated endpoints.
 - **SC-005**: A disconnected ready worker is shown as degraded or unverified within 15 seconds. Its existing management connection remains available when that connection's physical network is intact.
@@ -122,7 +122,13 @@ As an operator, I stop or retry the managed network and recover after interrupti
 - Workers are already enrolled and reachable over ordinary cluster management connectivity. Initial enrollment over an unconfigured dedicated link is outside scope.
 - Initial scope is one private IPv4 subnet, a direct link for one worker or a switch for several. Automatic physical bridging, IPv6, routing across sites, and permanent OS configuration are outside scope.
 - Operators select each adapter once and arrange local OS permissions. Master initiation coordinates prepared nodes; it does not grant remote administrator rights.
-- DHCP-disabled dedicated adapters and temporary addresses follow the existing dedicated-link workflow. Unknown negotiated speed is ineligible until verified.
+- The guided flow handles dedicated adapter DHCP configuration and restoration through a scoped native helper; the manual workflow retains its DHCP-disabled prerequisite. Unknown negotiated speed is ineligible until verified.
 - Already-configured adapters may participate when eligible; pre-existing settings remain user-owned.
 - Existing cluster authentication and current-master ownership apply to setup signals; a private address alone does not establish trust.
 - The timings above are acceptance targets, not claims of current performance or guaranteed throughput.
+
+## Guided setup revision (2026-10-01)
+
+The approved beginner workflow supersedes the original manual-pairing and already-root prerequisites. First-time identity bootstrap uses mutual join-secret proofs and Ed25519 transcript proofs, then pins immutable identities. Possession of the join secret does not authorize privileged host operations: a local user must acknowledge the notice and approve the OS installation prompt on every participating machine. Changed pins require explicit settled local replacement.
+
+The helper runs from an administrator-owned installation, loads no Python runtime, and accepts bounded account-restricted local IPC. Its installed grant fixes the current cluster master key, binding, node and account. Signed network phases authorize exact dedicated assignments; no arbitrary commands, remote elevation or public helper listener exist. The original agent account and credential paths remain unchanged. Normal setup contains no public-identity JSON, manual subnet entry or shell instructions. Recovery exposes a deliberate keep-current or restore-reviewed decision. Advanced details retains manual controls.

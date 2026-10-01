@@ -1,3 +1,4 @@
+#![cfg(feature = "python-bindings")]
 mod gguf;
 mod network;
 mod hw;

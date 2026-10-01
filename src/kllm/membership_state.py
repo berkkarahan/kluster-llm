@@ -15,6 +15,7 @@ _SNAPSHOT_OPTIONAL = (
     "actual_backend",
     "requested_backend",
     "devices",
+    "rpc_devices",
     "unified_memory",
     "binary_version",
     "reclaimable_ram_bytes",

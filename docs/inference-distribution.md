@@ -22,22 +22,34 @@ would invalidate the plan.
 ## Memory-pooling routing
 
 GGUF metadata provides the block count, tensor spans, attention dimensions and Qwen
-hybrid recurrent state dimensions. Input tensors and CPU spill belong to the master;
-the output layer is included in GPU-layer counts.
+hybrid recurrent state dimensions. Input tensors and the CPU prefix belong to the
+master; workers can also host layer segments on explicitly advertised RPC CPU
+devices. The output layer is included in upstream offload counts.
 
 Routing policy (`src/kllm/tensor_split.py` + `placement.py`):
 
-1. Prefer **master-local** devices when they can hold the model (no `--rpc`).
-2. Else prefer a **single remote** device that alone fits.
-3. Else **pool** across devices ordered by score/budget with contiguous DP allocation.
+1. Prefer **master-local GPUs** when they can hold the model without CPU spill.
+2. Else prefer a **single remote GPU** that alone fits.
+3. Else **pool GPUs** across nodes with contiguous allocation.
+4. If GPU placement cannot fit or satisfy required nodes, use master/worker CPU RAM,
+   minimizing CPU bytes, RPC endpoints, then favoring the existing device scores.
+
+`required_nodes` (repeatable `--require-node NODE`) overrides local-only shortcuts:
+each listed node must host at least one model layer. The planner chooses appropriate
+shares; it never forces equal allocations or ignores an infeasible requirement.
 
 `--tensor-split` values are layer counts from that allocation (with a tiny boundary
-bias). Unified RAM is a shared pool on the master. Measured RSS of the tracked process
+bias). Unified RAM is one shared pool on every Apple Silicon node, including Vulkan.
+Measured RSS of the tracked process
 may be reclaimed when replacing it. Discrete GPU memory without an attributable
 allocation measurement is conservatively treated as occupied. Execution buffers and
 unknown architectures remain estimates, labeled in plan results.
 
 Workers must publish device inventory before a new placement can be launched.
+Updated workers expose selected GPUs followed by CPU in an explicit runtime order.
+`rpc_devices` tracks that full order so skipping a CPU device does not shift another
+worker's RPC index. Rebuild and rejoin workers to enable RAM pooling; older workers
+remain accelerator-only. CPU-mode plans can pool advertised worker CPU devices.
 Control RTT uses pooled HTTP connections; it measures control-plane responsiveness,
 not RPC throughput or GPU performance.
 

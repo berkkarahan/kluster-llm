@@ -80,14 +80,18 @@ def test_runtime_setup_restarts_worker_with_selected_devices_and_records_process
                 "host": "10.0.0.2",
                 "port": 50052,
                 "repo_root": "/repo",
-                "env": {"VISIBLE": "cuda:[2]"},
-                "devices": ["GPU-2"],
+                "env": None,
+                "devices": ["GPU-2", "CPU"],
                 "log_path": "/logs/rpc.log",
             },
         ),
         ("register", 99, "rpc-server"),
     ]
     assert (state.process_pid, state.process_role, saved) == (99, "worker", [True])
+    assert state.members[state.node_id]["rpc_devices"] == [
+        {"index": 0, "device": "GPU-2", "backend": "cuda", "memory_kind": "gpu"},
+        {"index": 1, "device": "CPU", "backend": "cpu", "memory_kind": "ram"},
+    ]
 
 
 def test_runtime_setup_returns_relaunch_failure_without_losing_install_result():

@@ -261,6 +261,8 @@ def plan_split(
     model_layout: dict | None = None,
     launch_settings: dict | None = None,
     node_shares: dict[str, float] | None = None,
+    required_nodes: Sequence[str] = (),
+    node_priority: Sequence[str] = (),
 ) -> dict[str, Any]:
     if launch_settings is not None:
         return plan_from_settings(
@@ -278,7 +280,11 @@ def plan_split(
             draft_model_size_bytes=draft_model_size_bytes,
             vision=vision,
             node_shares=node_shares,
+            required_nodes=required_nodes,
+            node_priority=node_priority,
         ).to_payload()
+    if required_nodes or node_priority or node_shares:
+        raise ValueError("node placement constraints require resolved launch settings")
     n = require_native()
     req: dict[str, Any] = {
         "nodes": nodes,

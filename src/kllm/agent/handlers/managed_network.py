@@ -13,6 +13,8 @@ from kllm.managed_network.identity import IdentityError, strict_json
 from kllm.managed_network.models import PeerIdentity, Record
 from kllm.managed_network.platform.base import PlatformRefusal, is_admin
 from kllm.managed_network.store import StoreConflict
+from kllm.managed_network.bootstrap import BootstrapRequest, BootstrapCommit
+from kllm.managed_network.guided_setup import ADMIN_NOTICE, EnableRequest, GuidedRequest, RecoveryRequest
 from kllm.agent.origin import _is_loopback, _origin_allowed, _request_origin
 from kllm.agent.services.managed_network import ManagedNetworkService
 
@@ -66,6 +68,100 @@ def build_router(service: Callable[[], ManagedNetworkService], token_verifier: C
                 raise PlatformRefusal('NOT_MASTER', 'This operation requires the current master')
             return selected
         except (PlatformRefusal, StoreConflict, IdentityError, OSError, RuntimeError) as error:
+            raise error_response(error) from None
+
+    @router.post('/node/network-bootstrap/challenge')
+    async def bootstrap_challenge(request: Request) -> dict[str, Any]:
+        if request.headers.get('origin'):
+            raise HTTPException(403, detail={'code': 'INVALID_ORIGIN', 'message': 'Agent pairing only'})
+        value = await body(request, BootstrapRequest)
+        try:
+            return service().bootstrap.challenge(value)
+        except (IdentityError, StoreConflict, PlatformRefusal) as error:
+            raise error_response(error) from None
+
+    @router.post('/node/network-bootstrap/commit')
+    async def bootstrap_commit(request: Request) -> dict[str, Any]:
+        if request.headers.get('origin'):
+            raise HTTPException(403, detail={'code': 'INVALID_ORIGIN', 'message': 'Agent pairing only'})
+        value = await body(request, BootstrapCommit)
+        try:
+            return service().bootstrap.commit(value)
+        except (IdentityError, StoreConflict, PlatformRefusal) as error:
+            raise error_response(error) from None
+
+    @router.get('/node/network-setup')
+    async def local_setup(request: Request) -> dict[str, Any]:
+        selected = authorized(request)
+        return {**selected.guided.local_status(), 'administrator_notice': ADMIN_NOTICE}
+
+    @router.get('/node/network-setup/recovery/{network_id}')
+    async def helper_review(network_id: UUID, request: Request) -> dict[str, Any]:
+        selected = authorized(request, local=True)
+        try:
+            import asyncio
+            return await asyncio.to_thread(selected.guided.helper.request, 'review', network=str(network_id))
+        except PlatformRefusal as error:
+            raise error_response(error) from None
+
+    @router.post('/node/network-setup/recovery/{network_id}')
+    async def helper_resolve(network_id: UUID, request: Request) -> dict[str, Any]:
+        selected = authorized(request, local=True)
+        value = await body(request, RecoveryRequest)
+        try:
+            return await selected.guided.resolve(network_id, value)
+        except (PlatformRefusal, StoreConflict) as error:
+            raise error_response(error) from None
+
+    @router.post('/node/network-setup/administrator')
+    async def enable_administrator(request: Request) -> dict[str, Any]:
+        selected = authorized(request, local=True)
+        value = await body(request, EnableRequest)
+        try:
+            return await selected.guided.enable(value.acknowledged)
+        except (IdentityError, StoreConflict, PlatformRefusal, OSError, RuntimeError) as error:
+            raise error_response(error) from None
+
+    @router.get('/cluster/network-setup')
+    async def assess_setup(request: Request) -> dict[str, Any]:
+        selected = authorized(request, master=True)
+        try:
+            return await selected.guided.assess()
+        except (IdentityError, StoreConflict, PlatformRefusal, OSError, RuntimeError, TimeoutError) as error:
+            raise error_response(error) from None
+
+    @router.delete('/node/network-setup/administrator')
+    async def disable_administrator(request: Request) -> dict[str, Any]:
+        selected = authorized(request, local=True)
+        if any(n.observed_state != 'stopped' for n in selected.store.networks()):
+            raise error_response(PlatformRefusal('OPERATION_IN_PROGRESS', 'Stop the private network before disabling administrator access'))
+        try:
+            import asyncio
+            return await asyncio.to_thread(selected.guided.helper.request, 'revoke')
+        except PlatformRefusal as error:
+            raise error_response(error) from None
+
+    @router.post('/cluster/network-setup', status_code=202)
+    async def guided_start(request: Request) -> JSONResponse:
+        selected = authorized(request, master=True)
+        value = await body(request, GuidedRequest)
+        try:
+            return JSONResponse(await selected.guided.start(value), status_code=202)
+        except (IdentityError, StoreConflict, PlatformRefusal, OSError, RuntimeError, ValueError) as error:
+            raise error_response(error) from None
+
+    @router.get('/cluster/network-setup/operations/{operation_id}')
+    async def guided_progress(operation_id: UUID, request: Request) -> dict[str, Any]:
+        selected = authorized(request, master=True)
+        try:
+            from kllm.managed_network.guided_setup import MESSAGES
+            view = selected.operation_view(operation_id)
+            terminal = view.get('terminal_result') or {}
+            view['message'] = MESSAGES.get(terminal.get('error_code') or '', terminal.get('message', ''))
+            latest = {r['node_id']: r for r in view['results']}
+            view['participants'] = [{'node_id': r['node_id'], 'status': r['status'], 'stage': r['stage']} for r in latest.values()]
+            return view
+        except KeyError as error:
             raise error_response(error) from None
 
     @router.get('/node/network-identity')

@@ -102,8 +102,8 @@ Precedence for `plan` / `run`: CLI `--device` (or dashboard/API request body) �
 Memory budget for plan/run uses `vram_percent` or `ram_percent` from config (as planner `headroom`) unless the request passes an explicit `headroom` / `--vram-percent` / `--ram-percent`.
 
 - **GPU:** VRAM-aware budgets scaled by `vram_percent`; GPU multi-select via `gpu_ids` / `--gpus`; `-ngl` = estimated layers when at least one node can use GPU/Metal.
-- **CPU:** RAM-only budgets scaled by `ram_percent`; `-ngl 0` (GPU picker ignored).
-- **Fallback:** if GPU is preferred but a node has unknown/zero VRAM (and is not Metal), that node falls back to RAM/CPU silently. Plan responses include `device_requested`, `device_effective`, and per-node `node_devices`.
+- **CPU:** RAM-only budgets scaled by `ram_percent`; GPU picker ignored. Master CPU layers use the local prefix; worker CPU layers use RPC offload routing, so their upstream `ngl` can be positive while VRAM allocation is zero.
+- **Fallback:** automatic GPU planning tries GPU placements before CPU RAM. Updated workers advertise a CPU RPC device to contribute RAM; older workers remain accelerator-only. Plan responses distinguish RAM/GPU allocations per node and count unified memory once.
 
 Dashboard Plan & Run exposes device-gated controls (GPUs + VRAM % vs RAM %) and persists via `PUT /v1/config`. System Settings reports measured local discrete GPU capacity in one-decimal GiB, counting each selected GPU once; missing measurements show as unavailable. Plans show usable per-device budgets limited by headroom and available memory, GPU-only and CPU RAM allocations separately, and explicitly labeled total-memory estimates/budgets. Unified GPU capacity is shared RAM, not extra VRAM.
 
@@ -123,6 +123,7 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--parallel`, `--batch-size`, `--micro-batch` | `auto` | Maps to llama-server parallel / batch / ubatch |
 | `--flash-attention` | `auto` | `auto`, `on`, or `off` |
 | `--node-share NODE=FRACTION` (repeatable) | automatic | Manual GPU layer workload shares; give every current node, fractions totaling 1. Example: `--node-share worker=0.4 --node-share master=0.6`. No CPU spill in manual mode. |
+| `--require-node NODE` (repeatable) | none | Require at least one model layer on each node in automatic layer placement. The planner chooses GPU/RAM amounts. Incompatible with manual shares and row/tensor modes. |
 | `--chat-template` / `--chat-template-file` | `default` / — | Auto embedded GGUF, `chatml`, or a `preset:…` ID; file uploads custom Jinja text to the master. `kllm model templates --model NAME` lists choices. |
 | `--vision`, `--mmproj` | off / — | Vision requires a usable mmproj on run |
 | `--load-mode` | `auto` | mmap / mlock mapping |
@@ -137,6 +138,12 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--split-mode` | system default | `layer`, `row`, or `tensor`; overrides the system setting for this plan/run |
 
 No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement: prefer master-local, then single remote, then VRAM-proportional pool — see [layer-split-calculator.md](layer-split-calculator.md)).
+
+Automatic planning prefers GPU-only placements, then uses master and advertised
+worker CPU RAM when needed. `--require-node master-id --require-node worker-id`
+requires model layers on both nodes without imposing equal shares. The dashboard
+provides the same option as **Must use this node** in Automatic placement. Rebuild
+and rejoin workers to advertise CPU devices and refresh corrected macOS capacity.
 
 Manual node shares are rounded to contiguous full layers; Plan reports requested and actual bytes per node and blocks Run if the requested distribution cannot fit. Pinned preset assets come from [llama.cpp v0.5.0](https://github.com/ggml-org/llama.cpp/tree/v0.5.0/models/templates); select the version that matches your model, rather than guessing from its family name. Custom Jinja can be smoke-checked in the dashboard editor, but that check does not establish model compatibility.
 
@@ -275,7 +282,9 @@ kllm cluster update
 
 ### App-managed dedicated Ethernet
 
-The app's Home → Private 10GbE network panel pairs public node identities, selects local adapters, and starts the selected participants from the master. On each node, first follow [agent installation](agent-install.md), join the intended cluster, and run the agent with administrator/root privileges. Use a dedicated physical Ethernet adapter with DHCP disabled and a negotiated link of at least 10 Gbps. Unknown hardware, permissions, DHCP or route facts refuse preparation.
+Home → Private 10GbE network guides setup from the master. First install/update Kluster and join the intended cluster on every computer. Connect a dedicated Ethernet adapter with a negotiated link of at least 10 Gbps, keeping ordinary cluster management on a separate adapter.
+
+The panel explains administrator access before requesting permission. On each computer, acknowledge that notice and click **Enable administrator access on this computer**. Approve the operating system prompt once. Kluster installs a protected networking helper; the agent and its credentials stay under your original account. The master can then handle the dedicated adapter settings for all authorized computers.
 
 Both runtime binaries require a recorded TCP-only source build. On each participating node, use the supported installer and then restart its worker/agent:
 
@@ -283,8 +292,10 @@ Both runtime binaries require a recorded TCP-only source build. On each particip
 uv run python scripts/install.py --llama-only --rpc-tcp-only
 ```
 
-Copy each node's public identity JSON from its local panel. Pair the master on each worker and the workers on the master; the master supplies the public cluster binding. Join-key possession does not replace fingerprint pairing. Replacement requires settled networking and explicit local selection.
+Return to the master, refresh the computer list, and click **Set up private network**. Initial node pairing, a sole safe adapter, private subnet and addresses are handled automatically. If multiple suitable adapters exist, choose one in the computer row. A slow or unknown link, missing authorization, unsupported runtime or unsafe configuration gets a readable status.
 
-Select each worker's adapter in that worker's local app, then select participants and a private subnet on the master. Start creates a queryable operation. All participants must prepare before any temporary address is added. The app preserves existing LAN/WireGuard control routes, DHCP/DNS profiles and the original RPC child. Readiness requires signed dedicated path verification and a released valid RPC protocol probe. `RPC_BUSY` leaves the address configured with verification pending.
+All participants prepare before address changes. Kluster saves dedicated DHCP settings, disables IPv4 DHCP where needed, and restores owned changes on stop or cancellation. Existing LAN/WireGuard management paths, DNS profiles and the original RPC child are preserved. Readiness requires signed dedicated path verification and a released valid RPC protocol probe. `RPC_BUSY` leaves the address configured with verification pending.
 
 On Plan & Run, choose the dedicated network explicitly for that request. The default remains LAN/WireGuard. The selector is excluded from remembered model settings. Run diagnostics expose logical dedicated endpoints and the actual master loopback bridge endpoints. Stop inference before stopping or changing a dependent network. Retry/add/cancel and local cleanup review are available in the network panel. Temporary addresses survive only as long as the host OS retains them; they are not persistent adapter profiles. Keep upstream RPC port 50052 off public networks.
+
+Administrator access can be revoked under **Advanced details** once the private network and cleanup are settled. That section retains manual identity pairing, adapter selection, subnet override and diagnostics. If ownership is lost after a restart or external changes, use **Review network recovery** locally and choose whether to keep the current settings or restore the reviewed Kluster changes. Recovery never silently deletes an ambiguous address.

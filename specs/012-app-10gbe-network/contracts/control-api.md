@@ -1,10 +1,10 @@
-# Managed Network Control API (proposed v1)
+# Managed Network Control API (v1 compatibility and guided v2)
 
-These are additive /v2 contracts to implement, not currently available routes. Existing /v1 and omitted run network selection retain their behavior. Network operations execute asynchronously under one per-cluster mutation coordinator.
+These additive /v2 resources are implemented. Existing /v1 and omitted run network selection retain their behavior. Network operations execute asynchronously under one per-cluster mutation coordinator.
 
 ## Operator Authorization
 
-All routes below require the local node's existing API bearer token. Pairing/trust changes additionally require a loopback peer and valid same-origin request when Origin is supplied; never trust forwarded peer headers. Master cluster mutations require current role master. Worker adapter selection/pinning can be set only through that worker's local app. GET views exclude secrets, journal command text, private keys and join keys. Browser clients follow the existing local token retrieval flow and clear it on teardown; never put it in URLs.
+All routes below require the local node's existing API bearer token. Pairing/trust changes additionally require a loopback peer and valid same-origin request when Origin is supplied; never trust forwarded peer headers. Master cluster mutations require current role master. Manual worker adapter selection and identity replacement remain local. Once the installed helper grants the pinned master authority, signed phases can select a safe dedicated adapter remotely. GET views exclude secrets, journal command text, private keys and join keys. Browser clients follow the existing local token retrieval flow and clear it on teardown; never put it in URLs.
 
 | Method and path | Request / response |
 |---|---|
@@ -49,3 +49,20 @@ Stop/add/retry affecting an active dependent network return INFERENCE_ACTIVE wit
 ## Dashboard Boundary
 
 Add optional sanitized `managed_networks` to existing status snapshots. Keep existing /v2/events topics, generation, acknowledgement and freshness behavior. A client without this capability hides the panel; missing/expired network evidence must not render ready. No separate dashboard socket or new viewer authentication mechanism is introduced. Detailed operation polling uses the resource routes while an operation is pending, with bounded cancellation on navigation.
+
+## Guided resources
+
+| Method and path | Contract |
+|---|---|
+| GET /v2/node/network-setup | Administrator notice, current local grant/runtime status and cleanup_pending; read-only. |
+| POST /v2/node/network-setup/administrator | Local-only acknowledged=true; installs protected helper through OS approval. No notice acknowledgment means no elevation. |
+| DELETE /v2/node/network-setup/administrator | Local-only; revoke settled helper grant, reject active/pending changes. |
+| GET /v2/cluster/network-setup | Master assessment: readable computers, administrator status, safe adapter candidates, automatic sole selection, inventory-bound assessment_revision and networks. |
+| POST /v2/cluster/network-setup | request_id, nodes, optional adapters/subnet, assessment_revision, action start/add/retry, and network_id/expected_revision for existing networks. Repeated identical request IDs retain their original resolved proposal; changed bodies conflict. |
+| GET /v2/cluster/network-setup/operations/{id} | Durable lifecycle operation plus readable message and participant stage/status. |
+| GET /v2/node/network-setup/recovery/{id} | Local-only current/original settings and fresh snapshot_digest. |
+| POST /v2/node/network-setup/recovery/{id} | Local-only decision keep_current or restore_owned with snapshot_digest; dependent inference blocks resolution. |
+| POST /v2/node/network-bootstrap/challenge | Agent-only, <=64KiB, no browser Origin; joined worker public identity, fresh nonce and join-secret HMAC. Master signs/HMACs a fresh challenge; pending challenges expire after 30s and are capped at 256. |
+| POST /v2/node/network-bootstrap/commit | Single-use challenge, worker Ed25519 proof and join-secret HMAC. Pins initial identity; cannot silently replace an existing pin. |
+
+All guided browser resources require the existing bearer and origin rules. Bootstrap resources authenticate by HMAC and signed transcript instead of the browser bearer; join secrets are never sent in these messages. Guided status is managed-network-v2; old workers are reported as requiring an update.

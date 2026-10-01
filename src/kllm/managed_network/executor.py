@@ -63,6 +63,7 @@ def platform_adapter() -> PlatformAdapter:
 class LocalNetworkExecutor:
     def __init__(self, store: NetworkStore, identity: LocalIdentity, state: Callable[[], Any], platform: PlatformAdapter, repository: Callable[[], Path | None]):
         self.store, self.identity, self.state, self.platform, self.repository = store, identity, state, platform, repository
+        self.guided_status: Callable[[], dict[str, Any]] | None = None
         self.lock = asyncio.Lock()
         self.prepared: dict[str, Prepared] = {}
         self.preparation: dict[str, PrepareBody] = {}
@@ -116,7 +117,7 @@ class LocalNetworkExecutor:
         if self.state().role == 'worker':
             import json
             selection = json.loads(self.store.metadata('network_selection') or '{}')
-            if selection.get('adapter_id') != assignment.adapter_id:
+            if selection.get('adapter_id') != assignment.adapter_id and not (self.guided_status and self.guided_status().get('administrator_enabled')):
                 raise PlatformRefusal('INVALID_ADAPTER', 'Worker must select this adapter in its local app first')
         existing_network = self.store.network(command.network_id)
         if self.store.metadata(f'stopped_network:{command.network_id}') or (existing_network is not None and existing_network.observed_state == 'stopped'):
@@ -140,6 +141,7 @@ class LocalNetworkExecutor:
             if key in self.journals and self.journals[key].phase != 'removed_observed':
                 raise PlatformRefusal('CLEANUP_PENDING', 'Settle prior local ownership before preparing again')
             self.platform.close_prepared(self.prepared.pop(key))
+        self.platform.authorize(command)
         prepared = self.platform.prepare(assignment, body.inventory_revision, body.management_hosts)
         self.prepared[key], self.preparation[key] = prepared, body
         assignment.state = 'prepared'
@@ -152,6 +154,7 @@ class LocalNetworkExecutor:
         prepared = self.prepared.get(key)
         if prepared is None or prepared.assignment.assignment_revision != command.assignment_revision or body.prepared_snapshot_digest != prepared.snapshot_digest:
             raise PlatformRefusal('STALE_REVISION', 'No matching current prepared assignment')
+        self.platform.authorize(command)
         authority = MasterAuthority(cluster_binding_id=command.cluster_binding_id, master_node_id=command.master_node_id, master_key_id=command.master_key_id, master_term=command.master_term, master_session_id=command.master_session_id, accepted_channel_id=command.channel_id)
         journal = None
         if not prepared.user_owned:
@@ -343,6 +346,8 @@ class LocalNetworkExecutor:
             await self.diagnostics.pop(key).close()
         journals = [j for j in self.store.journals() if j.network_id == command.network_id and j.node_id == self.identity.node_id and j.phase != 'removed_observed']
         prepared = self.prepared.get(key)
+        if prepared or journals:
+            await asyncio.to_thread(self.platform.authorize, command)
         for journal in journals:
             if prepared is None:
                 assignment = next((a for a in self.store.assignments(command.network_id) if a.node_id == self.identity.node_id), None)
@@ -365,6 +370,8 @@ class LocalNetworkExecutor:
                         journal.event_high_water = prepared.high_water
                         self.store.journal(journal)
                 await asyncio.to_thread(remove)
+        if prepared or journals:
+            await asyncio.to_thread(self.platform.restore_configuration, key)
         if prepared:
             await asyncio.to_thread(self.platform.close_prepared, prepared)
             self.prepared.pop(key, None)
@@ -406,7 +413,11 @@ class LocalNetworkExecutor:
             if command.phase == 'inspect':
                 if command.body:
                     raise PlatformRefusal('STALE_REVISION', 'Inspect does not accept command arguments')
-                return {'status': 'prepared', 'local_revision': self.local_revision(command.network_id), **await asyncio.to_thread(self.inspect_view)}
+                inventory = await asyncio.to_thread(self.inspect_view)
+                setup = getattr(self, 'guided_status', None)
+                if setup:
+                    inventory['setup'] = await asyncio.to_thread(setup)
+                return {'status': 'prepared', 'local_revision': self.local_revision(command.network_id), **inventory}
             key = '/'.join((str(command.cluster_binding_id), command.master_key_id, str(command.network_id), str(command.operation_id), str(command.operation_revision), self.identity.node_id, str(command.phase_sequence)))
             body_digest = digest({'phase': command.phase, 'body': command.body, 'assignment_revision': command.assignment_revision, 'expected_local_revision': command.expected_local_revision})
             fresh, saved = self.store.begin_command(key, body_digest)

@@ -230,8 +230,12 @@ impl Collector {
             result.memory.total = Metric::bytes(total, "host", "mac.hw.memsize");
             if vm_ok {
                 let free = (vm.free_count as u64).checked_mul(page_size as u64);
-                let available =
-                    (vm.free_count as u64 + vm.inactive_count as u64).checked_mul(page_size as u64);
+                let available = crate::hw::macos_available_bytes(
+                    vm.free_count as u64,
+                    vm.inactive_count as u64,
+                    page_size as u64,
+                    total,
+                );
                 let used =
                     (vm.active_count as u64 + vm.wire_count as u64).checked_mul(page_size as u64);
                 for (target, value, name) in [

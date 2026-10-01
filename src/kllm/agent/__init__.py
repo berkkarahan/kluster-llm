@@ -814,7 +814,7 @@ def health() -> dict[str, Any]:
         "pid": os.getpid(),
     }
     if getattr(app.state, 'managed_network', None) is not None:
-        out['capabilities'] = ['managed-network-v1']
+        out['capabilities'] = ['managed-network-v1', 'managed-network-v2']
     # Non-secret fingerprint (same as mDNS ``kid``) so Join-by-key can HTTP-probe
     # when Bonjour/mDNS is unavailable on the LAN.
     if STATE.role == "master" and STATE.join_key:

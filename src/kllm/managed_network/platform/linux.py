@@ -9,7 +9,7 @@ from pathlib import Path
 from ..models import NodeAssignment
 from ..store import digest
 from .base import AdapterSnapshot, PlatformAdapter, PlatformRefusal, run_fixed
-from .inspection import INTERFACE_RE, _inspect_linux, _linux_dhcp
+from .inspection import INTERFACE_RE, NetworkError, _inspect_linux, _linux_dhcp
 
 
 class LinuxAdapter(PlatformAdapter):
@@ -18,7 +18,7 @@ class LinuxAdapter(PlatformAdapter):
         for _, name in socket.if_nameindex():
             try:
                 result.append(self.inspect(name))
-            except (OSError, ValueError, PlatformRefusal):
+            except (OSError, ValueError, NetworkError):
                 continue
         return result
 

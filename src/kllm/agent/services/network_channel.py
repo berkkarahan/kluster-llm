@@ -134,6 +134,7 @@ class ChannelSession:
 class NetworkChannelHub:
     def __init__(self, store: NetworkStore, identity: LocalIdentity, state: Callable[[], Any], master_base: Callable[[], str | None], handler: Callable[[SignedCommand, float], Awaitable[dict[str, Any]]]):
         self.store, self.identity, self.state, self.master_base, self.handler = store, identity, state, master_base, handler
+        self.bootstrap: Callable[[], Awaitable[None]] | None = None
         self.authority: MasterAuthority | None = None
         self.sessions: dict[str, ChannelSession] = {}
         self.client_task: asyncio.Task | None = None
@@ -222,10 +223,15 @@ class NetworkChannelHub:
 
     async def client_loop(self) -> None:
         import websockets
+        import httpx
         while not self.stopping:
             try:
                 peers = [p for p in self.store.peers() if p.expected_role == 'master']
                 base = self.master_base()
+                bootstrap = getattr(self, 'bootstrap', None)
+                if self.state().role == 'worker' and not peers and base and bootstrap:
+                    await bootstrap()
+                    peers = [p for p in self.store.peers() if p.expected_role == 'master']
                 if self.state().role != 'worker' or len(peers) != 1 or not base:
                     await asyncio.sleep(1)
                     continue
@@ -237,7 +243,7 @@ class NetworkChannelHub:
                         await session.pump()
                     finally:
                         self.sessions.pop(peers[0].node_id, None)
-            except (OSError, IdentityError, StoreConflict, ValueError, TimeoutError, websockets.WebSocketException):
+            except (OSError, IdentityError, StoreConflict, ValueError, TimeoutError, websockets.WebSocketException, httpx.HTTPError):
                 pass  # Signed state is reconciled after a fresh handshake, never replayed blindly.
             await asyncio.sleep(1)
 

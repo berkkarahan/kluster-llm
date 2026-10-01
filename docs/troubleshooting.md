@@ -331,7 +331,9 @@ See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-cons
 
 ### Managed private-network preparation and recovery
 
-Use Home → Private 10GbE network → Refresh prerequisites and status. Every worker must be paired locally to the displayed master fingerprint/binding and must select its own adapter before master setup. `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`) followed by an agent/worker restart. Installing over an already running RPC child does not prove that child's transport capabilities.
+If adapter refresh reports HTTP 500 or a JSON parsing error, check `~/.kllm/logs/agent.log` for the failing `/v2/node/network-adapters` request. Older agents may abort macOS discovery on loopback or tunnel interfaces with no `networksetup` service; update and restart the agent to use discovery that skips uninspectable interfaces. The dashboard reports the request path and HTTP status when an error response is not JSON, and preserves structured prerequisite refusal codes.
+
+Use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`) followed by an agent/worker restart. Installing over an already running RPC child does not prove that child's transport capabilities.
 
 `RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN/WireGuard.
 
@@ -340,3 +342,15 @@ Use Home → Private 10GbE network → Refresh prerequisites and status. Every w
 After an abrupt agent restart, prior address observations and readiness are invalid. Present addresses with lost ownership remain untouched. Open that node's local cleanup review: inspect the current exact address and adapter snapshot, then either keep the address and release app ownership or explicitly confirm that exact delta for removal. A changed snapshot refuses removal and requires another review. Never delete all addresses from an adapter to resolve one journal. Graceful shutdown stops a matching dependent managed inference before closing bridges; unrelated legacy inference is identified separately.
 
 Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.
+
+### Guided setup and administrator support
+
+**Administrator access needed:** open Kluster on the named computer and use the local enable button. A remote master cannot open the OS approval prompt. Denial leaves the computer unconfigured; retry locally. The helper is installed by the supported build/install flow, while the agent remains in the original user account. A missing helper binary means update Kluster through [agent installation](agent-install.md).
+
+**No eligible 10GbE connection:** check the cable, switch, adapter and negotiated speed. A 1 Gbps Ethernet connection is insufficient even when the adapter is advertised as 10GbE. Wi-Fi, virtual interfaces and adapters carrying the default or cluster-management connection are excluded. Unknown speed or DHCP/profile state requires fixing the OS configuration before setup.
+
+**Restoration needs attention:** reconnect the named computer and refresh. If the agent or helper lost ownership continuity, open its local panel and choose **Review network recovery**. Keep current settings preserves them and releases Kluster's claim; restore removes only the exact reviewed address and restores its owned configuration. Changed snapshots require another review. Active or uncertain inference reservations block recovery.
+
+**Linux configuration manager unsupported:** guided DHCP transitions support a readable NetworkManager connection or systemd-networkd network file. Custom DHCP plus static settings, ambiguous profiles or another configuration manager require manual review. Advanced/manual setup still supports already-configured dedicated interfaces.
+
+**Windows private traffic blocked:** the helper adds an inbound TCP rule limited to the dedicated address, interface, signed private peers and network ports. Existing firewall rules remain. Group-policy restrictions or externally changed rules are reported; Kluster does not open public RPC access.

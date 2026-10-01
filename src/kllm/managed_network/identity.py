@@ -17,7 +17,7 @@ from uuid import UUID
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 
 from .models import Digest, Counter, Identifier, MasterAuthority, NodeIdentity, PeerIdentity, Phase, Record, Revision
 from .store import NetworkStore
@@ -168,6 +168,7 @@ def validate_peer(peer: PeerIdentity) -> None:
 
 
 class SignedCommand(Record):
+    _wire: str = PrivateAttr(default='')
     cluster_binding_id: UUID
     master_node_id: Identifier
     master_key_id: Digest
@@ -258,7 +259,8 @@ class ChannelFence:
             if actual != self.authority or command.channel_id != self.authority.accepted_channel_id or command.sender_node_id != self.sender or command.target_node_id != self.target or command.sequence <= self.sequence:
                 raise IdentityError('command authority/channel/sequence mismatch')
             self.sequence = command.sequence
-            return command
+            command._wire = wire
+        return command
 
     @staticmethod
     def deadline(command: SignedCommand) -> float:

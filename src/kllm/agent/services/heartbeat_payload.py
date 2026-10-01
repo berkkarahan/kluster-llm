@@ -41,6 +41,7 @@ class HeartbeatPayloadBuilder:
         identity = self._software_identity()
         return {
             "node_id": state.node_id,
+            "rpc_devices": member.get("rpc_devices", []) if state.process_pid and state.process_role == "worker" else [],
             "host": state.rpc_bind or member.get("host") or member.get("lan_host") or "",
             "control_port": state.control_port,
             "rpc_port": state.rpc_port,

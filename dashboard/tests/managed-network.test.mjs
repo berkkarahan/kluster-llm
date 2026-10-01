@@ -32,6 +32,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
     let network = null;
     let operationPending = false;
     let operationRevision = 1;
+    let administratorEnabled = false;
     const status = () => ({role:'master',node_id:'master',members:{master:{host:'192.168.68.1'},worker:{host:'192.168.68.2'}},managed_networks:network ? [network] : []});
     const model = {name:'fixture.gguf',path:'fixture.gguf',size_bytes:100};
     try {
@@ -57,6 +58,24 @@ test('private network app setup, selected run, blocked stop and cleanup',
         const body=chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
         requests.push({path,method:req.method,body,authorization:req.headers.authorization});
         if(path==='/v2/credentials/api-token') return json({api_token:'fixture-token'});
+        if(path==='/v2/node/network-setup/administrator' && req.method==='POST') {
+          assert.equal(body.acknowledged,true,'Administrator notice must be acknowledged first');
+          administratorEnabled=true; return json({ready:true});
+        }
+        if(path==='/v2/node/network-setup') return json({administrator_enabled:administratorEnabled,cleanup_pending:[],administrator_notice:'Administrator access is required on each computer. Original settings will be restored.'});
+        if(path==='/v2/cluster/network-setup' && req.method==='GET') return json({administrator_notice:'Administrator access is required on each computer. Original settings will be restored.',assessment_revision:'a'.repeat(64),master_node_id:'master',networks:network?[network]:[],computers:['master','worker','worker-b'].map(node_id=>({node_id,name:node_id,host:'192.168.68.1',master:node_id==='master',administrator_enabled:administratorEnabled,adapters:[{...adapter,reason:''}],selected_adapter:'eth-test',ready:administratorEnabled,error_code:administratorEnabled?null:'ADMIN_REQUIRED',message:administratorEnabled?'Ready':'Enable administrator access'}))});
+        if(path==='/v2/cluster/network-setup' && req.method==='POST') {
+          assert.equal(body.assessment_revision,'a'.repeat(64));
+          assert.deepEqual(body.nodes,['master','worker','worker-b']);
+          assert.equal(body.subnet,undefined,'Private subnet should be chosen automatically');
+          operationPending=false;
+          network={network_id:networkId,subnet:'192.168.234.0/24',revision:1,observed_state:'ready',desired_state:'active',participants:body.nodes.map((node_id,i)=>({node_id,address:`192.168.234.${i+1}`,prefix_length:24,state:'ready',ownership:'app_owned',verification_freshness:'fresh'})),blocking_runs:[]};
+          return json({network_id:networkId,operation_id:operationId},202);
+        }
+        if(path===`/v2/cluster/network-setup/operations/${operationId}`) return json({phase:operationPending?'preparing':'complete',operation_revision:operationRevision,terminal_result:operationPending?null:{state:network.observed_state},participants:[]});
+        if(path==='/v2/network-test/plain-error') return res.writeHead(500,{'Content-Type':'text/plain'}).end('Internal Server Error');
+        if(path==='/v2/network-test/invalid-json') return res.writeHead(200,{'Content-Type':'text/plain'}).end('invalid');
+        if(path==='/v2/network-test/refusal') return json({error:{code:'unprocessable_entity',message:'The request could not be completed.',details:{code:'LINK_TOO_SLOW',message:'Negotiated speed must be at least 10000 Mbps'}}},422);
         if(path==='/v2/node/network-identity') return json({node_id:'master',key_id:'b'.repeat(64),public_key:'fake-public-key',cluster_binding_id:networkId,permission:true,paired_peers:[]});
         if(path.startsWith('/v2/node/network-identity/peers/')) return json(body);
         if(path==='/v2/node/network-adapters') return json({node_id:'master',adapters:[adapter],selection:JSON.stringify({adapter_id:'eth-test'})});
@@ -135,9 +154,30 @@ test('private network app setup, selected run, blocked stop and cleanup',
       await call('Runtime.enable');
       await call('Page.navigate',{url:base+'/__network-test'});
       await wait("document.querySelector('.managed-network summary')");
+      for (const [path, expected] of [
+        ['plain-error', 'Network request GET /v2/network-test/plain-error returned 500: Internal Server Error'],
+        ['invalid-json', 'Network request GET /v2/network-test/invalid-json returned 200: Invalid JSON response'],
+        ['refusal', 'LINK_TOO_SLOW: Negotiated speed must be at least 10000 Mbps']
+      ]) {
+        const message = await evaluate(`window.networkStore.networkRequest('/v2/network-test/${path}').then(() => 'unexpected success', error => error.message)`, true);
+        assert.equal(message, expected);
+      }
       const click = async text => {await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()===${JSON.stringify(text)} && !b.disabled)`);return evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`);};
       await evaluate("document.querySelector('.managed-network').open=true");
       await wait("document.body.textContent.includes('eth-test')");
+      assert.equal(await evaluate("document.querySelector('.managed-network .advanced').open"),false);
+      assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Enable administrator access on this computer').disabled"),true);
+      await evaluate("document.querySelector('.admin-notice input[type=checkbox]').click()");
+      await click('Enable administrator access on this computer');
+      await click('Set up private network');
+      await wait("document.querySelector('.managed-network summary').textContent.includes('Private network ready')");
+      assert.ok(!requests.some(r=>r.path==='/v2/node/network-selection'||r.path.startsWith('/v2/node/network-identity/peers/')), 'Guided setup needs no manual pairing or selection');
+      await click('Stop private network and restore settings');
+      await wait("document.querySelector('.managed-network summary').textContent.includes('Not set up')");
+      await evaluate("document.querySelector('.managed-network .advanced').open=true");
+      await wait("document.querySelector('.legacy-network')");
+      await evaluate("document.querySelector('.legacy-network').open=true");
+      await wait("document.querySelector('.legacy-network textarea[readonly]')");
       await click('Save local adapter');
       await wait("document.querySelector('.managed-network textarea:not([readonly])')");
       await evaluate(`(()=>{const t=document.querySelector('.managed-network textarea:not([readonly])');t.value=JSON.stringify({node_id:'worker',key_id:'c'.repeat(64),public_key:'fixture-key'});t.dispatchEvent(new Event('input',{bubbles:true}));})()`);

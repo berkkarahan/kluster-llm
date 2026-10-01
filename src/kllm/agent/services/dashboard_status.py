@@ -92,6 +92,7 @@ class DashboardStatusService:
             "backend",
             "actual_backend",
             "devices",
+            "rpc_devices",
             "unified_memory",
             "reclaimable_ram_bytes",
         )

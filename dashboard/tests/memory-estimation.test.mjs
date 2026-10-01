@@ -14,12 +14,12 @@ test('memory controls refresh previews, explain constant batch totals and suppre
   const response = (body, total = 1024 ** 3) => new Response(JSON.stringify({
     estimated_bytes: total, budget_bytes: 8 * 1024 ** 3, fit_status: 'fits',
     weights_estimate_bytes: 512 * 1024 ** 2, auxiliary_weights_bytes: 0,
-    kv_estimate_bytes: 32 * 1024 ** 2, recurrent_state_bytes: 0,
+    kv_estimate_bytes: (body.cache_type_k === 'q4_0' && body.cache_type_v === 'q4_0' ? 16 : 32) * 1024 ** 2, recurrent_state_bytes: 0,
     compute_estimate_bytes: 40 * 1024 ** 2, checkpoint_estimate_bytes: 0,
     auxiliary_runtime_bytes: 0, execution_overhead_bytes: 256 * 1024 ** 2,
     estimate_complete: false, estimate_warnings: ['Fixture unpriced argument'],
     resolved_launch_settings: { context: body.context, batch_size: body.batch_size,
-      micro_batch: 128, parallel_slots: body.parallel_slots }
+      micro_batch: 128, parallel_slots: body.parallel_slots, cache_type_k: body.cache_type_k, cache_type_v: body.cache_type_v }
   }), { status: 200 });
   try {
     process.chdir(fileURLToPath(new URL('..', import.meta.url)));
@@ -71,6 +71,39 @@ test('memory controls refresh previews, explain constant batch totals and suppre
     assert.match(html, /Resolved: context 8192/);
     assert.match(html, /Incomplete estimate/);
     assert.match(html, /Fixture unpriced argument/);
+
+    store.cacheTypeK = 'q8_0'; store.cacheTypeV = 'q8_0';
+    await store.refreshEstimate();
+    store.cacheTypeK = 'q4_0'; store.cacheTypeV = 'q4_0';
+    await store.refreshEstimate();
+    assert.match(store.estimateNote, /KV cache decreased by 16\.00 MiB.*weights and host checkpoints are unchanged/);
+    const quantized = render(RunPage).body;
+    assert.match(quantized, /K cache: q4_0.*V cache: q4_0/);
+    assert.match(quantized, /Must use this node/);
+    store.setNodeRequired('master', true);
+    if (store.estimateTimer) clearTimeout(store.estimateTimer);
+    await store.refreshEstimate();
+    assert.deepEqual(requests.at(-1).required_nodes, ['master']);
+    store.applyParameterSet({ required_nodes: ['master', 'missing'] });
+    assert.match(render(RunPage).body, /missing.*unavailable/);
+    store.nodeShares = { master: 1 };
+    assert.deepEqual(store.planPayload().required_nodes, []);
+    store.nodeShares = null;
+    store.setNodeRequired('missing', false);
+    if (store.estimateTimer) clearTimeout(store.estimateTimer);
+    assert.deepEqual(store.requiredNodes, ['master']);
+    store.applyParameterSet({ node_shares: { missing: 0.8, master: 0.2 } });
+    assert.deepEqual(store.nodePriority, ['missing', 'master']);
+    assert.equal(store.nodeShares, null);
+    assert.match(render(RunPage).body, /Remove unavailable missing/);
+    store.removeNodePriority('missing');
+    assert.deepEqual(store.planPayload().node_priority, ['master']);
+    store.applyParameterSet({ node_priority: ['master'], required_nodes: ['master'] });
+    assert.deepEqual(store.nodePriority, ['master']);
+    store.setPriorityPlanning(false);
+    assert.deepEqual(store.planPayload().node_priority, []);
+    assert.deepEqual(store.planPayload().required_nodes, ['master']);
+    if (store.estimateTimer) clearTimeout(store.estimateTimer);
 
     // Schedule invalidates in-flight previews before the next request even starts.
     defer = true;

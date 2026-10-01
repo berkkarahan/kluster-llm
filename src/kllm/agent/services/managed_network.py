@@ -17,7 +17,7 @@ from kllm.managed_network.models import (
     AdmissionLease, ManagedNetwork, MasterAuthority, NetworkOperation,
     NetworkState, Phase, NodeAssignment, ParticipantResult, RPCChildIdentity, VerificationEvidence, utc_now,
 )
-from kllm.managed_network.platform.base import PlatformAdapter, PlatformRefusal
+from kllm.managed_network.platform.base import PlatformAdapter, PlatformRefusal, is_admin
 from kllm.managed_network.store import NetworkStore, StoreConflict, digest
 from kllm.managed_network.verification import Freshness
 from kllm.state import repo_root
@@ -29,8 +29,17 @@ class ManagedNetworkService:
         self.state, self.home = state, home
         self.store = NetworkStore(home)
         self.identity = LocalIdentity(home, state().node_id, self.store)
+        from kllm.managed_network.bootstrap import IdentityBootstrap
+        from kllm.managed_network.guided_setup import GuidedSetup
+        self.bootstrap = IdentityBootstrap(self)
+        self.guided = GuidedSetup(self)
         self.executor = LocalNetworkExecutor(self.store, self.identity, state, platform or platform_adapter(), repository)
+        self.executor.guided_status = self.guided.local_status
+        if platform is None and not is_admin():
+            from kllm.managed_network.helper_platform import HelperPlatform
+            self.executor.platform = HelperPlatform(self.executor.platform, self.guided.helper, self.guided.grant)
         self.channels = NetworkChannelHub(self.store, self.identity, state, master_base, self.executor.execute)
+        self.channels.bootstrap = self.bootstrap.connect
         self.lock = asyncio.Lock()  # Shared by topology changes and run reservations.
         self.tasks: dict[str, asyncio.Task] = {}
         self.local_authority: MasterAuthority | None = None
@@ -61,7 +70,7 @@ class ManagedNetworkService:
         return self.local_authority
 
     def local_inventory(self) -> dict[str, Any]:
-        return self.executor.inspect_view()
+        return {**self.executor.inspect_view(), 'setup': self.guided.local_status()}
 
     def select_adapter(self, selection: AdapterSelection) -> dict[str, Any]:
         snapshot = self.executor.platform.inspect(selection.adapter_id)
@@ -142,6 +151,7 @@ class ManagedNetworkService:
             if node_id == self.identity.node_id:
                 authority = self._authority()
                 command = SignedCommand.model_validate({**authority.model_dump(exclude={'accepted_channel_id'}), 'channel_id': authority.accepted_channel_id, 'version': 1, 'type': 'command', 'sender_node_id': node_id, 'target_node_id': node_id, 'sequence': sequence, 'network_id': operation.network_id, 'operation_id': operation.operation_id, 'operation_revision': operation.operation_revision, 'phase_sequence': sequence, 'phase': phase, 'assignment_revision': assignment.assignment_revision, 'expected_local_revision': revision, 'ttl_ms': max(1, min(60000, int(timeout * 1000))), 'body': body})
+                command._wire = self.identity.sign(command.model_dump(mode='json'))
                 result = await self.executor.execute(command, time.monotonic() + timeout)
             else:
                 session = self.channels.sessions.get(node_id)

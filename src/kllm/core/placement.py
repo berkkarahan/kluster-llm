@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -12,7 +12,10 @@ from kllm.core.memory_estimation import (
     effective_launch_settings,
     memory_costs,
 )
-from kllm.core.tensor_split import proportional_weights, select_routing_devices
+from kllm.core.tensor_split import proportional_weights
+from kllm.core.contiguous_allocation import (
+    ContiguousAllocation, allocation_rank, allocate_contiguous as _allocate_contiguous,
+)
 from kllm.core.placement_models import (
     DeviceAllocation,
     DevicePlacementPlan,
@@ -30,74 +33,11 @@ Allocation = DeviceAllocation
 
 
 @dataclass(frozen=True)
-class ContiguousAllocation:
-    """A successful contiguous layer placement with its CPU prefix."""
-
-    cpu_layers: int
-    cpu_bytes: int
-    allocations: tuple[Allocation, ...]
-
-
-@dataclass(frozen=True)
 class ManualAllocationResult:
     """Manual placement result and an optional reason why it did not fit."""
 
     solution: ContiguousAllocation | None
     failure_reason: str | None = None
-
-
-def _allocate_contiguous(
-    devices: Sequence[Device],
-    costs: Sequence[int],
-    *,
-    cpu_budget: int,
-    cpu_base: int,
-    overhead: int,
-    master_node_id: str,
-) -> ContiguousAllocation | None:
-    """Find a contiguous layer allocation, including its CPU prefix."""
-    count = len(costs)
-    prefix = [0]
-    for cost in costs:
-        prefix.append(prefix[-1] + cost)
-    for cpu_count in range(count + 1):
-        cpu_bytes = cpu_base + prefix[cpu_count]
-        if cpu_bytes > cpu_budget:
-            continue
-        states: dict[int, list[Allocation]] = {cpu_count: []}
-        for d in devices:
-            next_states = dict(states)
-            for start, assignments in states.items():
-                budget = d.budget_bytes
-                if d.local and d.unified_memory:
-                    budget = max(0, budget - prefix[cpu_count])
-                if d.unified_memory:
-                    budget = max(
-                        0,
-                        budget
-                        - sum(
-                            a.estimated_bytes
-                            for a in assignments
-                            if a.node_id == d.node_id
-                        ),
-                    )
-                for end in range(start + 1, count + 1):
-                    used = prefix[end] - prefix[start] + overhead
-                    if used > budget:
-                        break
-                    if end not in next_states:
-                        next_states[end] = assignments + [
-                            d.allocate(
-                                layer_start=start,
-                                layer_end=end,
-                                estimated_bytes=used,
-                                total_layers=count,
-                            )
-                        ]
-            states = next_states
-        if count in states:
-            return ContiguousAllocation(cpu_count, cpu_bytes, tuple(states[count]))
-    return None
 
 
 def _allocate_manual(
@@ -110,6 +50,7 @@ def _allocate_manual(
     cpu_base: int,
     overhead: int,
     master_node_id: str,
+    shared_budgets: Mapping[str, int] | None = None,
 ) -> ManualAllocationResult:
     """Round node byte targets to contiguous whole layers; never spill onto CPU."""
     if cpu_base > cpu_budget:
@@ -156,6 +97,7 @@ def _allocate_manual(
                     cpu_base=0,
                     overhead=overhead,
                     master_node_id=master_node_id,
+                    shared_budgets=shared_budgets,
                 )
                 if solved is None or solved.cpu_layers != 0:
                     continue
@@ -199,7 +141,22 @@ def plan_devices(
     vram_weight: float,
     latency_weight: float,
     node_shares: dict[str, float] | None = None,
+    required_nodes: Sequence[str] = (),
+    node_priority: Sequence[str] = (),
 ) -> DevicePlacementPlan:
+    required = frozenset(required_nodes)
+    unknown = required - {n.node_id for n in nodes}
+    if unknown:
+        raise ValidationError(f"required nodes are unavailable: {', '.join(sorted(unknown))}")
+    if required and (node_shares is not None or settings.split_mode != "layer"):
+        raise ValidationError("required_nodes require automatic layer placement")
+    if len(set(node_priority)) != len(node_priority) or any(not nid.strip() or nid != nid.strip() for nid in node_priority):
+        raise ValidationError("node_priority must contain unique nonempty node IDs")
+    unavailable = set(node_priority) - {n.node_id for n in nodes}
+    if unavailable:
+        raise ValidationError(f"priority nodes are unavailable: {', '.join(sorted(unavailable))}")
+    if node_priority and (node_shares is not None or settings.split_mode != "layer"):
+        raise ValidationError("node_priority requires automatic layer placement")
     settings = effective_launch_settings(settings, context)
     context = settings.context
     device_count = (
@@ -240,28 +197,48 @@ def plan_devices(
                     int(total * headroom), free + inventory_device.reclaimable_bytes
                 )
                 if n.unified_memory:
-                    budget = min(budget, ram(n))
-                    if n.is_master:
-                        budget = max(0, budget - cpu_base)
+                    budget = min(budget, max(0, ram(n) - (cpu_base if n.is_master else 0)))
                 local = n.is_master
                 name = inventory_device.device
                 if not name:
                     raise ValidationError(f"{n.node_id}: missing llama.cpp device name")
                 endpoint = n.rpc_endpoint
+                rpc_inventory = {d.device: d for d in n.rpc_devices}
+                rpc_device = rpc_inventory.get(name)
+                if not local and n.rpc_devices and (rpc_device is None or rpc_device.memory_kind != "gpu"):
+                    raise ValidationError(f"{n.node_id}: selected GPU absent from running RPC inventory; rejoin this node")
+                rpc_index = rpc_device.index if rpc_device is not None else i
                 devices.append(
                     Device(
                         node_id=n.node_id,
-                        device=name if local else f"RPC[{endpoint}]/{i}",
+                        device=name if local else f"RPC[{endpoint}]/{rpc_index}",
                         backend=inventory_device.backend or n.backend,
                         local=local,
                         budget_bytes=budget,
                         latency_ms=n.latency_ms,
                         rpc_endpoint=None if local else endpoint,
-                        rpc_index=i,
-                        rpc_device_count=len(inventory),
+                        rpc_index=rpc_index,
+                        rpc_device_count=len(n.rpc_devices) or len(inventory),
                         unified_memory=n.unified_memory,
                     )
                 )
+    cpu_devices: list[Device] = []
+    if node_shares is None and settings.split_mode == "layer":
+        for n in nodes:
+            if n.is_master:
+                continue  # Master CPU layers remain the upstream contiguous prefix.
+            for rpc_device in n.rpc_devices:
+                if rpc_device.memory_kind != "ram":
+                    continue
+                if not n.rpc_endpoint:
+                    raise ValidationError(f"{n.node_id}: CPU RPC device requires an endpoint")
+                cpu_devices.append(Device(
+                    node_id=n.node_id, device=f"RPC[{n.rpc_endpoint}]/{rpc_device.index}",
+                    backend="cpu", local=False, budget_bytes=ram(n), latency_ms=n.latency_ms,
+                    rpc_endpoint=n.rpc_endpoint, rpc_index=rpc_device.index,
+                    rpc_device_count=len(n.rpc_devices), unified_memory=n.unified_memory,
+                    memory_kind="ram",
+                ))
     max_cap = max((d.budget_bytes for d in devices), default=1) or 1
     max_lat = max((d.latency_ms for d in devices), default=0)
     devices = [
@@ -277,80 +254,91 @@ def plan_devices(
     ]
     gpu_budgets = {
         n.node_id: (
-            min(ram(n), sum(d.budget_bytes for d in devices if d.node_id == n.node_id))
+            min(max(0, ram(n) - (cpu_base if n.is_master else 0)), sum(d.budget_bytes for d in devices if d.node_id == n.node_id))
             if n.unified_memory
             else sum(d.budget_bytes for d in devices if d.node_id == n.node_id)
         )
         for n in nodes
     }
-    devices.sort(key=lambda d: -d.score)
-
+    devices.sort(key=lambda d: (-d.score, -d.budget_bytes))
+    cpu_devices.sort(key=lambda d: (-d.budget_bytes, d.latency_ms))
+    if node_priority:
+        priority_order = {nid: i for i, nid in enumerate(node_priority)}
+        devices.sort(key=lambda d: priority_order.get(d.node_id, len(priority_order)))
+        cpu_devices.sort(key=lambda d: priority_order.get(d.node_id, len(priority_order)))
+    gpu_devices = list(devices)
+    shared_budgets = {
+        n.node_id: max(0, ram(n) - (cpu_base if n.is_master else 0))
+        for n in nodes if n.unified_memory
+    }
     model_bytes = sum(costs)
     overhead = memory.overhead
-    locals_only = [d for d in devices if d.local]
-    local_solution = (
-        _allocate_contiguous(
-            locals_only,
-            costs,
-            cpu_budget=cpu_budget,
-            cpu_base=cpu_base,
-            overhead=overhead,
-            master_node_id=master.node_id,
-        )
-        if cpu_base <= cpu_budget and locals_only
-        else None
-    )
-    locals_fit = cpu_base <= cpu_budget and bool(locals_only) and local_solution is not None
+    split_mode = settings.split_mode
+    failure_reason: str | None = None
+    routing_mode: Literal["manual", "local", "single_remote", "pool"] = "pool"
     if node_shares is not None:
-        if device != "gpu" or settings.split_mode != "layer":
+        if device != "gpu" or split_mode != "layer":
             raise ValidationError("manual node shares require GPU layer placement")
         active = {n.node_id for n in nodes}
         if any(share > 0 for nid, share in node_shares.items() if nid not in active):
             raise ValidationError("manual node shares must match current cluster members")
         node_shares = {nid: node_shares.get(nid, 0) for nid in active}
-        routing_mode: Literal["manual", "local", "single_remote", "pool"] = "manual"
-    else:
-        routing = select_routing_devices(
-            devices,
-            model_bytes=model_bytes,
-            overhead=overhead,
-            cpu_base=cpu_base,
-            cpu_budget=cpu_budget,
-            locals_fit=locals_fit,
-        )
-        routing_mode = routing.mode
-        devices = list(routing.devices)
-
-    split_mode = settings.split_mode
-    # For each possible CPU prefix, find contiguous device segments by dynamic programming.
-    # Includes the output layer, so ngl and tensor_split describe the same allocation.
-    failure_reason: str | None = None
-    if node_shares is not None:
+        routing_mode = "manual"
         manual = _allocate_manual(
-            nodes,
-            devices,
-            costs,
-            node_shares,
-            cpu_budget=cpu_budget,
-            cpu_base=cpu_base,
-            overhead=overhead,
-            master_node_id=master.node_id,
+            nodes, devices, costs, node_shares, cpu_budget=cpu_budget,
+            cpu_base=cpu_base, overhead=overhead, master_node_id=master.node_id,
+            shared_budgets=shared_budgets,
         )
         solution = manual.solution
         failure_reason = manual.failure_reason
     else:
-        solution = (
-            local_solution
-            if routing_mode == "local"
-            else _allocate_contiguous(
-                devices,
-                costs,
-                cpu_budget=cpu_budget,
-                cpu_base=cpu_base,
-                overhead=overhead,
-                master_node_id=master.node_id,
+        def allocate(candidates: Sequence[Device], *, spill: bool) -> ContiguousAllocation | None:
+            return _allocate_contiguous(
+                candidates, costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+                overhead=overhead, master_node_id=master.node_id,
+                required_nodes=required, shared_budgets=shared_budgets,
+                allow_cpu_spill=spill, node_priority=node_priority,
             )
-        )
+
+        # GPU-first: a local CPU-spill shortcut must not hide a feasible GPU pool.
+        locals_only = [d for d in devices if d.local]
+        solution = allocate(locals_only, spill=False) if locals_only and not node_priority else None
+        if solution is not None:
+            routing_mode, devices = "local", locals_only
+        if solution is None and not node_priority:
+            for remote in sorted((d for d in gpu_devices if not d.local), key=lambda d: -d.budget_bytes):
+                single = allocate([remote], spill=False)
+                if single is not None:
+                    solution, routing_mode, devices = single, "single_remote", [remote]
+                    break
+        if solution is None:
+            devices = gpu_devices
+            solution = allocate(devices, spill=False)
+        if solution is None:
+            devices = gpu_devices + cpu_devices
+            solution = allocate(devices, spill=True)
+            # Try GPU and CPU orders in both directions; CPU devices may need to
+            # precede a GPU to host an expensive early layer without CPU-prefix spill.
+            if cpu_devices and gpu_devices:
+                alternate = allocate(cpu_devices + gpu_devices, spill=True)
+                if alternate is not None and (solution is None or allocation_rank(alternate, costs, node_priority, master.node_id) < allocation_rank(solution, costs, node_priority, master.node_id)):
+                    solution = alternate
+            if solution is not None:
+                endpoints_used = {a.rpc_endpoint for a in solution.allocations if a.rpc_endpoint}
+                routing_mode = "local" if not endpoints_used else "single_remote" if len(endpoints_used) == 1 else "pool"
+        if solution is None:
+            details = []
+            if cpu_base > cpu_budget:
+                details.append("master RAM cannot hold input tensors, checkpoints and runtime reserves")
+            if required:
+                details.append(f"cannot allocate a model layer on every required node ({', '.join(sorted(required))})")
+            if any(n.available_ram_bytes == 0 for n in nodes if n.unified_memory):
+                details.append("a unified-memory node reports zero available RAM; check its capacity measurement")
+            failure_reason = "; ".join(details) or "no contiguous device allocation fits available memory"
+
+    if node_priority and solution is not None:
+        endpoints_used = {a.rpc_endpoint for a in solution.allocations if a.rpc_endpoint}
+        routing_mode = "local" if not endpoints_used else "single_remote" if len(endpoints_used) == 1 else "pool"
     fits = solution is not None
     if solution is None:
         cpu_count = count
@@ -395,25 +383,48 @@ def plan_devices(
         for nid in node_ids
     ]
     node_workload = {
-        nid: sum(
+        nid: (sum(costs[:cpu_count]) if nid == master.node_id and fits else 0) + sum(
             sum(costs[a.layer_start : a.layer_end])
             for a in allocations
             if a.node_id == nid
         )
         for nid in node_ids
     }
-    budget = cpu_budget + sum(
-        d.budget_bytes for d in devices if not (d.local and d.unified_memory)
-    )
+    ram_budgets = {
+        n.node_id: ram(n) if n.is_master or any(d.node_id == n.node_id for d in cpu_devices) else 0
+        for n in nodes
+    }
+    node_ram = {
+        n.node_id: (cpu_bytes if n.is_master else 0) + sum(a.estimated_bytes for a in allocations if a.node_id == n.node_id and a.memory_kind == "ram")
+        for n in nodes
+    }
+    node_vram = {
+        n.node_id: sum(a.estimated_bytes for a in allocations if a.node_id == n.node_id and a.memory_kind == "gpu")
+        for n in nodes
+    }
+    node_budgets = {
+        n.node_id: max(ram_budgets[n.node_id], gpu_budgets[n.node_id]) if n.unified_memory else ram_budgets[n.node_id] + gpu_budgets[n.node_id]
+        for n in nodes
+    }
+    budget = sum(node_budgets.values())
     tight = fits and (
         cpu_bytes > cpu_budget * 0.9
         or any(a.estimated_bytes > a.budget_bytes * 0.9 for a in allocations)
+        or any(
+            node_ram[n.node_id] + node_vram[n.node_id] > node_budgets[n.node_id] * 0.9
+            for n in nodes if n.unified_memory
+        )
     )
     fit_status: Literal["overflow", "tight", "fits"] = (
         "overflow" if not fits else "tight" if tight else "fits"
     )
-    device_effective = "gpu" if ngl else "cpu"
+    device_effective = "gpu" if any(a.memory_kind == "gpu" for a in allocations) else "cpu"
     return DevicePlacementPlan(
+        required_nodes=tuple(sorted(required)),
+        node_priority=tuple(node_priority),
+        node_ram_budget_bytes=tuple(NodeByteValue(nid, value) for nid, value in ram_budgets.items()),
+        node_ram_alloc_bytes=tuple(NodeByteValue(nid, value) for nid, value in node_ram.items()),
+        node_vram_alloc_bytes=tuple(NodeByteValue(nid, value) for nid, value in node_vram.items()),
         node_ids=tuple(node_ids),
         node_alloc_bytes=tuple(node_alloc),
         distributable_bytes=model_bytes,
@@ -428,12 +439,7 @@ def plan_devices(
             if node_shares is not None
             else None
         ),
-        budgets_bytes=tuple(
-            ram(n)
-            if n.is_master
-            else sum(d.budget_bytes for d in devices if d.node_id == n.node_id)
-            for n in nodes
-        ),
+        budgets_bytes=tuple(node_budgets[n.node_id] for n in nodes),
         tensor_split=tuple(split),
         tensor_split_csv=",".join(f"{v:.6f}" for v in split) or "0",
         device_allocations=tuple(allocations),
@@ -441,7 +447,7 @@ def plan_devices(
         rpc_endpoints=tuple(endpoints),
         routing_mode=routing_mode,
         cpu_layers=cpu_count,
-        cpu_alloc_bytes=cpu_bytes,
+        cpu_alloc_bytes=sum(node_ram.values()),
         ngl=ngl,
         estimated_layers=count - 1,
         model_size_bytes=size,
@@ -468,7 +474,7 @@ def plan_devices(
             NodeDeviceAssignment(
                 node_id=nid,
                 effective=(
-                    "gpu" if any(a.node_id == nid for a in allocations) else "cpu"
+                    "gpu" if any(a.node_id == nid and a.memory_kind == "gpu" for a in allocations) else "cpu"
                 ),
                 fallback=False,
             )
@@ -478,8 +484,8 @@ def plan_devices(
             max((d.score for d in devices if d.node_id == nid), default=0) for nid in node_ids
         ),
         node_latency_ms=tuple(n.latency_ms for n in nodes),
-        vram_alloc_bytes=sum(a.estimated_bytes for a in allocations),
-        ram_alloc_bytes=cpu_bytes,
+        vram_alloc_bytes=sum(node_vram.values()),
+        ram_alloc_bytes=sum(node_ram.values()),
         fit_status=fit_status,
         hint=(failure_reason or "no contiguous device allocation fits available memory")
         if not fits

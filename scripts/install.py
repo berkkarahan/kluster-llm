@@ -812,6 +812,22 @@ def build_rust(python: Path, *, release: bool) -> None:
             env=env,
         )
 
+    # The privileged executable must not load Python or a user-writable Python
+    # runtime. Build it independently of the extension's PyO3 features.
+    helper_target = ROOT / "target" / "network-helper"
+    helper_command = [
+        "cargo", "build", "--manifest-path", str(ROOT / "crates" / "kllm-native" / "Cargo.toml"),
+        "--no-default-features", "--features", "network-helper", "--bin", "kllm-network-helper",
+        "--target-dir", str(helper_target),
+    ]
+    if release:
+        helper_command.append("--release")
+    _run(helper_command, env=env)
+    helper_name = "kllm-network-helper.exe" if os.name == "nt" else "kllm-network-helper"
+    helper_binary = helper_target / ("release" if release else "debug") / helper_name
+    (ROOT / "vendor" / "bin").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(helper_binary, ROOT / "vendor" / "bin" / helper_name)
+
 
 def build_ui(*, skip_install: bool) -> None:
     ensure_node()

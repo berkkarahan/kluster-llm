@@ -100,6 +100,7 @@ def _run_settings_options(
     split_mode: Optional[str] = None,
     flash_attention: str = "auto",
     node_share: list[str] | None = None,
+    require_node: list[str] | None = None,
 ) -> dict[str, object]:
     headroom = _headroom_override(device, vram_percent, ram_percent)
     shares = _parse_node_shares(node_share)
@@ -120,6 +121,7 @@ def _run_settings_options(
         micro_batch=micro_batch,
         flash_attention=flash_attention,
         node_shares=shares,
+        required_nodes=require_node,
         vision=vision,
         mmproj=mmproj,
         chat_template=chat_template,
@@ -243,6 +245,7 @@ def plan_cmd(
     node_share: list[str] = typer.Option(
         [], "--node-share", help="NODE=FRACTION; repeat for every member"
     ),
+    require_node: list[str] = typer.Option([], "--require-node", help="Require a model layer on NODE; repeat for multiple nodes"),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -284,6 +287,7 @@ def plan_cmd(
         split_mode=split_mode,
         flash_attention=flash_attention,
         node_share=node_share,
+        require_node=require_node,
     )
     with _client(port) as c:
         r = c.post("/v2/inference/plans", json=payload)
@@ -362,6 +366,7 @@ def run(
     node_share: list[str] = typer.Option(
         [], "--node-share", help="NODE=FRACTION; repeat for every member"
     ),
+    require_node: list[str] = typer.Option([], "--require-node", help="Require a model layer on NODE; repeat for multiple nodes"),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
     remember: bool = typer.Option(True, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
@@ -403,6 +408,7 @@ def run(
         split_mode=split_mode,
         flash_attention=flash_attention,
         node_share=node_share,
+        require_node=require_node,
     )
     with _client(port) as c:
         r = c.post("/v2/inference/runs", json=payload)

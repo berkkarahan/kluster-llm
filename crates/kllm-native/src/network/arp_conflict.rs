@@ -1,108 +1,210 @@
 //! Interface-scoped RFC5227 probes. Incomplete capture never means no conflict.
+#[cfg(feature = "python-bindings")]
 use pyo3::prelude::*;
 #[cfg(unix)]
-use std::{ffi::CString, fs::File, io::{self, Read}, net::Ipv4Addr, os::fd::{AsRawFd, FromRawFd, OwnedFd}, time::{Duration, Instant}};
+use std::{
+    ffi::CString,
+    fs::File,
+    io::{self, Read},
+    net::Ipv4Addr,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    time::{Duration, Instant},
+};
 
 #[cfg(unix)]
-fn failure(message: &str) -> io::Error { io::Error::new(io::ErrorKind::Other, message) }
+fn failure(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, message)
+}
 
 #[cfg(unix)]
 fn frame(mac: [u8; 6], address: Ipv4Addr) -> [u8; 60] {
     let mut frame = [0u8; 60];
-    frame[..6].fill(255); frame[6..12].copy_from_slice(&mac);
-    frame[12..14].copy_from_slice(&[8,6]);
-    frame[14..22].copy_from_slice(&[0,1,8,0,6,4,0,1]);
+    frame[..6].fill(255);
+    frame[6..12].copy_from_slice(&mac);
+    frame[12..14].copy_from_slice(&[8, 6]);
+    frame[14..22].copy_from_slice(&[0, 1, 8, 0, 6, 4, 0, 1]);
     frame[22..28].copy_from_slice(&mac);
     // Sender IPv4 and target MAC are zero; target IPv4 is the proposed address.
     frame[38..42].copy_from_slice(&address.octets());
     frame
 }
 #[cfg(unix)]
-fn conflict(packet: &[u8], mac: [u8;6], address: Ipv4Addr) -> bool {
-    if packet.len() < 42 || packet[12..14] != [8,6] || packet[14..20] != [0,1,8,0,6,4] || packet[22..28] == mac { return false; }
-    packet[28..32] == address.octets() || (packet[28..32] == [0,0,0,0] && packet[38..42] == address.octets())
+fn conflict(packet: &[u8], mac: [u8; 6], address: Ipv4Addr) -> bool {
+    if packet.len() < 42
+        || packet[12..14] != [8, 6]
+        || packet[14..20] != [0, 1, 8, 0, 6, 4]
+        || packet[22..28] == mac
+    {
+        return false;
+    }
+    packet[28..32] == address.octets()
+        || (packet[28..32] == [0, 0, 0, 0] && packet[38..42] == address.octets())
 }
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 fn open(interface: &str) -> io::Result<OwnedFd> {
     let name = CString::new(interface).map_err(|_| failure("invalid interface"))?;
     let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
-    if index == 0 { return Err(failure("interface disappeared")); }
-    let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, (0x0806u16).to_be() as i32) };
-    if fd < 0 { return Err(io::Error::last_os_error()); }
+    if index == 0 {
+        return Err(failure("interface disappeared"));
+    }
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_RAW | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            (0x0806u16).to_be() as i32,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
     let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-    addr.sll_family = libc::AF_PACKET as u16; addr.sll_protocol = (0x0806u16).to_be(); addr.sll_ifindex = index as i32;
-    if unsafe { libc::bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of_val(&addr) as _) } < 0 { return Err(io::Error::last_os_error()); }
+    addr.sll_family = libc::AF_PACKET as u16;
+    addr.sll_protocol = (0x0806u16).to_be();
+    addr.sll_ifindex = index as i32;
+    if unsafe {
+        libc::bind(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            std::mem::size_of_val(&addr) as _,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     Ok(owned)
 }
-#[cfg(target_os="macos")]
+#[cfg(target_os = "macos")]
 fn open(interface: &str) -> io::Result<OwnedFd> {
     let name = CString::new(interface).map_err(|_| failure("invalid interface"))?;
-    if interface.len() >= libc::IFNAMSIZ || unsafe { libc::if_nametoindex(name.as_ptr()) } == 0 { return Err(failure("invalid/missing interface")); }
+    if interface.len() >= libc::IFNAMSIZ || unsafe { libc::if_nametoindex(name.as_ptr()) } == 0 {
+        return Err(failure("invalid/missing interface"));
+    }
     let mut opened = None;
     for number in 0..256 {
         let path = CString::new(format!("/dev/bpf{number}")).unwrap();
-        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) };
-        if fd >= 0 { opened = Some(unsafe { OwnedFd::from_raw_fd(fd) }); break; }
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd >= 0 {
+            opened = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+            break;
+        }
         let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::EBUSY) { return Err(err); }
+        if err.raw_os_error() != Some(libc::EBUSY) {
+            return Err(err);
+        }
     }
     let owned = opened.ok_or_else(|| failure("no BPF capture handle available"))?;
     let fd = owned.as_raw_fd();
     let mut length = 65536u32;
     let mut immediate = 1u32;
     let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
-    for (target, source) in req.ifr_name.iter_mut().zip(interface.bytes()) { *target = source as _; }
+    for (target, source) in req.ifr_name.iter_mut().zip(interface.bytes()) {
+        *target = source as _;
+    }
     // Values derived from SDK net/bpf.h _IO{R,W,WR} and the actual ifreq size.
     let setif = 0x80000000u64 | ((std::mem::size_of::<libc::ifreq>() as u64) << 16) | 0x426c;
-    if unsafe { libc::ioctl(fd, 0xc0044266, &mut length) } < 0 || unsafe { libc::ioctl(fd, setif, &mut req) } < 0 || unsafe { libc::ioctl(fd, 0x80044270, &mut immediate) } < 0 { return Err(io::Error::last_os_error()); }
+    if unsafe { libc::ioctl(fd, 0xc0044266, &mut length) } < 0
+        || unsafe { libc::ioctl(fd, setif, &mut req) } < 0
+        || unsafe { libc::ioctl(fd, 0x80044270, &mut immediate) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     let mut dlt = 0u32;
-    if unsafe { libc::ioctl(fd, 0x4004426a, &mut dlt) } < 0 || dlt != 1 { return Err(failure("BPF interface does not expose Ethernet frames")); }
-    if length > 65536 { return Err(failure("BPF buffer exceeds capture bound")); }
+    if unsafe { libc::ioctl(fd, 0x4004426a, &mut dlt) } < 0 || dlt != 1 {
+        return Err(failure("BPF interface does not expose Ethernet frames"));
+    }
+    if length > 65536 {
+        return Err(failure("BPF buffer exceeds capture bound"));
+    }
     Ok(owned)
 }
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 fn check_loss(fd: i32) -> io::Result<()> {
-    let mut statistics = [0u32; 3]; let mut length = std::mem::size_of_val(&statistics) as libc::socklen_t;
-    if unsafe { libc::getsockopt(fd, libc::SOL_PACKET, libc::PACKET_STATISTICS, statistics.as_mut_ptr().cast(), &mut length) } < 0 { return Err(io::Error::last_os_error()); }
-    if statistics[1] != 0 { return Err(failure("ARP capture dropped packets")); }
+    let mut statistics = [0u32; 3];
+    let mut length = std::mem::size_of_val(&statistics) as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_PACKET,
+            libc::PACKET_STATISTICS,
+            statistics.as_mut_ptr().cast(),
+            &mut length,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if statistics[1] != 0 {
+        return Err(failure("ARP capture dropped packets"));
+    }
     Ok(())
 }
-#[cfg(target_os="macos")]
+#[cfg(target_os = "macos")]
 fn check_loss(fd: i32) -> io::Result<()> {
     let mut statistics = [0u32; 2];
-    if unsafe { libc::ioctl(fd, 0x4008426f, &mut statistics) } < 0 { return Err(io::Error::last_os_error()); }
-    if statistics[1] != 0 { return Err(failure("ARP capture dropped packets")); }
+    if unsafe { libc::ioctl(fd, 0x4008426f, &mut statistics) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if statistics[1] != 0 {
+        return Err(failure("ARP capture dropped packets"));
+    }
     Ok(())
 }
 
 #[cfg(unix)]
-fn capture(fd: i32, bytes: &mut [u8;65536], mac: [u8;6], address: Ipv4Addr) -> io::Result<Option<bool>> {
-    #[cfg(target_os="linux")]
-    let size = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), libc::MSG_TRUNC | libc::MSG_DONTWAIT) };
-    #[cfg(target_os="macos")]
+fn capture(
+    fd: i32,
+    bytes: &mut [u8; 65536],
+    mac: [u8; 6],
+    address: Ipv4Addr,
+) -> io::Result<Option<bool>> {
+    #[cfg(target_os = "linux")]
+    let size = unsafe {
+        libc::recv(
+            fd,
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+            libc::MSG_TRUNC | libc::MSG_DONTWAIT,
+        )
+    };
+    #[cfg(target_os = "macos")]
     let size = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
     if size < 0 {
         let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted { return Ok(None); }
+        if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted {
+            return Ok(None);
+        }
         return Err(err);
     }
-    if size == 0 || size as usize > bytes.len() { return Err(failure("ARP capture truncated")); }
-    #[cfg(target_os="linux")]
+    if size == 0 || size as usize > bytes.len() {
+        return Err(failure("ARP capture truncated"));
+    }
+    #[cfg(target_os = "linux")]
     return Ok(Some(conflict(&bytes[..size as usize], mac, address)));
-    #[cfg(target_os="macos")]
+    #[cfg(target_os = "macos")]
     {
         let mut offset = 0;
         while offset < size as usize {
             let data = &bytes[offset..size as usize];
-            if data.len() < 18 { return Err(failure("BPF capture header truncated")); }
+            if data.len() < 18 {
+                return Err(failure("BPF capture header truncated"));
+            }
             let caplen = u32::from_ne_bytes(data[8..12].try_into().unwrap()) as usize;
             let datalen = u32::from_ne_bytes(data[12..16].try_into().unwrap()) as usize;
             let hdrlen = u16::from_ne_bytes(data[16..18].try_into().unwrap()) as usize;
-            if caplen != datalen || hdrlen < 18 || hdrlen + caplen > data.len() { return Err(failure("BPF capture packet truncated")); }
-            if conflict(&data[hdrlen..hdrlen+caplen], mac, address) { return Ok(Some(true)); }
+            if caplen != datalen || hdrlen < 18 || hdrlen + caplen > data.len() {
+                return Err(failure("BPF capture packet truncated"));
+            }
+            if conflict(&data[hdrlen..hdrlen + caplen], mac, address) {
+                return Ok(Some(true));
+            }
             offset += (hdrlen + caplen + 3) & !3;
         }
         Ok(Some(false))
@@ -110,26 +212,39 @@ fn capture(fd: i32, bytes: &mut [u8;65536], mac: [u8;6], address: Ipv4Addr) -> i
 }
 
 #[cfg(unix)]
-fn probe(interface: &str, mac: [u8;6], address: Ipv4Addr) -> io::Result<bool> {
+fn probe(interface: &str, mac: [u8; 6], address: Ipv4Addr) -> io::Result<bool> {
     let socket = open(interface)?;
     let fd = socket.as_raw_fd();
-    let mut random = [0u8;6]; File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let random_delay = |n: usize| Duration::from_millis(u16::from_ne_bytes([random[n], random[n+1]]) as u64 % 1001);
+    let mut random = [0u8; 6];
+    File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let random_delay = |n: usize| {
+        Duration::from_millis(u16::from_ne_bytes([random[n], random[n + 1]]) as u64 % 1001)
+    };
     let initial = random_delay(0);
     let gap_one = Duration::from_secs(1) + random_delay(2);
     let gap_two = Duration::from_secs(1) + random_delay(4);
     let started = Instant::now();
-    let times = [started + initial, started + initial + gap_one, started + initial + gap_one + gap_two];
+    let times = [
+        started + initial,
+        started + initial + gap_one,
+        started + initial + gap_one + gap_two,
+    ];
     let end = times[2] + Duration::from_secs(2);
     let deadline = started + Duration::from_secs(10);
     let mut sent = 0;
     let packet = frame(mac, address);
-    let mut bytes = [0u8;65536];
+    let mut bytes = [0u8; 65536];
     check_loss(fd)?;
     loop {
-        if Instant::now() >= deadline { return Err(failure("ARP observation deadline exceeded")); }
+        if Instant::now() >= deadline {
+            return Err(failure("ARP observation deadline exceeded"));
+        }
         if sent < 3 && Instant::now() >= times[sent] {
-            if unsafe { libc::write(fd, packet.as_ptr().cast(), packet.len()) } != packet.len() as isize { return Err(failure("ARP probe send incomplete")); }
+            if unsafe { libc::write(fd, packet.as_ptr().cast(), packet.len()) }
+                != packet.len() as isize
+            {
+                return Err(failure("ARP probe send incomplete"));
+            }
             sent += 1;
         }
         for _ in 0..128 {
@@ -138,26 +253,58 @@ fn probe(interface: &str, mac: [u8;6], address: Ipv4Addr) -> io::Result<bool> {
                 Some(false) => (),
                 None => break,
             }
-            if Instant::now() >= deadline { return Err(failure("ARP capture deadline exceeded")); }
+            if Instant::now() >= deadline {
+                return Err(failure("ARP capture deadline exceeded"));
+            }
         }
         check_loss(fd)?;
-        if sent == 3 && Instant::now() >= end { return Ok(false); }
+        if sent == 3 && Instant::now() >= end {
+            return Ok(false);
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
+#[cfg(feature = "python-bindings")]
 #[pyfunction]
-pub fn probe_ipv4_conflict(py: Python<'_>, interface: String, mac: String, address: String) -> PyResult<bool> {
+pub fn probe_ipv4_conflict(
+    py: Python<'_>,
+    interface: String,
+    mac: String,
+    address: String,
+) -> PyResult<bool> {
     #[cfg(windows)]
-    { let _ = (py, interface, mac, address); Err(pyo3::exceptions::PyRuntimeError::new_err("Windows requires native post-add DAD observation")) }
+    {
+        let _ = (py, interface, mac, address);
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Windows requires native post-add DAD observation",
+        ))
+    }
     #[cfg(unix)]
     {
-        let values = mac.split(':').map(|b| u8::from_str_radix(b,16)).collect::<Result<Vec<_>,_>>().map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
-        let mac: [u8;6] = values.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
-        if mac == [0;6] || mac[0] & 1 != 0 { return Err(pyo3::exceptions::PyValueError::new_err("unicast Ethernet MAC required")); }
-        let address: Ipv4Addr = address.parse().map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 required"))?;
-        if !super::relay::private(address) { return Err(pyo3::exceptions::PyValueError::new_err("private IPv4 required")); }
-        py.allow_threads(|| probe(&interface, mac, address)).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        let values = mac
+            .split(':')
+            .map(|b| u8::from_str_radix(b, 16))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
+        let mac: [u8; 6] = values
+            .try_into()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
+        if mac == [0; 6] || mac[0] & 1 != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "unicast Ethernet MAC required",
+            ));
+        }
+        let address: Ipv4Addr = address
+            .parse()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 required"))?;
+        if !super::relay::private(address) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "private IPv4 required",
+            ));
+        }
+        py.allow_threads(|| probe(&interface, mac, address))
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 }
 
@@ -169,54 +316,130 @@ struct ConflictState {
 }
 
 #[cfg(unix)]
-#[pyclass]
+#[cfg_attr(feature = "python-bindings", pyclass)]
 pub struct IPv4ConflictObserver {
     state: std::sync::Arc<ConflictState>,
     thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 #[cfg(unix)]
 impl IPv4ConflictObserver {
-    fn close_native(&self) {
-        self.state.closed.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(thread) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() { let _ = thread.join(); }
+    pub fn close_native(&self) {
+        self.state
+            .closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = thread.join();
+        }
+    }
+    pub fn status_native(&self) -> (bool, bool, bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (
+            self.state.conflict.load(SeqCst),
+            self.state.lost.load(SeqCst),
+            self.state.closed.load(SeqCst),
+        )
     }
 }
 #[cfg(unix)]
-impl Drop for IPv4ConflictObserver { fn drop(&mut self) { self.close_native(); } }
+impl Drop for IPv4ConflictObserver {
+    fn drop(&mut self) {
+        self.close_native();
+    }
+}
 #[cfg(unix)]
+#[cfg(feature = "python-bindings")]
 #[pymethods]
 impl IPv4ConflictObserver {
     fn status(&self) -> (bool, bool, bool) {
-        use std::sync::atomic::Ordering::SeqCst;
-        (self.state.conflict.load(SeqCst), self.state.lost.load(SeqCst), self.state.closed.load(SeqCst))
+        self.status_native()
     }
-    fn close(&self, py: Python<'_>) { py.allow_threads(|| self.close_native()); }
+    fn close(&self, py: Python<'_>) {
+        py.allow_threads(|| self.close_native());
+    }
 }
 #[cfg(unix)]
+#[cfg(feature = "python-bindings")]
 #[pyfunction]
-pub fn start_ipv4_conflict_observer(py: Python<'_>, interface: String, mac: String, address: String) -> PyResult<IPv4ConflictObserver> {
-    let values = mac.split(':').map(|b| u8::from_str_radix(b,16)).collect::<Result<Vec<_>,_>>().map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
-    let mac: [u8;6] = values.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
-    let address: Ipv4Addr = address.parse().map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 required"))?;
-    if mac == [0;6] || mac[0] & 1 != 0 || !super::relay::private(address) { return Err(pyo3::exceptions::PyValueError::new_err("private IPv4 and unicast MAC required")); }
-    let socket = py.allow_threads(|| open(&interface)).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let state = std::sync::Arc::new(ConflictState { conflict: std::sync::atomic::AtomicBool::new(false), lost: std::sync::atomic::AtomicBool::new(false), closed: std::sync::atomic::AtomicBool::new(false) });
+pub fn start_ipv4_conflict_observer(
+    py: Python<'_>,
+    interface: String,
+    mac: String,
+    address: String,
+) -> PyResult<IPv4ConflictObserver> {
+    py.allow_threads(|| start_native(interface, mac, address))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+#[cfg(unix)]
+pub fn start_native(
+    interface: String,
+    mac: String,
+    address: String,
+) -> io::Result<IPv4ConflictObserver> {
+    let values = mac
+        .split(':')
+        .map(|b| u8::from_str_radix(b, 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("invalid Ethernet MAC"))?;
+    let mac: [u8; 6] = values
+        .try_into()
+        .map_err(|_| failure("invalid Ethernet MAC"))?;
+    let address: Ipv4Addr = address
+        .parse()
+        .map_err(|_| failure("literal IPv4 required"))?;
+    if mac == [0; 6] || mac[0] & 1 != 0 || !super::relay::private(address) {
+        return Err(failure("private IPv4 and unicast MAC required"));
+    }
+    let socket = open(&interface)?;
+    let state = std::sync::Arc::new(ConflictState {
+        conflict: std::sync::atomic::AtomicBool::new(false),
+        lost: std::sync::atomic::AtomicBool::new(false),
+        closed: std::sync::atomic::AtomicBool::new(false),
+    });
     let worker = state.clone();
     let thread = std::thread::spawn(move || {
         use std::sync::atomic::Ordering::SeqCst;
-        let mut bytes = [0u8;65536];
+        let mut bytes = [0u8; 65536];
         while !worker.closed.load(SeqCst) {
             for _ in 0..128 {
                 match capture(socket.as_raw_fd(), &mut bytes, mac, address) {
-                    Ok(Some(true)) => { worker.conflict.store(true, SeqCst); },
+                    Ok(Some(true)) => {
+                        worker.conflict.store(true, SeqCst);
+                    }
                     Ok(Some(false)) => (),
                     Ok(None) => break,
-                    Err(_) => { worker.lost.store(true, SeqCst); worker.closed.store(true, SeqCst); return; },
+                    Err(_) => {
+                        worker.lost.store(true, SeqCst);
+                        worker.closed.store(true, SeqCst);
+                        return;
+                    }
                 }
             }
-            if check_loss(socket.as_raw_fd()).is_err() { worker.lost.store(true, SeqCst); worker.closed.store(true, SeqCst); return; }
+            if check_loss(socket.as_raw_fd()).is_err() {
+                worker.lost.store(true, SeqCst);
+                worker.closed.store(true, SeqCst);
+                return;
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
     });
-    Ok(IPv4ConflictObserver { state, thread: std::sync::Mutex::new(Some(thread)) })
+    Ok(IPv4ConflictObserver {
+        state,
+        thread: std::sync::Mutex::new(Some(thread)),
+    })
+}
+
+#[cfg(unix)]
+pub fn probe_native(interface: &str, mac: &str, address: &str) -> io::Result<bool> {
+    let values = mac
+        .split(':')
+        .map(|b| u8::from_str_radix(b, 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("invalid MAC"))?;
+    let mac: [u8; 6] = values.try_into().map_err(|_| failure("invalid MAC"))?;
+    let address: Ipv4Addr = address.parse().map_err(|_| failure("invalid IPv4"))?;
+    if mac == [0; 6] || mac[0] & 1 != 0 || !super::relay::private(address) {
+        return Err(failure("private address and unicast MAC required"));
+    }
+    probe(interface, mac, address)
 }

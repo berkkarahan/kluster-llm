@@ -21,6 +21,7 @@ class InterfaceState:
     addresses: tuple[ipaddress.IPv4Interface, ...]
     routes: tuple[ipaddress.IPv4Network, ...]
     physical_ethernet: bool = True
+    default_route: bool = False
 
 def parse_speed_mbps(value: str | int | None) -> int | None:
     if value is None:
@@ -70,7 +71,7 @@ $a = Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop
 $ipif = Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop
 $addresses = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ IPAddress=$_.IPAddress; PrefixLength=$_.PrefixLength } })
 $routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -ne '0.0.0.0/0' } | Select-Object -ExpandProperty DestinationPrefix)
-[pscustomobject]@{ Name=$a.Name; Status=$a.Status.ToString(); LinkSpeed=$a.LinkSpeed.ToString(); Hardware=[bool]$a.HardwareInterface; Description=$a.InterfaceDescription; Dhcp=($ipif.Dhcp -eq 'Enabled'); Addresses=$addresses; Routes=$routes } | ConvertTo-Json -Compress -Depth 5
+[pscustomobject]@{ Name=$a.Name; Status=$a.Status.ToString(); LinkSpeed=$a.LinkSpeed.ToString(); Hardware=[bool]$a.HardwareInterface; Description=$a.InterfaceDescription; Default=(@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count -gt 0); Dhcp=($ipif.Dhcp -eq 'Enabled'); Addresses=$addresses; Routes=$routes } | ConvertTo-Json -Compress -Depth 5
 """
     try:
         data = json.loads(powershell(script, {"interface": interface}))
@@ -86,7 +87,7 @@ $routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorActi
     return InterfaceState(
         data.get("Name", interface), data.get("Status") == "Up",
         parse_speed_mbps(data.get("LinkSpeed")), data.get("Dhcp"), addresses,
-        routes, bool(physical),
+        routes, bool(physical), bool(data.get("Default", False)),
     )
 
 
@@ -120,7 +121,7 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
             addresses.append(ipaddress.IPv4Interface(f"{match.group(1)}/{mask}"))
     routes_out = run(["netstat", "-rn", "-f", "inet"])
     routes = _v4_routes([line.split()[0] for line in routes_out.splitlines()[2:] if line.split()])
-    dhcp = True if "DHCP Configuration" in info or "BOOTP Configuration" in info else False if "Manual Configuration" in info else None
+    dhcp = True if "DHCP Configuration" in info or "BOOTP Configuration" in info else False if "Manual Configuration" in info or "off" in info.lower() else None
     return InterfaceState(
         interface,
         bool(re.search(r"^\s*status:\s*active$", output, re.MULTILINE | re.IGNORECASE)),
@@ -129,6 +130,7 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
         tuple(addresses),
         routes,
         not re.search(r"wi-?fi|wireless|airport|thunderbolt bridge", hardware, re.I),
+        any(parts[0] in {"default", "0.0.0.0/0"} and interface in parts for line in routes_out.splitlines() if (parts := line.split())),
     )
 
 
@@ -152,6 +154,23 @@ def _linux_dhcp(interface: str, run, which) -> bool | None:
         match = re.search(r"DHCP4 Client:\s*(yes|no)", status, re.I)
         if match:
             return match.group(1).lower() == "yes"
+        try:
+            configuration = run([networkctl, 'cat', '--no-pager', interface])
+        except NetworkError:
+            return None
+        section, method = '', 'no'
+        for line in configuration.splitlines():
+            line = line.strip()
+            if line.startswith('['):
+                section = line
+            if section == '[Network]' and '=' in line:
+                key, value = line.split('=', 1)
+                if key.strip() == 'DHCP':
+                    method = value.strip().lower()
+        if method in {'yes', 'true', 'ipv4'}:
+            return True
+        if method in {'no', 'false', 'ipv6'}:
+            return False
     return None
 
 
@@ -187,4 +206,5 @@ def _inspect_linux(interface: str, run, dhcp, sys_class_net) -> InterfaceState:
         tuple(addresses),
         _v4_routes(route_values),
         (sysfs / "device").exists() and not (sysfs / "wireless").exists(),
+        any(item.get("dev") == interface and item.get("dst") == "default" for item in route_data),
     )

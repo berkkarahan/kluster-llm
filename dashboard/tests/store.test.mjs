@@ -123,7 +123,7 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     };
     appStore.status = { ...appStore.status, members: { master: { node_id: 'master', role: 'master' } } };
     const overflow = render(RunPage).body;
-    assert.match(overflow, /GPU budget: 15\.1 GiB · does not fit/);
+    assert.match(overflow, /GPU budget: 15\.1 GiB/);
     assert.match(overflow, /RAM budget: 20\.3 GiB/);
     assert.doesNotMatch(overflow, /Estimated GPU memory/);
     assert.doesNotMatch(overflow, /Estimated master CPU RAM/);
@@ -165,23 +165,21 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(appStore.planResult.budget_bytes, 15.2 * 1024 ** 3);
     assert.match(render(RunPage).body, /usable total memory budget 15\.2 GiB/);
-    appStore.nodeShares = { master: 1 };
+    appStore.applyParameterSet({ node_shares: { master: 1 } });
     appStore.flashAttention = 'off';
-    assert.deepEqual(appStore.planPayload().node_shares, { master: 1 });
+    assert.equal(appStore.planPayload().node_shares, null);
+    assert.deepEqual(appStore.planPayload().node_priority, ['master']);
     assert.equal(appStore.planPayload().flash_attention, 'off');
-    assert.match(render(RunPage).body, /target GPU workload|Target GPU workload/);
-    appStore.setNodeShare('master', 0.5);
-    assert.equal(appStore.nodeShares.master, 1);
+    assert.match(render(RunPage).body, /Earlier nodes receive as much workload/);
     appStore.status = { ...appStore.status, members: {
       master: { node_id: 'master', role: 'master' }, worker: { node_id: 'worker', role: 'worker' }
     } };
-    appStore.nodeShares = null;
-    appStore.setNodeShare('worker', 0.4);
-    assert.equal(appStore.nodeShares.worker, 0.4);
-    assert.equal(appStore.nodeShares.master, 0.6);
-    assert.match(render(RunPage).body, /share-worker/);
+    appStore.moveNodePriority('worker', -1);
+    assert.deepEqual(appStore.planPayload().node_priority, ['worker', 'master']);
+    assert.match(render(RunPage).body, /Move worker up/);
+    assert.doesNotMatch(render(RunPage).body, /share-worker/);
     appStore.status = { ...appStore.status, members: { master: { node_id: 'master' } } };
-    appStore.nodeShares = null;
+    appStore.setPriorityPlanning(false);
 
     gpuInventory = { gpus: [
       { index: 2, name: 'new first', vram_bytes: 16 * 1024 ** 3 },

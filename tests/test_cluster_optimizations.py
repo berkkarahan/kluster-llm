@@ -134,7 +134,7 @@ def test_fitting_local_device_avoids_rpc_and_offloads_output():
 
 def test_multi_local_gpus_prefer_local_over_rpc():
     """Two master GPUs that together fit must not pull in a remote worker."""
-    master = node("master", 510 * MIB, master=True, gpus=2)
+    master = node("master", 700 * MIB, master=True, gpus=2)
     remote = node("remote", 4000 * MIB, backend="metal")
     result = plan([remote, master])
     assert result["routing_mode"] == "local"

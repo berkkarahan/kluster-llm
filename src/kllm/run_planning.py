@@ -177,6 +177,7 @@ def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
                 "backend": m.get("backend", "unknown"),
                 "unified_memory": m.get("unified_memory", m.get("backend") == "metal"),
                 "devices": devices,
+                "rpc_devices": m.get("rpc_devices", []),
                 "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
                 "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
                 "latency_ms": float(lat) if lat is not None else None,
@@ -248,6 +249,7 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
                     rpc_endpoint=node.rpc_endpoint,
                     latency_ms=node.latency_ms,
                     devices=selected_devices,
+                    rpc_devices=node.rpc_devices,
                 )
     try:
         result = native.plan_split(
@@ -268,6 +270,8 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             draft_model_size_bytes=_file_size_bytes(body.draft_model),
             vision=bool(body.vision),
             node_shares=body.node_shares,
+            required_nodes=body.required_nodes,
+            node_priority=body.node_priority,
         )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc

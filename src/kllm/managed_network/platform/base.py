@@ -81,6 +81,7 @@ class AdapterSnapshot:
     mac: str
     state: InterfaceState
     facts: dict[str, Any] = field(default_factory=dict)
+    permission: bool | None = None
 
     def public(self) -> dict[str, Any]:
         data = {
@@ -88,9 +89,9 @@ class AdapterSnapshot:
             'interface_index': self.interface_index, 'identity_fingerprint': self.fingerprint,
             'mac': self.mac, 'connected': self.state.connected,
             'link_speed_mbps': self.state.speed_mbps, 'dhcp': self.state.dhcp,
-            'permission': is_admin(), 'physical_ethernet': self.state.physical_ethernet,
+            'permission': is_admin() if self.permission is None else self.permission, 'physical_ethernet': self.state.physical_ethernet,
             'addresses': [str(a) for a in self.state.addresses],
-            'routes': [str(r) for r in self.state.routes], 'facts': self.facts,
+            'routes': [str(r) for r in self.state.routes], 'facts': {**self.facts, **({'default_route': True} if self.state.default_route else {})},
         }
         data['inventory_revision'] = digest(data)
         return data
@@ -112,6 +113,16 @@ class Prepared:
 
 
 class PlatformAdapter(ABC):
+    runtime: Any = native
+
+    def authorize(self, command: Any) -> None:
+        """Optional privileged boundary; manual adapters execute in the agent."""
+
+    def before_add(self, snapshot: AdapterSnapshot, prepared: Prepared) -> AdapterSnapshot:
+        return snapshot
+
+    def restore_configuration(self, network_id: str) -> None:
+        """Manual adapters never change DHCP configuration."""
     @abstractmethod
     def inventory(self) -> list[AdapterSnapshot]: ...
 
@@ -128,7 +139,7 @@ class PlatformAdapter(ABC):
     def check_source_route(self, snapshot: AdapterSnapshot, source: str, peer: str) -> None: ...
 
     def conflict_preflight(self, snapshot: AdapterSnapshot, address: str) -> None:
-        if native.probe_ipv4_conflict(snapshot.os_interface, snapshot.mac, address):
+        if self.runtime.probe_ipv4_conflict(snapshot.os_interface, snapshot.mac, address):
             raise PlatformRefusal('ADDRESS_CONFLICT', 'Another Ethernet peer claims the proposed address')
 
     def eligible(self, snapshot: AdapterSnapshot) -> None:
@@ -173,24 +184,24 @@ class PlatformAdapter(ABC):
             if route.prefixlen and route.overlaps(subnet) and not compatible:
                 raise PlatformRefusal('SUBNET_CONFLICT', 'Subnet overlaps an existing route')
         epoch = str(uuid4())
-        observer = native.start_address_observer(snapshot.interface_index, epoch)
+        observer = self.runtime.start_address_observer(snapshot.interface_index, epoch)
         conflict_observer = None
         try:
             if os.name != 'nt':
-                conflict_observer = native.start_ipv4_conflict_observer(snapshot.os_interface, snapshot.mac, assignment.address)
-            before = native.address_observer_events(observer)
+                conflict_observer = self.runtime.start_ipv4_conflict_observer(snapshot.os_interface, snapshot.mac, assignment.address)
+            before = self.runtime.address_observer_events(observer)
             current = self.inspect(assignment.adapter_id)
-            after = native.address_observer_events(observer)
+            after = self.runtime.address_observer_events(observer)
             if before['health'] != 'continuous' or after['health'] != 'continuous' or after['events'] or current.public() != snapshot.public():
                 raise PlatformRefusal('OWNERSHIP_CONFLICT', 'Cannot establish a stable snapshot/event barrier')
             if not user_owned:
                 self.conflict_preflight(snapshot, assignment.address)
-            final = native.address_observer_events(observer)
+            final = self.runtime.address_observer_events(observer)
             if final['health'] != 'continuous' or final['events']:
                 raise PlatformRefusal('OWNERSHIP_CONFLICT', 'Adapter changed during conflict preparation')
             return Prepared(assignment, snapshot, digest(snapshot.public()), observer, epoch, final['high_water'], user_owned, time.monotonic() + 20, conflict_observer)
         except BaseException:
-            native.stop_address_observer(observer)
+            self.runtime.stop_address_observer(observer)
             if conflict_observer is not None:
                 conflict_observer.close()
             raise
@@ -203,7 +214,7 @@ class PlatformAdapter(ABC):
             raise PlatformRefusal('TIMEOUT', 'Prepared assignment expired')
         current = self.inspect(prepared.assignment.adapter_id)
         self.eligible(current)
-        events = native.address_observer_events(prepared.observer)
+        events = self.runtime.address_observer_events(prepared.observer)
         if events['health'] != 'continuous' or events['events'] or digest(current.public()) != prepared.snapshot_digest:
             raise PlatformRefusal('OWNERSHIP_CONFLICT', 'Prepared snapshot changed before apply')
         if prepared.user_owned:
@@ -211,12 +222,13 @@ class PlatformAdapter(ABC):
         if journal is None or journal.phase != 'intent_written' or str(journal.observation_epoch) != prepared.epoch or journal.adapter_fingerprint != current.fingerprint or journal.exact_address_prefix != f'{prepared.assignment.address}/{prepared.assignment.prefix_length}' or journal.pre_snapshot != current.public():
             raise PlatformRefusal('OWNERSHIP_CONFLICT', 'Durable exact mutation intent is required')
         fence()  # executor holds the authority/operation serialization boundary
+        current = self.before_add(current, prepared)
         self.add_exact(current, prepared.assignment)
         deadline = min(prepared.deadline, time.monotonic() + 10)
         expected_adds = 0
         while time.monotonic() < deadline:
             snapshot = self.inspect(prepared.assignment.adapter_id)
-            batch = native.address_observer_events(prepared.observer)
+            batch = self.runtime.address_observer_events(prepared.observer)
             prepared.high_water = batch['high_water']
             if batch['health'] != 'continuous' or snapshot.fingerprint != current.fingerprint:
                 prepared.ownership_conflict = True
@@ -250,7 +262,7 @@ class PlatformAdapter(ABC):
         raise PlatformRefusal('TIMEOUT', 'Address did not become observed and usable before its deadline')
 
     def close_prepared(self, prepared: Prepared) -> None:
-        native.stop_address_observer(prepared.observer)
+        self.runtime.stop_address_observer(prepared.observer)
         if prepared.conflict_observer is not None:
             prepared.conflict_observer.close()
 
@@ -267,7 +279,7 @@ class PlatformAdapter(ABC):
 
     def observe(self, prepared: Prepared) -> AdapterSnapshot:
         snapshot = self.inspect(prepared.assignment.adapter_id)
-        batch = native.address_observer_events(prepared.observer)
+        batch = self.runtime.address_observer_events(prepared.observer)
         prepared.high_water = batch['high_water']
         if batch['health'] != 'continuous' or snapshot.fingerprint != prepared.snapshot.fingerprint:
             prepared.ownership_conflict = True

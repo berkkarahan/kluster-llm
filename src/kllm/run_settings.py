@@ -55,6 +55,8 @@ class RunSettingsFields(BaseModel):
     chat_template: str = "default"
     chat_template_text: str | None = None
     node_shares: dict[str, float] | None = None
+    required_nodes: list[str] = Field(default_factory=list)
+    node_priority: list[str] = Field(default_factory=list)
     mmap_mlock: MmapMlock = "auto"
     checkpoints: AutoInt = "auto"
     cache_ram: AutoInt = "auto"
@@ -82,6 +84,16 @@ class RunSettingsFields(BaseModel):
 
     @model_validator(mode="after")
     def validate_context_and_percents(self) -> RunSettingsFields:
+        if any(not node.strip() or node != node.strip() for node in self.required_nodes):
+            raise ValueError("required_nodes must contain nonempty node IDs without whitespace")
+        if len(set(self.required_nodes)) != len(self.required_nodes):
+            raise ValueError("required_nodes must contain unique node IDs")
+        if self.required_nodes and (self.node_shares is not None or self.split_mode not in (None, "layer")):
+            raise ValueError("required_nodes require automatic layer placement")
+        if any(not node.strip() or node != node.strip() for node in self.node_priority) or len(set(self.node_priority)) != len(self.node_priority):
+            raise ValueError("node_priority must contain unique nonempty node IDs without whitespace")
+        if self.node_priority and (self.node_shares is not None or self.split_mode not in (None, "layer")):
+            raise ValueError("node_priority requires automatic layer placement")
         if self.tensor_split is not None:
             raise ValueError(
                 "tensor_split is not supported on the primary path; use automatic placement"
@@ -132,6 +144,8 @@ class RunSettingsFields(BaseModel):
             "chat_template": self.chat_template,
             "chat_template_text": self.chat_template_text,
             "node_shares": self.node_shares,
+            "required_nodes": list(self.required_nodes),
+            "node_priority": list(self.node_priority),
             "mmap_mlock": self.mmap_mlock,
             "checkpoints": norm_auto_int(self.checkpoints),
             "cache_ram": norm_auto_int(self.cache_ram),

@@ -100,6 +100,9 @@ pub fn probe_capacity_with_gpus() -> (CapacitySnapshot, Vec<GpuDevice>, BackendH
     sys.refresh_memory();
 
     let total_ram_bytes = sys.total_memory();
+    #[cfg(target_os = "macos")]
+    let available_ram_bytes = macos_available_ram(total_ram_bytes).unwrap_or(0);
+    #[cfg(not(target_os = "macos"))]
     let available_ram_bytes = sys.available_memory();
     let (devices, backend) = enumerate_gpus();
     let vram_bytes = sum_vram(&devices);
@@ -112,6 +115,57 @@ pub fn probe_capacity_with_gpus() -> (CapacitySnapshot, Vec<GpuDevice>, BackendH
         hostname: hostname(),
     };
     (snapshot, devices, backend)
+}
+
+/// Free and inactive pages are allocatable. Compressed pages are already occupied;
+/// subtracting them again can turn a usable unified-memory pool into zero capacity.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_available_bytes(
+    free: u64,
+    inactive: u64,
+    page_size: u64,
+    total: u64,
+) -> Option<u64> {
+    if page_size == 0 {
+        return None;
+    }
+    free.checked_add(inactive)?
+        .checked_mul(page_size)
+        .filter(|bytes| *bytes <= total)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn macos_available_ram(total: u64) -> Option<u64> {
+    let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let port = unsafe { libc::mach_host_self() };
+    let status = unsafe {
+        libc::host_statistics64(
+            port,
+            libc::HOST_VM_INFO64,
+            (&mut vm as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        )
+    };
+    unsafe extern "C" {
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+    unsafe {
+        mach_port_deallocate(libc::mach_task_self(), port);
+    }
+    if status != 0 {
+        return None;
+    }
+    macos_available_bytes(
+        vm.free_count as u64,
+        vm.inactive_count as u64,
+        unsafe { libc::vm_page_size } as u64,
+        total,
+    )
 }
 
 /// Enumerate local GPUs with index, name, and VRAM.
@@ -375,6 +429,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn available_pages_do_not_subtract_compressed_memory() {
+        assert_eq!(
+            macos_available_bytes(1, 9, 16384, 48 * 1024 * 1024 * 1024),
+            Some(163840)
+        );
+        assert_eq!(macos_available_bytes(0, 0, 16384, 1024 * 1024), Some(0));
+        assert_eq!(macos_available_bytes(1, 1, 0, 1024), None);
+        assert_eq!(macos_available_bytes(u64::MAX, 1, 4096, u64::MAX), None);
+        assert_eq!(macos_available_bytes(2, 2, 4096, 1024), None);
+    }
+
+    #[test]
     fn probe_returns_ram() {
         let snap = probe_capacity();
         assert!(snap.total_ram_bytes > 0);
@@ -400,7 +466,10 @@ device,VRAM Total Memory (B),VRAM Total Used Memory (B)
 card0,8589934592,0
 card1,17179869184,1024
 ";
-        assert_eq!(parse_rocm_smi_vram_csv(sample), Some(8589934592 + 17179869184));
+        assert_eq!(
+            parse_rocm_smi_vram_csv(sample),
+            Some(8589934592 + 17179869184)
+        );
         let devices = parse_rocm_smi_devices(sample);
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].index, 0);

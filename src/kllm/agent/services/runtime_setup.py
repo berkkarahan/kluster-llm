@@ -9,6 +9,7 @@ from typing import Any
 
 from kllm.agent.schemas import LlamaSetupBody
 from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.agent.services.rpc_devices import worker_rpc_devices
 from kllm.exceptions import NotFoundError, ValidationError
 from kllm.state import DEFAULT_RPC_PORT, ClusterState
 
@@ -75,10 +76,10 @@ class RuntimeSetupService:
     def _relaunch_worker(self, state: ClusterState) -> dict[str, Any]:
         try:
             root = self._repository_root()
-            member = state.members.get(state.node_id) or {}
-            gpu_env = self._gpu_visibility_env(
-                member.get("backend") or "cpu", state.gpu_ids
-            )
+            member = state.members.setdefault(state.node_id, {})
+            member["rpc_devices"] = []
+            selection = self._resolve_gpu_selection(state.gpu_ids)
+            rpc_devices = worker_rpc_devices(selection.devices, selection.backend)
             if state.process_pid:
                 self._stop_process(state.process_pid, force=True)
                 self._clear_children()
@@ -88,17 +89,14 @@ class RuntimeSetupService:
                 host=state.rpc_bind or "0.0.0.0",
                 port=state.rpc_port or DEFAULT_RPC_PORT,
                 repo_root=str(root) if root else None,
-                env=gpu_env or None,
-                devices=[
-                    device.device
-                    for device in self._resolve_gpu_selection(state.gpu_ids).devices
-                    if device.device is not None
-                ],
+                env=None,
+                devices=[device["device"] for device in rpc_devices],
                 log_path=str(self._rpc_log_path()),
             )
             state.process_pid = launched.get("pid")
             state.process_role = "worker"
             if launched.get("pid"):
+                member["rpc_devices"] = rpc_devices
                 self._register_child(int(launched["pid"]), "rpc-server")
             state.save()
             return launched

@@ -1,272 +1,245 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { appStore } from '$lib/store.svelte';
-  import type { ManagedNetwork, NetworkAdapter, NetworkIdentity, NetworkInventory } from '$lib/types';
+  import type { ManagedNetwork } from '$lib/types';
+  import NetworkAdvanced from './NetworkAdvanced.svelte';
 
-  let identity = $state<NetworkIdentity | null>(null);
-  let localAdapters = $state<NetworkAdapter[]>([]);
-  let nodes = $state<Record<string, NetworkInventory>>({});
-  let networks = $state<ManagedNetwork[]>([]);
-  let selections = $state<Record<string, string>>({});
+  type Adapter = { adapter_id: string; os_interface: string; link_speed_mbps: number | null; reason: string };
+  type Computer = { node_id: string; name: string; host: string; master: boolean; administrator_enabled: boolean; adapters: Adapter[]; selected_adapter: string; ready: boolean; error_code: string | null; message: string };
+  type Assessment = { administrator_notice: string; master_node_id: string; computers: Computer[]; assessment_revision: string; networks: ManagedNetwork[] };
+  type LocalStatus = { administrator_enabled: boolean; administrator_notice: string; message: string; cleanup_pending?: string[] };
+  const notice = 'Administrator access is required on each computer to configure its dedicated network adapter. Kluster will save the original settings and restore its changes when the network is stopped. After you enable access once on each computer, this cluster’s master can set up the private network.';
+  let assessment = $state<Assessment | null>(null);
+  let local = $state<LocalStatus | null>(null);
   let included = $state<Record<string, boolean>>({});
-  let localAdapter = $state('');
-  let peerIdentity = $state('');
-  let replacePeer = $state(false);
-  let subnet = $state('192.168.234.0/24');
-  let error = $state('');
-  let busy = $state(false);
+  let adapters = $state<Record<string, string>>({});
+  let acknowledged = $state(false);
+  let advanced = $state(false);
+  let subnet = $state('');
   let opened = $state(false);
-  let activeOperation = $state('');
-  let activeOperationRevision = $state(1);
-  let cleanupJournals = $state<Array<{journal_id: string; exact_address_prefix: string; phase: string}>>([]);
-  let cleanupReview = $state<{journal: {journal_id: string; exact_address_prefix: string}; snapshot: unknown; snapshot_digest: string} | null>(null);
+  let busy = $state(false);
+  let error = $state('');
+  let diagnostic = $state('');
+  let operation = $state('');
+  let operationRevision = $state(1);
+  let phase = $state('');
+  let recovery = $state<{network_id: string; snapshot_digest: string; exact_address_prefix: string; current: unknown} | null>(null);
+  let participants = $state<Array<{node_id: string; status: string; stage: string}>>([]);
   let controller: AbortController | null = null;
-  let pollController: AbortController | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const master = $derived(appStore.status?.role === 'master');
-  const activeNetwork = $derived(networks.find((network) => network.observed_state !== 'stopped'));
+  const network = $derived(assessment?.networks.find(n => n.observed_state !== 'stopped'));
+  const selected = $derived(assessment?.computers.filter(c => c.master || included[c.node_id]) ?? []);
+  const canStart = $derived(selected.length >= 2 && selected.every(c => !c.error_code && !!(adapters[c.node_id] || c.selected_adapter)));
+  const networkLabel = $derived(network?.observed_state === 'ready' ? 'Private network ready' : operation ? 'Setting up' : network ? ({preparing:'Checking computers', applying:'Configuring adapters', verifying:'Testing connections', degraded:'Connection needs attention', failed:'Setup needs attention', stopping:'Restoring settings', cleanup_pending:'Restoration needs attention'}[network.observed_state] ?? 'Not set up') : 'Not set up');
 
-  function selectedAdapter(node: NetworkInventory): string {
-    try { return JSON.parse(node.selection ?? '{}').adapter_id ?? ''; }
-    catch { return ''; }
+  function readable(failure: unknown): string {
+    const value = String(failure).replace(/^Error:\s*/, '');
+    const code = value.split(':', 1)[0];
+    const messages: Record<string, string> = {
+      ADMIN_REQUIRED: 'Administrator access was not enabled. Open Kluster on that computer and approve the operating system prompt.',
+      STALE_REVISION: 'The network changed. Refresh the computer list and try again.',
+      INFERENCE_ACTIVE: 'Stop the inference run using this network before changing it.',
+      UNSUPPORTED_CAPABILITY: 'Update Kluster on the computer that needs attention, then refresh.',
+      UPGRADE_REQUIRED: 'Update Kluster on this computer to install administrator support.',
+      UNPAIRED_IDENTITY: 'A computer’s identity needs attention. Review its pairing in Advanced details.',
+      HELPER_REFUSED: 'Network settings could not be applied safely. Review the diagnostic message in Advanced details.'
+    };
+    return messages[code] ?? value.replace(/^[A-Z_]+:\s*/, '');
   }
 
-  async function refresh() {
-    controller?.abort();
-    controller = new AbortController();
-    const signal = controller.signal;
-    error = '';
-    try {
-      const [publicIdentity, local, current] = await Promise.all([
-        appStore.networkRequest<NetworkIdentity>('/v2/node/network-identity', 'GET', undefined, signal),
-        appStore.networkRequest<NetworkInventory>('/v2/node/network-adapters', 'GET', undefined, signal),
-        appStore.networkRequest<{networks: ManagedNetwork[]}>('/v2/cluster/networks', 'GET', undefined, signal)
-      ]);
-      cleanupJournals = (await appStore.networkRequest<{journals: typeof cleanupJournals}>('/v2/node/network-cleanup', 'GET', undefined, signal)).journals;
-      identity = publicIdentity;
-      localAdapters = local.adapters;
-      localAdapter = selectedAdapter(local);
-      networks = current.networks;
-      if (master) {
-        const inventory = await appStore.networkRequest<{nodes: Record<string, NetworkInventory>}>('/v2/cluster/network-adapters', 'GET', undefined, signal);
-        nodes = inventory.nodes;
-        for (const [nodeId, node] of Object.entries(nodes)) {
-          selections[nodeId] = selectedAdapter(node);
-          included[nodeId] ??= true;
-        }
+  async function refresh(signal?: AbortSignal) {
+    local = await appStore.networkRequest<LocalStatus>('/v2/node/network-setup', 'GET', undefined, signal);
+    if (master) {
+      assessment = await appStore.networkRequest<Assessment>('/v2/cluster/network-setup', 'GET', undefined, signal);
+      for (const c of assessment.computers) {
+        included[c.node_id] ??= true;
+        if (!adapters[c.node_id] || !c.adapters.some(a => a.adapter_id === adapters[c.node_id] && !a.reason)) adapters[c.node_id] = c.selected_adapter;
       }
-    } catch (failure) {
-      if (!signal.aborted) error = String(failure);
     }
   }
 
-  async function action(work: () => Promise<void>) {
-    busy = true;
-    error = '';
-    try { await work(); }
-    catch (failure) { error = String(failure); }
+  async function work(action: () => Promise<void>) {
+    busy = true; error = ''; diagnostic = '';
+    try { await action(); }
+    catch (failure) { if (!controller?.signal.aborted) { diagnostic = String(failure); error = readable(failure); } }
     finally { busy = false; }
   }
 
-  async function pair() {
-    await action(async () => {
-      const peer = JSON.parse(peerIdentity);
-      await appStore.networkRequest(`/v2/node/network-identity/peers/${encodeURIComponent(peer.node_id)}`, 'PUT', {
-        node_id: peer.node_id, public_key: peer.public_key, key_id: peer.key_id,
-        cluster_binding_id: master ? identity?.cluster_binding_id : peer.cluster_binding_id,
-        expected_role: master ? 'worker' : 'master', replace: replacePeer
-      });
-      peerIdentity = '';
-      await refresh();
+  async function load() {
+    await work(async () => {
+      await refresh(controller?.signal);
+      if (timer) clearTimeout(timer);
+      if (!operation && network?.current_operation_id && ['preparing', 'applying', 'verifying', 'stopping'].includes(network.observed_state)) operation = network.current_operation_id;
+      if (operation) await poll();
     });
   }
 
-  async function saveSelection() {
-    await action(async () => {
-      const adapter = localAdapters.find((item) => item.adapter_id === localAdapter);
-      if (!adapter) throw new Error('Choose an adapter explicitly');
-      await appStore.networkRequest('/v2/node/network-selection', 'PUT', {
-        adapter_id: adapter.adapter_id, expected_inventory_revision: adapter.inventory_revision
-      });
-      await refresh();
+  async function enableAdministrator() {
+    await work(async () => {
+      await appStore.networkRequest('/v2/node/network-setup/administrator', 'POST', {acknowledged});
+      await refresh(controller?.signal);
     });
   }
 
-  async function pollOperation(operationId: string) {
-    activeOperation = operationId;
-    pollController?.abort();
-    pollController = new AbortController();
-    const signal = pollController.signal;
-    if (timer) clearTimeout(timer);
-    const poll = async () => {
-      if (!opened || !activeOperation) return;
-      try {
-        const operation = await appStore.networkRequest<{phase: string; operation_revision: number; terminal_result: {error_code?: string; message?: string} | null}>(`/v2/cluster/network-operations/${operationId}`, 'GET', undefined, signal);
-        activeOperationRevision = operation.operation_revision;
-        if (operation.terminal_result) {
-          activeOperation = '';
-          await refresh();
-          if (operation.terminal_result.error_code) error = `${operation.terminal_result.error_code}: ${operation.terminal_result.message ?? 'Inspect participant results'}`;
-          return;
-        }
-        const current = await appStore.networkRequest<{networks: ManagedNetwork[]}>('/v2/cluster/networks', 'GET', undefined, signal);
-        networks = current.networks;
-        timer = setTimeout(poll, 1000);
-      } catch (failure) { if (!signal.aborted) { activeOperation = ''; error = String(failure); } }
-    };
-    await poll();
+  async function reviewRecovery(networkId: string) {
+    await work(async () => { recovery = await appStore.networkRequest(`/v2/node/network-setup/recovery/${networkId}`); });
   }
 
-  async function start() {
-    await action(async () => {
-      const participants = Object.entries(nodes).filter(([nodeId]) => included[nodeId] || nodeId === identity?.node_id).map(([nodeId, node]) => {
-        const adapter = node.adapters.find((item) => item.adapter_id === selections[nodeId]);
-        if (!adapter) throw new Error(`${nodeId}: choose an adapter in that node's local app first`);
-        return {node_id: nodeId, adapter_id: adapter.adapter_id, inventory_revision: adapter.inventory_revision};
-      });
-      const accepted = await appStore.networkRequest<{operation_id: string}>('/v2/cluster/networks', 'POST', {request_id: crypto.randomUUID(), subnet, participants});
-      await pollOperation(accepted.operation_id);
+  async function resolveRecovery(decision: 'keep_current' | 'restore_owned') {
+    await work(async () => {
+      if (!recovery) return;
+      await appStore.networkRequest(`/v2/node/network-setup/recovery/${recovery.network_id}`, 'POST', {decision, snapshot_digest: recovery.snapshot_digest});
+      recovery = null; await refresh(controller?.signal);
     });
   }
 
-  async function stop(network: ManagedNetwork) {
-    await action(async () => {
+  async function disableAdministrator() {
+    await work(async () => { await appStore.networkRequest('/v2/node/network-setup/administrator', 'DELETE'); await refresh(controller?.signal); });
+  }
+
+  async function poll() {
+    if (!opened || !operation) return;
+    try {
+      const result = await appStore.networkRequest<{phase: string; operation_revision: number; terminal_result: {error_code?: string; message?: string} | null; message?: string; participants?: typeof participants}>(`/v2/cluster/network-setup/operations/${operation}`, 'GET', undefined, controller?.signal);
+      phase = result.phase; operationRevision = result.operation_revision;
+      participants = result.participants ?? [];
+      if (result.terminal_result) {
+        operation = ''; await refresh(controller?.signal);
+        if (result.terminal_result.error_code) error = result.message || readable(`${result.terminal_result.error_code}: ${result.terminal_result.message ?? 'Review computer status'}`);
+      } else timer = setTimeout(poll, 1000);
+    } catch (failure) { if (!controller?.signal.aborted) { operation = ''; error = readable(failure); } }
+  }
+
+  async function setup(action: 'start' | 'add' | 'retry' = 'start') {
+    await work(async () => {
+      if (!assessment) return;
+      const accepted = await appStore.networkRequest<{operation_id: string}>('/v2/cluster/network-setup', 'POST', {
+        request_id: crypto.randomUUID(), nodes: selected.map(c => c.node_id), adapters,
+        assessment_revision: assessment.assessment_revision, ...(subnet ? {subnet} : {}), action,
+        ...(network && action !== 'start' ? {network_id: network.network_id, expected_revision: network.revision} : {})
+      });
+      operation = accepted.operation_id; phase = 'preparing'; await poll();
+    });
+  }
+
+  async function stop() {
+    await work(async () => {
+      if (!network) return;
       const accepted = await appStore.networkRequest<{operation_id: string}>(`/v2/cluster/networks/${network.network_id}/operations`, 'POST', {request_id: crypto.randomUUID(), expected_revision: network.revision, action: 'stop'});
-      await pollOperation(accepted.operation_id);
-    });
-  }
-
-  async function reconfigure(network: ManagedNetwork, kind: 'add' | 'retry') {
-    await action(async () => {
-      const participants = kind === 'add' ? Object.entries(nodes).filter(([nodeId]) => included[nodeId] && !network.participants.some((participant) => participant.node_id === nodeId)).map(([nodeId, node]) => {
-        const adapter = node.adapters.find((item) => item.adapter_id === selections[nodeId]);
-        if (!adapter) throw new Error(`${nodeId}: select an adapter locally first`);
-        return {node_id: nodeId, adapter_id: adapter.adapter_id, inventory_revision: adapter.inventory_revision};
-      }) : [];
-      if (kind === 'add' && !participants.length) throw new Error('Select a new participant first');
-      const accepted = await appStore.networkRequest<{operation_id: string}>(`/v2/cluster/networks/${network.network_id}/operations`, 'POST', {request_id: crypto.randomUUID(), expected_revision: network.revision, action: kind, participants});
-      await pollOperation(accepted.operation_id);
+      operation = accepted.operation_id; phase = 'cleaning'; await poll();
     });
   }
 
   async function cancel() {
-    await action(async () => {
-      await appStore.networkRequest(`/v2/cluster/network-operations/${activeOperation}/cancel`, 'POST', {request_id: crypto.randomUUID(), expected_operation_revision: activeOperationRevision});
-    });
-  }
-
-  async function reviewCleanup(journalId: string) {
-    await action(async () => {
-      cleanupReview = await appStore.networkRequest(`/v2/node/network-cleanup/${journalId}`);
-    });
-  }
-
-  async function resolveCleanup(decision: 'release_ownership' | 'confirm_owned') {
-    await action(async () => {
-      if (!cleanupReview) return;
-      await appStore.networkRequest(`/v2/node/network-cleanup/${cleanupReview.journal.journal_id}/resolve`, 'POST', {decision, snapshot_digest: cleanupReview.snapshot_digest});
-      cleanupReview = null;
-      await refresh();
+    await work(async () => {
+      await appStore.networkRequest(`/v2/cluster/network-operations/${operation}/cancel`, 'POST', {request_id: crypto.randomUUID(), expected_operation_revision: operationRevision});
     });
   }
 
   function toggle(event: Event) {
+    if (event.target !== event.currentTarget) return;
     opened = (event.currentTarget as HTMLDetailsElement).open;
-    if (opened) void refresh();
-    else {
-      controller?.abort();
-      pollController?.abort();
-      if (timer) clearTimeout(timer);
-      activeOperation = '';
-    }
+    if (opened) { controller = new AbortController(); void load(); }
+    else { controller?.abort(); if (timer) clearTimeout(timer); }
   }
-
-  onDestroy(() => {
-    opened = false;
-    controller?.abort();
-    pollController?.abort();
-    if (timer) clearTimeout(timer);
-  });
+  onDestroy(() => { opened = false; controller?.abort(); if (timer) clearTimeout(timer); });
 </script>
 
 <details class="panel managed-network" ontoggle={toggle} data-testid="managed-network">
-  <summary>Private 10GbE network <span class="mono">{activeNetwork?.observed_state ?? 'not configured'}</span></summary>
-  <div class="network-content">
-    <p>Use a dedicated Ethernet adapter with DHCP disabled, at least 10 Gbps negotiated speed, and a privileged agent. Pair each worker and master locally before starting.</p>
+  <summary><span>Private 10GbE network</span><span class:ready={network?.observed_state === 'ready'}>{networkLabel}</span></summary>
+  <div class="guided-content">
+    <p class="intro">Connect your computers to a dedicated 10GbE switch or cable. Kluster handles the network settings and tests the connection.</p>
+    <section class="admin-notice" aria-label="Administrator access requirements">
+      <strong>Administrator access is needed first</strong>
+      <p>{assessment?.administrator_notice ?? local?.administrator_notice ?? notice}</p>
+      {#if !local?.administrator_enabled}
+        <label class="check"><input type="checkbox" bind:checked={acknowledged} /> I understand and allow this cluster to manage this computer’s dedicated network adapter.</label>
+        <button class="btn" disabled={!acknowledged || busy || !!operation} onclick={enableAdministrator}>Enable administrator access on this computer</button>
+        <p class="hint">Your operating system will ask for permission. Do this once in Kluster on each participating computer.</p>
+      {:else}<p class="granted">Administrator access enabled on this computer.</p>{#if local?.message}<p>{local.message}</p>{/if}{/if}
+    </section>
     {#if error}<p role="alert" class="network-error">{error}</p>{/if}
-    {#if identity}
-      <label>Public identity to copy to the paired node
-        <textarea readonly rows="4" value={JSON.stringify({node_id: identity.node_id, key_id: identity.key_id, public_key: identity.public_key, cluster_binding_id: identity.cluster_binding_id}, null, 2)} aria-label="Local network public identity"></textarea>
-      </label>
-      <p>Paired: {identity.paired_peers.map((peer) => peer.node_id).join(', ') || 'none'}</p>
-      <label>Paste {master ? 'worker' : 'master'} public identity JSON
-        <textarea bind:value={peerIdentity} rows="3" aria-label="Peer network public identity"></textarea>
-      </label>
-      <label><input type="checkbox" bind:checked={replacePeer} /> Explicitly replace an existing pairing (requires settled networking)</label>
-      <button class="btn" disabled={busy || !peerIdentity} onclick={pair}>Pair node</button>
-      <label>Local dedicated adapter
-        <select bind:value={localAdapter} aria-label="Local dedicated network adapter">
-          <option value="">Choose explicitly</option>
-          {#each localAdapters as adapter}
-            <option value={adapter.adapter_id}>{adapter.os_interface} · {adapter.link_speed_mbps === null ? 'speed unknown' : `${adapter.link_speed_mbps} Mbps`} · DHCP {adapter.dhcp === null ? 'unknown' : adapter.dhcp ? 'enabled' : 'disabled'}</option>
-          {/each}
-        </select>
-      </label>
-      <button class="btn" disabled={busy || !localAdapter || !!activeNetwork} onclick={saveSelection}>Save local adapter</button>
-      {#if !identity.permission}<p>Restart this node's agent with administrator/root privileges before setup.</p>{/if}
+    {#each local?.cleanup_pending ?? [] as pending}
+      <p>Network settings on this computer need review before setup can continue.</p>
+      <button class="btn" disabled={busy} onclick={() => reviewRecovery(pending)}>Review network recovery</button>
+    {/each}
+    {#if recovery}
+      <section class="admin-notice" aria-label="Network recovery decision">
+        <p>Kluster lost track of changes on this computer’s dedicated adapter. Choose whether to keep its current settings or remove Kluster’s private address ({recovery.exact_address_prefix}) and restore the saved settings.</p>
+        <button class="btn" disabled={busy} onclick={() => resolveRecovery('keep_current')}>Keep current settings</button>
+        <button class="btn" disabled={busy} onclick={() => resolveRecovery('restore_owned')}>Restore Kluster’s changes</button>
+        <details><summary>Settings to review</summary><pre>{JSON.stringify(recovery.current, null, 2)}</pre></details>
+      </section>
     {/if}
     {#if master}
-      <fieldset disabled={busy || !!activeOperation}>
-        <legend>Participants</legend>
-        {#each Object.entries(nodes) as [nodeId, node]}
-          <label><input type="checkbox" bind:checked={included[nodeId]} disabled={nodeId === identity?.node_id} /> {nodeId}: {selections[nodeId] || node.error_code || 'local adapter not selected'}</label>
+      <fieldset disabled={busy || !!operation} class="computer-list">
+        <legend>Computers to connect</legend>
+        {#each assessment?.computers ?? [] as computer (computer.node_id)}
+          <div class="computer">
+            <label class="check"><input type="checkbox" bind:checked={included[computer.node_id]} disabled={computer.master || !!network?.participants.some(p => p.node_id === computer.node_id)} /> <strong>{computer.name}</strong> {#if computer.master}<span class="hint">This computer · master</span>{/if}</label>
+            <p class:granted={!computer.error_code && !!(adapters[computer.node_id] || computer.selected_adapter)}>{computer.message}</p>
+            {#if computer.adapters.filter(a => !a.reason).length > 1}
+              <label>Dedicated Ethernet adapter
+                <select aria-label={`Dedicated adapter for ${computer.name}`} bind:value={adapters[computer.node_id]}>
+                  <option value="">Choose an adapter</option>
+                  {#each computer.adapters.filter(a => !a.reason) as adapter}<option value={adapter.adapter_id}>{adapter.os_interface} · {(adapter.link_speed_mbps ?? 0) / 1000} Gbps</option>{/each}
+                </select>
+              </label>
+            {:else if computer.selected_adapter}
+              <p class="hint">{computer.selected_adapter} · {(computer.adapters.find(a => a.adapter_id === computer.selected_adapter)?.link_speed_mbps ?? 0) / 1000} Gbps · Settings handled automatically</p>
+            {/if}
+            {#if !computer.administrator_enabled && !computer.master}<p class="hint">Open Kluster locally on {computer.name} to enable administrator access.</p>{/if}
+          </div>
         {/each}
+        {#if !assessment}<p>Refresh to check connected computers.</p>{/if}
       </fieldset>
-      <label>Private subnet <input bind:value={subnet} aria-label="Dedicated private subnet" placeholder="192.168.234.0/24" /></label>
-      <button class="btn btn-primary" disabled={busy || !!activeNetwork || !!activeOperation} onclick={start}>Start private network</button>
-    {/if}
-    {#each networks as network}
-      <section class="network-status" aria-label="Private network status">
-        <p><strong>{network.subnet}</strong> · {network.observed_state} · revision {network.revision}</p>
-        {#each network.participants as participant}
-          <p>{participant.node_id} · <span class="mono">{participant.address}/{participant.prefix_length}</span> · {participant.state} · {participant.ownership} · {participant.verification_freshness}</p>
-          {#if participant.error}<p class="network-error">{participant.error.code}: {participant.error.message}</p>{/if}
-        {/each}
-        {#if network.blocking_runs.length}<p>Stop dependent inference first: {network.blocking_runs.map((run) => `${run.run_id} (${run.state})`).join(', ')}</p>{/if}
-        {#if master && network.observed_state !== 'stopped'}
-          <button class="btn" disabled={busy || !!activeOperation || network.blocking_runs.length > 0} onclick={() => stop(network)}>Stop private network</button>
-          {#if network.observed_state === 'ready'}
-            <button class="btn" disabled={busy || !!activeOperation || network.blocking_runs.length > 0} onclick={() => reconfigure(network, 'add')}>Add selected participants</button>
-          {/if}
-          {#if ['failed', 'degraded', 'verifying'].includes(network.observed_state)}
-            <button class="btn" disabled={busy || !!activeOperation || network.blocking_runs.length > 0} onclick={() => reconfigure(network, 'retry')}>Retry verification and setup</button>
-          {/if}
-        {/if}
-      </section>
-    {/each}
-    {#if activeOperation}<p role="status">Operation in progress. Participant results are being checked.</p><button class="btn" disabled={busy} onclick={cancel}>Cancel and roll back</button>{/if}
-    {#each cleanupJournals as journal}
-      <p>Local cleanup: {journal.exact_address_prefix} · {journal.phase}</p>
-      <button class="btn" disabled={busy} onclick={() => reviewCleanup(journal.journal_id)}>Review local address</button>
-    {/each}
-    {#if cleanupReview}
-      <p>Review this exact address: {cleanupReview.journal.exact_address_prefix}</p>
-      <pre>{JSON.stringify(cleanupReview.snapshot, null, 2)}</pre>
-      <button class="btn" disabled={busy} onclick={() => resolveCleanup('release_ownership')}>Keep address and release app ownership</button>
-      <button class="btn" disabled={busy} onclick={() => resolveCleanup('confirm_owned')}>Confirm app ownership and remove exact address</button>
-    {/if}
-    <button class="btn" disabled={busy} onclick={refresh}>Refresh prerequisites and status</button>
+      {#if network}
+        <section class="network-status" aria-label="Private network status">
+          <strong>{networkLabel}</strong>
+          {#each network.participants as participant}<p>{assessment?.computers.find(c => c.node_id === participant.node_id)?.name ?? participant.node_id} · {participant.state === 'ready' ? 'Connection verified' : participant.state.replaceAll('_', ' ')}</p>{/each}
+          {#if network.blocking_runs.length}<p>Stop the inference run using this network before changing it.</p>{/if}
+        </section>
+      {/if}
+      {#if operation}
+        <p role="status">{phase === 'preparing' ? 'Checking each computer…' : phase === 'applying' ? 'Configuring dedicated adapters…' : phase === 'verifying' ? 'Testing private connections…' : 'Restoring network settings…'}</p>
+        {#each participants as participant}<p>{assessment?.computers.find(c => c.node_id === participant.node_id)?.name ?? participant.node_id}: {participant.status.replaceAll('_', ' ')}</p>{/each}
+        <button class="btn" disabled={busy} onclick={cancel}>Cancel setup and restore settings</button>
+      {:else if !network}<button class="btn btn-primary" disabled={busy || !canStart} onclick={() => setup()}>Set up private network</button>
+      {:else}
+        {#if ['failed', 'degraded', 'verifying'].includes(network.observed_state)}<button class="btn" disabled={busy || !canStart || network.blocking_runs.length > 0} onclick={() => setup('retry')}>Retry setup</button>{/if}
+        {#if network.observed_state === 'ready' && selected.some(c => !network?.participants.some(p => p.node_id === c.node_id))}<button class="btn" disabled={busy || !canStart || network.blocking_runs.length > 0} onclick={() => setup('add')}>Add selected computers</button>{/if}
+        <button class="btn" disabled={busy || network.blocking_runs.length > 0} onclick={stop}>Stop private network and restore settings</button>
+      {/if}
+    {:else}<p>The cluster’s master handles private-network setup. After enabling administrator access here, continue on the master.</p>{/if}
+    <button class="btn" disabled={busy || !!operation} onclick={load}>Refresh computers</button>
+    <details class="advanced" bind:open={advanced}>
+      <summary>Advanced details</summary>
+      {#if diagnostic}<pre>{diagnostic}</pre>{/if}
+      <label>Private address range (optional)<input bind:value={subnet} placeholder="Chosen automatically" aria-label="Private subnet override" /></label>
+      <p class="hint">Leave this empty to let Kluster choose a range that avoids existing networks.</p>
+      {#if local?.administrator_enabled}<button class="btn" disabled={busy || !!network || !!operation} onclick={disableAdministrator}>Disable administrator access on this computer</button>{/if}
+      {#if advanced}<NetworkAdvanced />{/if}
+    </details>
   </div>
 </details>
 
 <style>
   .managed-network { margin-top: 12px; }
   summary { padding: 12px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; }
-  .network-content { padding: 0 12px 12px; display: grid; gap: 10px; font-size: 12px; }
-  label { display: grid; gap: 5px; }
-  textarea, select, input:not([type='checkbox']) { width: 100%; padding: 7px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
-  textarea { font-family: monospace; }
-  fieldset, .network-status { border: 1px solid var(--border); padding: 10px; }
+  .guided-content { padding: 0 12px 12px; display: grid; gap: 14px; font-size: 13px; }
+  p { margin: 6px 0; }
+  .intro, .hint { color: var(--muted); }
+  .hint { font-size: 12px; }
+  .admin-notice { padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
+  .check { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .check input { flex: 0 0 auto; width: auto; margin: 0; }
+  .computer-list, .network-status { border: 1px solid var(--border); padding: 12px; border-radius: 6px; }
+  .computer + .computer { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
+  .computer p, .computer > label:not(.check) { margin-left: 24px; }
+  select, input:not([type='checkbox']) { width: 100%; padding: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
   .network-error { color: var(--danger, #c44); overflow-wrap: anywhere; }
+  .ready, .granted { color: var(--success, #69b884); }
+  .advanced { border-top: 1px solid var(--border); padding-top: 8px; }
   button { justify-self: start; }
 </style>

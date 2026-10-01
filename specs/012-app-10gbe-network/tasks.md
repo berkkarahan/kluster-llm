@@ -192,6 +192,19 @@ Tables in quickstart.md remain a reference for selecting cases and hardware diag
 
 ## Requirement Traceability
 
+## Guided setup revision (approved 2026-10-01)
+
+The approved guided setup plan supersedes manual pairing, manual adapter selection, DHCP-disabled prerequisites and the prohibition on interactive elevation for the new v2 flow. Existing manual contracts remain compatible.
+
+- [X] T040 Update specification, contracts and plan for administrator disclosure, one-time per-computer authorization and master-controlled guided setup.
+- [X] T041 Implement bounded mutual join-secret identity bootstrap with pinned signing keys and replay protection; preserve manual local-only pairing.
+- [X] T042 Implement a protected native network helper, local IPC, OS authorization/install and scoped operations with durable configuration recovery; preserve the agent account and credentials.
+- [X] T043 Integrate helper-backed observation, DHCP configuration/restoration and ownership handling into the signed network lifecycle.
+- [X] T044 Implement guided assessment, safe adapter/subnet selection, start/add/retry/cancel and actionable errors through additive v2 resources.
+- [X] T045 Replace the technical panel with administrator disclosure, readable computer status, automatic choices, simple actions and Advanced details.
+- [X] T046 Validate bootstrap/refusal/recovery, real local HTTP/IPC boundaries, browser journey, native tests, dashboard checks and supported package rebuild.
+- [X] T047 Update operational docs and record physical OS/hardware acceptance limitations without claiming unperformed checks passed.
+
 | Requirement | Implementing tasks |
 |---|---|
 | FR-001 | T019-T020, T031-T036 |
@@ -312,3 +325,11 @@ The single serial browser journey passes local setup, cancel, retry, add, select
 The combined native lab found and fixed canonical UUID-array parsing in signed admissions, macOS nonblocking socket inheritance, and renewal incorrectly rejecting the current lease generation. Existing compact native cases now assert quiet-stream survival and duplicate-generation renewal/released-lease refusal.
 
 Final `make test` includes 697 Python passed / 11 existing skips, all dashboard tests, 41 native tests and Svelte check. Scoped Ruff/mypy, supported rebuild/editable refresh, dashboard production build and Linux/Windows native compile checks pass. Full-package mypy retains six pre-existing errors in log_sink.py, connect.py and commands/connect.py; new facade/type errors were fixed. See quickstart.md for executable commands and physical limits.
+
+### Guided revision completion evidence
+
+T040–T047 are implemented. T039 remains open for physical acceptance. Current validation: 716 Python tests passed / 11 existing skips; 111 focused network/install tests passed; all dashboard cases passed (51 non-browser and four serial browser cases, with an unrelated usage-history timeout passing on isolated rerun); 42 native library tests and three standalone-helper tests passed; scoped Ruff/mypy, Svelte check (zero errors/warnings), production dashboard/package/helper builds, and Linux/Windows helper compile checks passed. The first broad Python run had a planner call-count timing failure; its isolated cases and the later full suite passed.
+
+The standalone macOS helper links libSystem/libiconv only, without Python or user runtime libraries. No OS administrator approval or physical network mutation was performed. Helper install/ACL behavior, real dedicated DHCP/firewall restoration, reboot/ARP/DAD/cable loss and mixed-node model generation require physical acceptance. Controlled tests must not be reported as validating those boundaries.
+
+The after_implement memory capture hook was evaluated; feature-local evidence is recorded here. Durable memory registration was not performed because the session's governing memory instructions require an explicit user request to write memory.

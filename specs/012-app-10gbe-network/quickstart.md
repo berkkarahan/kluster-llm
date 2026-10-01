@@ -9,10 +9,10 @@ The user's task-generation instruction is to keep end-to-end checks and some tes
 ## Prerequisites
 
 - Follow [agent install guide](../../docs/agent-install.md) on every participating machine. Use the committed stable llama-release and run `python scripts/install.py --check` on each node; install recorded TCP-only binaries with `uv run python scripts/install.py --llama-only --rpc-tcp-only` and restart the agents/workers. An older running RPC process is ineligible even when files on disk have been replaced.
-- Dedicated connected physical Ethernet adapters, reported negotiated speed >=10 Gbps, DHCP disabled, and ordinary cluster management connectivity on a separate unaffected path.
-- Windows elevated local agent or POSIX root local agent; no passwordless general shell helper. Use an explicit test KLLM_HOME and the existing supported agent invocation; arrange elevation locally before starting the operation.
+- Dedicated connected physical Ethernet adapters, reported negotiated speed >=10 Gbps, readable DHCP configuration, and ordinary cluster management connectivity on a separate unaffected path.
+- Original-account agents with the supported native helper binary. Read the administrator notice and enable access locally on each computer through its OS approval prompt. Do not move agent credentials to a root/admin account.
 - One master and two workers for the primary acceptance, connected through a dedicated switch; a direct cable suffices for the one-worker subset. Windows, Linux and macOS hardware coverage must be recorded, including one mixed-platform pair.
-- Paired node fingerprints and selected adapters through the local app on each node. Workers must support managed-network-v1; unsupported nodes remain legacy cluster members but cannot participate.
+- Automatically bootstrapped/pinned node fingerprints and protected local administrator grants. Workers must support managed-network-v2; unsupported nodes remain legacy cluster members but cannot participate.
 - Stop inference for initial full readiness/protocol verification. Separately exercise setup while a legacy run is active to verify explicit pending status and preserved connections.
 
 ## Baseline and Build Checks
@@ -45,9 +45,9 @@ Use timestamps and retain output in a test evidence directory outside tracked so
 
 ## End-to-End Operator Scenario
 
-1. Start/join an ordinary cluster using existing controls and verify every management connection. Open each node's local app, compare master/worker public fingerprints over a trusted local channel and pair them; select the dedicated adapter. Missing permissions or pairing must show a prerequisite failure before mutations.
-2. On the master overview, open Managed Network. Select the master and two workers, inspect adapter evidence, and accept a conflict-checked private subnet proposal or select an unused one. Click Start once.
-3. Expect preparing, applying, verifying, then ready within 60s on an idle eligible cluster. Query the accepted operation via [control API](contracts/control-api.md); every node must have a distinct address and current bidirectional/protocol evidence. Confirm existing management/default route/DNS/DHCP remain unchanged.
+1. Start/join an ordinary cluster using existing controls and verify every management connection. Open each computer's local app, read the administrator notice and enable access through OS approval. Joined updated nodes bootstrap initial signing identities automatically. Denied authorization or changed identity must show a prerequisite failure before networking mutations.
+2. On the master overview, open Private 10GbE network. Select the master and two workers; a sole safe adapter and conflict-checked subnet are chosen automatically. Select an adapter only for ambiguous rows. Click Set up private network once.
+3. Expect preparing, applying, verifying, then ready within 60s on an idle eligible cluster. Query the accepted operation via [control API](contracts/control-api.md); every node must have a distinct address and current bidirectional/protocol evidence. Confirm management/default route/DNS profiles remain unchanged, dedicated DHCP is disabled during setup, and original settings return after stop.
 4. On Run, explicitly choose this network and a locally available model that fits the cluster. Start distributed inference, then perform a real generation through existing inference controls. Inspect run diagnostics: logical endpoints are dedicated worker addresses; actual launch endpoints are master loopback bridges; bridge outbound sources equal the assigned master dedicated address. Confirm worker RPC PID/start identity remains the original one and bridge traffic traverses the selected interfaces.
 5. Attempt Stop Network while the run is active: expect INFERENCE_ACTIVE and the run ID; inference continues. Stop inference through existing controls, then Stop Network. Reachable nodes must show stopped and app-owned temporary settings removed within 60s; pre-existing snapshot facts must match.
 6. A run with no network selection must still use the pre-existing LAN/WireGuard workflow. Run the manual configure_10gbe script's existing regression checks to verify its arguments and refusal rules remain compatible.
@@ -56,7 +56,7 @@ Use timestamps and retain output in a test evidence directory outside tracked so
 
 | Scenario | Required outcome / spec coverage |
 |---|---|
-| Slow/unknown speed, DHCP on, permission missing, adapter absent | All-node preparation fails before any network delta; affected node and actionable reason (SC-002). |
+| Slow/unknown speed, unreadable DHCP configuration, authorization denied, adapter absent | All-node preparation fails before any network delta; affected node and actionable reason (SC-002). |
 | Conflicting VPN/route/subnet, too few addresses, reused adapter index | Explicit preparation failure; no mutation and no management-path loss. |
 | Ten retries, lost ACK, duplicate or altered-body request ID | One assignment per node, no duplicate address; changed-body conflict (SC-003). |
 | Invalid signature, shared-key peer impersonation, stale term/session, replay | Zero host changes; persisted fencing survives restart (SC-007). |
@@ -103,3 +103,20 @@ make test
 ```
 
 T011/T023/T030 are complete with the documented controlled OS/runtime boundaries; only T039 physical acceptance remains pending. This machine has no isolated three-node 10GbE lab, Windows/Linux runtime hosts or privileged temporary-address test environment. Do not mark SC-001–SC-008, physical timing, real-model generation, ARP/DAD behavior, cable-loss or mixed-OS cleanup passed from local tests.
+
+## Guided revision validation (2026-10-01)
+
+New tests cover mutual bootstrap proofs, immutable pins, single-use commit, initial administrator disclosure and local-only authorization, automatic safe adapter/subnet choice across all visible interfaces, stable guided retries, and a real three-agent automatic-pairing/setup/ready/stop journey. Native helper checks cover restricted schema, valid/tampered/wrong-node/stale signed authority, durable revocation, pending-cleanup refusal and actual framed local socket IPC with the size bound. The browser journey covers notice acknowledgment before the OS action and guided setup/restoration before exercising retained Advanced controls.
+
+The three-agent lab controls hardware/OS/runtime facts; it does not elevate or change host networking. The standalone helper links only protected system libraries on macOS, with no Python library. Linux/Windows checks compile the helper for their targets; OS install, permissions, DHCP/firewall mutation/restoration, reboot, physical adapter events and mixed-machine model generation remain unverified.
+
+```bash
+uv run python -m pytest -q tests/test_guided_network.py tests/test_managed_network_critical.py tests/test_managed_network_e2e.py tests/test_configure_10gbe.py tests/test_install_script.py
+cargo test --manifest-path crates/kllm-native/Cargo.toml --no-default-features --features network-helper --bin kllm-network-helper
+uv run python scripts/build.py --skip-llama --skip-wireguard --skip-toolchains
+make test
+```
+
+The current master has a connected 1Gbps Ethernet link and no eligible dedicated 10GbE adapter. Do not perform physical setup or count it as accepted on this topology until the hardware and per-machine runtime/administrator requirements are met.
+
+Latest guided validation: full Python suite 716 passed / 11 existing skips, 111 focused network/install checks, 42 native library tests plus three standalone-helper tests, scoped Ruff/mypy and Svelte checks, supported native/helper/dashboard build, and Linux/Windows helper compilation. Dashboard cases passed individually; the aggregate runner encountered an unrelated usage-history timeout that passed on isolated rerun. The first broad Python attempt encountered a planner call-count timing failure; isolated rerun and the later complete suite passed. These transient failures are recorded rather than claiming the first `make test` attempt passed.

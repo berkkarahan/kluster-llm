@@ -106,3 +106,9 @@ stateDiagram-v2
 ```
 
 Restart enters verification_pending for intended active configuration or cleanup_pending for unresolved mutations; persisted ready is never trusted. Add uses the same preparation/application rules for new participants, retaining original addresses and restoring the prior ready set only after complete rollback if adding fails. Cancellation sets desired stopped for an initial start or reverts only the additions for add; a new operation revision fences the cancelled commands.
+
+## Guided setup additions
+
+AdministratorGrant is a protected native record: original account UID/SID, node_id, pinned master public key and cluster_binding_id. It contains no agent token, join secret or private key. HelperJournal stores authority fences, operation replay tombstones, grant revocation and per-network configuration scope: adapter MAC/index, exact address/prefix, signed peers/ports, original DHCP/profile/firewall configuration, mutation intent, ownership uncertainty and preparation deadline (live only).
+
+Guided request metadata retains the submitted request digest and resolved legacy StartRequest/OperationRequest under cluster-binding/request UUID. Identical retries reuse that proposal despite inventory changes; changed bodies conflict. Assessment revisions bind all visible inventories and management hosts. Existing network adapters and subnet remain fixed during add/retry.

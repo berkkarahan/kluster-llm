@@ -131,6 +131,31 @@ def test_preview_never_overwrites_applied_settings_or_remembered_model(client):
     assert c.get("/v1/model-settings/toy.gguf").json()["updated_at"] is None
 
 
+@pytest.mark.parametrize("endpoint", ["/v1/plan?preview=true", "/v2/inference/plans?preview=true"])
+def test_required_node_api_uses_real_planner_and_preserves_preview_state(client, monkeypatch, endpoint):
+    from test_memory_estimation import synthetic_gguf
+    from test_required_node_planning import node
+    from kllm import run_planning
+    from kllm.core.placement_models import PlacementNodeInput
+
+    c, agent, tmp = client
+    synthetic_gguf(_model_file(tmp))
+    nodes = [PlacementNodeInput.from_mapping(n) for n in (
+        node("master1", master=True, gpu=4000), node("w1", gpu=1000),
+    )]
+    monkeypatch.setattr(run_planning, "cluster_nodes", lambda _: nodes)
+    before = agent.STATE.last_plan
+    result = c.post(endpoint, json=_payload(required_nodes=["w1", "master1"]))
+    assert result.status_code == 200, result.text
+    plan = result.json()
+    assert plan["fit_status"] != "overflow"
+    assert plan["required_nodes"] == ["master1", "w1"]
+    assert {a["node_id"] for a in plan["device_allocations"]} == {"master1", "w1"}
+    assert agent.STATE.last_plan == before
+    assert c.post(endpoint, json=_payload(required_nodes=["missing"])).status_code == 400
+    assert c.post(endpoint, json=_payload(required_nodes=["w1"], node_shares={"w1": 1})).status_code in (400, 422)
+
+
 def test_real_plan_components_auto_context_and_unpriced_arguments(client, monkeypatch):
     from test_memory_estimation import COMPONENTS, capacity, synthetic_gguf
     from kllm import run_planning
@@ -467,3 +492,15 @@ def test_model_settings_file_location(client, tmp_path):
     assert store.is_file()
     data = json.loads(store.read_text())
     assert "toy.gguf" in data.get("models", {})
+
+
+@pytest.mark.parametrize("route", ["/v1/plan", "/v2/inference/plans"])
+def test_priority_api_forwards_and_remembers_order(client, route):
+    c, agent, tmp = client
+    _model_file(tmp)
+    with patch.object(agent.native, "plan_split", return_value=_fake_plan()) as planner:
+        response = c.post(route, json=_payload(node_priority=["w1"], required_nodes=["w1"]))
+    assert response.status_code == 200
+    assert planner.call_args.kwargs["node_priority"] == ["w1"]
+    assert planner.call_args.kwargs["required_nodes"] == ["w1"]
+    assert c.get("/v1/model-settings/toy.gguf").json()["parameter_set"]["node_priority"] == ["w1"]

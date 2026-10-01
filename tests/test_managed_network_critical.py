@@ -8,6 +8,25 @@ from kllm.managed_network.models import ManagedNetwork, PeerIdentity
 from kllm.managed_network.store import NetworkStore, StoreConflict, digest
 
 
+@pytest.mark.parametrize('platform_name', ['macos', 'linux'])
+def test_inventory_skips_uninspectable_interfaces(platform_name, monkeypatch):
+    from importlib import import_module
+    from kllm.managed_network.platform.inspection import NetworkError
+
+    module = import_module(f'kllm.managed_network.platform.{platform_name}')
+    platform = module.MacOSAdapter() if platform_name == 'macos' else module.LinuxAdapter()
+    monkeypatch.setattr(module.socket, 'if_nameindex', lambda: [(1, 'lo0'), (2, 'ethernet'), (3, 'utun0')])
+    snapshot = object()
+
+    def inspect(name):
+        if name == 'ethernet':
+            return snapshot
+        raise NetworkError(f'no network service maps to interface {name!r}')
+
+    monkeypatch.setattr(platform, 'inspect', inspect)
+    assert platform.inventory() == [snapshot]
+
+
 def test_signed_authority_replay_and_changed_identity(tmp_path):
     from kllm.managed_network.identity import ChannelFence, IdentityError, LocalIdentity, SignedCommand
 

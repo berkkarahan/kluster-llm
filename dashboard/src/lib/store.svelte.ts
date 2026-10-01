@@ -19,6 +19,7 @@ import type {
     UsagePage
   } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
+import { formatMemoryComponent } from './format-memory';
 import { pushToast } from './toast';
 import { DashboardUpdates } from './live-updates';
 import type { LiveLogListener } from './live-updates';
@@ -66,6 +67,7 @@ function memberFingerprint(m: Member): unknown {
     actual_backend: m.actual_backend,
     requested_backend: m.requested_backend,
     unified_memory: m.unified_memory,
+    rpc_devices: m.rpc_devices,
     total_ram_bytes: m.total_ram_bytes,
     vram_bytes: m.vram_bytes,
     gpu_ids: m.gpu_ids,
@@ -159,6 +161,8 @@ class AppStore {
   microBatch = $state<number | 'auto'>('auto');
   flashAttention = $state<'auto' | 'on' | 'off'>('auto');
   nodeShares = $state<Record<string, number> | null>(null);
+  nodePriority = $state<string[] | null>(null);
+  requiredNodes = $state<string[]>([]);
   threadsMax = $state(8);
   templateEmbedded = $state(false);
   modelTemplateText = $state<string | null>(null);
@@ -507,9 +511,13 @@ class AppStore {
       headers: { Authorization: `Bearer ${this.apiToken}`, 'Content-Type': 'application/json' },
       ...(value === undefined ? {} : { body: JSON.stringify(value) })
     });
-    const data = await response.json();
+    let data;
+    try { data = await response.json(); }
+    catch {
+      throw new Error(`Network request ${method} ${path} returned ${response.status}: ${response.ok ? 'Invalid JSON response' : response.statusText || 'Request failed'}`);
+    }
     if (!response.ok) {
-      const detail = data?.detail;
+      const detail = data?.error?.details ?? data?.detail ?? data?.error;
       throw new Error(typeof detail === 'object' && detail !== null
         ? `${detail.code ?? response.status}: ${detail.message ?? 'Network request failed'}`
         : String(detail ?? `Network request ${response.status}`));
@@ -663,9 +671,13 @@ class AppStore {
       this.microBatch = ps.micro_batch as number | 'auto';
     if (ps.flash_attention === 'auto' || ps.flash_attention === 'on' || ps.flash_attention === 'off')
       this.flashAttention = ps.flash_attention;
-    if (ps.node_shares && typeof ps.node_shares === 'object' && !Array.isArray(ps.node_shares))
-      this.nodeShares = ps.node_shares as Record<string, number>;
-    else this.nodeShares = null;
+    this.nodeShares = null;
+    this.nodePriority = Array.isArray(ps.node_priority) && ps.node_priority.length
+      ? [...new Set(ps.node_priority.filter((node): node is string => typeof node === 'string' && !!node))]
+      : ps.node_shares && typeof ps.node_shares === 'object' && !Array.isArray(ps.node_shares)
+        ? Object.keys(ps.node_shares).sort((a, b) => Number((ps.node_shares as Record<string, number>)[b]) - Number((ps.node_shares as Record<string, number>)[a])) : null;
+    this.requiredNodes = Array.isArray(ps.required_nodes)
+      ? [...new Set(ps.required_nodes.filter((node): node is string => typeof node === 'string' && !!node))] : [];
     if (typeof ps.speculative === 'string') this.speculative = ps.speculative;
     if (typeof ps.draft_model === 'string') this.draftModel = ps.draft_model;
     if (typeof ps.vision === 'boolean') this.vision = ps.vision;
@@ -762,6 +774,34 @@ class AppStore {
     this.scheduleEstimate();
   }
 
+  setPriorityPlanning(enabled: boolean) {
+    this.nodeShares = null;
+    this.nodePriority = enabled ? [...new Set([...(this.nodePriority ?? []), ...Object.keys(this.status?.members ?? {})])] : null;
+    this.scheduleEstimate();
+  }
+
+  moveNodePriority(node: string, direction: -1 | 1) {
+    const order = [...new Set([...(this.nodePriority ?? []), ...Object.keys(this.status?.members ?? {})])];
+    const index = order.indexOf(node);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= order.length) return;
+    [order[index], order[target]] = [order[target], order[index]];
+    this.nodePriority = order;
+    this.nodeShares = null;
+    this.scheduleEstimate();
+  }
+
+  removeNodePriority(node: string) {
+    this.nodePriority = (this.nodePriority ?? []).filter((id) => id !== node);
+    this.requiredNodes = this.requiredNodes.filter((id) => id !== node);
+    this.scheduleEstimate();
+  }
+
+  setNodeRequired(node: string, required: boolean) {
+    this.requiredNodes = required ? [...new Set([...this.requiredNodes, node])] : this.requiredNodes.filter((id) => id !== node);
+    this.scheduleEstimate();
+  }
+
   /** Apply GGUF / fallback sampling seeds into the slider-backed fields. */
   seedSamplingDefaults() {
     this.temperature = this.samplingDefault('temperature');
@@ -819,6 +859,8 @@ class AppStore {
     this.microBatch = 'auto';
     this.flashAttention = 'auto';
     this.nodeShares = null;
+    this.nodePriority = null;
+    this.requiredNodes = [];
     this.speculative = 'auto';
     this.draftModel = '';
     this.vision = false;
@@ -887,6 +929,8 @@ class AppStore {
       micro_batch: this.microBatch,
       flash_attention: this.flashAttention,
       node_shares: this.nodeShares,
+      node_priority: this.nodePriority ? [...new Set([...this.nodePriority, ...Object.keys(this.status?.members ?? {})])] : [],
+      required_nodes: this.nodeShares ? [] : [...this.requiredNodes],
       vision: this.vision,
       mmproj: this.mmproj || null,
       device: this.device,
@@ -1421,6 +1465,22 @@ class AppStore {
       const previous = this.lastEstimate;
       const resolved = this.planResult.resolved_launch_settings as Record<string, unknown> | undefined;
       const previousResolved = previous?.result.resolved_launch_settings as Record<string, unknown> | undefined;
+      if (previous && previous.payload.model === payload.model
+        && (previous.payload.cache_type_k !== payload.cache_type_k || previous.payload.cache_type_v !== payload.cache_type_v)) {
+        const before = Number(previous.result.kv_estimate_bytes);
+        const after = Number(this.planResult.kv_estimate_bytes);
+        if (Number.isFinite(before) && Number.isFinite(after) && before > after) {
+          this.estimateNote += ` KV cache decreased by ${formatMemoryComponent(before - after)}.`;
+          if (previous.result.weights_estimate_bytes === this.planResult.weights_estimate_bytes
+            && previous.result.checkpoint_estimate_bytes === this.planResult.checkpoint_estimate_bytes) {
+            this.estimateNote += ' Model weights and host checkpoints are unchanged.';
+          }
+        } else if (resolved?.context !== previousResolved?.context) {
+          this.estimateNote += ' Resolved context changed; compare KV types at a fixed context to see quantization savings.';
+        } else if (resolved?.cache_type_k === previousResolved?.cache_type_k && resolved?.cache_type_v === previousResolved?.cache_type_v) {
+          this.estimateNote += ' Effective K/V types are unchanged; check extra arguments for cache-type overrides.';
+        }
+      }
       if (previous && previous.payload.model === payload.model && previous.payload.batch_size !== payload.batch_size
         && previous.result.estimated_bytes === this.planResult.estimated_bytes
         && resolved?.micro_batch != null && resolved.micro_batch === previousResolved?.micro_batch) {

@@ -26,7 +26,7 @@
 
 ## 3. Privileges and safe platform mutation
 
-**Decision**: First version requires a correctly privileged local agent: elevated Windows or root POSIX. No socket command invokes an interactive elevation prompt, changes DHCP or grants privileges. Reject preparation without needed permissions. A bounded privileged helper remains a future alternative with its own local trust boundary.
+**Decision (guided revision)**: A standalone native helper receives one-time local OS approval after a displayed administrator notice. The normal agent stays under its original account. Only bounded, signed, dedicated network operations pass account-restricted IPC. The helper saves and restores owned DHCP/configuration changes; no remote command triggers elevation. The earlier privileged-agent-only policy is superseded for guided setup.
 
 **Rationale**: Existing is_admin() already enforces this prerequisite. Remote triggers must not reach an unrestricted shell; platform commands are fixed argv or fixed PowerShell with validated values, bounded output, explicit errors and timeouts.
 
@@ -95,3 +95,9 @@ All technical decisions have a chosen approach and alternatives; no unresolved p
 Post-design review resolved admission lease grant/renew/release/drain schemas, explicit cluster binding pairing, bypass of the legacy loopback HTTP reachability gate, and TCP-only evidence for both runtime ends. Platform-lifecycle.md defines IPv4 conflict evidence and authoritative event continuity with conservative uncertainty.
 
 Missing workflow.md and architecture_constitution.md are documented in plan.md. No durable-memory capture or shared import was performed: there is no configured shared project profile/callable sync tool, and unimplemented choices remain feature-local. No host settings were changed during research.
+
+## Approved beginner workflow revision
+
+Automatic mutual bootstrap is limited to initial identity establishment for joined nodes. It cannot replace pins or authorize the privileged helper. Grant installation requires explicit local acknowledgment and OS approval. A sole safe adapter and nonoverlapping subnet are selected automatically; ambiguity asks a small adapter question. Existing technical controls remain in Advanced details.
+
+Configuration policy now permits owned dedicated DHCP changes: temporary NetworkManager clone, runtime networkd override, dedicated macOS service DHCP/off transition, and Windows ActiveStore changes. Original profiles and unrelated adapter settings are preserved. Windows firewall automation is confined to signed private peers, local dedicated address, interface and TCP ports, with owned restoration. Prior alternatives rejecting every DHCP transition apply to the compatibility manual flow, not the approved guided policy.

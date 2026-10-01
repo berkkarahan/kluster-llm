@@ -283,6 +283,37 @@ class PlacementDeviceInput:
 
 
 @dataclass(frozen=True)
+class RpcDeviceInput:
+    """A device in the exact order exposed by a running worker RPC server."""
+
+    index: int
+    device: str
+    backend: str
+    memory_kind: Literal["gpu", "ram"]
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> RpcDeviceInput:
+        index, device = value.get("index"), value.get("device")
+        kind, backend = value.get("memory_kind"), value.get("backend")
+        if type(index) is not int or index < 0 or not isinstance(device, str) or not device:
+            raise ValidationError("RPC inventory requires a device name and nonnegative index")
+        if kind not in ("gpu", "ram") or not isinstance(backend, str) or not backend:
+            raise ValidationError("RPC inventory requires backend and gpu|ram memory_kind")
+        if (kind == "ram") != (backend == "cpu"):
+            raise ValidationError("RPC CPU devices must use ram memory_kind")
+        return cls(index, device, backend, kind)
+
+    @classmethod
+    def parse_inventory(cls, value: Any) -> tuple[RpcDeviceInput, ...]:
+        if not isinstance(value, (list, tuple)) or any(not isinstance(d, Mapping) for d in value):
+            raise ValidationError("RPC inventory must be a list of devices")
+        devices = tuple(cls.from_mapping(d) for d in value)
+        if [d.index for d in devices] != list(range(len(devices))) or len({d.device for d in devices}) != len(devices):
+            raise ValidationError("RPC inventory must have unique devices in runtime order")
+        return devices
+
+
+@dataclass(frozen=True)
 class PlacementNodeInput:
     """Node inventory facts used to budget host RAM and accelerators."""
 
@@ -296,6 +327,7 @@ class PlacementNodeInput:
     rpc_endpoint: str | None
     latency_ms: float
     devices: tuple[PlacementDeviceInput, ...]
+    rpc_devices: tuple[RpcDeviceInput, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PlacementNodeInput:
@@ -310,6 +342,7 @@ class PlacementNodeInput:
         if any(not isinstance(device, Mapping) for device in raw_devices):
             raise ValidationError(f"{node_id}: device inventory contains an invalid entry")
         devices = tuple(PlacementDeviceInput.from_mapping(device) for device in raw_devices)
+        rpc_devices = RpcDeviceInput.parse_inventory(value.get("rpc_devices") or ())
         return cls(
             node_id=node_id,
             is_master=bool(value.get("is_master")),
@@ -323,6 +356,7 @@ class PlacementNodeInput:
             ),
             latency_ms=float(value.get("latency_ms") or 0),
             devices=devices,
+            rpc_devices=rpc_devices,
         )
 
 
@@ -354,6 +388,7 @@ class DeviceAllocation:
     layers: int
     output_layer: bool
     estimated_bytes: int
+    memory_kind: Literal["gpu", "ram"] = "gpu"
 
 
 @dataclass(frozen=True)
@@ -371,6 +406,7 @@ class PlacementDeviceCandidate:
     rpc_device_count: int
     unified_memory: bool
     score: float = 0.0
+    memory_kind: Literal["gpu", "ram"] = "gpu"
 
     def allocate(
         self, *, layer_start: int, layer_end: int, estimated_bytes: int, total_layers: int
@@ -393,6 +429,7 @@ class PlacementDeviceCandidate:
             layers=layer_end - layer_start,
             output_layer=layer_end == total_layers,
             estimated_bytes=estimated_bytes,
+            memory_kind=self.memory_kind,
         )
 
 
@@ -453,10 +490,20 @@ class DevicePlacementPlan:
     ram_alloc_bytes: int
     fit_status: Literal["overflow", "tight", "fits"]
     hint: str
+    node_ram_budget_bytes: tuple[NodeByteValue, ...] = ()
+    node_ram_alloc_bytes: tuple[NodeByteValue, ...] = ()
+    node_vram_alloc_bytes: tuple[NodeByteValue, ...] = ()
+    required_nodes: tuple[str, ...] = ()
+    node_priority: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, object]:
         """Convert this domain result to the existing JSON response contract."""
         return {
+            "required_nodes": list(self.required_nodes),
+            "node_priority": list(self.node_priority),
+            "node_ram_budget_bytes": {row.node_id: row.value for row in self.node_ram_budget_bytes},
+            "node_ram_alloc_bytes": {row.node_id: row.value for row in self.node_ram_alloc_bytes},
+            "node_vram_alloc_bytes": {row.node_id: row.value for row in self.node_vram_alloc_bytes},
             "node_ids": list(self.node_ids),
             "node_alloc_bytes": list(self.node_alloc_bytes),
             "distributable_bytes": self.distributable_bytes,

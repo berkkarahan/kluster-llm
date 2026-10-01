@@ -5,9 +5,10 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kllm import netsec
+from kllm.core.placement_models import RpcDeviceInput
 from kllm.managed_network import allocation as network_allocation
 from kllm.managed_network.recovery import CleanupDecision
 from kllm.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT
@@ -70,6 +71,8 @@ class RegisterBody(BaseModel):
     actual_backend: str | None = None
     requested_backend: str | None = None
     devices: list[dict[str, Any]] = Field(default_factory=list)
+    rpc_devices: list[dict[str, Any]] = Field(default_factory=list)
+
     unified_memory: bool = False
     binary_version: str | None = None
     reclaimable_ram_bytes: int = 0
@@ -86,6 +89,11 @@ class RegisterBody(BaseModel):
     resource_session: dict[str, Any] | None = None
     logging_ack: LoggingAcknowledgement | None = None
 
+    @field_validator("rpc_devices")
+    @classmethod
+    def validate_rpc_devices(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        RpcDeviceInput.parse_inventory(value)
+        return value
 
 class LoggingBody(BaseModel):
     model_config = ConfigDict(extra="forbid")

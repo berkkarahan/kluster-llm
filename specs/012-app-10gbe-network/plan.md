@@ -8,7 +8,7 @@
 
 Add a master-controlled network lifecycle to the existing agent and dashboard. Joined workers establish authenticated command sockets to the master; a start operation prepares every participant, allocates unique private addresses, applies temporary settings locally, and verifies dedicated connectivity before admitting new inference runs. Record host changes in a durable ownership journal and retain pending cleanup through disconnects and restarts.
 
-Existing shared-key membership does not authenticate a unique master. Add pinned node signing identities and explicit local pairing as a setup prerequisite. Existing RPC binds to one address and serves one client at a time. Use native dedicated network bridges to preserve the original RPC listener and bind outgoing traffic to the selected master address. Fully verify RPC only while idle, then release the verification connection before inference admission. Setup during an existing run can configure addresses but remains verification pending until that connection is idle.
+Existing shared-key membership does not authenticate a unique master. Bootstrap and pin node signing identities through mutual join-secret and Ed25519 proofs; require one-time local OS authorization of the cluster master before privileged setup. Existing RPC binds to one address and serves one client at a time. Use native dedicated network bridges to preserve the original RPC listener and bind outgoing traffic to the selected master address. Fully verify RPC only while idle, then release the verification connection before inference admission. Setup during an existing run can configure addresses but remains verification pending until that connection is idle.
 
 ## Technical Context
 
@@ -20,13 +20,13 @@ Existing shared-key membership does not authenticate a unique master. Add pinned
 
 **Testing**: Existing pytest/pytest-asyncio/xdist, Rust unit/integration tests, Node dashboard tests, Svelte check and production build. Add controlled subprocess/platform fixtures, actual loopback WebSocket/native bridge tests, crash/restart persistence tests, and a physical mixed-OS acceptance matrix.
 
-**Target Platform**: Windows, Linux and macOS with dedicated physical Ethernet, known negotiated speed >=10 Gbps, DHCP disabled, selected adapter, permissions, existing cluster management, and matching stable llama-release.
+**Target Platform**: Windows, Linux and macOS with dedicated physical Ethernet, known negotiated speed >=10 Gbps, known DHCP configuration, automatically selected safe adapter, helper permissions, existing cluster management, and matching stable llama-release.
 
 **Project Type**: Distributed Python CLI/agent with Rust native runtime and a local browser dashboard.
 
 **Performance Goals**: Spec targets: idle eligible three-node setup <=60 seconds; degradation visible <=15 seconds; reachable cleanup <=60 seconds. No throughput claim follows from link speed. Measure bridge overhead and actual inference separately on identified hardware.
 
-**Constraints**: No wildcard/public RPC listeners; no default route, DNS, DHCP or persistent-profile changes; no automatic interactive elevation; no raw connect/close RPC probes; no inference rerouting; no trust replacement through shared-key messages; no deletion of ambiguous ownership.
+**Constraints**: No wildcard/public RPC listeners; no default-route, DNS-profile or unrelated persistent-profile changes; save and restore dedicated IPv4 DHCP changes; OS elevation only after explicit local notice and acknowledgment; no raw connect/close RPC probes; no inference rerouting; no trust replacement through shared-key messages; no deletion of ambiguous ownership.
 
 **Scale/Scope**: One active managed IPv4 subnet per cluster in this version, one selected adapter per node, direct link or dedicated switch. Address capacity bounds membership; use a /24 proposal from RFC1918 candidate pools, validated across every participant. Do not impose a smaller hidden worker limit. Concurrent local bridge sessions are bounded to admitted run/probe reservations, with excess connections rejected before opening upstream RPC.
 
@@ -126,7 +126,7 @@ scripts/configure_10gbe.py               # existing standalone compatibility fac
 
 ## Design and Integration
 
-1. **Trust and inventory**: Generate local signing identity; pair public fingerprints through authenticated loopback app controls on each worker and on the master. Report missing pairing or unsupported managed-network-v1 capability as preparation failure, while preserving legacy membership. Workers connect to /v2/cluster/network-control over the existing control path, including cp_proxy if already required. Signed challenges bind the master and worker identities, current master term/session and fresh socket nonces.
+1. **Trust and inventory**: Generate local signing identity; bootstrap public fingerprints through bounded mutual agent proofs, retaining authenticated loopback manual pairing controls. Install a narrowly scoped native helper only after local administrator acknowledgment and OS approval. Report missing pairing or unsupported managed-network-v1 capability as preparation failure, while preserving legacy membership. Workers connect to /v2/cluster/network-control over the existing control path, including cp_proxy if already required. Signed challenges bind the master and worker identities, current master term/session and fresh socket nonces.
 2. **Prepare and apply**: Master writes an operation and deterministic assignment set, validates all participants, then commits application intent. Workers journal before each bounded OS mutation and verify observed state afterward. Only app-created exact addresses become removable. Candidate subnet suggestions are proposals until all nodes validate them; duplicate-address detection and post-add usability follow contracts/platform-lifecycle.md; IPv6 DAD is not IPv4 proof.
 3. **Dedicated data path**: Require TCP-only builds for both llama-server and rpc-server; an idle zero-capability probe alone is insufficient evidence. Native worker bridge listens only on its dedicated address and selected port and forwards to its existing same-host private RPC endpoint. Native master bridge exposes a loopback listener per worker; its outbound connection is explicitly bound to the master's dedicated address. Planner launch endpoints are loopback bridge addresses with a separate mapping to the logical dedicated addresses shown in the app. No second RPC process, GPU inventory, or wildcard listener is introduced.
 4. **Verification and admission**: Check route/interface identities; exchange signed source-bound challenges in both directions on separate dedicated diagnostic listeners; then make one bounded valid read-only RPC probe through the master and worker bridges while RPC is idle. Close it and confirm relay drain before launch. Freeze network revisions and endpoints in a durable run reservation before stopping a previous run. Managed runs replace ensure_rpc_peers_reachable with signed worker evidence/grants; loopback endpoints must never go to that HTTP-status gate. A managed replacement without fresh idle proof returns RPC_BUSY and preserves the old run; the operator stops it first. Active-run status uses signed dedicated probes, bridge stream state and child identity; it never opens a competing RPC verification connection.
@@ -152,7 +152,7 @@ Sample dedicated and control liveness every 5s; a 2s bounded failure invalidates
 
 ## Research and Phase 1 Outputs
 
-[research.md](research.md) resolves transport, authentication, privilege, ownership, platform, routing, probing and UI choices. [data-model.md](data-model.md) defines persisted invariants and transitions. [control-api](contracts/control-api.md), [command-socket](contracts/command-socket.md), [native-network](contracts/native-network.md), and [platform lifecycle](contracts/platform-lifecycle.md) define boundaries. [quickstart.md](quickstart.md) defines implementation and physical acceptance checks. This command ends at Phase 1; tasks.md and runtime implementation are intentionally not generated.
+[research.md](research.md) resolves transport, authentication, privilege, ownership, platform, routing, probing and UI choices. [data-model.md](data-model.md) defines persisted invariants and transitions. [control-api](contracts/control-api.md), [command-socket](contracts/command-socket.md), [native-network](contracts/native-network.md), and [platform lifecycle](contracts/platform-lifecycle.md) define boundaries. [quickstart.md](quickstart.md) defines implementation and physical acceptance checks. The implementation and validation records are maintained in tasks.md and quickstart.md.
 
 ## Complexity Tracking
 
@@ -161,3 +161,9 @@ No constitutional violation is requested. The added identity, journal and bridge
 ## Hook Completion
 
 The mandatory before_plan memory hook ran via the installed CLI; context savings were 1,912 baseline / 437 cached / 1,475 saved tokens (77.1%). Shared-memory sync was evaluated: project_profile/config and a callable sync MCP are absent, so no shared import was performed. Capture was evaluated using the installed command guidance; unimplemented design choices remain feature-local and durable memory was not written. The user's planning request does not authorize durable personal memory updates. There are no after_plan hooks in extensions.yml.
+
+## Guided setup implementation
+
+Python adds bootstrap.py, guided_setup.py, helper.py and helper_platform.py under src/kllm/managed_network. Additive /v2 network-setup resources assess computers, retain request identity across retries, authorize the local helper, and reuse signed lifecycle phases. The dashboard shows an administrator notice first, computer status, automatic adapter/subnet choices, and setup/cancel/retry/add/stop actions. NetworkAdvanced.svelte preserves manual diagnostics.
+
+The standalone Rust binary is built with --no-default-features --features network-helper; it never links PyO3. Protected launchd/systemd/SYSTEM installations use restricted local sockets or named pipes. Grants and journals live in protected OS locations. Configuration intent precedes fixed OS changes; native observation independently guards removal. Linux supports a temporary NetworkManager clone or owned runtime networkd drop-in; macOS saves DHCP state and uses networksetup only on the dedicated service; Windows uses ActiveStore DHCP/address changes and exact peer/address/port/interface firewall rules. Missing platform capabilities fail closed.

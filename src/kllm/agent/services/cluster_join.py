@@ -13,6 +13,7 @@ from kllm import netsec
 from kllm.agent.join_flow import require_join_overlay, resolve_master_endpoint
 from kllm.agent.schemas import JoinBody
 from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.agent.services.rpc_devices import worker_rpc_devices
 from kllm.core.gpu_selection import GpuDeviceInput
 from kllm.state import ClusterState
 
@@ -190,19 +191,24 @@ class ClusterJoinService:
         state: ClusterState,
     ) -> dict[str, Any]:
         root = self._deps.repo_root()
-        gpu_env = self._deps.gpu_visibility_env(backend, state.gpu_ids)
+        rpc_devices = worker_rpc_devices(gpus, backend)
+        member = state.members.setdefault(state.node_id, {})
+        member["rpc_devices"] = []
         try:
             launched = self._deps.start_worker(
                 host=rpc_bind_host,
                 port=body.rpc_port,
                 repo_root=str(root) if root else None,
-                env=gpu_env or None,
-                devices=[device.device for device in gpus if device.device is not None],
+                # --device is authoritative. Visibility masks would renumber
+                # CUDA/Vulkan devices and invalidate the advertised RPC indices.
+                env=None,
+                devices=[device["device"] for device in rpc_devices],
                 log_path=str(self._deps.rpc_server_log_path()),
             )
             state.process_pid = launched["pid"]
             state.process_role = "worker"
             if launched.get("pid"):
+                member["rpc_devices"] = rpc_devices
                 self._deps.register_child(int(launched["pid"]), "rpc-server")
             return launched
         except Exception as exc:

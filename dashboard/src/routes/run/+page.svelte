@@ -45,6 +45,10 @@
   const overflowRamBudget = $derived.by(() => {
     if (fitStatus !== 'overflow') return null;
     const plan = appStore.planResult;
+    const ramBudgets = plan?.node_ram_budget_bytes;
+    if (ramBudgets && typeof ramBudgets === 'object') {
+      return Object.values(ramBudgets as Record<string, number>).reduce((sum, value) => sum + value, 0);
+    }
     const ids = plan?.node_ids;
     const budgets = plan?.budgets_bytes;
     if (!Array.isArray(ids) || !Array.isArray(budgets)) return null;
@@ -67,7 +71,7 @@
   const settingsDirty = $derived(appStore.settingsDirty());
   let showJinjaEditor = $state(false);
   const nodeIds = $derived(Object.keys(appStore.status?.members ?? {}));
-  const workloadBytes = $derived(appStore.distributableBytes);
+  const automaticNodeIds = $derived([...new Set([...(appStore.nodePriority ?? []), ...nodeIds, ...appStore.requiredNodes])]);
 
   const parallelMode = $derived(appStore.parallelSlots === 'auto' ? 'auto' : 'edit');
   const batchMode = $derived(appStore.batchSize === 'auto' ? 'auto' : 'edit');
@@ -165,13 +169,10 @@
       <div class="flex items-center justify-between gap-2">
         <h2 class="mono text-[11px] uppercase tracking-wider">Planning</h2>
         <label class="mono text-[11px]" for="run-placement-mode">Placement</label>
-        <select id="run-placement-mode" class="field mono" style="width: auto" disabled={!!appStore.busy || appStore.device === 'cpu'}
-          value={appStore.nodeShares ? 'manual' : 'auto'}
-          onchange={(e) => {
-            if (e.currentTarget.value === 'auto') { appStore.nodeShares = null; bumpEstimate(); }
-            else appStore.setNodeShare(nodeIds[0], 1 / Math.max(1, nodeIds.length));
-          }}>
-          <option value="auto">Automatic</option><option value="manual">Manual</option>
+        <select id="run-placement-mode" class="field mono" style="width: auto" disabled={!!appStore.busy}
+          value={appStore.nodePriority ? 'priority' : 'auto'}
+          onchange={(e) => appStore.setPriorityPlanning(e.currentTarget.value === 'priority')}>
+          <option value="auto">Automatic</option><option value="priority">Priority</option>
         </select>
       </div>
       {#if appStore.estimateError}<p class="mono text-[11px]" role="alert" style="color: var(--danger)">{appStore.estimateError}</p>{/if}
@@ -180,15 +181,20 @@
           Estimated total memory: {formatGib(appStore.planResult.estimated_bytes as number)}
           / usable total memory budget {formatGib(appStore.planResult.budget_bytes as number)}
           {#if fitStatus === 'overflow'}
-            {#if overflowGpuBudget != null}<div>GPU budget: {formatGib(overflowGpuBudget)} · does not fit</div>{/if}
+            {#if overflowGpuBudget != null}<div>GPU budget: {formatGib(overflowGpuBudget)}</div>{/if}
             {#if overflowRamBudget != null}<div>RAM budget: {formatGib(overflowRamBudget)}</div>{/if}
           {:else}
             {#if appStore.device === 'gpu' && appStore.planResult.vram_alloc_bytes != null}
               <div>Estimated GPU memory: {formatGib(appStore.planResult.vram_alloc_bytes as number)}</div>
             {/if}
-            {#if appStore.planResult.cpu_alloc_bytes != null}<div>Estimated master CPU RAM: {formatGib(appStore.planResult.cpu_alloc_bytes as number)}</div>{/if}
+            {#if appStore.planResult.cpu_alloc_bytes != null}
+              <div>Estimated master CPU RAM: {formatGib(Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[appStore.status?.node_id ?? ''] ?? appStore.planResult.cpu_alloc_bytes))}</div>
+              {#if Number(appStore.planResult.ram_alloc_bytes) > Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[appStore.status?.node_id ?? ''] ?? appStore.planResult.cpu_alloc_bytes)}
+                <div>Estimated CPU RAM across nodes: {formatGib(Number(appStore.planResult.ram_alloc_bytes))}</div>
+              {/if}
+            {/if}
           {/if}
-          {#if fitStatus}<span style="color: var(--accent)">{fitStatus}</span>{/if}
+          {#if fitStatus}<span style:color={fitStatus === 'overflow' ? 'var(--danger)' : fitStatus === 'tight' ? 'var(--warn)' : 'var(--accent)'}>{fitStatus}</span>{/if}
           {#if appStore.estimating}<span style="color: var(--muted)"> · updating…</span>{/if}
           {#if appStore.planResult.weights_estimate_bytes != null}
             <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2">
@@ -205,6 +211,7 @@
           {#if appStore.planResult.resolved_launch_settings}
             {@const resolved = appStore.planResult.resolved_launch_settings as Record<string, unknown>}
             <p class="mt-2">Resolved: context {String(resolved.context)}, batch {String(resolved.batch_size)}, micro-batch {String(resolved.micro_batch)}, {String(resolved.parallel_slots)} slot(s).</p>
+            <p>K cache: {String(resolved.cache_type_k ?? appStore.cacheTypeK)} · V cache: {String(resolved.cache_type_v ?? appStore.cacheTypeV)}. Quantization changes KV storage; weights and host checkpoints are separate.</p>
           {/if}
           {#if appStore.estimateNote}<p class="mt-1" aria-live="polite">{appStore.estimateNote}</p>{/if}
           {#if appStore.planResult.estimate_complete === false}
@@ -223,27 +230,37 @@
           Cache RAM is a server cache limit; mmap/mlock primarily affect host residency.
         </p>
       {/if}
-      {#if appStore.nodeShares}
-        <p class="mono text-[11px]" style="color: var(--muted)">Target GPU workload: {workloadBytes ? formatGib(workloadBytes) : 'estimating…'} · 100% across nodes; full layers may round targets.</p>
-        {#each nodeIds as node}
-          {@const share = appStore.nodeShares[node] ?? 0}
+      <p class="mono text-[11px]" style="color: var(--muted)">{appStore.nodePriority ? 'Move nodes up or down to prioritize their devices. Earlier nodes receive as much workload as capacity and required nodes allow.' : 'Automatic planning chooses devices by capacity and latency.'} GPUs are preferred; CPU RAM is used if needed. Checked nodes must host at least one model layer.</p>
+        {#each automaticNodeIds as node, priorityIndex (node)}
+          {@const member = appStore.status?.members?.[node]}
           {@const allocations = (appStore.planResult?.device_allocations as DeviceAllocation[] | undefined) ?? []}
-          <div class="flex flex-col gap-1 mono text-[11px]">
-            <label for={'share-' + node}>{node === appStore.status?.node_id ? 'Master' : 'Worker'} · {node} · target {workloadBytes ? formatGib(workloadBytes * share) : '—'} ({(share * 100).toFixed(1)}%)</label>
-            <input id={'share-' + node} type="range" min="0" max={workloadBytes ? workloadBytes / 2**30 : 1}
-              step="any" value={workloadBytes ? workloadBytes * share / 2**30 : share}
-              aria-valuetext={`${workloadBytes ? formatGib(workloadBytes * share) : 'estimating'} of ${workloadBytes ? formatGib(workloadBytes) : 'model workload'} (${(share * 100).toFixed(1)}%)`}
-              disabled={!!blocked || !!appStore.busy}
-              oninput={(e) => appStore.setNodeShare(node, Number(e.currentTarget.value) / (workloadBytes ? workloadBytes / 2**30 : 1))} />
-            <span style="color: var(--muted)">
-              Actual workload: {formatGib(Number((appStore.planResult?.node_workload_bytes as Record<string, number> | undefined)?.[node] ?? 0))}
-              · GPU: {formatGib(allocations.filter((a) => a.node_id === node).reduce((n, a) => n + a.estimated_bytes, 0))}
-              / {formatGib(Number((appStore.planResult?.node_gpu_budget_bytes as Record<string, number> | undefined)?.[node] ?? 0))} usable
-              · {allocations.filter((a) => a.node_id === node).reduce((n, a) => n + a.layers, 0)} layers
-            </span>
+          <div class="mono text-[11px] flex flex-col gap-1">
+            {#if appStore.nodePriority}
+              <div class="flex items-center gap-2">
+                <span>{priorityIndex + 1}. {member?.role === 'master' ? 'Master' : 'Worker'} · {node}{!member ? ' · unavailable' : ''}</span>
+                <button class="btn mono" aria-label={'Move ' + node + ' up'} disabled={!!appStore.busy || priorityIndex === 0} onclick={() => appStore.moveNodePriority(node, -1)}>↑</button>
+                <button class="btn mono" aria-label={'Move ' + node + ' down'} disabled={!!appStore.busy || priorityIndex === automaticNodeIds.length - 1} onclick={() => appStore.moveNodePriority(node, 1)}>↓</button>
+                {#if !member}<button class="btn mono" aria-label={'Remove unavailable ' + node} disabled={!!appStore.busy} onclick={() => appStore.removeNodePriority(node)}>Remove</button>{/if}
+              </div>
+            {/if}
+            <label class="flex items-center gap-2" for={'required-' + node}>
+              <input id={'required-' + node} type="checkbox" checked={appStore.requiredNodes.includes(node)}
+                disabled={!!appStore.busy || (!member && !appStore.requiredNodes.includes(node))}
+                onchange={(e) => appStore.setNodeRequired(node, e.currentTarget.checked)} />
+              Must use this node · {member?.role === 'master' ? 'Master' : 'Worker'} · {node}{!member ? ' · unavailable' : ''}
+            </label>
+            {#if appStore.planResult}
+              <span style="color: var(--muted)">
+                GPU: {formatGib(Number((appStore.planResult.node_vram_alloc_bytes as Record<string, number> | undefined)?.[node] ?? 0))}
+                / {formatGib(Number((appStore.planResult.node_gpu_budget_bytes as Record<string, number> | undefined)?.[node] ?? 0))} usable
+                · CPU RAM: {formatGib(Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[node] ?? 0))}
+                / {formatGib(Number((appStore.planResult.node_ram_budget_bytes as Record<string, number> | undefined)?.[node] ?? 0))} usable
+                · {allocations.filter((a) => a.node_id === node).reduce((n, a) => n + a.layers - (a.output_layer ? 1 : 0), member?.role === 'master' && appStore.planResult.fit_status !== 'overflow' ? Math.min(Number(appStore.planResult.cpu_layers ?? 0), Number(appStore.planResult.estimated_layers ?? 0)) : 0)} model layers
+                {member?.unified_memory ? ' · shared RAM/GPU pool' : ''}
+              </span>
+            {/if}
           </div>
         {/each}
-      {/if}
       {#if fitStatus === 'overflow' && appStore.planResult?.hint}
         <p class="mono text-[11px]" role="alert" style="color: var(--danger)">{String(appStore.planResult.hint)}</p>
       {/if}

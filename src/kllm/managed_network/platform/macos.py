@@ -8,7 +8,7 @@ import socket
 from ..models import NodeAssignment
 from ..store import digest
 from .base import AdapterSnapshot, PlatformAdapter, PlatformRefusal, run_fixed
-from .inspection import INTERFACE_RE, _inspect_macos, _mac_service
+from .inspection import INTERFACE_RE, NetworkError, _inspect_macos, _mac_service
 
 
 class MacOSAdapter(PlatformAdapter):
@@ -17,7 +17,7 @@ class MacOSAdapter(PlatformAdapter):
         for _, name in socket.if_nameindex():
             try:
                 result.append(self.inspect(name))
-            except (OSError, ValueError, PlatformRefusal):
+            except (OSError, ValueError, NetworkError):
                 continue
         return result
 

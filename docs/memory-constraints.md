@@ -23,6 +23,11 @@ embedding copy needed for offloaded output. GGUF metadata/header bytes are not
 weights. The legacy native planner without resolved launch settings remains a
 file-size approximation and reports an incomplete estimate.
 
+`cpu_alloc_bytes`/`ram_alloc_bytes` include master and RPC worker CPU allocations.
+`node_ram_alloc_bytes` and `node_vram_alloc_bytes` show the per-node breakdown;
+`node_ram_budget_bytes` reports usable CPU budgets. RPC CPU layers contribute to
+upstream `ngl` and `tensor_split`, but are never labeled as VRAM.
+
 Compute is a conservative graph reserve based on physical microbatch, sequence
 outputs, embedding/FFN dimensions, attention masks, Flash Attention, cache
 dequantization and row/tensor split scratch. Each active device and the master
@@ -106,6 +111,38 @@ It reads metadata without
 loading weights. Backend peak-memory and live RPC validation still require the
 target hardware and a real model run.
 
+For a fixed context and Flash Attention setting, quantization changes only KV
+storage and associated scratch. For the Qwen hybrid model at context 200192,
+changing both K and V from `q8_0` to `q4_0` reduces KV from about 6.49 to 3.44 GiB.
+It does not reduce model weights, float32 recurrent state, or host checkpoints.
+Auto context may grow after quantization, consuming some of the memory savings.
+The preview displays resolved K/V types and reports KV savings between edits.
+
+### Automatic placement and required nodes
+
+Automatic planning tries local GPUs, a single remote GPU, and pooled GPUs before
+CPU RAM fallback. Worker CPU RAM is usable only when the running worker advertises
+its CPU device in `rpc_devices`; rebuild and rejoin older workers to enable it.
+On macOS, available RAM uses free plus inactive pages rather than subtracting
+compressed pages again. Metal and Vulkan on Apple Silicon share that same pool.
+
+Select **Must use this node** in Automatic placement, or repeat `--require-node NODE`
+on `kllm plan`/`kllm run`. API requests use `required_nodes: ["node-id", ...]`.
+Each required node must receive a transformer or recurrent model layer; host-only
+allocations and an output-only layer do not satisfy the requirement. The planner
+chooses the shares and budgets all runtime reserves. Unavailable IDs are rejected;
+insufficient capacity returns overflow rather than silently omitting a required node.
+Requirements are incompatible with manual shares and row/tensor modes.
+
+Select **Priority** to order nodes with the up/down controls. The planner maximizes
+workload on the first node, then the next, while respecting capacity, contiguous
+layers and required nodes. GPU-only solutions take precedence over CPU fallback.
+This replaces the dashboard's fixed-share sliders; stored manual shares migrate to
+priority order. API requests use `node_priority: ["preferred-node", "next-node"]`.
+Unlisted current nodes remain available as fallback; unavailable priority IDs must
+be removed. Priority order is remembered with model settings and applied to previews
+and launches.
+
 ---
 
 ## Quantization Size Reference
@@ -181,7 +218,8 @@ Can run: 70B Q4_K_M (48 GB) → NO (weights alone exceed the combined budget)
 
 For the 70B model, add capacity or use a smaller quantization. The Python planner
 can spill a contiguous prefix onto master CPU RAM when that RAM budget permits;
-GPU workers do not automatically spill their allocations onto worker RAM.
+updated GPU workers can contribute RAM through their advertised RPC CPU devices.
+Manual shares remain GPU-only.
 
 ---
 

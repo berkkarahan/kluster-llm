@@ -70,7 +70,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
         }
         if(path==='/v2/cluster/networks') return json({networks:network?[network]:[]});
         if(path===`/v2/cluster/network-operations/${operationId}`) return json({phase:operationPending?'preparing':'complete',operation_revision:operationRevision,terminal_result:operationPending?null:{state:network.observed_state}});
-        if(path===`/v2/cluster/network-operations/${operationId}/cancel`) {operationPending=false;operationRevision=2;network.observed_state='failed';return json({network_id:networkId,operation_id:operationId},202);} 
+        if(path===`/v2/cluster/network-operations/${operationId}/cancel`) {operationPending=false;operationRevision=2;network.observed_state='failed';return json({network_id:networkId,operation_id:operationId},202);}
         if(path===`/v2/cluster/networks/${networkId}/operations`) {
           assert.equal(network.blocking_runs.length,0,'UI must stop dependent inference before network cleanup');
           operationPending=false;
@@ -168,7 +168,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
       await wait("document.body.textContent.includes('· stopped ·')");
       assert.ok(requests.some(r=>r.path.endsWith('/peers/worker')));
       assert.ok(requests.some(r=>r.path==='/v2/node/network-selection'));
-      assert.ok(requests.filter(r=>(r.method==='POST'||r.method==='PUT') && (r.path.includes('network') || r.path.includes('/inference/runs'))).every(r=>r.authorization==='Bearer fixture-token'), JSON.stringify(requests.filter(r=>(r.method==='POST'||r.method==='PUT') && (r.path.includes('network') || r.path.includes('/inference/runs'))))); 
+      assert.ok(requests.filter(r=>(r.method==='POST'||r.method==='PUT') && (r.path.includes('network') || r.path.includes('/inference/runs'))).every(r=>r.authorization==='Bearer fixture-token'), JSON.stringify(requests.filter(r=>(r.method==='POST'||r.method==='PUT') && (r.path.includes('network') || r.path.includes('/inference/runs')))));
     } finally {
       try { ws?.close(); } catch { /* ignore */ }
       if (browser) {

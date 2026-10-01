@@ -41,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import platform
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -841,6 +842,155 @@ def build_ui(*, skip_install: bool) -> None:
     _run([npm, "run", "build"], cwd=DASHBOARD)
     if not (DASHBOARD / "build").is_dir():
         raise SystemExit(f"error: dashboard build did not produce {DASHBOARD / 'build'}")
+
+
+# ── kllm PATH shim ───────────────────────────────────────────────────────────
+
+_PATH_SHIM_MARKER = "# kllm-install: user-local-bin"
+_PATH_EXPORT_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
+
+
+def _user_local_bin_dir() -> Path:
+    return Path.home() / ".local" / "bin"
+
+
+def _kllm_shim_path(bin_dir: Path) -> Path:
+    name = "kllm.cmd" if _is_windows() else "kllm"
+    return bin_dir / name
+
+
+def _path_entry_contains(path_env: str, directory: Path) -> bool:
+    try:
+        target = directory.resolve()
+    except OSError:
+        return False
+    for part in path_env.split(os.pathsep):
+        if not part:
+            continue
+        try:
+            resolved = Path(part).resolve()
+        except OSError:
+            continue
+        if _is_windows():
+            if str(resolved).lower() == str(target).lower():
+                return True
+        elif resolved == target:
+            return True
+    return False
+
+
+def _unix_shell_profile_candidates() -> list[Path]:
+    home = Path.home()
+    return [
+        home / ".zprofile",
+        home / ".zshrc",
+        home / ".bash_profile",
+        home / ".bashrc",
+    ]
+
+
+def _profile_has_path_shim_marker(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    return _PATH_SHIM_MARKER in path.read_text(encoding="utf-8")
+
+
+def _any_shell_profile_has_path_shim_marker() -> bool:
+    return any(_profile_has_path_shim_marker(p) for p in _unix_shell_profile_candidates())
+
+
+def _write_kllm_shim_unix(shim: Path, *, uv: str, repo_root: Path) -> None:
+    uv_q = shlex.quote(str(Path(uv).resolve()))
+    root_q = shlex.quote(str(repo_root.resolve()))
+    body = f"#!/usr/bin/env sh\nexec {uv_q} run --directory {root_q} kllm \"$@\"\n"
+    shim.write_text(body, encoding="utf-8", newline="\n")
+    _mark_executable(shim)
+
+
+def _write_kllm_shim_windows(shim: Path, *, uv: str, repo_root: Path) -> None:
+    uv_path = str(Path(uv).resolve())
+    root_path = str(repo_root.resolve())
+    body = f'@echo off\r\n"{uv_path}" run --directory "{root_path}" kllm %*\r\n'
+    shim.write_text(body, encoding="utf-8", newline="\r\n")
+
+
+def install_kllm_path_shim(*, uv: str, repo_root: Path) -> Path:
+    """Install a global `kllm` launcher that runs `uv run kllm` for this repo."""
+    bin_dir = _user_local_bin_dir()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    shim = _kllm_shim_path(bin_dir)
+    if _is_windows():
+        _write_kllm_shim_windows(shim, uv=uv, repo_root=repo_root)
+    else:
+        _write_kllm_shim_unix(shim, uv=uv, repo_root=repo_root)
+    return shim
+
+
+def _ensure_windows_user_path(bin_dir: Path) -> bool:
+    """Append bin_dir to the Windows User PATH if missing. Returns True when updated."""
+    directory = str(bin_dir.resolve())
+    script = (
+        "$dir = $args[0]\n"
+        "$cur = [Environment]::GetEnvironmentVariable('Path', 'User')\n"
+        "if ($null -eq $cur) { $cur = '' }\n"
+        "foreach ($p in ($cur -split ';')) {\n"
+        "  if ($p -and ($p -ieq $dir)) { exit 2 }\n"
+        "}\n"
+        "$joined = if ($cur.TrimEnd(';')) { $cur.TrimEnd(';') + ';' + $dir } else { $dir }\n"
+        "[Environment]::SetEnvironmentVariable('Path', $joined, 'User')\n"
+        "exit 0\n"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script, directory],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 2:
+        return False
+    if result.returncode != 0:
+        _warn(
+            "Could not update Windows User PATH; add "
+            f"{directory} manually to use `kllm` globally."
+        )
+        return False
+    return True
+
+
+def ensure_user_local_bin_on_path(bin_dir: Path) -> bool:
+    """Idempotently ensure ~/.local/bin is on the user's PATH. Returns True if modified."""
+    resolved = bin_dir.resolve()
+    if _is_windows():
+        return _ensure_windows_user_path(resolved)
+
+    if _any_shell_profile_has_path_shim_marker():
+        return False
+    if _path_entry_contains(os.environ.get("PATH", ""), resolved):
+        return False
+
+    candidates = _unix_shell_profile_candidates()
+    target = next((p for p in candidates if p.is_file()), None)
+    if target is None:
+        shell = os.environ.get("SHELL", "")
+        if _is_macos() or shell.endswith("/zsh"):
+            target = Path.home() / ".zshrc"
+        else:
+            target = Path.home() / ".bashrc"
+
+    block = f"\n{_PATH_SHIM_MARKER}\n{_PATH_EXPORT_LINE}\n"
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(block)
+    return True
+
+
+def install_kllm_cli_on_path() -> tuple[Path, bool]:
+    uv = ensure_uv()
+    bin_dir = _user_local_bin_dir()
+    shim = install_kllm_path_shim(uv=uv, repo_root=ROOT)
+    path_updated = ensure_user_local_bin_on_path(bin_dir)
+    print(f"Installed `kllm` shim: {shim}")
+    if path_updated:
+        print(f"Added {bin_dir} to your shell PATH — open a new terminal to run `kllm` globally.")
+    return bin_dir, path_updated
 
 
 # ── WireGuard ────────────────────────────────────────────────────────────────
@@ -1717,6 +1867,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Install only llama-server / rpc-server (pinned in llama-release)",
     )
+    p.add_argument(
+        "--skip-path-shim",
+        action="store_true",
+        help="Do not install a global `kllm` shim or update PATH",
+    )
     return p.parse_args(argv)
 
 
@@ -1835,12 +1990,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.llama_only:
             print(f"llama.cpp {tag} ready.")
 
+    path_updated = False
+    if not args.skip_rust and not args.skip_path_shim:
+        print("\n=== kllm CLI on PATH ===")
+        _, path_updated = install_kllm_cli_on_path()
+
     print("\nInstall complete.")
     if not args.skip_rust:
         activate = r".\.venv\Scripts\Activate.ps1" if _is_windows() else "source .venv/bin/activate"
         print(f"Activate the venv with: {activate}")
-        print("Or without activate: uv run kllm start   |   uvx --from . kllm join --key <key>")
-        print("Then: kllm start   |   kllm join --key <key>")
+        if args.skip_path_shim:
+            print("Run: uv run kllm start   |   uvx --from . kllm join --key <key>")
+        else:
+            if path_updated:
+                print("After opening a new terminal: kllm start   |   kllm join --key <key>")
+            else:
+                print("Run: kllm start   |   kllm join --key <key>")
+            print("(Same as: uv run kllm … from the repo root.)")
+            print("Note: the global shim points at this checkout; re-run install after moving the repo.")
     if not args.skip_ui:
         print("Dashboard: kllm ui")
     if not args.skip_wireguard:

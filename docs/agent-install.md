@@ -23,7 +23,7 @@ After install on **this** machine:
 | 6 | `rpc-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
 | 6b | llama.cpp pin matches | `python scripts/install.py --check` exits 0; stamp `vendor/bin/llama-release.txt` equals committed [`llama-release`](../llama-release) |
 | 7 | WireGuard CLI present (for overlay) | `wg --version` or `C:\Program Files\WireGuard\wg.exe` |
-| 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK) |
+| 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK). Install adds a global `~/.local/bin/kllm` shim (`uv run kllm` for this checkout); open a **new terminal** if PATH was just updated. Skip with `python scripts/install.py --skip-path-shim`. |
 
 **Cluster smoke (needs 2+ machines):** master `kllm start` prints join key; worker `kllm join --key …` succeeds; master `kllm status` lists the worker; optional `kllm run --model …` after master-local model download (no GGUF copy to workers).
 
@@ -120,6 +120,7 @@ python3 scripts/install.py --backend cuda --from-source
    llama-server's embedded HTTPS server is the expendable part: if `cmake` configure fails, the installer clears the cached OpenSSL entries and dangling linker flags and retries **with HTTPS enabled** (the real fix); only if that fails does it fall back to `-DLLAMA_OPENSSL=OFF`, recorded as `https=off` in the stamp. The fallback is never latched, so the next run restores HTTPS.
    `kllm join` reuses a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot, reporting the refusal as a `llama:` warning in the join output rather than downgrading the node.
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
+6. Installs a global **`kllm`** launcher under `~/.local/bin` (Windows: `kllm.cmd`) that runs `uv run kllm` for this checkout, and idempotently adds `~/.local/bin` to the user PATH when needed (`--skip-path-shim` to skip).
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).
 

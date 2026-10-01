@@ -899,6 +899,77 @@ def test_stamp_backend_helpers(install, monkeypatch):
     assert install.backends_satisfied("metal", ["metal"])
 
 
+def test_path_entry_contains_respects_platform_case(install, monkeypatch, tmp_path):
+    bin_dir = tmp_path / "Local" / "Bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr(install, "_is_windows", lambda: True)
+    monkeypatch.setattr(install.os, "pathsep", ";")
+    path_env = f"C:\\Tools;{bin_dir};C:\\Other"
+    assert install._path_entry_contains(path_env, bin_dir)
+    path_env_upper = f"C:\\Tools;{str(bin_dir).upper()};C:\\Other"
+    assert install._path_entry_contains(path_env_upper, bin_dir)
+
+
+def test_install_kllm_path_shim_unix(install, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    uv = tmp_path / "uv"
+    uv.write_text("", encoding="utf-8")
+
+    shim = install.install_kllm_path_shim(uv=str(uv), repo_root=repo)
+
+    assert shim == home / ".local" / "bin" / "kllm"
+    text = shim.read_text(encoding="utf-8")
+    assert text.startswith("#!/usr/bin/env sh\nexec ")
+    assert " run --directory " in text
+    assert ' kllm "$@"' in text
+    assert str(uv.resolve()) in text
+    assert str(repo.resolve()) in text
+    assert (shim.stat().st_mode & 0o111) != 0
+
+
+def test_install_kllm_path_shim_windows(install, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(install, "_is_windows", lambda: True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    uv = tmp_path / "uv.exe"
+    uv.write_text("", encoding="utf-8")
+
+    shim = install.install_kllm_path_shim(uv=str(uv), repo_root=repo)
+
+    assert shim.name == "kllm.cmd"
+    text = shim.read_text(encoding="utf-8")
+    assert "@echo off" in text
+    assert " run --directory " in text
+    assert " kllm %*" in text
+
+
+def test_ensure_user_local_bin_on_path_idempotent(install, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    zshrc = home / ".zshrc"
+    zshrc.write_text("# existing\n", encoding="utf-8")
+    monkeypatch.setattr(install.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    bin_dir = home / ".local" / "bin"
+
+    assert install.ensure_user_local_bin_on_path(bin_dir) is True
+    first = zshrc.read_text(encoding="utf-8")
+    assert install._PATH_SHIM_MARKER in first
+    assert install._PATH_EXPORT_LINE in first
+
+    assert install.ensure_user_local_bin_on_path(bin_dir) is False
+    assert zshrc.read_text(encoding="utf-8") == first
+
+
 def test_stamp_matches_multi_backend(install, monkeypatch, tmp_path):
     monkeypatch.setattr(install, "BIN_DIR", tmp_path)
     monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")

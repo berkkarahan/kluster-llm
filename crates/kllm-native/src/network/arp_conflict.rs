@@ -282,29 +282,14 @@ pub fn probe_ipv4_conflict(
     }
     #[cfg(unix)]
     {
-        let values = mac
-            .split(':')
-            .map(|b| u8::from_str_radix(b, 16))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
-        let mac: [u8; 6] = values
-            .try_into()
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid Ethernet MAC"))?;
-        if mac == [0; 6] || mac[0] & 1 != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "unicast Ethernet MAC required",
-            ));
-        }
-        let address: Ipv4Addr = address
-            .parse()
-            .map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 required"))?;
-        if !super::relay::private(address) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "private IPv4 required",
-            ));
-        }
-        py.allow_threads(|| probe(&interface, mac, address))
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        py.allow_threads(|| probe_native(&interface, &mac, &address)).map_err(|error| {
+            match error.to_string().as_str() {
+                "invalid MAC" | "invalid IPv4" | "private address and unicast MAC required" => {
+                    pyo3::exceptions::PyValueError::new_err(error.to_string())
+                }
+                _ => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+            }
+        })
     }
 }
 

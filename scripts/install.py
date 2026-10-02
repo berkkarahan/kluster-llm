@@ -38,6 +38,8 @@ CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import platform
@@ -762,6 +764,149 @@ def ensure_vulkan_macos() -> dict[str, str]:
 
 # ── kllm package + UI ────────────────────────────────────────────────────────
 
+# Console scripts the wheel RECORD deletes on force-reinstall.
+_WINDOWS_LAUNCHERS = ("kllm.exe", "kllm-agent.exe")
+
+
+def _park_destination(path: Path) -> Path:
+    """Pick a free sibling name, deleting an unmapped previous park first."""
+    candidates = (
+        path.with_name(f"{path.name}.locked"),
+        path.with_name(f"{path.name}.{os.getpid()}.locked"),
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            return candidate
+        try:
+            candidate.unlink()
+        except OSError:
+            continue
+        return candidate
+    return path.with_name(f"{path.name}.{os.getpid()}.extra.locked")
+
+
+def _park_windows_launchers(scripts_dir: Path) -> set[str]:
+    """Rename Windows console scripts so a reinstall can replace a running one.
+
+    Returns launcher file names that stayed in place. ``kllm rebuild`` is the
+    uv trampoline ``Scripts/kllm.exe``, and that trampoline keeps its own file
+    open for the whole process. Windows error 32 then blocks both delete and
+    rename. A normal image mapping can still be renamed; those launchers are
+    moved aside so the wheel can write a new file at the original path.
+    """
+    busy: set[str] = set()
+    if not _is_windows():
+        return busy
+    for name in _WINDOWS_LAUNCHERS:
+        path = scripts_dir / name
+        if not path.is_file():
+            continue
+        try:
+            path.rename(_park_destination(path))
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 32:
+                raise
+            busy.add(name)
+    return busy
+
+
+def _record_hash(data: bytes) -> str:
+    digest = hashlib.sha256(data).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _launcher_script_names(launchers: set[str]) -> set[str]:
+    return {name[:-4] if name.lower().endswith(".exe") else name for name in launchers}
+
+
+def _strip_console_scripts(text: str, script_names: set[str]) -> str:
+    lines = text.splitlines(keepends=True)
+    stripped: list[str] = []
+    in_scripts = False
+    for line in lines:
+        body = line.strip()
+        if body.startswith("[") and body.endswith("]"):
+            in_scripts = body == "[console_scripts]"
+            stripped.append(line if line.endswith("\n") else line + "\n")
+            continue
+        if in_scripts and "=" in body:
+            name = body.split("=", 1)[0].strip()
+            if name in script_names:
+                continue
+        stripped.append(line if line.endswith("\n") else line + "\n")
+    return "".join(stripped)
+
+
+def _omit_locked_launchers_from_record(python: Path, launchers: set[str]) -> None:
+    """Drop busy console scripts from the installed RECORD so uninstall skips them."""
+    site = python.parent.parent / "Lib" / "site-packages"
+    script_names = _launcher_script_names(launchers)
+    for record in site.glob("kllm-*.dist-info/RECORD"):
+        dist = record.parent
+        entry = dist / "entry_points.txt"
+        new_entry: bytes | None = None
+        if entry.is_file():
+            new_entry = _strip_console_scripts(
+                entry.read_text(encoding="utf-8"), script_names
+            ).encode("utf-8")
+            entry.write_bytes(new_entry)
+        kept: list[str] = []
+        for line in record.read_text(encoding="utf-8").splitlines():
+            path = line.split(",", 1)[0].replace("\\", "/")
+            if Path(path).name in launchers:
+                continue
+            if new_entry is not None and path.replace("\\", "/").endswith("/entry_points.txt"):
+                kept.append(f"{path},sha256={_record_hash(new_entry)},{len(new_entry)}")
+                continue
+            kept.append(line)
+        record.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+
+def _wheel_omitting_console_scripts(wheel: Path, launchers: set[str]) -> Path:
+    """Return a copy of ``wheel`` that does not reinstall busy console scripts."""
+    script_names = _launcher_script_names(launchers)
+    dest_dir = Path(tempfile.mkdtemp(prefix="kllm-wheel-"))
+    dest = dest_dir / wheel.name
+    with zipfile.ZipFile(wheel) as src:
+        files = {info.filename: src.read(info.filename) for info in src.infolist()}
+    entry_name = next(
+        (name for name in files if name.endswith(".dist-info/entry_points.txt")),
+        None,
+    )
+    if entry_name is not None:
+        files[entry_name] = _strip_console_scripts(
+            files[entry_name].decode("utf-8"), script_names
+        ).encode("utf-8")
+        record_name = next(
+            (name for name in files if name.endswith(".dist-info/RECORD")),
+            None,
+        )
+        if record_name is not None:
+            updated: list[str] = []
+            for line in files[record_name].decode("utf-8").splitlines():
+                path = line.split(",", 1)[0]
+                if path == entry_name:
+                    data = files[entry_name]
+                    updated.append(f"{path},sha256={_record_hash(data)},{len(data)}")
+                else:
+                    updated.append(line)
+            files[record_name] = ("\n".join(updated) + "\n").encode("utf-8")
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as out:
+        for name, data in files.items():
+            out.writestr(name, data)
+    return dest
+
+
+def _wheel_for_reinstall(python: Path, wheel: Path) -> Path:
+    """Park replaceable launchers, and keep a busy trampoline out of the reinstall."""
+    if not _is_windows():
+        return wheel
+    busy = _park_windows_launchers(python.parent)
+    if not busy:
+        return wheel
+    _omit_locked_launchers_from_record(python, busy)
+    return _wheel_omitting_console_scripts(wheel, busy)
+
 
 def build_rust(python: Path, *, release: bool) -> None:
     ensure_rust()
@@ -790,7 +935,7 @@ def build_rust(python: Path, *, release: bool) -> None:
     built = sorted(wheels.glob("kllm-*.whl"))
     if not built:
         raise SystemExit(f"error: maturin produced no wheel in {wheels}")
-    wheel = str(built[-1])
+    wheel = str(_wheel_for_reinstall(python, built[-1]))
     # --no-deps: only replace the kllm wheel / extension. Force-reinstalling
     # the full dependency tree races with running agents and can corrupt
     # packages like pydantic_core on Windows (locked .pyd / missing RECORD).

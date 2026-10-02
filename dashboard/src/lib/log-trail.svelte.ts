@@ -1,3 +1,4 @@
+import { errors } from './errors';
 import type { LiveLogs, LogEntry, LogSnapshot, LogSource, LogTag, RefreshMode } from './types';
 import { appStore } from './store.svelte';
 
@@ -323,6 +324,7 @@ export class LogTrail {
   }
 
   private async read(retainedHistory = false): Promise<void> {
+    const errorGeneration = errors.generation;
     if (this.disposed || (this.paused && !retainedHistory) || this.inFlight || (this.usingLive && this.denied)) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     this.inFlight = true;
@@ -369,7 +371,9 @@ export class LogTrail {
       if (legacyHandoff) this.continuityId = null;
     } catch (error) {
       if (this.disposed || gen !== this.generation) return;
+      if (errorGeneration !== errors.generation) return;
       this.errorText = timedOut ? 'Log read timed out; retrying' : String(error);
+      errors.observe('logs', this.errorText, '', false, errorGeneration);
       this.state = 'error';
     } finally {
       clearTimeout(requestTimer);
@@ -385,6 +389,7 @@ export class LogTrail {
     if (result.availability === 'denied') this.denied = true;
     if (result.availability !== 'available' || !result.snapshot) {
       this.errorText = result.error?.message ?? 'Live logs unavailable';
+      errors.observe('logs', this.errorText);
       this.state = 'error';
       return;
     }
@@ -392,6 +397,7 @@ export class LogTrail {
       this.commit(validateSnapshot(result.snapshot));
     } catch (error) {
       this.errorText = String(error);
+      errors.observe('logs', this.errorText, '', false);
       this.state = 'error';
     }
   }
@@ -426,6 +432,7 @@ export class LogTrail {
     this.gap = this.gap || gapNow || this.omittedRows > 0;
     this.warning = data.warning ?? '';
     this.errorText = '';
+    errors.observe('logs', '');
     this.lastSuccessAt = Date.now();
   }
 }

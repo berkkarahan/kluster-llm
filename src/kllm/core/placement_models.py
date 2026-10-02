@@ -58,6 +58,7 @@ class PlacementSettings:
     requested_batch_size: int | None = None
     requested_micro_batch: int | None = None
     device_count: int = 0
+    moe_offload: int | str = "auto"
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> PlacementSettings:
@@ -101,6 +102,11 @@ class PlacementSettings:
                 else None
             ),
             device_count=int(values.get("device_count", 0)),
+            moe_offload=(
+                values["moe_offload"]
+                if values.get("moe_offload") == "auto"
+                else int(values.get("moe_offload", "auto"))
+            ),
         )
 
     def to_mapping(self, *, device_count: int | None = None) -> dict[str, Any]:
@@ -130,6 +136,7 @@ class PlacementSettings:
             "auxiliary_weights_bytes": self.auxiliary_weights_bytes,
             "auxiliary_bytes": self.auxiliary_bytes,
             "device_count": self.device_count if device_count is None else device_count,
+            "moe_offload": self.moe_offload,
         }
         if self.requested_batch_size is not None:
             values["requested_batch_size"] = self.requested_batch_size
@@ -156,6 +163,8 @@ class MemoryEstimate:
     warnings: tuple[str, ...]
     complete: bool
     architecture: str
+    expert_costs: tuple[int, ...] = ()
+    expert_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -180,6 +189,7 @@ class ModelLayout:
     input_bytes: int
     tensors: tuple[TensorLayout, ...]
     confidence: Literal["metadata", "approximate"]
+    expert_layers: tuple[int, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> ModelLayout | None:
@@ -226,6 +236,19 @@ class ModelLayout:
             raise ValidationError("model layout contains invalid byte estimates") from exc
         if min(output_bytes, input_bytes, *normalized_layers) < 0:
             raise ValidationError("model layout byte estimates must be non-negative")
+        raw_expert = value.get("expert_layers", ())
+        if raw_expert is None:
+            raw_expert = ()
+        if not isinstance(raw_expert, (list, tuple)):
+            raise ValidationError("model layout expert_layers must be a sequence")
+        try:
+            normalized_expert = tuple(int(weight) for weight in raw_expert)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("model layout expert_layers contains invalid byte estimates") from exc
+        if normalized_expert and len(normalized_expert) != len(normalized_layers):
+            raise ValidationError("model layout expert_layers must match layer count")
+        if any(weight < 0 or weight > total for weight, total in zip(normalized_expert, normalized_layers)):
+            raise ValidationError("model layout expert bytes must be non-negative and within layer totals")
         return cls(
             architecture=architecture,
             metadata=_freeze(metadata),
@@ -234,6 +257,7 @@ class ModelLayout:
             input_bytes=input_bytes,
             tensors=tuple(tensors),
             confidence=confidence,
+            expert_layers=normalized_expert,
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -242,6 +266,7 @@ class ModelLayout:
             "architecture": self.architecture,
             "metadata": _thaw(self.metadata),
             "layers": list(self.layers),
+            "expert_layers": list(self.expert_layers),
             "output_bytes": self.output_bytes,
             "input_bytes": self.input_bytes,
             "tensors": [
@@ -495,6 +520,11 @@ class DevicePlacementPlan:
     node_vram_alloc_bytes: tuple[NodeByteValue, ...] = ()
     required_nodes: tuple[str, ...] = ()
     node_priority: tuple[str, ...] = ()
+    expert_offloaded: bool = False
+    expert_strategy: str = "none"
+    expert_offload_count: int | None = None
+    tensor_overrides: tuple[str, ...] = ()
+    n_cpu_moe: int | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Convert this domain result to the existing JSON response contract."""
@@ -554,4 +584,9 @@ class DevicePlacementPlan:
             "ram_alloc_bytes": self.ram_alloc_bytes,
             "fit_status": self.fit_status,
             "hint": self.hint,
+            "expert_offloaded": self.expert_offloaded,
+            "expert_strategy": self.expert_strategy,
+            "expert_offload_count": self.expert_offload_count,
+            "tensor_overrides": list(self.tensor_overrides),
+            "n_cpu_moe": self.n_cpu_moe,
         }

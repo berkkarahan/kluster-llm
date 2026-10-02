@@ -3,6 +3,47 @@
 > Generated from OpenDesign direction **tech-utility** (Datadog / GitHub density), adapted to a dark terminal-operator surface (exo-like TUI in the browser).
 > OpenDesign daemon was unavailable (Node ABI mismatch); direction tokens pulled via `od tools directions --id tech-utility`.
 
+## Dashboard polish reference (2026-10-02)
+
+The later polish used Open Design's `impeccable-design-polish` workflow with Local Codex in
+a separate project. The completed, self-contained six-page reference is retained in
+[design/004-dashboard-polish/index.html](design/004-dashboard-polish/index.html), with its
+[audit and translation guidance](design/004-dashboard-polish/AUDIT.md). Current Svelte source
+remains authoritative. The earlier [responsive workspace reference](design/003-responsive-node-workspace.html)
+and before screenshots informed the brief.
+
+Adapted refinements preserve the existing palette, IBM Plex fonts, 13px root, square panels,
+horizontal navigation and page structure: 15px page titles, consistent helper text, compact
+spacing, a green active-navigation underline with `aria-current`, visible keyboard focus,
+pressed/disabled controls, and red destructive hover states. Long names and paths wrap;
+wide tables scroll inside their containers. Existing backgrounds and Home's measured graph,
+pan/zoom, telemetry, mobile list, inspector and chat remain part of the production design.
+
+### Error presentation
+
+All routes use the same compact error treatment with an accessible **Dismiss error** button.
+The session-local controller in `src/lib/errors.ts` owns visibility and acknowledgment;
+components and the store retain authoritative validation, failures and availability state.
+Acknowledged text stays hidden across repeated snapshots, route changes and soft refreshes.
+Changed failures, a new operation, explicit failed retries and recurrence after recovery can
+produce a new message. Duplicate inline/toast messages dismiss together.
+
+Startup and hard refresh acknowledge each source's initial historical failure, including
+sources first loaded on later navigation. Stop Run, Stop Cluster and Leave clear every error
+before dispatch; failed actions can show a fresh error. Confirmed external termination,
+membership loss and connection loss also clear once per transition. Reset generations reject
+earlier request failures and component-local operation callbacks. No presentation state is
+persisted. Status indicators, backend diagnostics, validation and historical logs remain
+accurate; the Logs clear action still clears only the displayed buffer.
+
+Verification captures all six routes at 390/768/1440px, Home at 1280×720, and a 640×360 CSS
+viewport representing 200% layout scaling. Browser tests cover overflow, keyboard focus,
+reduced-motion preference, new errors, dismissal, retained validation, hard refresh and
+lifecycle failures; store/controller tests cover repeated snapshots, recovery, lazy sources,
+external termination and stale responses. Before/after captures are generated under
+`artifacts/dashboard-polish/` by `tests/polish-browser.test.mjs`; baseline mode uses
+`KLLM_POLISH_BASELINE` to point at an archived original dashboard.
+
 ## Mood
 
 Data-dense, monospace-friendly, dark + hairline grid. Built for cluster operators — information per square inch, not marketing vibes.

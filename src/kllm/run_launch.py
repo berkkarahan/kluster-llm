@@ -128,6 +128,10 @@ def build_master_launch(
             launch["extra_args"] = [
                 arg for arg in launch["extra_args"] if arg != "--jinja"
             ] + ["--no-jinja"]
+    for pattern in plan_result.get("tensor_overrides") or []:
+        launch["extra_args"] += ["--override-tensor", pattern]
+    if plan_result.get("n_cpu_moe") is not None:
+        launch["extra_args"] += ["--n-cpu-moe", str(plan_result["n_cpu_moe"])]
     if "device_order" in plan_result:
         launch["extra_args"] += ["--device", ",".join(plan_result["device_order"]) or "none"]
     elif gpu_env:

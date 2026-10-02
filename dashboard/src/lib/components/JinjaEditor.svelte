@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
+  import { errors } from '$lib/errors';
   import { onMount } from 'svelte';
 
   let { initialText, onApply, onClose }: {
@@ -8,6 +10,7 @@
   } = $props();
   let draft = $state('');
   let error = $state('');
+  let errorGeneration = $state(errors.generation);
   let checked = $state('');
   let checking = $state(false);
   let dialog: HTMLDialogElement;
@@ -38,6 +41,8 @@
   });
 
   async function validate() {
+    const requestGeneration = errors.generation;
+    errorGeneration = requestGeneration;
     checking = true;
     error = '';
     checked = '';
@@ -49,7 +54,7 @@
       const data = await response.json();
       if (!response.ok) throw new Error(String(data.detail ?? response.status));
       checked = data.detail;
-    } catch (cause) { error = String(cause); }
+    } catch (cause) { if (requestGeneration === errors.generation) { error = String(cause); errors.publish('jinja', error, requestGeneration); } }
     finally { checking = false; }
   }
 </script>
@@ -64,7 +69,7 @@
   <div class="flex justify-between gap-2 mt-2 text-[11px]" style="color: var(--muted)">
     <span>{bytes.toLocaleString()} / 65,536 bytes</span><span>Model compatibility is not verified by syntax checks.</span>
   </div>
-  {#if error}<p class="text-[11px] mt-2" role="alert" style="color: var(--danger)">{error}</p>{/if}
+  {#if error}<ErrorMessage source="jinja" message={error} snapshot={false} generation={errorGeneration} />{/if}
   {#if checked}<p class="text-[11px] mt-2" role="status" style="color: var(--accent)">{checked}</p>{/if}
   <div class="flex gap-2 justify-end mt-3">
     <button class="btn" type="button" onclick={() => dialog.close()}>Cancel</button>

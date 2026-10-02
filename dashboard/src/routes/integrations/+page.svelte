@@ -30,9 +30,9 @@
   }
 </script>
 
-<div class="max-w-3xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-2" style="color: var(--muted)">Connect harnesses</h1>
-  <p class="mono text-[12px] mb-4" style="color: var(--muted)">
+<div class="page-frame max-w-3xl mx-auto p-4">
+  <h1 class="page-title">Connect harnesses</h1>
+  <p class="page-description">
     Launch an installed coding agent using the cluster model. Set KLLM_API_KEY in your terminal first.
   </p>
 
@@ -51,9 +51,9 @@
 
   <div class="flex flex-col gap-2">
     {#each agents as agent}
-      <div class="panel px-3 py-2 flex items-center gap-3" style="border-color: var(--border)">
+      <div class="connect-row panel px-3 py-2 flex items-center gap-3" style="border-color: var(--border)">
         <span class="mono w-24" style="color: var(--accent)">{agent}</span>
-        <code class="mono flex-1 text-[12px] truncate" style="color: var(--muted)">{cmd(agent)}</code>
+        <code class="connect-command mono flex-1 text-[12px]" style="color: var(--muted)">{cmd(agent)}</code>
         <button class="btn" disabled={!model || !endpoint} onclick={() => copy(cmd(agent))}>Copy</button>
         <button class="btn" disabled={!model || !endpoint} onclick={() => copy(cmd(agent, true))}>--no-launch</button>
       </div>

@@ -4,7 +4,8 @@
   import { page } from '$app/state';
   import { appStore } from '$lib/store.svelte';
   import InferenceActivity from '$lib/components/InferenceActivity.svelte';
-  import { toasts } from '$lib/toast';
+  import { toasts, dismissToast } from '$lib/toast';
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
 
   let { children } = $props();
 
@@ -37,8 +38,8 @@
       {#each nav as item}
         <a
           href={item.href}
-          class="mono text-[12px] uppercase tracking-wider"
-          style:color={page.url.pathname === item.href ? 'var(--accent)' : 'var(--muted)'}
+          class="nav-link mono text-[12px] uppercase tracking-wider"
+          aria-current={page.url.pathname === item.href ? 'page' : undefined}
           style:text-decoration="none"
         >
           {item.label}
@@ -58,7 +59,8 @@
       {:else if appStore.deliveryHealth === 'periodic-refresh'}
         <span class="chip chip-warn">refresh</span>
       {:else if appStore.deliveryHealth === 'unavailable'}
-        <span class="chip chip-danger" title={appStore.deliveryError}>updates unavailable</span>
+        <span class="chip chip-muted">updates unavailable</span>
+        <ErrorMessage source="delivery" message={appStore.deliveryError} snapshot={false} />
       {:else if appStore.deliveryHealth === 'reconnecting'}
         <span class="chip chip-warn">reconnecting</span>
       {:else if appStore.deliveryHealth === 'paused'}
@@ -66,9 +68,8 @@
       {/if}
       {#each Object.entries(appStore.areaHealth) as [topic, health]}
         {#if health.availability === 'denied' || health.availability === 'unavailable'}
-          <span class="chip chip-danger" role="status" aria-live="polite" style="white-space:normal;overflow-wrap:anywhere">
-            {topic} {health.availability}: {health.error?.message ?? 'source unavailable'} · last success {health.last_success_at ?? 'never'}
-          </span>
+          <span class="chip chip-muted">{topic} {health.availability}</span>
+          <ErrorMessage source={`area:${topic}`} message={health.error?.message ?? 'source unavailable'} label={topic} />
         {:else if (topic === 'status' || topic === 'usage') && health.coverage === 'local_with_cluster_view'}
           <span class="chip chip-warn" title="Local worker view with mirrored cluster information">{topic} mirrored</span>
         {:else if (topic === 'status' || topic === 'usage') && health.coverage === 'local'}
@@ -82,7 +83,8 @@
         {:else if appStore.downloadJob.state === 'complete'}
           <span class="chip chip-ok">dl ✓</span>
         {:else if appStore.downloadJob.state === 'error'}
-          <span class="chip chip-danger">dl !</span>
+          <span class="chip chip-muted">dl stopped</span>
+          <ErrorMessage source="download" message={appStore.downloadJob.error ?? 'unknown error'} identity={appStore.downloadJob.operation_id} />
         {:else if appStore.downloadJob.state === 'unknown'}
           <span class="chip chip-warn">dl ?</span>
         {:else}
@@ -111,7 +113,7 @@
     {@render children()}
   </main>
 
-  <div class="fixed bottom-3 right-3 flex flex-col gap-2 z-50 max-w-sm">
+  <div class="toast-stack fixed bottom-3 right-3 flex flex-col gap-2 z-50 max-w-sm">
     {#each $toasts as t (t.id)}
       <div
         class="panel px-3 py-2 mono text-[12px]"
@@ -121,7 +123,14 @@
             ? 'var(--warn)'
             : 'var(--accent)'}
       >
-        {t.text}
+        {#if t.kind === 'danger'}
+          <ErrorMessage source={t.source} message={t.text} />
+        {:else}
+          <div class="flex items-start gap-2">
+            <span class="min-w-0 flex-1">{t.text}</span>
+            <button class="error-dismiss" type="button" aria-label="Dismiss notification" onclick={() => dismissToast(t.id)}>×</button>
+          </div>
+        {/if}
       </div>
     {/each}
   </div>

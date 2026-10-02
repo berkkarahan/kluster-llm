@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { goto } from '$app/navigation';
   import { appStore } from '$lib/store.svelte';
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
@@ -93,9 +94,9 @@
   }
 </script>
 
-<div class="max-w-4xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">Models</h1>
-  <p class="mono text-[11px] mb-3" style="color: var(--muted)">
+<div class="page-frame max-w-4xl mx-auto p-4">
+  <h1 class="page-title">Models</h1>
+  <p class="page-description">
     Search Hugging Face GGUFs, download on the master (workers need no local copy), then Load from Plan &amp; Run.
   </p>
 
@@ -167,7 +168,7 @@
     </div>
   </div>
 
-  <div class="panel overflow-hidden" style="border-color: var(--border)">
+  <div class="panel model-table-scroll" style="border-color: var(--border)">
     <table class="w-full text-left">
       <thead>
         <tr class="mono text-[11px]" style="color: var(--muted)">
@@ -246,7 +247,7 @@
         {#if appStore.searching}
           <p class="mono text-[12px]" style="color: var(--muted)">Searching…</p>
         {:else if appStore.searchError}
-          <p class="mono text-[12px]" style="color: var(--danger)">{appStore.searchError}</p>
+          <ErrorMessage source="search" message={appStore.searchError} snapshot={false} />
         {:else if appStore.searchResults.length === 0}
           <p class="mono text-[12px]" style="color: var(--muted)">No supported downloadable options were found.</p>
         {/if}

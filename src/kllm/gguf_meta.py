@@ -57,6 +57,28 @@ _SAMPLING_KEY_MAP = {
     "penalty_freq": "frequency_penalty",
 }
 
+# Mixture-of-experts architectures whose expert FFN weights can be offloaded
+# independently of the shared attention/gate tensors.
+MOE_ARCHITECTURES = frozenset(
+    {
+        "qwen2moe",
+        "qwen3moe",
+        "qwen35moe",
+        "deepseek2",
+        "deepseek3",
+        "gpt_oss",
+        "glm4",
+    }
+)
+
+# Expert FFN tensors: ``blk.N.ffn_{up,down,gate}_{exps,<i>}.weight``. The router
+# ``blk.N.ffn_gate.weight`` and dense ``blk.N.ffn_{up,down}.weight`` are shared.
+_MOE_EXPERT_RE = re.compile(r"^blk\.\d+\.ffn_(?:up|down|gate)(?:_exps\.|\.[0-9]+\.)weight$")
+
+
+def _is_moe_expert_tensor(name: str) -> bool:
+    return bool(_MOE_EXPERT_RE.match(name))
+
 
 def _read_string(f: BinaryIO) -> str:
     (n,) = struct.unpack("<Q", f.read(8))
@@ -338,6 +360,7 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
             if not 0 < n_layers <= 10000:
                 return None
             layers = [0] * n_layers
+            expert_layers = [0] * n_layers
             output = inputs = token_embd = 0
             has_output = False
             for i, tensor in enumerate(tensors):
@@ -349,6 +372,8 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
                 match = re.match(r"blk\.(\d+)\.", tensor["name"])
                 if match and int(match[1]) < n_layers:
                     layers[int(match[1])] += nbytes
+                    if _is_moe_expert_tensor(tensor["name"]):
+                        expert_layers[int(match[1])] += nbytes
                 elif tensor["name"].startswith("output"):
                     output += nbytes
                     has_output |= tensor["name"] == "output.weight"
@@ -362,6 +387,7 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
                 architecture=arch,
                 metadata=meta,
                 layers=layers,
+                expert_layers=expert_layers,
                 output_bytes=output,
                 input_bytes=inputs,
                 tensors=tensors,

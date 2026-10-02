@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   /**
    * System Settings > Software & Updates: local checkout identity (git HEAD +
    * llama-release pin), runtime ports, and the master-only "Update workers"
@@ -54,14 +55,14 @@
       {/if}
     </div>
     {#if upd?.error}
-      <p class="mono text-[11px]" style="color: var(--danger, #c44)">{upd.error}</p>
+      <ErrorMessage source="update" message={upd.error} />
     {/if}
     {#if upd?.workers?.length}
       {#each upd.workers as w}
-        <p class="mono text-[10px]" style="color: var(--muted)">
+        <div class="mono text-[10px]" style="color: var(--muted)">
           {w.host ?? w.node_id ?? '?'} <span style="color: var(--fg)"> {w.phase}</span>
-          {#if w.error} <span style="color: var(--danger, #c44)"> {w.error}</span> {/if}
-        </p>
+          {#if w.error} <ErrorMessage source={`update-worker:${w.node_id ?? w.host}`} message={w.error} /> {/if}
+        </div>
       {/each}
     {/if}
     <p class="mono text-[10px] mt-1" style="color: var(--muted)">

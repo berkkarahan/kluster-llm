@@ -21,6 +21,7 @@ import type {
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { formatMemoryComponent } from './format-memory';
 import { pushToast } from './toast';
+import { errors } from './errors';
 import { DashboardUpdates } from './live-updates';
 import type { LiveLogListener } from './live-updates';
 import type { DeliveryHealth, LiveArea, LiveAreaHealth, LiveAreaName, LiveProgress } from './types';
@@ -159,6 +160,7 @@ class AppStore {
   parallelSlots = $state<number | 'auto'>('auto');
   batchSize = $state<number | 'auto'>('auto');
   microBatch = $state<number | 'auto'>('auto');
+  moeOffload = $state<number | 'auto'>('auto');
   flashAttention = $state<'auto' | 'on' | 'off'>('auto');
   nodeShares = $state<Record<string, number> | null>(null);
   nodePriority = $state<string[] | null>(null);
@@ -227,6 +229,7 @@ class AppStore {
   private selectionHydrated = false;
   private lastApplyError: string | null = null;
   private lastApplyWarning: string | null = null;
+  private clearingLifecycle = false;
 
   viewState(): ClusterView {
     if (!this.statusSeen) return 'loading';
@@ -238,11 +241,24 @@ class AppStore {
   }
 
   start() {
+    errors.start();
+    this.usageError = '';
+    this.historyError = '';
+    this.searchError = '';
+    this.estimateError = '';
+    for (const source of ['usage-request', 'history', 'search', 'estimate']) errors.observe(source, '', '', false);
+    this.fieldErrors = {};
+    this.lastApplyError = null;
+    this.statusSeen = false;
+    this.connected = false;
     if (!this.updates) {
       this.updates = new DashboardUpdates({
         onArea: (topic, area) => this.applyLiveArea(topic, area),
         onAreaHealth: (topic, area) => this.applyLiveHealth(topic, area),
         onHealth: (health, error) => {
+          const lostConnection = this.connected && health === 'unavailable';
+          errors.observe('delivery', error ?? '', '', false);
+          if (lostConnection) this.clearErrors();
           this.deliveryHealth = health;
           this.deliveryError = error ?? '';
           if (health === 'unavailable') {
@@ -291,6 +307,7 @@ class AppStore {
       if (!selected && (this.loadProgress?.phase === 'starting' || this.loadProgress?.phase === 'loading')) {
         this.loadProgress = { ...this.loadProgress, phase: 'unknown' };
       } else this.loadProgress = selected;
+      errors.observe('load', selected?.phase === 'error' ? selected.error ?? 'unknown error' : '', selected?.operation_id ?? '');
     } else if (topic === 'download') {
       const progress = area.data as LiveProgress<DownloadJob>;
       this.applyDownloadRecords(progress);
@@ -298,6 +315,7 @@ class AppStore {
   }
 
   private applyLiveHealth(topic: LiveAreaName, area: LiveArea<unknown>) {
+    errors.observe(`area:${topic}`, area.error?.message ?? (area.availability === 'denied' || area.availability === 'unavailable' ? 'source unavailable' : ''));
     const previous = this.areaHealth[topic];
     this.areaHealth[topic] = {
       availability: area.availability,
@@ -308,6 +326,26 @@ class AppStore {
   }
 
   private applyStatus(data: Status) {
+    const initial = !this.statusSeen;
+    const previous = initial ? null : this.status;
+    if (!this.clearingLifecycle && previous && ((previous.role !== 'idle' && data.role === 'idle')
+      || ((previous.inference_up || previous.process_role === 'master' && previous.process_pid)
+        && !data.inference_up && !data.process_pid)
+      || (previous.role === 'worker' && previous.members?.[previous.node_id] && !data.members?.[previous.node_id]))) {
+      this.clearErrors();
+    }
+    errors.observe('apply', data.apply_error ?? '');
+    errors.observe('inference-activity', data.inference_activity?.phase === 'error'
+      ? data.inference_activity.detail ?? 'Inference failed' : '');
+    errors.observe('update', data.update?.error ?? '');
+    for (const worker of previous?.update?.workers ?? []) {
+      if (!data.update?.workers.some(next => (next.node_id ?? next.host) === (worker.node_id ?? worker.host))) {
+        errors.observe(`update-worker:${worker.node_id ?? worker.host}`, '');
+      }
+    }
+    for (const worker of data.update?.workers ?? []) {
+      errors.observe(`update-worker:${worker.node_id ?? worker.host}`, worker.error ?? '', '', initial);
+    }
     this.statusSeen = true;
     this.status = data;
     this.connected = true;
@@ -330,7 +368,7 @@ class AppStore {
       if (this.selectedModel && data.role === 'master') this.scheduleEstimate();
       const err = data.apply_error ?? null;
       const warn = data.apply_warning ?? null;
-      if (err && err !== this.lastApplyError) pushToast('danger', err);
+      if (err && err !== this.lastApplyError) pushToast('danger', err, 4000, { source: 'apply', snapshot: true });
       if (warn && warn !== this.lastApplyWarning) pushToast('warn', warn);
       this.lastApplyError = err;
       this.lastApplyWarning = warn;
@@ -339,8 +377,11 @@ class AppStore {
   }
 
   private applyUsage(data: UsageLive) {
+    errors.observe('recorder', data.recording?.error ?? '');
+    for (const node of Object.values(data.nodes)) errors.observe(`collector:${node.node_id}`, node.reading?.collector_error ?? '');
     this.liveUsage = data;
     this.usageError = '';
+    errors.observe('usage-request', '', '', false);
     if (!this.selectedNodeId || !this.liveUsage.nodes[this.selectedNodeId]) {
       this.selectedNodeId = Object.keys(this.liveUsage.nodes)[0] ?? this.selectedNodeId;
     }
@@ -353,6 +394,8 @@ class AppStore {
   private applyDownloadRecords(progress: LiveProgress<DownloadJob>) {
     const current = progress.current;
     const terminal = progress.last_terminal;
+    const displayed = current ?? terminal;
+    errors.observe('download', displayed?.state === 'error' ? displayed.error ?? 'unknown error' : '', displayed?.operation_id ?? '');
     if (current?.operation_id) this.observedDownloadIds.add(current.operation_id);
     this.lastDownloadTerminal = terminal;
     const tracked = this.downloadJob;
@@ -397,18 +440,22 @@ class AppStore {
   }
 
   private async refreshDirect() {
+    const errorGeneration = errors.generation;
     try {
       const r = await fetch('/v2/node');
       if (!r.ok) throw new Error(`status ${r.status}`);
       const data = (await r.json()) as Status;
-      this.applyStatus(data);
+      if (errorGeneration === errors.generation) this.applyStatus(data);
     } catch {
+      if (errorGeneration !== errors.generation) return;
+      if (this.connected) this.clearErrors();
       this.statusSeen = true;
       this.connected = false;
     }
   }
 
   async refreshUsage() {
+    const errorGeneration = errors.generation;
     if (this.updates) {
       this.updates.refresh();
       return;
@@ -423,9 +470,10 @@ class AppStore {
           : typeof detail === 'string' ? detail : `usage ${r.status}`;
         throw new Error(message);
       }
-      this.applyUsage((await r.json()) as UsageLive);
+      const data = (await r.json()) as UsageLive;
+      if (errorGeneration === errors.generation) this.applyUsage(data);
     } catch (error) {
-      this.usageError = String(error);
+      this.setRequestError('usageError', String(error), errorGeneration, false);
       if (this.liveUsage) this.liveUsage = { ...this.liveUsage, nodes: Object.fromEntries(
         Object.entries(this.liveUsage.nodes).map(([id, node]) => [id, {
           ...node, freshness: node.reading ? 'stale' as const : 'unavailable' as const
@@ -435,6 +483,7 @@ class AppStore {
   }
 
   async selectUsageNode(nodeId: string) {
+    const errorGeneration = errors.generation;
     this.selectedNodeId = nodeId;
     this.selectedLifetimeId = '';
     this.usageLifetimes = null;
@@ -449,9 +498,10 @@ class AppStore {
       this.usageLifetimes = (await r.json()) as UsageLifetimes;
       this.selectedLifetimeId = this.usageLifetimes.lifetimes[0]?.lifetime_id ?? '';
       this.historyError = '';
+      errors.observe('history', '', '', false);
       if (this.selectedLifetimeId) await this.loadUsageHistory();
     } catch (error) {
-      if (seq === this.historySeq) this.historyError = String(error);
+      if (seq === this.historySeq) this.setRequestError('historyError', String(error), errorGeneration, true);
     }
   }
 
@@ -466,6 +516,7 @@ class AppStore {
   }
 
   async loadUsageHistory() {
+    const errorGeneration = errors.generation;
     const nodeId = this.selectedNodeId;
     const lifeId = this.selectedLifetimeId;
     const seq = ++this.historySeq;
@@ -482,12 +533,14 @@ class AppStore {
       this.usageSeries = (await series.json()) as UsageSeries;
       this.usagePage = (await page.json()) as UsagePage;
       this.historyError = '';
+      errors.observe('history', '', '', false);
     } catch (error) {
-      if (seq === this.historySeq) this.historyError = String(error);
+      if (seq === this.historySeq) this.setRequestError('historyError', String(error), errorGeneration, true);
     }
   }
 
   async nextUsagePage() {
+    const errorGeneration = errors.generation;
     const cursor = this.usagePage?.next_cursor;
     if (!cursor) return;
     const seq = this.historySeq;
@@ -500,7 +553,7 @@ class AppStore {
       if (seq !== this.historySeq || this.usagePage?.next_cursor !== cursor) return;
       this.usagePage = { ...page, readings: [...(this.usagePage?.readings ?? []), ...page.readings] };
     } catch (error) {
-      if (seq === this.historySeq) this.historyError = String(error);
+      if (seq === this.historySeq) this.setRequestError('historyError', String(error), errorGeneration, true);
     }
   }
 
@@ -559,6 +612,7 @@ class AppStore {
   }
 
   private async putHfToken(token: string) {
+    const errorGeneration = errors.generation;
     this.busy = '/v2/credentials/huggingface';
     try {
       const r = await fetch('/v2/credentials/huggingface', {
@@ -568,11 +622,13 @@ class AppStore {
       });
       const text = await r.text();
       if (!r.ok) {
-        pushToast('danger', text || `hf-token ${r.status}`);
         throw new Error(text);
       }
       pushToast('ok', token ? 'hf token saved' : 'hf token cleared');
       await this.loadHfToken();
+    } catch (error) {
+      pushToast('danger', String(error), 4000, { generation: errorGeneration });
+      throw error;
     } finally {
       this.busy = '';
     }
@@ -669,6 +725,8 @@ class AppStore {
       this.batchSize = ps.batch_size as number | 'auto';
     if (ps.micro_batch === 'auto' || typeof ps.micro_batch === 'number')
       this.microBatch = ps.micro_batch as number | 'auto';
+    if (ps.moe_offload === 'auto' || typeof ps.moe_offload === 'number')
+      this.moeOffload = ps.moe_offload as number | 'auto';
     if (ps.flash_attention === 'auto' || ps.flash_attention === 'on' || ps.flash_attention === 'off')
       this.flashAttention = ps.flash_attention;
     this.nodeShares = null;
@@ -814,9 +872,10 @@ class AppStore {
 
   /** Persist the current run settings for this model. */
   async saveModelSettings() {
+    const errorGeneration = errors.generation;
     if (!this.selectedModel) return;
-    if (!this.validateRunSettings()) {
-      pushToast('danger', 'Fix validation errors before saving');
+    if (!this.validateRunSettings(true)) {
+      pushToast('danger', 'Fix validation errors before saving', 4000, { generation: errorGeneration });
       return;
     }
     const body = this.planPayload();
@@ -837,13 +896,13 @@ class AppStore {
         data = text;
       }
       if (!r.ok) {
-        pushToast('danger', apiErrorMessage(data, text, r.status, 'save settings'));
+        pushToast('danger', apiErrorMessage(data, text, r.status, 'save settings'), 4000, { generation: errorGeneration });
         return;
       }
       pushToast('ok', `settings saved for ${this.selectedModel}`);
       this.markSettingsClean();
     } catch (e) {
-      pushToast('danger', String(e));
+      pushToast('danger', String(e), 4000, { generation: errorGeneration });
     } finally {
       this.busy = '';
     }
@@ -857,6 +916,7 @@ class AppStore {
     this.parallelSlots = 'auto';
     this.batchSize = 'auto';
     this.microBatch = 'auto';
+    this.moeOffload = 'auto';
     this.flashAttention = 'auto';
     this.nodeShares = null;
     this.nodePriority = null;
@@ -891,7 +951,7 @@ class AppStore {
     return null;
   }
 
-  validateRunSettings(): boolean {
+  validateRunSettings(explicit = false): boolean {
     const err: Record<string, string> = {};
     const maxCtx = this.selectedModelMaxContext();
     if (!this.contextAuto && this.context < MIN_CONTEXT)
@@ -906,7 +966,12 @@ class AppStore {
     if (this.latencyWeight < 0 || this.latencyWeight > 1) err.latencyWeight = 'Latency weight must be 0–1.';
     if (this.vramWeight + this.latencyWeight <= 0)
       err.placementWeights = 'VRAM and latency weights cannot both be zero.';
+    const fields = new Set([...Object.keys(this.fieldErrors), ...Object.keys(err)]);
     this.fieldErrors = err;
+    for (const field of fields) {
+      if (explicit && err[field]) errors.publish(`validation:${field}`, err[field]);
+      else errors.observe(`validation:${field}`, err[field] ?? '', '', false);
+    }
     if (Object.keys(err).some((key) => key !== 'context')) this.advancedOpen = true;
     return Object.keys(err).length === 0;
   }
@@ -927,6 +992,7 @@ class AppStore {
       parallel_slots: this.parallelSlots,
       batch_size: this.batchSize,
       micro_batch: this.microBatch,
+      moe_offload: this.moeOffload,
       flash_attention: this.flashAttention,
       node_shares: this.nodeShares,
       node_priority: this.nodePriority ? [...new Set([...this.nodePriority, ...Object.keys(this.status?.members ?? {})])] : [],
@@ -1004,6 +1070,7 @@ class AppStore {
   }
 
   private applyGpusPayload(data: Record<string, unknown>) {
+    errors.observe('gpu-probe', typeof data.error === 'string' ? data.error : '');
     this.gpuProbeError = typeof data.error === 'string' ? data.error : '';
     this.gpuInstallHint = typeof data.install_hint === 'string' ? data.install_hint : '';
     this.gpuBackendWarning =
@@ -1035,11 +1102,12 @@ class AppStore {
   }
 
   async loadGpus() {
+    const errorGeneration = errors.generation;
     try {
       const r = await fetch('/v2/node/devices');
       if (!r.ok) return;
       const data = await r.json();
-      this.applyGpusPayload(data);
+      if (errorGeneration === errors.generation) this.applyGpusPayload(data);
       if (!this.gpusLoaded) {
         this.gpusLoaded = true;
         this.hydrateGpuSelection();
@@ -1093,6 +1161,7 @@ class AppStore {
     ram_percent?: number;
     accel_backend?: AccelBackend | null;
   }) {
+    const errorGeneration = errors.generation;
     const device = partial?.device ?? this.device;
     this.device = device;
     const body: Record<string, unknown> = {
@@ -1121,8 +1190,7 @@ class AppStore {
       });
       const text = await r.text();
       if (!r.ok) {
-        pushToast('danger', text || `config ${r.status}`);
-        throw new Error(text);
+        throw new Error(text || `config ${r.status}`);
       }
       try {
         const data = text ? JSON.parse(text) : {};
@@ -1140,6 +1208,9 @@ class AppStore {
       this.estimating = false;
       this.planResult = null;
       this.scheduleEstimate();
+    } catch (error) {
+      pushToast('danger', String(error), 4000, { generation: errorGeneration });
+      throw error;
     } finally {
       this.busy = '';
     }
@@ -1178,6 +1249,7 @@ class AppStore {
   }
 
   async post(path: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST') {
+    const errorGeneration = errors.generation;
     this.busy = path;
     try {
       const r = await fetch(path, {
@@ -1193,7 +1265,6 @@ class AppStore {
         data = text;
       }
       if (!r.ok) {
-        pushToast('danger', typeof data === 'string' ? data : JSON.stringify(data));
         throw new Error(String(text));
       }
       if (path === '/v2/models/downloads' && data && typeof data === 'object'
@@ -1208,6 +1279,9 @@ class AppStore {
       await this.refresh();
       await this.loadModels();
       return data;
+    } catch (error) {
+      pushToast('danger', String(error), 4000, { generation: errorGeneration });
+      throw error;
     } finally {
       this.busy = '';
     }
@@ -1248,8 +1322,30 @@ class AppStore {
   }
 
   async stopCluster() {
-    await this.post('/v2/cluster', undefined, 'DELETE');
-    this.resetClusterView();
+    this.clearErrors();
+    this.clearingLifecycle = true;
+    try {
+      await this.post('/v2/cluster', undefined, 'DELETE');
+      this.resetClusterView();
+    } finally { this.clearingLifecycle = false; }
+  }
+
+  private setRequestError(field: 'usageError' | 'historyError' | 'searchError' | 'estimateError',
+    message: string, generation: number, explicit: boolean) {
+    if (generation !== errors.generation) return;
+    this[field] = message;
+    const source = field === 'usageError' ? 'usage-request' : field.replace('Error', '');
+    if (explicit) errors.publish(source, message, generation);
+    else errors.observe(source, message, '', false, generation);
+  }
+
+  clearErrors() {
+    errors.clear();
+    ++this.historySeq;
+    ++this.estimateSeq;
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.estimateTimer = null;
+    this.estimating = false;
   }
 
   private resetClusterView() {
@@ -1288,11 +1384,18 @@ class AppStore {
   }
 
   async leaveCluster() {
-    await this.post('/v2/cluster/membership', undefined, 'DELETE');
-    this.resetClusterView();
+    this.clearErrors();
+    this.clearingLifecycle = true;
+    try {
+      await this.post('/v2/cluster/membership', undefined, 'DELETE');
+      this.resetClusterView();
+    } finally { this.clearingLifecycle = false; }
   }
 
   async updateWorkers() {
+    const errorGeneration = errors.generation;
+    errors.observe('update', '');
+    for (const worker of this.status?.update?.workers ?? []) errors.observe(`update-worker:${worker.node_id ?? worker.host}`, '');
     this.busy = '/v2/cluster/updates';
     try {
       const r = await fetch('/v2/cluster/updates', { method: 'POST' });
@@ -1305,23 +1408,27 @@ class AppStore {
       }
       if (!r.ok) {
         const msg = apiErrorMessage(data, text, r.status, 'update');
-        pushToast('danger', msg);
         throw new Error(msg);
       }
       pushToast('ok', 'worker update started');
       await this.refresh();
       return data;
+    } catch (error) {
+      pushToast('danger', String(error), 4000, { generation: errorGeneration });
+      throw error;
     } finally {
       this.busy = '';
     }
   }
 
   async searchModels(): Promise<ModelSearchResponse | null> {
+    const errorGeneration = errors.generation;
     const query = this.modelSource.trim();
     if (!query || this.searching) return null;
     this.busy = '/v2/models/search';
     this.searching = true;
     this.searchError = '';
+    errors.observe('search', '', '', false);
     this.searchResults = [];
     this.searchTotalVram = null;
     this.searchWarnings = [];
@@ -1341,11 +1448,11 @@ class AppStore {
       }
       if (!r.ok) {
         const msg = apiErrorMessage(data, text, r.status, 'search');
-        this.searchError = msg;
+        this.setRequestError('searchError', msg, errorGeneration, true);
         this.searchResults = [];
         this.searchTotalVram = null;
         this.searchWarnings = [];
-        pushToast('danger', msg);
+        pushToast('danger', msg, 4000, { source: 'search', generation: errorGeneration });
         throw new Error(msg);
       }
       const body = data as ModelSearchResponse;
@@ -1357,8 +1464,8 @@ class AppStore {
     } catch (e) {
       if (!this.searchError) {
         const msg = String(e);
-        this.searchError = msg;
-        pushToast('danger', msg);
+        this.setRequestError('searchError', msg, errorGeneration, true);
+        pushToast('danger', msg, 4000, { source: 'search', generation: errorGeneration });
       }
       this.searchResults = [];
       this.searchTotalVram = null;
@@ -1379,18 +1486,19 @@ class AppStore {
 
   /** Cancel the in-flight HF download. */
   async cancelDownload() {
+    const errorGeneration = errors.generation;
     if (!this.downloadJob || this.downloadJob.state !== 'running') return;
     this.busy = '/v2/models/downloads/cancel';
     try {
       const r = await fetch('/v2/models/downloads/cancel', { method: 'POST' });
       const text = await r.text();
       if (!r.ok) {
-        pushToast('danger', text || `cancel ${r.status}`);
+        pushToast('danger', text || `cancel ${r.status}`, 4000, { generation: errorGeneration });
         return;
       }
       await this.refresh();
     } catch (e) {
-      pushToast('danger', String(e));
+      pushToast('danger', String(e), 4000, { generation: errorGeneration });
     } finally {
       this.busy = '';
     }
@@ -1422,6 +1530,7 @@ class AppStore {
   scheduleEstimate(delayMs = 300) {
     this.planResult = null;
     this.estimateError = '';
+    errors.observe('estimate', '', '', false);
     this.estimateNote = '';
     ++this.estimateSeq;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
@@ -1432,6 +1541,7 @@ class AppStore {
   }
 
   async refreshEstimate() {
+    const errorGeneration = errors.generation;
     if (this.planRunBlockedReason()) return;
     if (!this.selectedModel) return;
     if (!this.validateRunSettings()) return;
@@ -1455,11 +1565,15 @@ class AppStore {
       if (seq !== this.estimateSeq) return;
       if (!r.ok) {
         this.planResult = null;
-        this.estimateError = apiErrorMessage(data, text, r.status, 'Estimate');
+        this.setRequestError('estimateError', apiErrorMessage(data, text, r.status, 'Estimate'), errorGeneration, false);
         return;
       }
       this.estimateError = '';
+      errors.observe('estimate', '', '', false);
       this.planResult = data as Record<string, unknown>;
+      errors.observe('plan-overflow', this.planResult.fit_status === 'overflow'
+        ? String(this.planResult.hint ?? 'Model + context exceed cluster budget — lower context or pick a smaller quant.')
+        : '', '', false, errorGeneration);
       ++this.estimateRecalculations;
       this.estimateNote = 'Preview recalculated.';
       const previous = this.lastEstimate;
@@ -1490,17 +1604,18 @@ class AppStore {
       if (typeof (data as Record<string, unknown>).distributable_bytes === 'number')
         this.distributableBytes = (data as Record<string, number>).distributable_bytes;
     } catch {
-      if (seq === this.estimateSeq) { this.planResult = null; this.estimateError = 'Estimate unavailable'; }
+      if (seq === this.estimateSeq) { this.planResult = null; this.setRequestError('estimateError', 'Estimate unavailable', errorGeneration, false); }
     } finally {
       if (seq === this.estimateSeq) this.estimating = false;
     }
   }
 
-  setAutoInt(field: 'parallelSlots' | 'batchSize' | 'microBatch' | 'checkpoints' | 'cacheRam', mode: 'auto' | 'edit') {
+  setAutoInt(field: 'parallelSlots' | 'batchSize' | 'microBatch' | 'moeOffload' | 'checkpoints' | 'cacheRam', mode: 'auto' | 'edit') {
     const defaults: Record<typeof field, number> = {
       parallelSlots: 1,
       batchSize: 512,
       microBatch: 128,
+      moeOffload: 0,
       checkpoints: 0,
       cacheRam: 0
     };
@@ -1520,15 +1635,18 @@ class AppStore {
   }
 
   async run() {
+    const errorGeneration = errors.generation;
     if (this.planRunBlockedReason()) return;
-    if (!this.validateRunSettings()) return;
+    if (!this.validateRunSettings(true)) return;
     if (this.planResult?.fit_status === 'overflow') {
-      pushToast('danger', String(this.planResult.hint ?? 'overflow — adjust context and re-plan'));
+      pushToast('danger', String(this.planResult.hint ?? 'overflow — adjust context and re-plan'), 4000, { generation: errorGeneration });
       return;
     }
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     ++this.estimateSeq;
+    errors.observe('apply', '');
+    this.lastApplyError = null;
     if (this.selectedNetworkId) await this.loadToken();
     const data = (await this.post('/v2/inference/runs', this.networkPlanPayload())) as Record<string, unknown>;
     const plan = (data.plan ?? {}) as Record<string, unknown>;
@@ -1547,11 +1665,16 @@ class AppStore {
   }
 
   async stopInference() {
+    this.clearErrors();
     this.stopChat();
-    await this.post('/v2/inference/runs/stop');
+    this.clearingLifecycle = true;
+    try {
+      await this.post('/v2/inference/runs/stop');
+    } finally { this.clearingLifecycle = false; }
   }
 
   async sendChat() {
+    const errorGeneration = errors.generation;
     const content = this.chatInput.trim();
     if (!content || this.chatStreaming) return;
     if (!this.apiToken) await this.loadToken();
@@ -1584,7 +1707,7 @@ class AppStore {
       });
       if (!r.ok || !r.body) {
         const t = await r.text();
-        pushToast('danger', t || `chat ${r.status}`);
+        pushToast('danger', t || `chat ${r.status}`, 4000, { generation: errorGeneration });
         this.chatStreaming = false;
         return;
       }
@@ -1618,7 +1741,7 @@ class AppStore {
         }
       }
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') pushToast('danger', String(e));
+      if ((e as Error).name !== 'AbortError') pushToast('danger', String(e), 4000, { generation: errorGeneration });
     } finally {
       this.chatStreaming = false;
       this.abort = null;

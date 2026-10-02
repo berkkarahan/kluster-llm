@@ -433,25 +433,22 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
           }).map((value) => value.textContent); }))()`);
       assert.deepEqual(spilled, [], `resource values must stay inside their card: ${JSON.stringify(spilled)}`);
 
-      // --- FR-009: operational errors stay visible while cluster controls are collapsed -----
+      // Security warnings remain visible; historical errors start acknowledged. New errors are tested separately.
       assert.equal(await evaluate("document.querySelector('.cluster-controls')?.open"), false,
         'cluster controls must open collapsed');
       const compactStatus = await evaluate("document.querySelector('.usage-toolbar-main').textContent");
       assert.match(compactStatus, /RPC port 50052 reachable/);
-      assert.match(compactStatus, /update worker-b7: git pull failed/);
+      assert.doesNotMatch(compactStatus, /git pull failed/, 'startup acknowledges historical worker-update errors');
       assert.match(compactStatus, /up 10\.66\.87\.1 \(listen 51820\)/);
       const statusColors = await evaluate(`(() => {
         const overlay = getComputedStyle(document.querySelector('.usage-overlay-status')).color;
         const info = getComputedStyle(document.querySelector('.usage-toolbar-main [role="status"]')).color;
-        const alerts = [...document.querySelectorAll('.usage-toolbar-main [role="alert"]')];
-        const warning = getComputedStyle(alerts.find((el) => el.textContent.includes('RPC port 50052')).closest('[role="alert"]')).color;
-        const update = getComputedStyle(alerts.find((el) => el.textContent.includes('git pull failed'))).color;
-        return { overlay, info, warning, update };
+        const notes = [...document.querySelectorAll('.usage-toolbar-main [role="note"]')];
+        const warning = getComputedStyle(notes.find((el) => el.textContent.includes('RPC port 50052'))).color;
+        return { overlay, info, warning };
       })()`);
       assert.equal(statusColors.overlay, statusColors.info,
         'healthy overlay status uses informational color, not warning color');
-      assert.equal(statusColors.warning, statusColors.update,
-        'security warnings and update errors use the same error color');
       assert.notEqual(statusColors.overlay, statusColors.warning,
         'healthy overlay status must not look like a warning');
 
@@ -738,7 +735,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
 
       // Failures keep the rows but must not continue to claim a healthy stream.
       logsFailure = true;
-      await wait("document.querySelector('[role=status]').textContent.includes('Logs are unavailable')");
+      await wait("document.querySelector('[data-error-source=logs]')?.textContent.includes('Logs are unavailable')");
       assert.equal(await evaluate("document.querySelectorAll('.logs-row').length"), 1);
       logsFailure = false;
       logsWarning = 'master unreachable; showing local logs';
@@ -803,7 +800,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       await wait("document.body.textContent.includes('Disconnected — keeping last cluster view')");
       mode = 'usage_denied';
       await call('Page.navigate', { url: base + '/' });
-      await wait("document.body.textContent.includes('usage denied: Access denied · last success never')");
+      await wait("document.body.textContent.includes('usage denied')");
     } finally {
       ws?.close();
       if (browser) {

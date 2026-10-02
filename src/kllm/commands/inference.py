@@ -78,6 +78,7 @@ def _run_settings_options(
     parallel: str,
     batch_size: str,
     micro_batch: str,
+    moe_offload: str,
     vision: bool,
     mmproj: Optional[str],
     chat_template: str,
@@ -119,6 +120,7 @@ def _run_settings_options(
         parallel=parallel,
         batch_size=batch_size,
         micro_batch=micro_batch,
+        moe_offload=moe_offload,
         flash_attention=flash_attention,
         node_shares=shares,
         required_nodes=require_node,
@@ -203,6 +205,9 @@ def plan_cmd(
     parallel: str = typer.Option("auto", "--parallel"),
     batch_size: str = typer.Option("auto", "--batch-size"),
     micro_batch: str = typer.Option("auto", "--micro-batch"),
+    moe_offload: str = typer.Option(
+        "auto", "--moe-offload", help="Offload MoE expert weights: auto or a non-negative count"
+    ),
     vision: bool = typer.Option(False, "--vision"),
     mmproj: Optional[str] = typer.Option(None, "--mmproj"),
     chat_template: str = typer.Option("default", "--chat-template"),
@@ -265,6 +270,7 @@ def plan_cmd(
         parallel=parallel,
         batch_size=batch_size,
         micro_batch=micro_batch,
+        moe_offload=moe_offload,
         vision=vision,
         mmproj=mmproj,
         chat_template=chat_template,
@@ -324,6 +330,9 @@ def run(
     parallel: str = typer.Option("auto", "--parallel"),
     batch_size: str = typer.Option("auto", "--batch-size"),
     micro_batch: str = typer.Option("auto", "--micro-batch"),
+    moe_offload: str = typer.Option(
+        "auto", "--moe-offload", help="Offload MoE expert weights: auto or a non-negative count"
+    ),
     vision: bool = typer.Option(False, "--vision"),
     mmproj: Optional[str] = typer.Option(None, "--mmproj"),
     chat_template: str = typer.Option("default", "--chat-template"),
@@ -386,6 +395,7 @@ def run(
         parallel=parallel,
         batch_size=batch_size,
         micro_batch=micro_batch,
+        moe_offload=moe_offload,
         vision=vision,
         mmproj=mmproj,
         chat_template=chat_template,

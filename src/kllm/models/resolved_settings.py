@@ -17,6 +17,7 @@ class ResolvedLaunchSettings:
     parallel_slots: int
     batch_size: int
     micro_batch: int
+    moe_offload: int | str
     context: int
     cache_type_k: str
     cache_type_v: str
@@ -57,6 +58,11 @@ class ResolvedLaunchSettings:
                 parallel_slots=int(values["parallel_slots"]),
                 batch_size=int(values["batch_size"]),
                 micro_batch=int(values["micro_batch"]),
+                moe_offload=(
+                    values["moe_offload"]
+                    if values.get("moe_offload") == "auto"
+                    else int(values.get("moe_offload", "auto"))
+                ),
                 context=int(values["context"]),
                 cache_type_k=str(values["cache_type_k"]),
                 cache_type_v=str(values["cache_type_v"]),
@@ -93,6 +99,7 @@ class ResolvedLaunchSettings:
             "parallel_slots": self.parallel_slots,
             "batch_size": self.batch_size,
             "micro_batch": self.micro_batch,
+            "moe_offload": self.moe_offload,
             "context": self.context,
             "cache_type_k": self.cache_type_k,
             "cache_type_v": self.cache_type_v,

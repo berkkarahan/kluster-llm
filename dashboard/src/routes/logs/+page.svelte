@@ -24,10 +24,12 @@
 </script>
 
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { onMount } from 'svelte';
   import { appStore } from '$lib/store.svelte';
   import { LogTrail, REFRESH_MODES, REFRESH_MS } from '$lib/log-trail.svelte';
   import type { RefreshMode } from '$lib/types';
+  import { errors } from '$lib/errors';
   import { pushToast } from '$lib/toast';
 
   const trail = new LogTrail();
@@ -36,6 +38,7 @@
   $effect(() => { trail.setEnabled(logging?.enabled !== false); });
 
   async function toggleLogging() {
+    const errorGeneration = errors.generation;
     changingLogging = true;
     try {
       const response = await fetch('/v2/cluster/logging', {
@@ -45,7 +48,7 @@
       if (!response.ok) throw new Error(`Logging control failed (${response.status})`);
       const result = await response.json();
       if (appStore.status) appStore.status = { ...appStore.status, logging: result };
-    } catch (error) { pushToast('danger', String(error)); }
+    } catch (error) { pushToast('danger', String(error), 4000, { generation: errorGeneration }); }
     finally { changingLogging = false; }
   }
 
@@ -165,11 +168,11 @@
   }
 </script>
 
-<div class="logs-page p-3 flex flex-col gap-3 min-h-0">
+<div class="page-frame logs-page p-3 flex flex-col gap-3 min-h-0">
   <header class="flex items-end justify-between gap-3 flex-wrap">
     <div>
-      <h1 class="text-[15px] font-semibold tracking-wide m-0">Cluster Log Trail</h1>
-      <p class="m-0 text-[11px]" style="color: var(--muted)">
+      <h1 class="page-title">Cluster Log Trail</h1>
+      <p class="page-description">
         Master and worker activity · times in UTC · Stop logging discards new output across the cluster; inference continues.
       </p>
     </div>
@@ -248,12 +251,13 @@
       class="chip"
       class:chip-ok={trail.state === 'ready' || trail.state === 'empty'}
       class:chip-warn={trail.coverage === 'local' || trail.gap}
-      class:chip-danger={trail.state === 'error'}
+      class:chip-muted={trail.state === 'error'}
       role="status"
       aria-live="polite"
     >
-      {statusText()}
+      {trail.state === 'error' ? 'Log source unavailable' : statusText()}
     </span>
+    <ErrorMessage source="logs" message={trail.errorText} />
     <span class="chip chip-muted mono">{trail.refreshMode === 'live'
       ? 'Live'
       : `${MODE_LABELS[trail.refreshMode]} · ${REFRESH_MS[trail.refreshMode] / 1000}s`}</span>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   /**
    * System / hardware settings: device (CPU|GPU), accel backend (CUDA/Vulkan/…),
    * multi-GPU selection, and VRAM/RAM budget. Persists via PUT /v2/node/config —
@@ -125,9 +126,7 @@
         No local GPUs detected — inference will fall back to CPU layers.
       </p>
       {#if appStore.gpuProbeError}
-        <p class="mono text-[11px]" style="color: var(--danger, #c44)">
-          {appStore.gpuProbeError}
-        </p>
+        <ErrorMessage source="gpu-probe" message={appStore.gpuProbeError} />
         <p class="mono text-[10px]" style="color: var(--muted)">
           Run: {appStore.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'}
         </p>

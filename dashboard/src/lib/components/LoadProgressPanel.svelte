@@ -1,10 +1,12 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   /**
    * Live inference load strip — Unsloth Studio chat toast analogue.
    * Phases: Starting engine → Loading to VRAM/RAM → Ready | error | OOM Warning.
    * Reads the shared dashboard live feed; never blocks UI.
    */
   import { appStore } from '$lib/store.svelte';
+  import { errors } from '$lib/errors';
   import { composeProgressLabel } from '$lib/format-transfer';
 
   let dismissedReady = $state(false);
@@ -16,9 +18,11 @@
   const active = $derived(p?.phase === 'starting' || p?.phase === 'loading');
   const ready = $derived(p?.phase === 'ready' && !dismissedReady);
   const failed = $derived(p?.phase === 'error');
+  const failedVisible = $derived(failed && (!$errors.started || $errors.entries.load?.visible));
   const unknown = $derived(p?.phase === 'unknown');
   const cancelled = $derived(p?.phase === 'cancelled');
-  const showOom = $derived(oom && !active && !ready && !failed && !unknown && !cancelled);
+  const showOom = $derived(oom && (!$errors.started || $errors.entries['plan-overflow']?.visible)
+    && !active && !ready && !failed && !unknown && !cancelled);
 
   // Auto-dismiss Ready after a short confirmation (Unsloth toast pattern).
   $effect(() => {
@@ -49,7 +53,7 @@
       case 'ready':
         return 'Ready';
       case 'error':
-        return 'Load failed';
+        return 'Load stopped';
       case 'unknown':
         return 'Load outcome unknown';
       case 'cancelled':
@@ -67,7 +71,7 @@
   );
 </script>
 
-{#if active || ready || failed || unknown || cancelled || showOom}
+{#if active || ready || failedVisible || unknown || cancelled || showOom}
   <div
     class="panel flex flex-col gap-2 p-3"
     style:border-color={failed || showOom || unknown
@@ -91,9 +95,8 @@
     </div>
 
     {#if showOom}
-      <p class="mono text-[12px]" style="color: var(--danger)">
-        {String(appStore.planResult?.hint ?? 'Model + context exceed cluster budget — lower context or pick a smaller quant.')}
-      </p>
+      <ErrorMessage source="plan-overflow" message={String(appStore.planResult?.hint ?? 'Model + context exceed cluster budget — lower context or pick a smaller quant.')}
+      />
     {:else if active}
       <div
         class="progress"
@@ -114,7 +117,7 @@
     {:else if ready}
       <p class="mono text-[11px]" style="color: var(--accent)">Inference is up and answering requests.</p>
     {:else if failed}
-      <p class="mono text-[12px]" style="color: var(--danger)">{p?.error ?? 'unknown error'}</p>
+      <ErrorMessage source="load" message={p?.error ?? 'unknown error'} identity={p?.operation_id} />
     {:else if unknown}
       <p class="mono text-[12px]" style="color: var(--warn)">Reconnect or inspect inference status to determine the final load outcome.</p>
     {:else if cancelled}

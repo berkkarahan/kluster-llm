@@ -1,5 +1,7 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { onDestroy } from 'svelte';
+  import { errors } from '$lib/errors';
   import { appStore } from '$lib/store.svelte';
   import type { ManagedNetwork, NetworkAdapter, NetworkIdentity, NetworkInventory } from '$lib/types';
 
@@ -14,6 +16,7 @@
   let replacePeer = $state(false);
   let subnet = $state('192.168.234.0/24');
   let error = $state('');
+  let errorGeneration = $state(errors.generation);
   let busy = $state(false);
   let opened = $state(false);
   let activeOperation = $state('');
@@ -32,6 +35,8 @@
   }
 
   async function refresh() {
+    const requestGeneration = errors.generation;
+    errorGeneration = requestGeneration;
     controller?.abort();
     controller = new AbortController();
     const signal = controller.signal;
@@ -43,12 +48,14 @@
         appStore.networkRequest<{networks: ManagedNetwork[]}>('/v2/cluster/networks', 'GET', undefined, signal)
       ]);
       cleanupJournals = (await appStore.networkRequest<{journals: typeof cleanupJournals}>('/v2/node/network-cleanup', 'GET', undefined, signal)).journals;
+      if (requestGeneration !== errors.generation) return;
       identity = publicIdentity;
       localAdapters = local.adapters;
       localAdapter = selectedAdapter(local);
       networks = current.networks;
       if (master) {
         const inventory = await appStore.networkRequest<{nodes: Record<string, NetworkInventory>}>('/v2/cluster/network-adapters', 'GET', undefined, signal);
+        if (requestGeneration !== errors.generation) return;
         nodes = inventory.nodes;
         for (const [nodeId, node] of Object.entries(nodes)) {
           selections[nodeId] = selectedAdapter(node);
@@ -56,15 +63,18 @@
         }
       }
     } catch (failure) {
-      if (!signal.aborted) error = String(failure);
+      if (!signal.aborted && requestGeneration === errors.generation) { error = String(failure); errors.observe('advanced-network', error, '', false, requestGeneration); }
     }
   }
 
   async function action(work: () => Promise<void>) {
+    const requestGeneration = errors.generation;
+    errorGeneration = requestGeneration;
     busy = true;
     error = '';
+    errors.observe('advanced-network', '', '', false, requestGeneration);
     try { await work(); }
-    catch (failure) { error = String(failure); }
+    catch (failure) { if (requestGeneration === errors.generation) { error = String(failure); errors.publish('advanced-network', error, requestGeneration); } }
     finally { busy = false; }
   }
 
@@ -93,26 +103,28 @@
   }
 
   async function pollOperation(operationId: string) {
+    const operationGeneration = errorGeneration;
     activeOperation = operationId;
     pollController?.abort();
     pollController = new AbortController();
     const signal = pollController.signal;
     if (timer) clearTimeout(timer);
     const poll = async () => {
+      const requestGeneration = operationGeneration;
       if (!opened || !activeOperation) return;
       try {
         const operation = await appStore.networkRequest<{phase: string; operation_revision: number; terminal_result: {error_code?: string; message?: string} | null}>(`/v2/cluster/network-operations/${operationId}`, 'GET', undefined, signal);
         activeOperationRevision = operation.operation_revision;
         if (operation.terminal_result) {
           activeOperation = '';
-          await refresh();
-          if (operation.terminal_result.error_code) error = `${operation.terminal_result.error_code}: ${operation.terminal_result.message ?? 'Inspect participant results'}`;
+          if (requestGeneration === errors.generation) await refresh();
+          if (operation.terminal_result.error_code && requestGeneration === errors.generation) { errorGeneration = requestGeneration; error = `${operation.terminal_result.error_code}: ${operation.terminal_result.message ?? 'Inspect participant results'}`; errors.observe('advanced-network', error); }
           return;
         }
         const current = await appStore.networkRequest<{networks: ManagedNetwork[]}>('/v2/cluster/networks', 'GET', undefined, signal);
         networks = current.networks;
         timer = setTimeout(poll, 1000);
-      } catch (failure) { if (!signal.aborted) { activeOperation = ''; error = String(failure); } }
+      } catch (failure) { if (!signal.aborted && requestGeneration === errors.generation) { errorGeneration = requestGeneration; activeOperation = ''; error = String(failure); errors.observe('advanced-network', error, '', false, requestGeneration); } }
     };
     await poll();
   }
@@ -193,7 +205,7 @@
   <summary>Manual configuration and diagnostics</summary>
   <div class="network-content">
     <p>Use a dedicated Ethernet adapter with DHCP disabled, at least 10 Gbps negotiated speed, and a privileged agent. Pair each worker and master locally before starting.</p>
-    {#if error}<p role="alert" class="network-error">{error}</p>{/if}
+    {#if error}<ErrorMessage source="advanced-network" message={error} snapshot={false} generation={errorGeneration} />{/if}
     {#if identity}
       <label>Public identity to copy to the paired node
         <textarea readonly rows="4" value={JSON.stringify({node_id: identity.node_id, key_id: identity.key_id, public_key: identity.public_key, cluster_binding_id: identity.cluster_binding_id}, null, 2)} aria-label="Local network public identity"></textarea>
@@ -219,7 +231,8 @@
       <fieldset disabled={busy || !!activeOperation}>
         <legend>Participants</legend>
         {#each Object.entries(nodes) as [nodeId, node]}
-          <label><input type="checkbox" bind:checked={included[nodeId]} disabled={nodeId === identity?.node_id} /> {nodeId}: {selections[nodeId] || node.error_code || 'local adapter not selected'}</label>
+          <label><input type="checkbox" bind:checked={included[nodeId]} disabled={nodeId === identity?.node_id} /> {nodeId}: {selections[nodeId] || (node.error_code ? 'Needs attention' : 'local adapter not selected')}</label>
+          <ErrorMessage source={`network-adapter:${nodeId}`} message={node.error_code} />
         {/each}
       </fieldset>
       <label>Private subnet <input bind:value={subnet} aria-label="Dedicated private subnet" placeholder="192.168.234.0/24" /></label>
@@ -230,7 +243,7 @@
         <p><strong>{network.subnet}</strong> · {network.observed_state} · revision {network.revision}</p>
         {#each network.participants as participant}
           <p>{participant.node_id} · <span class="mono">{participant.address}/{participant.prefix_length}</span> · {participant.state} · {participant.ownership} · {participant.verification_freshness}</p>
-          {#if participant.error}<p class="network-error">{participant.error.code}: {participant.error.message}</p>{/if}
+          {#if participant.error}<ErrorMessage source={`network-participant:${participant.node_id}`} message={`${participant.error.code}: ${participant.error.message}`} />{/if}
         {/each}
         {#if network.blocking_runs.length}<p>Stop dependent inference first: {network.blocking_runs.map((run) => `${run.run_id} (${run.state})`).join(', ')}</p>{/if}
         {#if master && network.observed_state !== 'stopped'}
@@ -269,6 +282,5 @@
   textarea, select, input:not([type='checkbox']) { width: 100%; padding: 7px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
   textarea { font-family: monospace; }
   fieldset, .network-status { border: 1px solid var(--border); padding: 10px; }
-  .network-error { color: var(--danger, #c44); overflow-wrap: anywhere; }
   button { justify-self: start; }
 </style>

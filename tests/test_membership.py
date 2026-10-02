@@ -1013,3 +1013,69 @@ def test_worker_accepted_false_local_leave(client):
         agent._worker_post_heartbeat()
     assert agent.STATE.role == "idle"
     assert agent.STATE.members == {}
+
+
+def test_register_keeps_advertised_host_when_rpc_bind_hint_sent():
+    from types import SimpleNamespace
+
+    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.agent.schemas import RegisterBody
+
+    state = ClusterState(role="master", node_id="master", overlay="none")
+    state.save = lambda: None  # noqa: SLF001
+    handlers = MembershipHandlers(
+        lambda: state,
+        sync_liveness=lambda **_: [],
+        resources=SimpleNamespace(prune=lambda _: None),
+        resource_probe_available=lambda: False,
+        store=lambda: SimpleNamespace(end_node=lambda _: None),
+        master_lan_host=lambda: "192.168.68.1",
+        inference_activity=lambda: {},
+    )
+    body = RegisterBody(
+        **{**REGISTER_BODY, "host": "192.168.68.63", "lan_host": "192.168.68.63"},
+    )
+    request = SimpleNamespace(client=SimpleNamespace(host="192.168.68.62"))
+    out = handlers.register(body, request)
+    assert out["rpc_bind_hint"] == "192.168.68.62"
+    assert state.members["w1"]["host"] == "192.168.68.63"
+    assert state.members["w1"]["lan_host"] == "192.168.68.63"
+
+
+def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
+    from types import SimpleNamespace
+
+    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.agent.schemas import RegisterBody
+
+    state = ClusterState(role="master", node_id="master", overlay="none")
+    state.save = lambda: None  # noqa: SLF001
+    state.members["w1"] = {
+        **REGISTER_BODY,
+        "role": "worker",
+        "host": "192.168.68.62",
+        "lan_host": "192.168.68.62",
+        "last_seen": 0.0,
+    }
+    handlers = MembershipHandlers(
+        lambda: state,
+        sync_liveness=lambda **_: [],
+        resources=SimpleNamespace(prune=lambda _: None),
+        resource_probe_available=lambda: False,
+        store=lambda: SimpleNamespace(end_node=lambda _: None),
+        master_lan_host=lambda: "192.168.68.1",
+        inference_activity=lambda: {},
+    )
+    body = RegisterBody(
+        node_id="w1",
+        host="192.168.68.63",
+        lan_host="192.168.68.63",
+        rpc_bind="192.168.68.63",
+        control_port=18765,
+        rpc_port=50052,
+    )
+    request = SimpleNamespace(client=SimpleNamespace(host="192.168.68.62"))
+    handlers.heartbeat(body, request)
+    assert state.members["w1"]["host"] == "192.168.68.63"
+    assert state.members["w1"]["lan_host"] == "192.168.68.63"
+    assert state.members["w1"]["rpc_bind"] == "192.168.68.63"

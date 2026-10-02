@@ -64,22 +64,21 @@ class MembershipHandlers:
                 "resource_generation": generation,
             }
 
-        lan_host = body.lan_host or body.host
+        advertised = body.lan_host or body.host
         peer = request.client.host if request.client else None
         response: dict[str, Any] = {"ok": True}
         if (
             state.overlay == netsec.OVERLAY_NONE
             and isinstance(peer, str)
             and netsec.is_usable_lan_peer(peer)
-            and peer != lan_host
+            and peer != advertised
         ):
             response["rpc_bind_hint"] = peer
-            lan_host = peer
 
         member: dict[str, Any] = {
             **body.model_dump(exclude={"resource_session"}),
-            "host": lan_host,
-            "lan_host": lan_host,
+            "host": advertised,
+            "lan_host": advertised,
             "role": "worker",
             "last_seen": time.time(),
         }
@@ -113,8 +112,6 @@ class MembershipHandlers:
                 }
             ]
             response["wg_listen_port"] = netsec.WG_LISTEN_PORT
-        else:
-            member["host"] = lan_host
 
         state.members[body.node_id] = member
         state.save()
@@ -184,14 +181,6 @@ class MembershipHandlers:
                     self._store().end_node(body.node_id)
                 except (OSError, sqlite3.Error):
                     pass
-            peer = request.client.host if request.client else None
-            if (
-                state.overlay == netsec.OVERLAY_NONE
-                and netsec.is_usable_lan_peer(peer)
-                and (update.get("host") != peer or update.get("lan_host") != peer)
-            ):
-                update["host"] = peer
-                update["lan_host"] = peer
             state.members[body.node_id].update(update)
             state.members[body.node_id]["last_seen"] = time.time()
             state.save()

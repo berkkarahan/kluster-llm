@@ -29,16 +29,16 @@ from kllm.run_launch import (
     build_master_launch as build_master_launch,
 )
 
-# Prefer cluster `host` (WG overlay address when set) over LAN — matches worker RPC bind.
+# RPC dial uses member rpc_bind when present (matches rpc-server listen address).
 _RPC_CONNECT_TIMEOUT_S = 2.0
 _POST_SPAWN_ALIVE_CHECKS = 3
 _POST_SPAWN_ALIVE_INTERVAL_S = 0.15
 
 
 def member_rpc_host(member: dict[str, Any] | None) -> str:
-    """Host used for RPC dial and latency probes (host, then lan_host)."""
+    """Host used for RPC dial (rpc_bind, then host, then lan_host)."""
     m = member or {}
-    return str(m.get("host") or m.get("lan_host") or "127.0.0.1")
+    return str(m.get("rpc_bind") or m.get("host") or m.get("lan_host") or "127.0.0.1")
 
 
 def ordered_members(members: dict[str, Any]) -> list[dict[str, Any]]:
@@ -95,6 +95,11 @@ def ensure_rpc_peers_reachable(
             data = resp.json()
             if not data.get("process_pid") or data.get("process_role") != "worker":
                 unreachable.append(ep)
+                continue
+            bind = data.get("rpc_bind")
+            if bind and str(bind) != host:
+                port = data.get("rpc_port", DEFAULT_RPC_PORT)
+                unreachable.append(f"{ep} (rpc-server bound to {bind}:{port})")
         except Exception:
             unreachable.append(ep)
     if unreachable:

@@ -41,6 +41,7 @@ class ClusterJoinDependencies:
     start_worker: Callable[..., dict[str, Any]]
     register_child: Callable[[int, str], None]
     rpc_server_log_path: Callable[[], Path]
+    post_worker_heartbeat: Callable[[], None]
 
 
 class ClusterJoinService:
@@ -146,7 +147,12 @@ class ClusterJoinService:
         state.master_port = master_port
         state.rpc_port = body.rpc_port
         state.rpc_bind = rpc_bind_host
+        local = state.members.setdefault(state.node_id, {})
+        local["host"] = rpc_bind_host
+        local["lan_host"] = rpc_bind_host
+        local["rpc_bind"] = rpc_bind_host
         state.save()
+        self._deps.post_worker_heartbeat()
         return {
             "role": "worker",
             "master": master_host,

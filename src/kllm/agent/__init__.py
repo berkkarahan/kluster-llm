@@ -1198,6 +1198,7 @@ def _cluster_join_service() -> ClusterJoinService:
             start_worker=native.start_worker,
             register_child=runtime.register_child,
             rpc_server_log_path=cluster_log.rpc_server_log_path,
+            post_worker_heartbeat=_worker_post_heartbeat,
         )
     )
 

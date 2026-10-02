@@ -42,6 +42,7 @@ class RunSettingsFields(BaseModel):
     parallel_slots: AutoInt = "auto"
     batch_size: AutoInt = "auto"
     micro_batch: AutoInt = "auto"
+    moe_offload: AutoInt = "auto"
     flash_attention: Literal["auto", "on", "off"] = "auto"
     vision: bool = False
     mmproj: str | None = None
@@ -80,6 +81,13 @@ class RunSettingsFields(BaseModel):
     def threads_min(cls, v: int) -> int:
         if not 1 <= v <= available_threads():
             raise ValueError(f"threads must be 1–{available_threads()} on the master")
+        return v
+
+    @field_validator("moe_offload")
+    @classmethod
+    def moe_offload_nonnegative(cls, v: AutoInt) -> AutoInt:
+        if v != "auto" and int(v) < 0:
+            raise ValueError("moe_offload must be 'auto' or a non-negative integer")
         return v
 
     @model_validator(mode="after")
@@ -131,6 +139,7 @@ class RunSettingsFields(BaseModel):
             "parallel_slots": norm_auto_int(self.parallel_slots),
             "batch_size": norm_auto_int(self.batch_size),
             "micro_batch": norm_auto_int(self.micro_batch),
+            "moe_offload": norm_auto_int(self.moe_offload),
             "flash_attention": self.flash_attention,
             "vision": self.vision,
             "mmproj": self.mmproj,

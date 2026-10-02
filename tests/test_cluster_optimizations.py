@@ -286,3 +286,54 @@ def test_explicit_launch_settings_and_overlapping_args():
 def test_managed_placement_cannot_be_overridden(flag):
     with pytest.raises(HTTPException):
         settings(extra_args=[flag, "1"])
+
+
+def test_moe_expert_offload_to_remote_nodes():
+    m = dict(architecture="qwen2moe", metadata={"qwen2moe.attention.head_count_kv": 1},
+             layers=[1000 * MIB] * 4, expert_layers=[800 * MIB] * 4,
+             output_bytes=1000 * MIB, input_bytes=10 * MIB, confidence="metadata")
+    master = node("master", 3000 * MIB, master=True)
+    worker = node("worker", 100 * MIB)
+    worker["rpc_devices"] = [
+        {"index": 0, "device": "Vulkan0", "backend": "vulkan", "memory_kind": "gpu"},
+        {"index": 1, "device": "CPU", "backend": "cpu", "memory_kind": "ram"},
+    ]
+    result = plan([worker, master], model=m)
+    assert result["expert_offloaded"] is True
+    assert result["expert_strategy"] == "experts"
+    assert result["expert_offload_count"] == 4
+    assert result["fit_status"] != "overflow"
+    assert result["tensor_overrides"]
+    assert all("ffn_" in pattern for pattern in result["tensor_overrides"])
+    assert result["node_ram_alloc_bytes"]["worker"] >= 4 * 800 * MIB
+
+
+def test_moe_expert_offload_in_manual_node_shares():
+    m = dict(architecture="qwen2moe", metadata={"qwen2moe.attention.head_count_kv": 1},
+             layers=[2000 * MIB] * 2, expert_layers=[1600 * MIB] * 2,
+             output_bytes=2000 * MIB, input_bytes=10 * MIB, confidence="metadata")
+    nodes = [node("worker", 4000 * MIB), node("master", 4000 * MIB, master=True)]
+    result = plan(nodes, model=m, node_shares={"worker": .5, "master": .5})
+    assert result["expert_offloaded"] is True
+    assert result["expert_strategy"] == "experts"
+    assert result["expert_offload_count"] == 2
+    assert result["fit_status"] != "overflow"
+
+
+def test_moe_offload_resolution_and_launch_args():
+    assert settings(moe_offload="auto")["moe_offload"] == "auto"
+    assert settings(moe_offload=3)["moe_offload"] == 3
+    with pytest.raises(ValueError):
+        settings(moe_offload=-1)
+    plan_result = {
+        "ngl": 5,
+        "tensor_split_csv": "5",
+        "tensor_overrides": ["blk.0.ffn_*=RPC[worker:50052]"],
+        "n_cpu_moe": 2,
+    }
+    launch = build_master_launch(RunBody(model="test.gguf"), plan_result, model_path=Path("missing.gguf"),
+                                 rpc_servers=[], infer_port=8080, repo_root=None, gpu_env={}, extra_args=[])
+    assert "blk.0.ffn_*=RPC[worker:50052]" in launch["extra_args"]
+    assert launch["extra_args"].count("--override-tensor") == 1
+    assert "--n-cpu-moe" in launch["extra_args"]
+    assert "2" in launch["extra_args"]

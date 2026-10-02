@@ -45,6 +45,7 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         "parallel_slots": 1 if body.parallel_slots == "auto" else int(body.parallel_slots),
         "batch_size": 512 if body.batch_size == "auto" else int(body.batch_size),
         "micro_batch": 128 if body.micro_batch == "auto" else int(body.micro_batch),
+        "moe_offload": body.moe_offload,
         "context": body.context,
         "cache_type_k": body.cache_type_k,
         "cache_type_v": body.cache_type_v,
@@ -167,8 +168,8 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         raise HTTPException(400, f"threads must be 1–{available_threads()} on the master")
     result["requested_batch_size"] = result["batch_size"]
     result["requested_micro_batch"] = result["micro_batch"]
-    result["batch_size"] = min(result["batch_size"], max(512, result["context"]))
-    result["micro_batch"] = min(result["micro_batch"], result["batch_size"])
+    result["batch_size"] = min(result["batch_size"], max(2048, result["context"]))
+    result["micro_batch"] = min(result["micro_batch"], result["batch_size"], 512)
     result["extra_args"] = extra
     result["speculative"] = {"draft": "draft-simple", "off": "none"}.get(
         result["speculative"], result["speculative"]

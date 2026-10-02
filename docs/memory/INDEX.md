@@ -14,5 +14,6 @@ This is a compact routing map for durable project memory (`docs/memory/`). Keep 
 ## Decisions
 
 - D1: Keep test patch surfaces on facade modules -> decisions/2026-09-29-facade-patch-surface.md
+- D2: MoE expert offload targets remote RPC via tensor overrides -> decisions/2026-10-02-moe-expert-offload.md
 
 ## Workflow

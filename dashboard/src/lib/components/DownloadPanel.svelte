@@ -1,9 +1,11 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   /**
    * HF / URL download job strip. State comes from appStore.downloadJob
    * (shared dashboard live feed); cancel is non-blocking.
    */
   import { appStore } from '$lib/store.svelte';
+  import { errors } from '$lib/errors';
   import { composeProgressLabel, formatGb } from '$lib/format-transfer';
 
   const job = $derived(appStore.downloadJob);
@@ -39,7 +41,7 @@
   );
 </script>
 
-{#if running || terminal}
+{#if (running || terminal) && (job?.state !== 'error' || !$errors.started || $errors.entries.download?.visible)}
   <div class="flex flex-col gap-2">
     <div class="flex items-center gap-2">
       {#if running}<span class="spinner" aria-hidden="true"></span>{/if}
@@ -71,7 +73,7 @@
           : 'RAM'}.
       </p>
     {:else if job?.state === 'error'}
-      <p class="mono text-[12px]" style="color: var(--danger)">{job.error ?? 'unknown error'}</p>
+      <ErrorMessage source="download" message={job.error ?? 'unknown error'} identity={job.operation_id} />
     {:else if job?.state === 'cancelled'}
       <p class="mono text-[11px]" style="color: var(--muted)">Cancelled — nothing was saved.</p>
     {:else}

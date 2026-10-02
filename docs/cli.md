@@ -121,7 +121,8 @@ kllm run --model NAME --device cpu --ram-percent 50
 |------|---------|--------|
 | `--context` / `--context-auto` | 4096 / off | Auto picks largest viable context under budget |
 | `--cache-type-k`, `--cache-type-v` | `q8_0` | KV cache dtype |
-| `--parallel`, `--batch-size`, `--micro-batch` | `auto` | Maps to llama-server parallel / batch / ubatch |
+| `--parallel`, `--batch-size`, `--micro-batch` | `auto` | Maps to llama-server parallel / batch / ubatch. Batch accepts up to 2048; micro-batch accepts up to 512 (defaults stay 512 / 128) |
+| `--moe-offload N` | `auto` | Offload MoE expert weights to remote nodes when the model does not fit GPU memory; `auto` uses a heuristic, a count offloads the first N layers' experts, `0` disables |
 | `--flash-attention` | `auto` | `auto`, `on`, or `off` |
 | `--node-share NODE=FRACTION` (repeatable) | automatic | Manual GPU layer workload shares; give every current node, fractions totaling 1. Example: `--node-share worker=0.4 --node-share master=0.6`. No CPU spill in manual mode. |
 | `--require-node NODE` (repeatable) | none | Require at least one model layer on each node in automatic layer placement. The planner chooses GPU/RAM amounts. Incompatible with manual shares and row/tensor modes. |

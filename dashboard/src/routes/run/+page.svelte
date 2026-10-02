@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import type { DeviceAllocation } from '$lib/types';
   import AutoEditField from '$lib/components/AutoEditField.svelte';
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
@@ -76,23 +77,24 @@
   const parallelMode = $derived(appStore.parallelSlots === 'auto' ? 'auto' : 'edit');
   const batchMode = $derived(appStore.batchSize === 'auto' ? 'auto' : 'edit');
   const microMode = $derived(appStore.microBatch === 'auto' ? 'auto' : 'edit');
+  const moeMode = $derived(appStore.moeOffload === 'auto' ? 'auto' : 'edit');
   const checkpointMode = $derived(appStore.checkpoints === 'auto' ? 'auto' : 'edit');
   const cacheRamMode = $derived(appStore.cacheRam === 'auto' ? 'auto' : 'edit');
   const speculativeMode = $derived(appStore.speculative === 'auto' ? 'auto' : 'edit');
 </script>
 
-<div class="max-w-2xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">
+<div class="page-frame max-w-2xl mx-auto p-4">
+  <h1 class="page-title">
     PLAN &amp; RUN
   </h1>
-  <p class="mono text-[11px] mb-3" style="color: var(--muted)">
+  <p class="page-description">
     Model: {appStore.selectedModel || '—'}
   </p>
 
   <DownloadPanel />
 
   {#if appStore.status?.apply_error}
-    <p class="mono text-[11px] mb-3" style="color: var(--danger, #c44)">{appStore.status.apply_error}</p>
+    <ErrorMessage source="apply" message={appStore.status.apply_error} />
   {/if}
   {#if appStore.status?.apply_warning}
     <p class="mono text-[11px] mb-3" style="color: var(--warn, #b80)">{appStore.status.apply_warning}</p>
@@ -162,7 +164,7 @@
       }}
     />
     {#if appStore.fieldErrors.context}
-      <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.context}</p>
+      <ErrorMessage source="validation:context" message={appStore.fieldErrors.context} snapshot={false} />
     {/if}
 
     <section class="panel p-3 flex flex-col gap-3" aria-label="Planning">
@@ -175,7 +177,7 @@
           <option value="auto">Automatic</option><option value="priority">Priority</option>
         </select>
       </div>
-      {#if appStore.estimateError}<p class="mono text-[11px]" role="alert" style="color: var(--danger)">{appStore.estimateError}</p>{/if}
+      {#if appStore.estimateError}<ErrorMessage source="estimate" message={appStore.estimateError} snapshot={false} />{/if}
       {#if !blocked && appStore.planResult?.estimated_bytes != null}
         <div class="mono text-[11px] p-2" style="background: var(--bg); border: 1px solid var(--border)">
           Estimated total memory: {formatGib(appStore.planResult.estimated_bytes as number)}
@@ -262,7 +264,7 @@
           </div>
         {/each}
       {#if fitStatus === 'overflow' && appStore.planResult?.hint}
-        <p class="mono text-[11px]" role="alert" style="color: var(--danger)">{String(appStore.planResult.hint)}</p>
+        <ErrorMessage source="plan-overflow" message={String(appStore.planResult.hint)} snapshot={false} />
       {/if}
     </section>
 
@@ -303,7 +305,7 @@
             label=""
             value={typeof appStore.batchSize === 'number' ? appStore.batchSize : 512}
             min={1}
-            max={4096}
+            max={2048}
             step={1}
             numberWidth="5rem"
             disabled={!!appStore.busy}
@@ -326,11 +328,30 @@
             label=""
             value={typeof appStore.microBatch === 'number' ? appStore.microBatch : 2}
             min={1}
-            max={typeof appStore.batchSize === 'number' ? appStore.batchSize : 4096}
+            max={Math.min(typeof appStore.batchSize === 'number' ? appStore.batchSize : 512, 512)}
             step={1}
             numberWidth="4.5rem"
             disabled={!!appStore.busy}
             onChange={(v) => { appStore.microBatch = v; bumpEstimate(); }}
+          />
+        </AutoEditField>
+
+        <AutoEditField
+          label="MoE expert offload"
+          mode={moeMode}
+          disabled={!!appStore.busy}
+          onModeChange={(m) => appStore.setAutoInt('moeOffload', m)}
+        >
+          <SliderField
+            id="run-moe-offload"
+            label=""
+            value={typeof appStore.moeOffload === 'number' ? appStore.moeOffload : 0}
+            min={0}
+            max={128}
+            step={1}
+            numberWidth="4.5rem"
+            disabled={!!appStore.busy}
+            onChange={(v) => { appStore.moeOffload = v; bumpEstimate(); }}
           />
         </AutoEditField>
 
@@ -554,7 +575,7 @@
           }}
         />
         {#if appStore.fieldErrors.threads}
-          <p class="mono text-[11px]" style="color: var(--accent)">{appStore.fieldErrors.threads}</p>
+          <ErrorMessage source="validation:threads" message={appStore.fieldErrors.threads} snapshot={false} />
         {/if}
 
         <label class="mono text-[11px]" style="color: var(--muted)" for="run-extra">Extra args</label>
@@ -577,6 +598,10 @@
     </p>
 
     <LoadProgressPanel />
+
+    {#each Object.entries(appStore.fieldErrors).filter(([field]) => field !== 'context' && field !== 'threads') as [field, message]}
+      <ErrorMessage source={`validation:${field}`} {message} snapshot={false} />
+    {/each}
 
     <div class="flex gap-2 flex-wrap">
       <button

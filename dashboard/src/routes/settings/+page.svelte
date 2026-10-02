@@ -27,11 +27,11 @@
   });
 </script>
 
-<div class="mx-auto w-full max-w-[960px] px-4 py-5">
+<div class="page-frame mx-auto w-full max-w-[960px] px-4 py-5">
   <div class="mb-4 flex flex-wrap items-end justify-between gap-2">
     <div>
-      <h1 class="m-0 text-[15px] font-medium" style="color: var(--fg)">System Settings</h1>
-      <p class="m-0 mt-0.5 text-[12px]" style="color: var(--muted)">
+      <h1 class="page-title">System Settings</h1>
+      <p class="page-description">
         Cluster runtime, bind, and secret configuration. Applies on next worker restart.
       </p>
     </div>
@@ -61,7 +61,7 @@
           {#each [{ label: 'home', path: home.home }, { label: 'models', path: home.models }, { label: 'logs', path: home.logs }] as item (item.label)}
             <div class="flex items-baseline justify-between gap-4 py-1 border-b" style="border-color: var(--border)">
               <span style="color: var(--muted)">{item.label}</span>
-              <span>{item.path}</span>
+              <span class="min-w-0 text-right break-all">{item.path}</span>
             </div>
           {/each}
         {:else}

@@ -129,6 +129,191 @@ def _allocate_manual(
     )
 
 
+def _expert_offload(
+    costs: Sequence[int],
+    expert_costs: Sequence[int],
+    *,
+    local_devices: Sequence[Device],
+    remote_devices: Sequence[Device],
+    cpu_devices: Sequence[Device],
+    cpu_budget: int,
+    cpu_base: int,
+    overhead: int,
+    master_node_id: str,
+    required_nodes: frozenset[str],
+    shared_budgets: Mapping[str, int] | None,
+    node_priority: Sequence[str],
+    moe_offload: int | str,
+) -> tuple[ContiguousAllocation | None, dict[str, Any]]:
+    """Offload MoE expert weights to remote nodes while shared weights stay local.
+
+    ponytail: v1 implements the "experts" strategy only — shared weights stay on
+    the master GPU and whole expert groups move to remote GPU (then remote RAM).
+    Whole-layer/mixed strategies fall through to the existing whole-layer
+    allocator; add a finer per-expert cost model here if a real workload needs
+    experts and attention on different nodes.
+    """
+    count = len(costs)
+    layer_count = count - 1
+    expert_layers = [i for i in range(layer_count) if expert_costs[i] > 0]
+    if not expert_layers or moe_offload == 0:
+        return None, {}
+    if moe_offload == "auto":
+        offloaded = expert_layers
+    else:
+        offloaded = expert_layers[: max(0, int(moe_offload))]
+    if not offloaded:
+        return None, {}
+    offload_set = set(offloaded)
+    shared_costs = tuple(
+        costs[i] - expert_costs[i] if i in offload_set else costs[i]
+        for i in range(count)
+    )
+    solution = _allocate_contiguous(
+        local_devices, shared_costs, cpu_budget=cpu_budget, cpu_base=cpu_base,
+        overhead=overhead, master_node_id=master_node_id,
+        required_nodes=required_nodes, shared_budgets=shared_budgets,
+        allow_cpu_spill=False, node_priority=node_priority,
+    )
+    if solution is None:
+        return None, {}
+    targets = list(remote_devices) + list(cpu_devices)
+    used: dict[int, int] = {}
+    layer_assign: dict[int, Device] = {}
+    for layer in offloaded:
+        ebytes = expert_costs[layer]
+        placed = False
+        for candidate in targets:
+            if used.get(id(candidate), 0) + ebytes <= candidate.budget_bytes:
+                layer_assign[layer] = candidate
+                used[id(candidate)] = used.get(id(candidate), 0) + ebytes
+                placed = True
+                break
+        if not placed:
+            return None, {}
+    assignments = tuple(
+        (
+            candidate.node_id,
+            expert_costs[layer],
+            candidate.memory_kind,
+            candidate.rpc_endpoint,
+            candidate.rpc_index,
+            candidate.rpc_device_count,
+        )
+        for layer, candidate in layer_assign.items()
+    )
+    overrides = tuple(
+        f"blk.{layer}.ffn_*=RPC[{candidate.rpc_endpoint}]"
+        for layer, candidate in layer_assign.items()
+        if candidate.rpc_endpoint
+    )
+    return solution, {
+        "shared_costs": shared_costs,
+        "offloaded_layers": tuple(offloaded),
+        "assignments": assignments,
+        "tensor_overrides": overrides,
+        "n_cpu_moe": None,
+    }
+
+
+def _expert_offload_manual(
+    nodes: Sequence[PlacementNodeInput],
+    devices: Sequence[Device],
+    cpu_devices: Sequence[Device],
+    costs: Sequence[int],
+    expert_costs: Sequence[int],
+    node_shares: dict[str, float],
+    *,
+    cpu_budget: int,
+    cpu_base: int,
+    overhead: int,
+    master_node_id: str,
+    shared_budgets: Mapping[str, int] | None,
+    moe_offload: int | str,
+) -> tuple[ContiguousAllocation | None, dict[str, Any]]:
+    """Expert offload under manual node shares; experts follow the share fractions."""
+    count = len(costs)
+    layer_count = count - 1
+    expert_layers = [i for i in range(layer_count) if expert_costs[i] > 0]
+    if not expert_layers or moe_offload == 0:
+        return None, {}
+    if moe_offload == "auto":
+        offloaded = expert_layers
+    else:
+        offloaded = expert_layers[: max(0, int(moe_offload))]
+    if not offloaded:
+        return None, {}
+    offload_set = set(offloaded)
+    shared_costs = tuple(
+        costs[i] - expert_costs[i] if i in offload_set else costs[i]
+        for i in range(count)
+    )
+    manual = _allocate_manual(
+        nodes, devices, shared_costs, node_shares, cpu_budget=cpu_budget,
+        cpu_base=cpu_base, overhead=overhead, master_node_id=master_node_id,
+        shared_budgets=shared_budgets,
+    )
+    if manual.solution is None:
+        return None, {}
+    active_nodes = [n for n in nodes if node_shares.get(n.node_id, 0) > 0]
+    if not active_nodes:
+        return None, {}
+    total_expert = sum(expert_costs[i] for i in offloaded)
+    target = {n.node_id: node_shares[n.node_id] * total_expert for n in active_nodes}
+    node_gpu_used: dict[str, int] = {}
+    for allocation in manual.solution.allocations:
+        if allocation.memory_kind == "gpu":
+            node_gpu_used[allocation.node_id] = (
+                node_gpu_used.get(allocation.node_id, 0) + allocation.estimated_bytes
+            )
+    node_gpu_budget = {
+        n.node_id: sum(d.budget_bytes for d in devices if d.node_id == n.node_id)
+        for n in nodes
+    }
+    remaining = {
+        n.node_id: node_gpu_budget.get(n.node_id, 0) - node_gpu_used.get(n.node_id, 0)
+        for n in active_nodes
+    }
+    placed: dict[str, int] = {n.node_id: 0 for n in active_nodes}
+    layer_assign: dict[int, Device] = {}
+    for layer in offloaded:
+        ebytes = expert_costs[layer]
+        nid = max(
+            active_nodes, key=lambda n: target[n.node_id] - placed[n.node_id]
+        ).node_id
+        if remaining.get(nid, 0) < ebytes:
+            return None, {}
+        candidate = next((d for d in devices if d.node_id == nid), None)
+        if candidate is None:
+            return None, {}
+        layer_assign[layer] = candidate
+        placed[nid] += ebytes
+        remaining[nid] -= ebytes
+    assignments = tuple(
+        (
+            candidate.node_id,
+            expert_costs[layer],
+            candidate.memory_kind,
+            candidate.rpc_endpoint,
+            candidate.rpc_index,
+            candidate.rpc_device_count,
+        )
+        for layer, candidate in layer_assign.items()
+    )
+    overrides = tuple(
+        f"blk.{layer}.ffn_*=RPC[{candidate.rpc_endpoint}]"
+        for layer, candidate in layer_assign.items()
+        if candidate.rpc_endpoint
+    )
+    return manual.solution, {
+        "shared_costs": shared_costs,
+        "offloaded_layers": tuple(offloaded),
+        "assignments": assignments,
+        "tensor_overrides": overrides,
+        "n_cpu_moe": None,
+    }
+
+
 def plan_devices(
     nodes: Sequence[PlacementNodeInput],
     size: int,
@@ -276,6 +461,12 @@ def plan_devices(
     split_mode = settings.split_mode
     failure_reason: str | None = None
     routing_mode: Literal["manual", "local", "single_remote", "pool"] = "pool"
+    expert_offloaded = False
+    expert_strategy = "none"
+    expert_offload_count: int | None = None
+    expert_assignments: list[tuple[str, int, str, str | None, int, int]] = []
+    tensor_overrides: list[str] = []
+    n_cpu_moe: int | None = None
     if node_shares is not None:
         if device != "gpu" or split_mode != "layer":
             raise ValidationError("manual node shares require GPU layer placement")
@@ -291,6 +482,22 @@ def plan_devices(
         )
         solution = manual.solution
         failure_reason = manual.failure_reason
+        if solution is None and memory.expert_bytes > 0 and settings.moe_offload != 0:
+            solution, expert_meta = _expert_offload_manual(
+                nodes, devices, cpu_devices, costs, memory.expert_costs, node_shares,
+                cpu_budget=cpu_budget, cpu_base=cpu_base, overhead=overhead,
+                master_node_id=master.node_id, shared_budgets=shared_budgets,
+                moe_offload=settings.moe_offload,
+            )
+            if solution is not None:
+                expert_offloaded = True
+                expert_strategy = "experts"
+                expert_offload_count = len(expert_meta["offloaded_layers"])
+                expert_assignments = list(expert_meta["assignments"])
+                tensor_overrides = list(expert_meta["tensor_overrides"])
+                n_cpu_moe = expert_meta["n_cpu_moe"]
+                costs = expert_meta["shared_costs"]
+                failure_reason = None
     else:
         def allocate(candidates: Sequence[Device], *, spill: bool) -> ContiguousAllocation | None:
             return _allocate_contiguous(
@@ -314,6 +521,28 @@ def plan_devices(
         if solution is None:
             devices = gpu_devices
             solution = allocate(devices, spill=False)
+        if solution is None and memory.expert_bytes > 0 and settings.moe_offload != 0:
+            solution, expert_meta = _expert_offload(
+                costs, memory.expert_costs,
+                local_devices=[d for d in gpu_devices if d.local],
+                remote_devices=[d for d in gpu_devices if not d.local],
+                cpu_devices=cpu_devices,
+                cpu_budget=cpu_budget, cpu_base=cpu_base, overhead=overhead,
+                master_node_id=master.node_id, required_nodes=required,
+                shared_budgets=shared_budgets, node_priority=node_priority,
+                moe_offload=settings.moe_offload,
+            )
+            if solution is not None:
+                expert_offloaded = True
+                expert_strategy = "experts"
+                expert_offload_count = len(expert_meta["offloaded_layers"])
+                expert_assignments = list(expert_meta["assignments"])
+                tensor_overrides = list(expert_meta["tensor_overrides"])
+                n_cpu_moe = expert_meta["n_cpu_moe"]
+                costs = expert_meta["shared_costs"]
+                devices = gpu_devices
+                endpoints_used = {a.rpc_endpoint for a in solution.allocations if a.rpc_endpoint}
+                routing_mode = "local" if not endpoints_used else "single_remote" if len(endpoints_used) == 1 else "pool"
         if solution is None:
             devices = gpu_devices + cpu_devices
             solution = allocate(devices, spill=True)
@@ -402,6 +631,15 @@ def plan_devices(
         n.node_id: sum(a.estimated_bytes for a in allocations if a.node_id == n.node_id and a.memory_kind == "gpu")
         for n in nodes
     }
+    for nid, ebytes, kind, _endpoint, _rpc_index, _rpc_count in expert_assignments:
+        if nid in node_ids:
+            idx = node_ids.index(nid)
+            node_alloc[idx] += ebytes
+            node_workload[nid] = node_workload.get(nid, 0) + ebytes
+            if kind == "gpu":
+                node_vram[nid] = node_vram.get(nid, 0) + ebytes
+            else:
+                node_ram[nid] = node_ram.get(nid, 0) + ebytes
     node_budgets = {
         n.node_id: max(ram_budgets[n.node_id], gpu_budgets[n.node_id]) if n.unified_memory else ram_budgets[n.node_id] + gpu_budgets[n.node_id]
         for n in nodes
@@ -492,4 +730,9 @@ def plan_devices(
         else "allocation exceeds 90% of a memory budget"
         if tight
         else "",
+        expert_offloaded=expert_offloaded,
+        expert_strategy=expert_strategy,
+        expert_offload_count=expert_offload_count,
+        tensor_overrides=tuple(tensor_overrides),
+        n_cpu_moe=n_cpu_moe,
     )

@@ -107,6 +107,7 @@ Common controls are available through `kllm run` and the dashboard:
 
 - Context length and KV-cache precision
 - CPU threads, batch size, and micro-batch size
+- MoE expert offload (`--moe-offload`): scatter a mixture-of-experts model's expert weights across nodes when it cannot fit in GPU memory, keeping attention layers local
 - Accelerator backend and GPU selection
 - Memory budgets and placement weights
 - Additional llama.cpp arguments with validation of planner-owned flags

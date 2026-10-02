@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { formatGib } from '$lib/format-memory';
   import type { InferenceActivity, UsageNode } from '$lib/types';
 
@@ -81,7 +82,7 @@
           {#if device.unavailable_reason}<p>{device.unavailable_reason}</p>{/if}
         </div>
       {/each}
-      {#if reading.collector_error}<p>Measurement error: {reading.collector_error}</p>{/if}
+      {#if reading.collector_error}<ErrorMessage source={`collector:${node.node_id}`} message={reading.collector_error} label="Measurement" />{/if}
     {:else if !resources}
       <p>{resources ? 'No verified managed-process reading recorded.' : 'Process and host measurements unavailable; no reading recorded.'}</p>
       <p>Host physical RAM: {formatGib(node.total_ram_bytes)} · device capacity: {formatGib(node.vram_bytes)}</p>

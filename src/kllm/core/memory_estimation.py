@@ -336,6 +336,9 @@ def memory_costs(
     checkpoint_bytes = sum(state) * checkpoint_count
     auxiliary = _auxiliary_runtime(settings, context, sum(state))
     warnings.extend(auxiliary.warnings)
+    expert_costs = tuple(layout.expert_layers) + (0,)
+    if len(expert_costs) != len(layers) + 1:
+        expert_costs = (0,) * (len(layers) + 1)
     return MemoryEstimate(
         costs=tuple(layers + [layout.output_bytes]),
         input_bytes=layout.input_bytes,
@@ -353,4 +356,6 @@ def memory_costs(
         warnings=tuple(dict.fromkeys(warnings)),
         complete=not warnings,
         architecture=arch,
+        expert_costs=expert_costs,
+        expert_bytes=sum(expert_costs),
     )

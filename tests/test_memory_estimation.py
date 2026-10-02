@@ -64,6 +64,46 @@ def synthetic_gguf(path: Path, arch="llama", **metadata):
     return read_model_layout(path)
 
 
+def synthetic_moe_gguf(path: Path, arch="qwen2moe", experts=4, layers=2):
+    """Write an MoE GGUF with per-expert FFN tensors to exercise expert splits."""
+    values = {"general.architecture": arch, f"{arch}.block_count": layers,
+              f"{arch}.context_length": 8192, f"{arch}.embedding_length": 512,
+              f"{arch}.feed_forward_length": 1024, f"{arch}.attention.head_count": 8,
+              f"{arch}.attention.head_count_kv": 2, f"{arch}.attention.key_length": 64,
+              f"{arch}.attention.value_length": 64, f"{arch}.expert_count": experts}
+    tensors = [("token_embd.weight", (512, 2048))]
+    for i in range(layers):
+        tensors.append((f"blk.{i}.attn_q.weight", (512, 512)))
+        tensors.append((f"blk.{i}.ffn_gate.weight", (64, experts)))
+        for e in range(experts):
+            tensors.append((f"blk.{i}.ffn_up.{e}.weight", (512, 1024)))
+            tensors.append((f"blk.{i}.ffn_down.{e}.weight", (1024, 512)))
+    tensors.append(("output.weight", (512, 2048)))
+    buf = bytearray(struct.pack("<4sIQQ", b"GGUF", 3, len(tensors), len(values)))
+
+    def string(value):
+        data = value.encode()
+        buf.extend(struct.pack("<Q", len(data)) + data)
+
+    for key, value in values.items():
+        string(key)
+        if isinstance(value, str):
+            buf.extend(struct.pack("<I", 8))
+            string(value)
+        else:
+            buf.extend(struct.pack("<II", 4, value))
+    offset = 0
+    for name, dims in tensors:
+        string(name)
+        buf.extend(struct.pack("<IQQIQ", 2, *dims, 0, offset))
+        offset += dims[0] * dims[1] * 4
+    padding = (-len(buf)) % 32
+    with path.open("wb") as file:
+        file.write(buf + bytes(padding))
+        file.truncate(len(buf) + padding + offset)
+    return read_model_layout(path)
+
+
 @pytest.fixture(params=["llama", "deepseek2", "qwen35moe"])
 def model_layout(request, tmp_path):
     return synthetic_gguf(tmp_path / "model.gguf", request.param)
@@ -143,7 +183,8 @@ def test_physical_batch_and_context_padding(tmp_path):
     assert costs(layout, micro_batch=256).overhead > costs(layout, micro_batch=128).overhead
     assert costs(layout, context=513).kv_bytes == costs(layout, context=768).kv_bytes
     capped = settings(context=512, batch_size=4096, micro_batch=4096)
-    assert capped["batch_size"] == capped["micro_batch"] == 512
+    assert capped["batch_size"] == 2048
+    assert capped["micro_batch"] == 512
 
 
 @pytest.mark.parametrize("dtype,block_bytes", [("q4_0", 18), ("q4_1", 20), ("q5_0", 22),
@@ -324,3 +365,38 @@ def test_optional_local_qwen_regression():
     assert one.kv_bytes == two.kv_bytes
     assert two.state_bytes == 2 * one.state_bytes
     assert one.weights_bytes >= sum(t["size_bytes"] for t in layout["tensors"])
+
+
+def test_moe_expert_tensor_split(tmp_path):
+    layout = synthetic_moe_gguf(tmp_path / "moe.gguf")
+    assert layout["architecture"] == "qwen2moe"
+    assert len(layout["expert_layers"]) == 2
+    assert all(eb > 0 for eb in layout["expert_layers"])
+    assert all(eb < lb for eb, lb in zip(layout["expert_layers"], layout["layers"]))
+    memory = memory_costs(
+        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
+        PlacementSettings.from_mapping(settings())
+    )
+    assert memory.expert_bytes == sum(layout["expert_layers"])
+    assert memory.expert_bytes > 0
+
+
+def test_non_moe_layout_has_no_expert_split(tmp_path):
+    layout = synthetic_gguf(tmp_path / "plain.gguf")
+    assert all(eb == 0 for eb in layout["expert_layers"])
+    memory = memory_costs(
+        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
+        PlacementSettings.from_mapping(settings())
+    )
+    assert memory.expert_bytes == 0
+
+
+def test_batch_and_micro_batch_ceilings():
+    capped = settings(context=512, batch_size=4096, micro_batch=4096)
+    assert capped["batch_size"] == 2048
+    assert capped["micro_batch"] == 512
+    assert settings()["batch_size"] == 512
+    assert settings()["micro_batch"] == 128
+    assert settings(batch_size=2048, context=512)["batch_size"] == 2048
+    assert settings(batch_size=1024, micro_batch=2048)["micro_batch"] == 512
+

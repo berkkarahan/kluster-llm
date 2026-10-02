@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { appStore } from '$lib/store.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import InferenceActivity from '$lib/components/InferenceActivity.svelte';
@@ -52,10 +53,6 @@
   const selectedNode = $derived(displayNodes[appStore.selectedNodeId] ?? null);
   const nodeCount = $derived(Object.keys(displayNodes).length);
   const recording = $derived(appStore.liveUsage?.recording ?? null);
-  const updateError = $derived(
-    (appStore.status?.update?.workers ?? []).filter((w) => w.error)
-      .map((w) => `${w.host ?? w.node_id ?? '?'}: ${w.error}`)
-  );
   const netsecWarnings = $derived(appStore.status?.netsec_warnings ?? []);
   const overlayStatus = $derived(appStore.status?.overlay_status ?? '');
 
@@ -168,11 +165,10 @@
             {#if (appStore.status.update.pct ?? 0) > 0}· {Math.round(appStore.status.update.pct ?? 0)}%{/if}
           </p>
           {#each appStore.status.update.workers ?? [] as w}
-            <p class="mono text-[11px]" style="color: var(--muted)">
-              {w.host ?? w.node_id ?? '?'}
+            <div class="mono text-[11px]" style="color: var(--muted)">{w.host ?? w.node_id ?? '?'}
               <span style="color: var(--fg)"> {w.phase}</span>
-              {#if w.error}<span style="color: var(--danger, #c44)"> {w.error}</span>{/if}
-            </p>
+              {#if w.error}<ErrorMessage source={`update-worker:${w.node_id ?? w.host}`} message={w.error} />{/if}
+            </div>
           {/each}
         {/if}
         <LoadProgressPanel />
@@ -208,7 +204,7 @@
           <p class="mono text-[11px]" style="color: var(--muted)">{appStore.status.overlay_status}</p>
         {/if}
         {#each appStore.status?.netsec_warnings ?? [] as w}
-          <p class="mono text-[11px]" style="color: var(--danger, #c44)">{w}</p>
+          <p class="mono text-[11px]" style="color: var(--warn)">{w}</p>
         {/each}
       </div>
     </details>
@@ -220,22 +216,23 @@
         Recording: {recording?.recording ?? 'unavailable'} · last saved {recording?.last_successful_save ?? 'never'}
       </span>
       {#if appStore.usageError}
-        <span class="mono text-[11px]" role="alert" style="color: var(--danger)">{appStore.usageError}</span>
+        <ErrorMessage source="usage-request" message={appStore.usageError} snapshot={false} />
       {/if}
       {#if appStore.status?.apply_error}
-        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">{appStore.status.apply_error}</span>
+        <ErrorMessage source="apply" message={appStore.status.apply_error} />
       {/if}
       {#if appStore.status?.apply_warning}
         <span class="mono text-[11px]" style="color: var(--warn, #b80)">{appStore.status.apply_warning}</span>
       {/if}
       {#if appStore.status?.update?.error}
-        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">{appStore.status.update.error}</span>
+        <ErrorMessage source="update" message={appStore.status.update.error} />
       {/if}
-      {#each updateError as error}
-        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">update {error}</span>
+      {#each appStore.status?.update?.workers ?? [] as worker}
+        <ErrorMessage source={`update-worker:${worker.node_id ?? worker.host}`} message={worker.error}
+          label={`Update ${worker.host ?? worker.node_id ?? '?'}`} />
       {/each}
       {#each netsecWarnings as warning}
-        <span class="mono text-[11px]" role="alert" style="color: var(--danger, #c44)">{warning}</span>
+        <span class="mono text-[11px]" role="note" style="color: var(--warn)">{warning}</span>
       {/each}
       {#if overlayStatus}
         <span class="usage-overlay-status mono text-[11px]" style="color: var(--muted)">{overlayStatus}</span>

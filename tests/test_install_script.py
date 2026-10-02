@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from pathlib import Path
@@ -809,6 +813,90 @@ def test_main_sync_runs_stages_in_order_without_process_pool(
     output = capsys.readouterr()
     assert "kllm (Rust + Python): rust build broke" in output.err
     assert "Install complete." not in output.out
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows refuses to delete a running executable")
+def test_park_windows_launchers_renames_running_exe(install, tmp_path):
+    """A running launcher can be renamed aside so the original path is reusable."""
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    source = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+    stale = scripts / "kllm.exe.locked"
+    shutil.copy2(source, stale)
+    exe = scripts / "kllm.exe"
+    shutil.copy2(source, exe)
+    agent = scripts / "kllm-agent.exe"
+    agent.write_bytes(b"agent")
+    command = ["/d", "/c", "ping -n 30 127.0.0.1 >nul"]
+    flags = subprocess.CREATE_NO_WINDOW
+    hold = subprocess.Popen([str(stale), *command], creationflags=flags)
+    proc = subprocess.Popen([str(exe), *command], creationflags=flags)
+    try:
+        assert hold.poll() is None and proc.poll() is None
+        install._park_windows_launchers(scripts)
+        assert not exe.exists()
+        assert stale.is_file()
+        assert (scripts / f"kllm.exe.{os.getpid()}.locked").is_file()
+        assert not agent.exists()
+        assert (scripts / "kllm-agent.exe.locked").is_file()
+        exe.write_bytes(b"new-launcher")
+        assert exe.read_bytes() == b"new-launcher"
+    finally:
+        proc.kill()
+        hold.kill()
+        proc.wait(timeout=10)
+        hold.wait(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing violation is error 32")
+def test_busy_windows_launcher_is_omitted_from_reinstall(install, tmp_path):
+    """A launcher that cannot be renamed is left in place and dropped from the wheel."""
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    python = scripts / "python.exe"
+    python.write_bytes(b"")
+    exe = scripts / "kllm.exe"
+    exe.write_bytes(b"MZ")
+    dist = tmp_path / "Lib" / "site-packages" / "kllm-0.1.0.dist-info"
+    dist.mkdir(parents=True)
+    entry_text = "[console_scripts]\nkllm=kllm.cli:main\nkllm-agent=kllm.agent.__main__:main\n"
+    entry = dist / "entry_points.txt"
+    entry.write_text(entry_text, encoding="utf-8")
+    entry_bytes = entry_text.encode("utf-8")
+    (dist / "RECORD").write_text(
+        "../../Scripts/kllm.exe,sha256=abc,2\n"
+        "../../Scripts/kllm-agent.exe,sha256=def,2\n"
+        f"kllm-0.1.0.dist-info/entry_points.txt,sha256={install._record_hash(entry_bytes)},{len(entry_bytes)}\n"
+        "kllm-0.1.0.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+    wheel = tmp_path / "kllm-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("kllm-0.1.0.dist-info/entry_points.txt", entry_text)
+        archive.writestr(
+            "kllm-0.1.0.dist-info/RECORD",
+            "kllm-0.1.0.dist-info/entry_points.txt,sha256=placeholder,1\n"
+            "kllm-0.1.0.dist-info/RECORD,,\n",
+        )
+    fd = os.open(exe, os.O_RDONLY)
+    try:
+        rebuilt = install._wheel_for_reinstall(python, wheel)
+        assert exe.is_file()
+        record = (dist / "RECORD").read_text(encoding="utf-8")
+        assert "kllm.exe" not in record
+        assert "kllm-agent.exe" in record
+        installed_entry = entry.read_text(encoding="utf-8")
+        assert "kllm=" not in installed_entry
+        assert "kllm-agent=" in installed_entry
+        with zipfile.ZipFile(rebuilt) as archive:
+            wheel_entry = archive.read("kllm-0.1.0.dist-info/entry_points.txt").decode("utf-8")
+            wheel_record = archive.read("kllm-0.1.0.dist-info/RECORD").decode("utf-8")
+        assert "kllm=" not in wheel_entry
+        assert "kllm-agent=" in wheel_entry
+        payload = wheel_entry.encode("utf-8")
+        assert f"sha256={install._record_hash(payload)},{len(payload)}" in wheel_record
+    finally:
+        os.close(fd)
 
 
 def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):

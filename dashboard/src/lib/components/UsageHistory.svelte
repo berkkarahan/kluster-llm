@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { formatGib } from '$lib/format-memory';
   import type { RecorderStatus, UsageBucket, UsageLifetime, UsagePage, UsageReading, UsageSeries } from '$lib/types';
 
@@ -34,7 +35,7 @@
   <h2 class="text-sm font-semibold">Recorded usage · {nodeId}</h2>
   <p>Recording: {recorder?.recording ?? 'interrupted'} · last saved {recorder?.last_successful_save ?? 'never'}
     {#if recorder?.storage_truncated} · storage-limited coverage{/if}</p>
-  {#if recorder?.error || error}<p role="alert">{recorder?.error ?? error}</p>{/if}
+  {#if recorder?.error || error}<ErrorMessage source={recorder?.error ? 'recorder' : 'history'} message={recorder?.error ?? error} snapshot={!!recorder?.error} />{/if}
   <p>Earliest retained: {series?.earliest_retained ?? 'unrecorded'} · UTC</p>
   {#if !lifetimes.length}<p>Unrecorded · no retained process lifetime for this node.</p>{/if}
   <div class="flex flex-wrap items-center gap-2 my-2">

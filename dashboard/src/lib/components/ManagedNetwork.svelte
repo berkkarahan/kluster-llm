@@ -1,5 +1,7 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { onDestroy } from 'svelte';
+  import { errors } from '$lib/errors';
   import { appStore } from '$lib/store.svelte';
   import type { ManagedNetwork } from '$lib/types';
   import NetworkAdvanced from './NetworkAdvanced.svelte';
@@ -19,8 +21,10 @@
   let opened = $state(false);
   let busy = $state(false);
   let error = $state('');
+  let errorGeneration = $state(errors.generation);
   let diagnostic = $state('');
   let operation = $state('');
+  let operationGeneration = errors.generation;
   let operationRevision = $state(1);
   let phase = $state('');
   let recovery = $state<{network_id: string; snapshot_digest: string; exact_address_prefix: string; current: unknown} | null>(null);
@@ -49,9 +53,14 @@
   }
 
   async function refresh(signal?: AbortSignal) {
-    local = await appStore.networkRequest<LocalStatus>('/v2/node/network-setup', 'GET', undefined, signal);
+    const generation = errors.generation;
+    const result = await appStore.networkRequest<LocalStatus>('/v2/node/network-setup', 'GET', undefined, signal);
+    if (generation !== errors.generation) return;
+    local = result;
     if (master) {
-      assessment = await appStore.networkRequest<Assessment>('/v2/cluster/network-setup', 'GET', undefined, signal);
+      const next = await appStore.networkRequest<Assessment>('/v2/cluster/network-setup', 'GET', undefined, signal);
+      if (generation !== errors.generation) return;
+      assessment = next;
       for (const c of assessment.computers) {
         included[c.node_id] ??= true;
         if (!adapters[c.node_id] || !c.adapters.some(a => a.adapter_id === adapters[c.node_id] && !a.reason)) adapters[c.node_id] = c.selected_adapter;
@@ -59,10 +68,13 @@
     }
   }
 
-  async function work(action: () => Promise<void>) {
+  async function work(action: () => Promise<void>, explicit = true) {
+    const requestGeneration = errors.generation;
+    errorGeneration = requestGeneration;
     busy = true; error = ''; diagnostic = '';
+    if (explicit) errors.observe('managed-network', '', '', false, requestGeneration);
     try { await action(); }
-    catch (failure) { if (!controller?.signal.aborted) { diagnostic = String(failure); error = readable(failure); } }
+    catch (failure) { if (!controller?.signal.aborted && requestGeneration === errors.generation) { diagnostic = String(failure); error = readable(failure); errors.publish('managed-network', error, errorGeneration); } }
     finally { busy = false; }
   }
 
@@ -70,9 +82,13 @@
     await work(async () => {
       await refresh(controller?.signal);
       if (timer) clearTimeout(timer);
-      if (!operation && network?.current_operation_id && ['preparing', 'applying', 'verifying', 'stopping'].includes(network.observed_state)) operation = network.current_operation_id;
+      if (!operation && network?.current_operation_id && ['preparing', 'applying', 'verifying', 'stopping'].includes(network.observed_state)) {
+        operation = network.current_operation_id;
+        operationGeneration = errors.generation;
+        errors.observe('managed-network', '');
+      }
       if (operation) await poll();
-    });
+    }, false);
   }
 
   async function enableAdministrator() {
@@ -99,16 +115,18 @@
   }
 
   async function poll() {
+    const requestGeneration = operationGeneration;
     if (!opened || !operation) return;
     try {
       const result = await appStore.networkRequest<{phase: string; operation_revision: number; terminal_result: {error_code?: string; message?: string} | null; message?: string; participants?: typeof participants}>(`/v2/cluster/network-setup/operations/${operation}`, 'GET', undefined, controller?.signal);
       phase = result.phase; operationRevision = result.operation_revision;
       participants = result.participants ?? [];
       if (result.terminal_result) {
-        operation = ''; await refresh(controller?.signal);
-        if (result.terminal_result.error_code) error = result.message || readable(`${result.terminal_result.error_code}: ${result.terminal_result.message ?? 'Review computer status'}`);
+        operation = '';
+        if (requestGeneration === errors.generation) await refresh(controller?.signal);
+        if (result.terminal_result.error_code && requestGeneration === errors.generation) { errorGeneration = requestGeneration; error = result.message || readable(`${result.terminal_result.error_code}: ${result.terminal_result.message ?? 'Review computer status'}`); errors.observe('managed-network', error); }
       } else timer = setTimeout(poll, 1000);
-    } catch (failure) { if (!controller?.signal.aborted) { operation = ''; error = readable(failure); } }
+    } catch (failure) { if (!controller?.signal.aborted && requestGeneration === errors.generation) { errorGeneration = requestGeneration; operation = ''; error = readable(failure); errors.observe('managed-network', error, '', false, requestGeneration); } }
   }
 
   async function setup(action: 'start' | 'add' | 'retry' = 'start') {
@@ -119,7 +137,7 @@
         assessment_revision: assessment.assessment_revision, ...(subnet ? {subnet} : {}), action,
         ...(network && action !== 'start' ? {network_id: network.network_id, expected_revision: network.revision} : {})
       });
-      operation = accepted.operation_id; phase = 'preparing'; await poll();
+      operation = accepted.operation_id; operationGeneration = errorGeneration; phase = 'preparing'; await poll();
     });
   }
 
@@ -127,7 +145,7 @@
     await work(async () => {
       if (!network) return;
       const accepted = await appStore.networkRequest<{operation_id: string}>(`/v2/cluster/networks/${network.network_id}/operations`, 'POST', {request_id: crypto.randomUUID(), expected_revision: network.revision, action: 'stop'});
-      operation = accepted.operation_id; phase = 'cleaning'; await poll();
+      operation = accepted.operation_id; operationGeneration = errorGeneration; phase = 'cleaning'; await poll();
     });
   }
 
@@ -159,7 +177,7 @@
         <p class="hint">Your operating system will ask for permission. Do this once in Kluster on each participating computer.</p>
       {:else}<p class="granted">Administrator access enabled on this computer.</p>{#if local?.message}<p>{local.message}</p>{/if}{/if}
     </section>
-    {#if error}<p role="alert" class="network-error">{error}</p>{/if}
+    {#if error}<ErrorMessage source="managed-network" message={error} snapshot={false} generation={errorGeneration} />{/if}
     {#each local?.cleanup_pending ?? [] as pending}
       <p>Network settings on this computer need review before setup can continue.</p>
       <button class="btn" disabled={busy} onclick={() => reviewRecovery(pending)}>Review network recovery</button>
@@ -178,7 +196,8 @@
         {#each assessment?.computers ?? [] as computer (computer.node_id)}
           <div class="computer">
             <label class="check"><input type="checkbox" bind:checked={included[computer.node_id]} disabled={computer.master || !!network?.participants.some(p => p.node_id === computer.node_id)} /> <strong>{computer.name}</strong> {#if computer.master}<span class="hint">This computer · master</span>{/if}</label>
-            <p class:granted={!computer.error_code && !!(adapters[computer.node_id] || computer.selected_adapter)}>{computer.message}</p>
+            <p class:granted={!computer.error_code && !!(adapters[computer.node_id] || computer.selected_adapter)}>{computer.error_code ? 'Needs attention' : computer.message}</p>
+            <ErrorMessage source={`network-computer:${computer.node_id}`} message={computer.error_code ? computer.message : ''} />
             {#if computer.adapters.filter(a => !a.reason).length > 1}
               <label>Dedicated Ethernet adapter
                 <select aria-label={`Dedicated adapter for ${computer.name}`} bind:value={adapters[computer.node_id]}>
@@ -215,7 +234,7 @@
     <button class="btn" disabled={busy || !!operation} onclick={load}>Refresh computers</button>
     <details class="advanced" bind:open={advanced}>
       <summary>Advanced details</summary>
-      {#if diagnostic}<pre>{diagnostic}</pre>{/if}
+      <ErrorMessage source="managed-network" message={error} detail={diagnostic} snapshot={false} generation={errorGeneration} />
       <label>Private address range (optional)<input bind:value={subnet} placeholder="Chosen automatically" aria-label="Private subnet override" /></label>
       <p class="hint">Leave this empty to let Kluster choose a range that avoids existing networks.</p>
       {#if local?.administrator_enabled}<button class="btn" disabled={busy || !!network || !!operation} onclick={disableAdministrator}>Disable administrator access on this computer</button>{/if}
@@ -238,7 +257,6 @@
   .computer + .computer { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
   .computer p, .computer > label:not(.check) { margin-left: 24px; }
   select, input:not([type='checkbox']) { width: 100%; padding: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
-  .network-error { color: var(--danger, #c44); overflow-wrap: anywhere; }
   .ready, .granted { color: var(--success, #69b884); }
   .advanced { border-top: 1px solid var(--border); padding-top: 8px; }
   button { justify-self: start; }

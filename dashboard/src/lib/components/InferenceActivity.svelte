@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorMessage from './ErrorMessage.svelte';
   import type { InferenceActivity } from '$lib/types';
 
   let {
@@ -16,21 +17,23 @@
     if (phase === 'generating') return `generating ${activity?.output_tokens ?? 0} tok`;
     if (phase === 'starting') return 'starting';
     if (phase === 'ready') return 'ready';
-    if (phase === 'error') return 'error';
+    if (phase === 'error') return 'stopped';
     return 'idle';
   });
   const chipClass = $derived.by(() => {
-    if (phase === 'error') return 'chip-danger';
+    if (phase === 'error') return 'chip-muted';
     if (phase === 'ready') return 'chip-ok';
     if (active) return phase === 'processing_input' || phase === 'generating' ? 'chip-info' : 'chip-warn';
     return 'chip-muted';
   });
 </script>
 
-<span class="inline-flex items-center gap-1.5" title={activity?.detail ?? label}>
+<span class="inline-flex items-center gap-1.5" title={phase === 'error' ? 'Inference stopped' : activity?.detail ?? label}>
   {#if active && assigned}<span class="spinner activity-spinner" aria-hidden="true"></span>{/if}
   <span class="chip {chipClass}">{label}</span>
   {#if assigned && (phase === 'processing_input' || phase === 'generating') && (activity?.active_requests ?? 0) > 1}
     <span class="mono text-[10px]" style="color: var(--muted)">{activity?.active_requests} req</span>
   {/if}
 </span>
+
+{#if phase === 'error'}<ErrorMessage source="inference-activity" message={activity?.detail ?? 'Inference failed'} />{/if}

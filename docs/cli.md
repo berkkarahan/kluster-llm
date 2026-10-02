@@ -218,6 +218,7 @@ The page reads a bounded recent tail (initially 200 rows, then incremental check
 kllm run --model my-model.Q4_K_M.gguf
 kllm connect claude
 kllm connect opencode --model my-model.Q4_K_M.gguf
+kllm connect hermes --url 'http://127.0.0.1:18765' --model 'Ornith-1.5-35B-A3B-Q6_K_L.gguf'
 kllm connect claude --no-launch   # print env + argv only
 ```
 
@@ -232,7 +233,7 @@ kllm connect claude --no-launch   # print env + argv only
 
 Flags: `--model`, `--api-key` / `KLLM_API_KEY`, `--url` / `KLLM_URL`, `--timeout` (readiness seconds; default 600), `--launch`/`--no-launch`, `--serve`/`--no-serve`, `--persist`, `--yolo`, `--context`. Extra args after the agent name are passed through to the harness.
 
-CONNECT commands include the dashboard endpoint and selected model, quoted for Bash or PowerShell. Set `KLLM_API_KEY` to the master token before using an explicit endpoint. A worker endpoint resolves to its master. Connection waits for the authenticated served catalog and uses the exact upstream model ID, including a path when llama.cpp advertises one. An already running different model is rejected; an idle master requires an explicit `--model`. Codex uses the native `/v1/responses` gateway; the other OpenAI-compatible clients use Chat Completions and Claude uses Messages. The pinned llama.cpp runtime implements these protocols. `--no-launch` performs the same readiness checks, prints a redacted plan, and removes temporary configuration directories.
+CONNECT commands include the dashboard endpoint and selected model, quoted for Bash or PowerShell. Explicit loopback endpoints (`localhost`, IPv4 loopback addresses such as `127.0.0.1`, and `[::1]`) reuse the local token in `~/.kllm/api_token` (or the configured `KLLM_HOME`) when no key is supplied. This applies to both `--url` and `KLLM_URL`. `--api-key` takes precedence over `KLLM_API_KEY`, and both override the local token. Remote endpoints require `--api-key` or `KLLM_API_KEY` set to the master's token. A worker endpoint resolves to its master. Connection waits for the authenticated served catalog and uses the exact upstream model ID, including a path when llama.cpp advertises one. An already running different model is rejected; an idle master requires an explicit `--model`. Codex uses the native `/v1/responses` gateway; the other OpenAI-compatible clients use Chat Completions and Claude uses Messages. The pinned llama.cpp runtime implements these protocols. `--no-launch` performs the same readiness checks, prints a redacted plan, and removes temporary configuration directories.
 
 OpenCode v2 starts a private server so the session provider configuration is inherited; an existing background service keeps its own settings. The Responses gateway combines only leading text developer/system messages into the instruction preamble for GGUF templates requiring one initial system turn. Tools and subsequent conversation input retain their native protocol representation. Installed-client smoke checks can be run with `KLLM_TEST_HARNESS_SMOKE=1 uv run python -m pytest -n 0 tests/test_connect_harness_smoke.py` while inference is already ready; these use temporary configurations and a private gateway. Claude, Hermes and OpenClaw require separate installed-client acceptance when available.
 

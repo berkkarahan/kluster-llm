@@ -10,9 +10,15 @@ from typing import Any
 import httpx
 import typer
 
-from kllm import config as kllm_config, runtime, log_sink
+from kllm import config as kllm_config, log_sink, runtime
 from kllm.commands.ui import console
-from kllm.state import DEFAULT_CONTROL_PORT, ensure_home, home_dir
+from kllm.state import (
+    DEFAULT_CONTROL_PORT,
+    ClusterState,
+    ClusterStateLoadError,
+    ensure_home,
+    home_dir,
+)
 
 __all__ = ["_agent_base", "_agent_healthy", "_client", "_ensure_agent", "_replace_tracked_instance", "_stop_local"]
 
@@ -64,6 +70,50 @@ def _replace_tracked_instance(port: int = DEFAULT_CONTROL_PORT) -> None:
     _stop_local(port)
 
 
+def _validate_saved_state() -> None:
+    try:
+        ClusterState.load(migrate=False)
+    except ClusterStateLoadError as exc:
+        typer.echo(f"Cannot start local kllm-agent: {exc}", err=True)
+        typer.echo(
+            "Fix access to that file, or move it to a backup name and retry to create "
+            "fresh local state.",
+            err=True,
+        )
+        typer.echo(
+            "Resetting cluster state changes this node's identity and saved cluster settings; "
+            "downloaded models are kept.",
+            err=True,
+        )
+        typer.echo(f"Agent log: {home_dir() / 'logs' / 'agent.log'}", err=True)
+        raise typer.Exit(code=1) from None
+
+
+def _terminate_spawned_process(proc: subprocess.Popen[Any]) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    except OSError:
+        pass
+
+
+def _cleanup_failed_start(
+    proc: subprocess.Popen[Any], sink: subprocess.Popen[Any]
+) -> None:
+    _terminate_spawned_process(proc)
+    if sink.poll() is None:
+        try:
+            sink.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            _terminate_spawned_process(sink)
+    runtime.clear_agent_if_matches(proc.pid)
+
+
 def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
     ensure_home()
     health = _agent_healthy(port)
@@ -87,6 +137,7 @@ def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
 
     # Dead or missing agent: clear stale tracked PIDs, then spawn one.
     _stop_local(port, graceful=False)
+    _validate_saved_state()
 
     console.print("[dim]Starting local kllm-agent…[/dim]")
     log = home_dir() / "logs" / "agent.log"
@@ -107,15 +158,32 @@ def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
     finally:
         if sink.stdin:
             sink.stdin.close()
-    runtime.register_agent(proc.pid, port, sink.pid)
-    for _ in range(40):
-        try:
-            with httpx.Client(timeout=0.5) as client:
-                if client.get(f"{_agent_base(port)}/health").status_code == 200:
-                    return
-        except Exception:
+    try:
+        runtime.register_agent(proc.pid, port, sink.pid)
+        for _ in range(40):
+            return_code = proc.poll()
+            if return_code is not None:
+                typer.echo(
+                    f"kllm-agent exited during startup with code {return_code}. "
+                    f"See {log}.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            try:
+                with httpx.Client(timeout=0.5) as client:
+                    if client.get(f"{_agent_base(port)}/health").status_code == 200:
+                        return
+            except Exception:
+                pass
             time.sleep(0.25)
-    raise typer.Exit(code=1)
+        typer.echo(
+            f"kllm-agent did not become healthy within 10 seconds. See {log}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except BaseException:
+        _cleanup_failed_start(proc, sink)
+        raise
 
 
 def _client(port: int = DEFAULT_CONTROL_PORT) -> httpx.Client:

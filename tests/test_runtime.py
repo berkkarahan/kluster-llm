@@ -50,6 +50,30 @@ def test_clear_removes_file(kllm_home):
     assert runtime.load().agent_pid is None
 
 
+def test_clear_agent_only_removes_matching_registration(kllm_home):
+    home, runtime = kllm_home
+    runtime.register_agent(42, 18765, 43)
+
+    assert runtime.clear_agent_if_matches(99) is False
+    assert runtime.load().agent_pid == 42
+
+    assert runtime.clear_agent_if_matches(42) is True
+    assert not (home / ".runtime.json").exists()
+
+
+def test_clear_agent_keeps_tracked_children(kllm_home, monkeypatch):
+    _, runtime = kllm_home
+    monkeypatch.setattr(runtime.native, "registered_process_identity", lambda _pid: None)
+    runtime.register_agent(42, 18765, 43)
+    runtime.register_child(99, "llama-server")
+
+    assert runtime.clear_agent_if_matches(42) is True
+    info = runtime.load()
+    assert info.agent_pid is None
+    assert info.agent_log_sink_pid is None
+    assert [child.pid for child in info.children] == [99]
+
+
 def test_any_live_and_kill_tracked(kllm_home, monkeypatch):
     _, runtime = kllm_home
     runtime.register_agent(10, 18765)

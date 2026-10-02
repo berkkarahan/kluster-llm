@@ -3,6 +3,8 @@
 import json
 from dataclasses import asdict
 
+import pytest
+
 from kllm import runtime, state
 
 
@@ -38,6 +40,33 @@ def test_legacy_cluster_state_resets_transient_data_and_keeps_settings(tmp_path,
     assert migrated.last_settings == {"model": "model.gguf", "context": 4096}
     assert migrated.schema_version == state.CLUSTER_STATE_SCHEMA_VERSION
     assert state.ClusterState.upgrade_pending() is False
+
+
+@pytest.mark.parametrize(
+    ("contents", "reason"),
+    [
+        (b"\0" * 128, "invalid JSON"),
+        (b"{broken", "invalid JSON"),
+        (b"[]", "JSON object"),
+        (b'{"schema_version": 0}', "positive integer"),
+        (b"\xff", "valid UTF-8"),
+    ],
+)
+def test_corrupt_cluster_state_fails_closed_without_exposing_contents(
+    tmp_path, monkeypatch, contents, reason
+) -> None:
+    path = tmp_path / "cluster.json"
+    path.write_bytes(contents)
+    monkeypatch.setattr(state, "state_path", lambda: path)
+
+    for read in (state.ClusterState.load, state.ClusterState.upgrade_pending):
+        with pytest.raises(state.ClusterStateLoadError) as raised:
+            read()
+        message = str(raised.value)
+        assert str(path) in message
+        assert reason in message
+        assert "broken" not in message
+        assert path.read_bytes() == contents
 
 
 def test_stop_children_keeps_agent_pid_and_stops_only_tracked_children(monkeypatch) -> None:

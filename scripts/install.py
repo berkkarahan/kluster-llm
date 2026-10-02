@@ -10,6 +10,7 @@ Usage:
   python scripts/install.py --llama-only
   python scripts/install.py --check
   python scripts/install.py --llama-only --from-source --force
+  python scripts/install.py --sync
 
 On macOS (non-CPU), the default llama.cpp install is a Metal+Vulkan source
 build (MoltenVK via Homebrew). Use ``--prefer-prebuilt`` for Metal-only
@@ -1872,6 +1873,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not install a global `kllm` shim or update PATH",
     )
+    p.add_argument(
+        "--sync",
+        action="store_true",
+        help="Run install stages one after another in this process",
+    )
     return p.parse_args(argv)
 
 
@@ -1912,8 +1918,25 @@ def _run_install_llama_stage(
     )
 
 
-def _run_stages(jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]]) -> list[str]:
+def _record_stage_error(name: str, exc: BaseException) -> str:
+    detail = str(exc) or type(exc).__name__
+    _warn(f"{name} failed ({detail})")
+    return f"{name}: {detail}"
+
+
+def _run_stages(
+    jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]],
+    *,
+    sync: bool = False,
+) -> list[str]:
     errors: list[str] = []
+    if sync:
+        for name, fn, args, kwargs in jobs:
+            try:
+                fn(*args, **kwargs)
+            except (Exception, SystemExit) as exc:
+                errors.append(_record_stage_error(name, exc))
+        return errors
     with ProcessPoolExecutor(max_workers=4) as pool:
         futures = {
             pool.submit(fn, *args, **kwargs): name for name, fn, args, kwargs in jobs
@@ -1923,9 +1946,7 @@ def _run_stages(jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]]) ->
             try:
                 future.result()
             except (Exception, SystemExit) as exc:
-                detail = str(exc) or type(exc).__name__
-                errors.append(f"{name}: {detail}")
-                _warn(f"{name} failed ({detail})")
+                errors.append(_record_stage_error(name, exc))
     return errors
 
 
@@ -2005,7 +2026,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
 
-    errors = _run_stages(jobs)
+    errors = _run_stages(jobs, sync=args.sync)
 
     if errors:
         print("\nInstall failed:", file=sys.stderr)

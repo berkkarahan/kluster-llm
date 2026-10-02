@@ -11,7 +11,7 @@ from kllm.state import repo_root
 
 
 def rebuild_cmd() -> None:
-    """Run scripts/install.py from the detected repo root (full install)."""
+    """Run scripts/install.py --sync from the detected repo root (full install)."""
     root = repo_root()
     if root is None:
         typer.secho(
@@ -23,5 +23,5 @@ def rebuild_cmd() -> None:
     if not script.is_file():
         typer.secho(f"Missing installer: {script}", err=True)
         raise typer.Exit(1)
-    proc = subprocess.run([sys.executable, str(script)], cwd=str(root))
+    proc = subprocess.run([sys.executable, str(script), "--sync"], cwd=str(root))
     raise typer.Exit(proc.returncode or 0)

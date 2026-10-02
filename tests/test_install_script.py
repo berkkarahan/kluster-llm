@@ -770,6 +770,47 @@ def test_main_runs_install_stages_concurrently_and_reports_failure(
     assert "Install complete." not in output.out
 
 
+def test_main_sync_runs_stages_in_order_without_process_pool(
+    install, monkeypatch, tmp_path, capsys
+):
+    order: list[str] = []
+
+    def reject_pool(*_args, **_kwargs):
+        pytest.fail("ProcessPoolExecutor must not run in sync mode")
+
+    def build_rust(*_args, **_kwargs):
+        order.append("rust")
+        raise RuntimeError("rust build broke")
+
+    def build_ui(**_kwargs):
+        order.append("ui")
+
+    def llama(*_args, **_kwargs):
+        order.append("llama")
+
+    monkeypatch.setattr(install, "ProcessPoolExecutor", reject_pool)
+    monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "ensure_venv", lambda: tmp_path / "python")
+    monkeypatch.setattr(install, "build_rust", build_rust)
+    monkeypatch.setattr(install, "build_ui", build_ui)
+    monkeypatch.setattr(install, "detect_backend", lambda backend: "cpu")
+    monkeypatch.setattr(install, "_run_install_llama_stage", llama)
+    monkeypatch.setattr(
+        install,
+        "verify_llama_installed",
+        lambda *args, **kwargs: pytest.fail("llama verification must not mask a stage failure"),
+    )
+
+    assert (
+        install.main(["--sync", "--skip-toolchains", "--skip-wireguard", "--backend", "cpu"]) == 1
+    )
+    assert order == ["rust", "ui", "llama"]
+    output = capsys.readouterr()
+    assert "kllm (Rust + Python): rust build broke" in output.err
+    assert "Install complete." not in output.out
+
+
 def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(install, "BIN_DIR", tmp_path)
     monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")

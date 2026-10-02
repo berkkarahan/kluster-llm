@@ -1914,7 +1914,7 @@ def _run_install_llama_stage(
 
 def _run_stages(jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]]) -> list[str]:
     errors: list[str] = []
-    with ProcessPoolExecutor(max_workers=len(jobs) or 1) as pool:
+    with ProcessPoolExecutor(max_workers=4) as pool:
         futures = {
             pool.submit(fn, *args, **kwargs): name for name, fn, args, kwargs in jobs
         }

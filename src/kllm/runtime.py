@@ -83,6 +83,20 @@ def clear() -> None:
             pass
 
 
+def clear_agent_if_matches(pid: int) -> bool:
+    """Clear a failed agent registration without clobbering a replacement."""
+    info = load()
+    if info.agent_pid != pid:
+        return False
+    info.agent_pid = None
+    info.agent_log_sink_pid = None
+    if info.children:
+        save(info)
+    else:
+        clear()
+    return True
+
+
 def register_agent(pid: int, control_port: int = DEFAULT_CONTROL_PORT, log_sink_pid: int | None = None) -> None:
     info = load()
     if info.agent_pid != pid or log_sink_pid is not None:

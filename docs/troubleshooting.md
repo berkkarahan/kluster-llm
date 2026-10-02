@@ -83,6 +83,39 @@ If Homebrew upgraded OpenSSL, MoltenVK, glslc, or SPIR-V headers, rerun the comm
 
 ## Cluster startup
 
+### `kllm ui` does not open or appears to hang
+
+`kllm ui` starts the local agent before opening the browser. If startup fails, use the state and
+log paths printed by the CLI; the agent log is normally `~/.kllm/logs/agent.log`. A corrupt
+`cluster.json` now fails immediately instead of waiting for the health timeout. Do not expose or
+paste its contents because it may contain cluster credentials.
+
+If the CLI reports invalid persisted cluster state and no usable backup exists, stop the tracked
+runtime and move the file aside explicitly. This creates a new node identity and clears saved
+cluster membership/settings, but keeps downloaded models, logs, tokens, dashboard assets, and
+runtime binaries.
+
+PowerShell:
+
+```powershell
+uv run kllm stop
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+Move-Item -LiteralPath "$env:USERPROFILE\.kllm\cluster.json" -Destination "$env:USERPROFILE\.kllm\cluster.json.corrupt-$stamp.bak"
+uv run kllm ui --no-open
+```
+
+macOS/Linux:
+
+```bash
+uv run kllm stop
+mv ~/.kllm/cluster.json ~/.kllm/cluster.json.corrupt-$(date +%Y%m%d-%H%M%S).bak
+uv run kllm ui --no-open
+```
+
+Confirm `http://127.0.0.1:18765/health`, then run `uv run kllm ui`. Re-create or rejoin the
+cluster as appropriate. Keep the renamed file until recovery is confirmed; the CLI never deletes
+or silently restores corrupt state.
+
 ### Start a master and join a worker
 
 ```bash

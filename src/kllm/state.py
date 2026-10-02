@@ -16,6 +16,35 @@ CLUSTER_STATE_SCHEMA_VERSION = 2
 SERVICE_TYPE = "_kllm._tcp.local."
 
 
+class ClusterStateLoadError(ValueError):
+    """Persisted cluster state cannot be read safely."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"cannot load cluster state at {path}: {reason}")
+
+
+def _read_state_data(path: Path) -> tuple[dict[str, Any], int]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ClusterStateLoadError(path, "file is not valid UTF-8") from exc
+    except OSError as exc:
+        raise ClusterStateLoadError(path, f"file could not be read ({type(exc).__name__})") from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at line {exc.lineno}, column {exc.colno}"
+        raise ClusterStateLoadError(path, reason) from exc
+    if not isinstance(data, dict):
+        raise ClusterStateLoadError(path, "state must contain a JSON object")
+    version = data.get("schema_version", 1)
+    if type(version) is not int or version < 1:
+        raise ClusterStateLoadError(path, "schema_version must be a positive integer")
+    return data, version
+
+
 def home_dir() -> Path:
     override = os.environ.get("KLLM_HOME")
     if override:
@@ -173,12 +202,7 @@ class ClusterState:
         path = state_path()
         if not path.exists():
             return False
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("cluster state must contain a JSON object")
-        version = data.get("schema_version", 1)
-        if type(version) is not int or version < 1:
-            raise ValueError("cluster state schema_version must be a positive integer")
+        _, version = _read_state_data(path)
         return version < CLUSTER_STATE_SCHEMA_VERSION
 
     @classmethod
@@ -187,12 +211,7 @@ class ClusterState:
         path = state_path()
         if not path.exists():
             return cls(node_id=secrets.token_hex(4))
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("cluster state must contain a JSON object")
-        version = data.get("schema_version", 1)
-        if type(version) is not int or version < 1:
-            raise ValueError("cluster state schema_version must be a positive integer")
+        data, version = _read_state_data(path)
         state = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
         if migrate and version < CLUSTER_STATE_SCHEMA_VERSION:
             state.reset_transient_state()

@@ -43,7 +43,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm model delete <name>` | Delete a GGUF from the master model store |
 | `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`). RPC is used only when the model exceeds master-local capacity. |
 | `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` (adds `--rpc` only when the plan needs workers) |
-| `kllm rebuild` | Run full `scripts/install.py` from the detected repo root (same as the one-shot install; honors `KLLM_REPO_ROOT`) |
+| `kllm rebuild` | Run full `scripts/install.py --sync` from the detected repo root (stages in order in one process; honors `KLLM_REPO_ROOT`) |
 | `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
 | `kllm connect <agent>` | Launch Claude/OpenCode/Codex/… with kllm API baked in |
 

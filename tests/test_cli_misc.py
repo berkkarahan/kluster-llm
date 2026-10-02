@@ -69,7 +69,7 @@ def test_rebuild_runs_install_script(monkeypatch, tmp_path):
     monkeypatch.setattr(rebuild.subprocess, "run", capture_run)
     assert main(["rebuild"]) == 0
     assert marker.read_text() == "ok"
-    assert calls[0][1:] == [str(script)]
+    assert calls[0][1:] == [str(script), "--sync"]
 
 
 def test_rebuild_missing_repo_or_script_exits_one(monkeypatch, tmp_path):

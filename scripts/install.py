@@ -37,7 +37,7 @@ CLI/dashboard-only build (invokes the same helpers with llama/WG skipped).
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import platform
 import re
@@ -1893,10 +1893,31 @@ def _prefer_llama_prebuilt(args: argparse.Namespace, resolved_backend: str) -> b
     return True
 
 
-def _run_stages(stages: list[tuple[str, Any]]) -> list[str]:
+def _run_install_llama_stage(
+    backend: str,
+    *,
+    prefer_prebuilt: bool,
+    force: bool,
+    tag: str,
+    expected: str | None,
+    rpc_tcp_only: bool,
+) -> None:
+    install_llama(
+        backend,
+        prefer_prebuilt=prefer_prebuilt,
+        force=force,
+        tag=tag,
+        expected=expected,
+        rpc_tcp_only=rpc_tcp_only,
+    )
+
+
+def _run_stages(jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]]) -> list[str]:
     errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=len(stages) or 1) as pool:
-        futures = {pool.submit(stage): name for name, stage in stages}
+    with ProcessPoolExecutor(max_workers=len(jobs) or 1) as pool:
+        futures = {
+            pool.submit(fn, *args, **kwargs): name for name, fn, args, kwargs in jobs
+        }
         for future in as_completed(futures):
             name = futures[future]
             try:
@@ -1938,20 +1959,24 @@ def main(argv: list[str] | None = None) -> int:
         if not args.skip_toolchains:
             ensure_node()
 
-    # Keep system package installs out of worker threads so package managers
+    # Keep system package installs out of worker processes so package managers
     # (brew/apt/winget) cannot contend with each other.
     if not args.skip_wireguard:
         print("\n=== WireGuard ===")
         install_wireguard()
 
-    stages: list[tuple[str, Any]] = []
+    jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
     if not args.skip_rust:
         assert python is not None
         print("\n=== kllm (Rust + Python) ===")
-        stages.append(("kllm (Rust + Python)", lambda: build_rust(python, release=args.release)))
+        jobs.append(
+            ("kllm (Rust + Python)", build_rust, (python,), {"release": args.release}),
+        )
     if not args.skip_ui:
         print("\n=== Dashboard (Svelte) ===")
-        stages.append(("Dashboard (Svelte)", lambda: build_ui(skip_install=args.skip_npm_install)))
+        jobs.append(
+            ("Dashboard (Svelte)", build_ui, (), {"skip_install": args.skip_npm_install}),
+        )
 
     if not args.skip_llama:
         print("\n=== llama.cpp (llama-server + rpc-server) ===")
@@ -1965,19 +1990,22 @@ def main(argv: list[str] | None = None) -> int:
         prefer_prebuilt = _prefer_llama_prebuilt(args, resolved_backend)
         expected_stamp = stamp_backend_for_install(resolved_backend)
 
-        def install_llama_stage() -> None:
-            install_llama(
-                args.backend,
-                prefer_prebuilt=prefer_prebuilt,
-                force=args.force,
-                tag=tag,
-                expected=expected_stamp,
-                **({"rpc_tcp_only": True} if args.rpc_tcp_only else {}),
-            )
+        jobs.append(
+            (
+                "llama.cpp (llama-server + rpc-server)",
+                _run_install_llama_stage,
+                (args.backend,),
+                {
+                    "prefer_prebuilt": prefer_prebuilt,
+                    "force": args.force,
+                    "tag": tag,
+                    "expected": expected_stamp,
+                    "rpc_tcp_only": args.rpc_tcp_only,
+                },
+            ),
+        )
 
-        stages.append(("llama.cpp (llama-server + rpc-server)", install_llama_stage))
-
-    errors = _run_stages(stages)
+    errors = _run_stages(jobs)
 
     if errors:
         print("\nInstall failed:", file=sys.stderr)

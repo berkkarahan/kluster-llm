@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from pathlib import Path
 
@@ -738,6 +739,7 @@ def test_prefer_prebuilt_allowed_on_macos_cpu(install, monkeypatch, tmp_path):
 def test_main_runs_install_stages_concurrently_and_reports_failure(
     install, monkeypatch, tmp_path, capsys
 ):
+    monkeypatch.setattr(install, "ProcessPoolExecutor", ThreadPoolExecutor)
     barrier = Barrier(3, timeout=5)
 
     def wait_for_other_stages():
@@ -753,7 +755,9 @@ def test_main_runs_install_stages_concurrently_and_reports_failure(
     monkeypatch.setattr(install, "build_rust", build_rust)
     monkeypatch.setattr(install, "build_ui", lambda **kwargs: wait_for_other_stages())
     monkeypatch.setattr(install, "detect_backend", lambda backend: "cpu")
-    monkeypatch.setattr(install, "install_llama", lambda *args, **kwargs: wait_for_other_stages())
+    monkeypatch.setattr(
+        install, "_run_install_llama_stage", lambda *args, **kwargs: wait_for_other_stages()
+    )
     monkeypatch.setattr(
         install,
         "verify_llama_installed",

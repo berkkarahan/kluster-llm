@@ -43,6 +43,7 @@ class HeartbeatPayloadBuilder:
             "node_id": state.node_id,
             "rpc_devices": member.get("rpc_devices", []) if state.process_pid and state.process_role == "worker" else [],
             "host": state.rpc_bind or member.get("host") or member.get("lan_host") or "",
+            "rpc_bind": state.rpc_bind,
             "control_port": state.control_port,
             "rpc_port": state.rpc_port,
             "total_ram_bytes": member.get("total_ram_bytes") or 0,
@@ -54,7 +55,7 @@ class HeartbeatPayloadBuilder:
                 for key in self._OPTIONAL_MEMBER_FIELDS
                 if member.get(key) is not None
             },
-            "lan_host": member.get("lan_host"),
+            "lan_host": state.rpc_bind or member.get("lan_host"),
             "wg_public_key": state.wg_public_key,
             "gpu_ids": state.gpu_ids,
             "git_head": identity.get("git_head"),

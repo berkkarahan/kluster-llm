@@ -77,6 +77,7 @@ class RegisterBody(BaseModel):
     binary_version: str | None = None
     reclaimable_ram_bytes: int = 0
     lan_host: str | None = None
+    rpc_bind: str | None = None
     wg_public_key: str | None = None
     wg_listen_port: int = netsec.WG_LISTEN_PORT
     gpu_ids: list[int] | None = None

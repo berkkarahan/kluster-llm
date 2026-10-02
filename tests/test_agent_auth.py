@@ -135,12 +135,18 @@ def test_join_discovers_master_by_key(client, monkeypatch):
             return None
 
         def json(self):
+            worker_id = agent.STATE.node_id
             return {
                 "ok": True,
+                "accepted": True,
                 "members": 2,
                 "cluster_members": {
                     "kllm-m": {"node_id": "kllm-m", "host": "192.168.10.1", "role": "master"},
-                    "testnode": {"node_id": "testnode", "host": "192.168.10.2", "role": "worker"},
+                    worker_id: {
+                        "node_id": worker_id,
+                        "host": "192.168.10.2",
+                        "role": "worker",
+                    },
                 },
                 "last_plan": None,
                 "apply_error": None,

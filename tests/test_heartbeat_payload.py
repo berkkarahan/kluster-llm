@@ -33,6 +33,8 @@ def test_heartbeat_payload_builder_combines_state_and_runtime_identity():
     payload = builder.build()
 
     assert payload["host"] == "10.0.0.2"
+    assert payload["rpc_bind"] == "10.0.0.2"
+    assert payload["lan_host"] == "10.0.0.2"
     assert payload["total_ram_bytes"] == 0
     assert payload["available_ram_bytes"] == 0
     assert payload["backend"] == "cuda"

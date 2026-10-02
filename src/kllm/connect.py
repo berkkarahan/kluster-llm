@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
@@ -40,6 +41,16 @@ def _base_url(port: int, url: str | None = None) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.host or parsed.userinfo or parsed.query or parsed.fragment:
         raise typer.BadParameter("--url must be an HTTP(S) agent URL without credentials, query, or fragment")
     return base
+
+
+def _is_loopback_url(base: str) -> bool:
+    host = httpx.URL(base).host
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _status(port: int) -> dict[str, Any]:
@@ -132,6 +143,15 @@ def _ensure_inference(base: str, token: str, model: str | None, serve: bool, con
 
 def _which(cmd: str) -> str | None:
     return shutil.which(cmd)
+
+
+def _hermes_runtime_dir() -> Path | None:
+    """PM tool store for the default Hermes install, when present."""
+    suffix = os.environ.get("HERMES_DATA_DIR_SUFFIX", "")
+    tools = Path.home() / f".hermes{suffix}" / "tools"
+    if (tools / "facts.json").is_file():
+        return tools
+    return None
 
 
 def _opencode_service_client(binary: str) -> bool:
@@ -242,6 +262,9 @@ def plan_hermes(base: str, token: str, model: str, persist: bool, extra: list[st
     cfg.write_text(json.dumps({"model": {"default": model, "provider": "custom", "base_url": f"{base}/v1"},
                                "auxiliary": {"compression": {"provider": "main"}}}), encoding="utf-8")
     env = {"HERMES_HOME": str(home), "OPENAI_API_KEY": token, "OPENAI_BASE_URL": f"{base}/v1", "CUSTOM_BASE_URL": f"{base}/v1"}
+    runtime = _hermes_runtime_dir()
+    if runtime is not None:
+        env["HERMES_RUNTIME_DIR"] = str(runtime)
     cleanup = [] if persist else [home]
     return LaunchPlan(agent="hermes", argv=[bin_, *extra], env=env, cleanup_dirs=cleanup)
 
@@ -335,7 +358,7 @@ def build_launch_plan(
         raise typer.BadParameter(f"unknown agent {agent!r}; choose from {', '.join(AGENTS)}")
     base = _base_url(port, url)
     api_key = api_key or os.environ.get("KLLM_API_KEY")
-    if (url or os.environ.get("KLLM_URL")) and not api_key:
+    if (url or os.environ.get("KLLM_URL")) and not api_key and not _is_loopback_url(base):
         raise typer.BadParameter("an explicit endpoint requires --api-key or KLLM_API_KEY")
     token = api_key or ensure_api_token()
     base, model_id = _ensure_inference(base, token, model, serve, context, timeout)

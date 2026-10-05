@@ -63,3 +63,5 @@ dashboard/.svelte-kit/
 dashboard/build/
 
 .specify
+.agents
+.claude

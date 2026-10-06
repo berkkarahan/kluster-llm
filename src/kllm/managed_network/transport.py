@@ -18,15 +18,22 @@ def file_digest(path: Path) -> str:
 
 
 def require_tcp_runtime(repo: Path, llama: Path, rpc: Path) -> dict:
-    manifest = repo / 'vendor' / 'bin' / 'rpc-transport.json'
+    manifest = rpc.parent / 'rpc-transport.json'
     try:
         if manifest.stat().st_size > 65536:
             raise ValueError('oversized manifest')
         evidence = json.loads(manifest.read_text())
         if not isinstance(evidence, dict):
             raise ValueError('invalid manifest object')
-        if evidence.get('schema') != 1 or evidence.get('tag') != 'v0.5.0' or evidence.get('ggml_rpc') != 'ON' or evidence.get('ggml_rpc_rdma') != 'OFF' or evidence.get('source_build') is not True:
+        if evidence.get('schema') != 1 or evidence.get('ggml_rpc') != 'ON' or evidence.get('ggml_rpc_rdma') != 'OFF' or evidence.get('source_build') is not True:
             raise ValueError('unknown or RDMA-capable build')
+        if evidence.get('runtime_id'):
+            from kllm.runtimes.models import SourceRequest, runtime_id
+            source = SourceRequest(repository=evidence['repository'], ref=evidence['commit'], ref_type='commit')
+            if evidence['runtime_id'] != runtime_id(source.repository, source.ref):
+                raise ValueError('source provenance mismatch')
+        elif evidence.get('tag') != 'v0.5.0' or manifest.resolve().parent != (repo / 'vendor/bin').resolve():
+            raise ValueError('unverified legacy runtime')
         if any(os.environ.get(key) for key in ('LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH')):
             raise ValueError('unverified dynamic-library override')
         installed_at = evidence['installed_at']

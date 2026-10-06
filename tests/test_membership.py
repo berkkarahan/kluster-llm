@@ -825,7 +825,7 @@ def test_master_liveness_sweep_does_not_wait_for_shrink_maintenance(client, monk
     second_replan = threading.Event()
     replans = 0
 
-    def blocked_replan(_state):
+    def blocked_replan(_state, **_kwargs):
         nonlocal replans
         replans += 1
         if replans == 1:
@@ -887,7 +887,7 @@ def test_failed_liveness_maintenance_does_not_strand_future_removals(client, mon
     second_done = threading.Event()
     count = 0
 
-    def replan(_state):
+    def replan(_state, **_kwargs):
         nonlocal count
         count += 1
         if count == 1:
@@ -1101,7 +1101,7 @@ def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
     assert state.members["w1"]["rpc_bind"] == "192.168.68.63"
 
 
-def test_worker_runtime_reconciler_restarts_unhealthy_worker(client, monkeypatch):
+def test_worker_runtime_reconciler_does_not_restart_unhealthy_worker(client, monkeypatch):
     _, agent = client
     state = agent.STATE
     state.role = "worker"
@@ -1123,7 +1123,7 @@ def test_worker_runtime_reconciler_restarts_unhealthy_worker(client, monkeypatch
 
     agent._ensure_worker_runtime()
 
-    assert calls == [True]
+    assert calls == []
 
 
 def test_worker_runtime_reconciler_skips_healthy_worker(client, monkeypatch):
@@ -1144,7 +1144,7 @@ def test_worker_runtime_reconciler_skips_healthy_worker(client, monkeypatch):
     assert calls == []
 
 
-def test_worker_runtime_reconciler_backs_off_after_failure(client, monkeypatch):
+def test_worker_runtime_reconciler_does_not_retry_without_master_command(client, monkeypatch):
     _, agent = client
     agent.STATE.role = "worker"
     agent.STATE.master_host = "10.0.0.1"
@@ -1164,5 +1164,5 @@ def test_worker_runtime_reconciler_backs_off_after_failure(client, monkeypatch):
     agent._ensure_worker_runtime()
     agent._ensure_worker_runtime()
 
-    assert calls == [True]
-    assert agent._worker_runtime_retry["next_attempt"] > 0
+    assert calls == []
+    assert agent._worker_runtime_retry["next_attempt"] == 0

@@ -47,6 +47,7 @@ target/
 vendor/
 
 # Editor / agent
+/.codegraph/codegraph.db
 .cursor/
 .opencode/
 .spec-kit-memory/

@@ -56,7 +56,8 @@ pub fn probe(endpoint: SocketAddrV4, source: Ipv4Addr, timeout_ms: u64) -> io::R
 
 #[pyfunction]
 pub fn probe_network_rpc(py: Python<'_>, endpoint: String, source: String, installed_tag: String, timeout_ms: u64) -> PyResult<String> {
-    if installed_tag != "v0.5.0" || cfg!(target_endian = "big") { return Err(pyo3::exceptions::PyValueError::new_err("unvalidated RPC pin/architecture")); }
+    let managed_identity = installed_tag.len() == 64 && installed_tag.bytes().all(|c| c.is_ascii_hexdigit());
+    if (installed_tag != "v0.5.0" && !managed_identity) || cfg!(target_endian = "big") { return Err(pyo3::exceptions::PyValueError::new_err("unvalidated RPC identity/architecture")); }
     let target: SocketAddrV4 = endpoint.parse().map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 endpoint required"))?;
     let source: Ipv4Addr = source.parse().map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 source required"))?;
     if !(super::relay::private(*target.ip()) || target.ip().is_loopback()) || !(super::relay::private(source) || source.is_loopback()) { return Err(pyo3::exceptions::PyValueError::new_err("private RPC source/endpoint required")); }

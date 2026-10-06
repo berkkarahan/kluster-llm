@@ -14,6 +14,7 @@ from kllm.accel import (
     selectable_accel_backends,
 )
 from kllm.core.placement_api import plan_from_settings
+from kllm.runtimes.selection import selected_binary
 from pathlib import Path
 import time
 import sys
@@ -359,6 +360,11 @@ def plan_split(
 
 def start_master(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    selected = selected_binary('llama-server')
+    if selected:
+        if getattr(n, 'RUNTIME_SELECTION_VERSION', 0) != 1:
+            raise RuntimeError('Rebuild the native extension with python scripts/build.py for managed runtimes')
+        kwargs['binary_path'] = selected
     if kwargs.get("log_path"):
         kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if kwargs.get("env") is None:
@@ -376,6 +382,11 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
+    selected = selected_binary('rpc-server')
+    if selected:
+        if getattr(n, 'RUNTIME_SELECTION_VERSION', 0) != 1:
+            raise RuntimeError('Rebuild the native extension with python scripts/build.py for managed runtimes')
+        kwargs['binary_path'] = selected
     if kwargs.get("log_path"):
         kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if "devices" not in kwargs:
@@ -408,11 +419,17 @@ def process_alive(pid: int) -> bool:
 
 
 def resolve_llama_server(repo_root: str | None = None) -> str | None:
+    selected = selected_binary('llama-server')
+    if selected:
+        return selected
     path = require_native().resolve_llama_server(repo_root)
     return path if isinstance(path, str) else None
 
 
 def resolve_rpc_server(repo_root: str | None = None) -> str | None:
+    selected = selected_binary('rpc-server')
+    if selected:
+        return selected
     path = require_native().resolve_rpc_server(repo_root)
     return path if isinstance(path, str) else None
 

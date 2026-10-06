@@ -565,7 +565,7 @@ def test_live_usage_sweeps_expired_members_without_status_poll(client, monkeypat
         "host": "worker",
         "last_seen": time.time() - 30,
     }
-    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", lambda *_: None)
+    monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", lambda *_, **__: None)
     result = c.get("/v1/usage/live").json()
     assert "late" not in agent.STATE.members
     assert "late" not in result["nodes"]  # No retained observations for this node.

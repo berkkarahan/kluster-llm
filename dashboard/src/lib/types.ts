@@ -1,5 +1,6 @@
 export type AccelBackend = 'metal' | 'cuda' | 'rocm' | 'vulkan';
 export type SplitMode = 'layer' | 'row' | 'tensor';
+export type RpcStatus = 'idle' | 'starting' | 'serving' | 'recovering' | 'failed' | 'cleanup_pending';
 
 export type GpuInfo = {
   index: number;
@@ -19,6 +20,10 @@ export type Member = {
   requested_backend?: string | null;
   devices?: GpuInfo[];
   rpc_devices?: { index: number; device: string; backend: string; memory_kind: 'gpu' | 'ram' }[];
+  rpc_capabilities?: Member['rpc_devices'];
+  rpc_control_version?: number;
+  rpc_status?: RpcStatus;
+  rpc_error?: string | null;
   unified_memory?: boolean;
   binary_version?: string;
   vram_bytes?: number | null;
@@ -147,6 +152,7 @@ export type HfTokenStatus = {
 };
 
 export type Status = {
+  runtimes?: import('./runtime-types').RuntimeLibrary;
   active_config?: EffectiveConfig | null;
   managed_networks?: ManagedNetwork[];
   logging?: LoggingStatus;
@@ -174,6 +180,7 @@ export type Status = {
   split_mode?: SplitMode;
   gpu_ids?: number[] | null;
   rpc_bind?: string | null;
+  rpc_lifecycle?: { status: RpcStatus; workers?: string[]; retries?: number; error?: string | null };
   overlay?: 'none' | 'wireguard' | string;
   wg_address?: string | null;
   overlay_status?: string | null;
@@ -294,6 +301,7 @@ export type UsageNode = {
   node_id: string;
   host: string;
   role: 'master' | 'worker';
+  rpc_status?: RpcStatus;
   backend?: string | null;
   devices?: GpuInfo[];
   unified_memory?: boolean;

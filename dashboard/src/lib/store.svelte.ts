@@ -71,6 +71,8 @@ function memberFingerprint(m: Member): unknown {
     requested_backend: m.requested_backend,
     unified_memory: m.unified_memory,
     rpc_devices: m.rpc_devices,
+    rpc_capabilities: m.rpc_capabilities,
+    rpc_status: m.rpc_status,
     total_ram_bytes: m.total_ram_bytes,
     vram_bytes: m.vram_bytes,
     gpu_ids: m.gpu_ids,
@@ -90,6 +92,8 @@ function fp(s: Status | null): string {
   if (!s) return '';
   return JSON.stringify({
     role: s.role,
+    runtime_target: s.runtimes?.target?.version.runtime_id ?? s.runtimes?.selected,
+    runtime_prepared: (s.runtimes?.nodes ?? []).map(n => [n.node_id, n.prepared?.runtime_id, n.prepared?.build_id]),
     members: Object.fromEntries(
       Object.entries(s.members ?? {}).map(([id, m]) => [id, memberFingerprint(m)])
     ),
@@ -611,6 +615,18 @@ class AppStore {
         : String(detail ?? `Network request ${response.status}`));
     }
     return data as T;
+  }
+
+  async refreshRuntimes(signal?: AbortSignal) {
+    const generation = errors.generation;
+    const data = await this.networkRequest<import('./runtime-types').RuntimeLibrary>('/v2/node/runtimes', 'GET', undefined, signal);
+    if (generation === errors.generation && this.status) this.status = { ...this.status, runtimes: data };
+    return data;
+  }
+
+  async runtimeAction(path: string, method: string, value?: unknown) {
+    await this.networkRequest(path, method, value);
+    await this.refreshRuntimes();
   }
 
   async loadToken() {

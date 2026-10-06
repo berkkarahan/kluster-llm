@@ -17,6 +17,8 @@ from kllm.agent.run_route import run_response
 from kllm.run_settings import PlanBody, RunBody, RunSettingsFields
 from kllm.state import ClusterState
 from kllm.effective_config import effective_configuration
+from kllm.agent.services.rpc_runs import remap_rpc_plan, selected_workers
+from kllm.runtimes.selection import snapshot
 
 
 class MasterLaunchBuilder(Protocol):
@@ -74,6 +76,9 @@ class InferenceDependencies:
     network_stop: Callable[[], ContextManager[None]] | None = None
     resolve_settings: Callable[[PlanBody | RunBody], PlanBody | RunBody] | None = None
     preflight: Callable[[RunSettingsFields, Path], None] | None = None
+    rpc_context: Callable[[RunBody, dict[str, Any], dict[str, Any]], ContextManager[None]] | None = None
+    network_run_selected: Callable[[str | None, list[str]], ContextManager[dict[str, Any]]] | None = None
+    runtime_context: Callable[[], ContextManager[dict[str, Any]]] | None = None
 
 
 class InferenceHandlers:
@@ -90,6 +95,10 @@ class InferenceHandlers:
             )
 
     def plan(self, body: PlanBody, preview: bool = False) -> dict[str, Any]:
+        with self._deps.runtime_context() if self._deps.runtime_context else nullcontext():
+            return self._plan(body, preview)
+
+    def _plan(self, body: PlanBody, preview: bool = False) -> dict[str, Any]:
         state = self._deps.state
         if state.role != "master":
             raise HTTPException(400, "plan requires master role")
@@ -107,6 +116,10 @@ class InferenceHandlers:
                 raise HTTPException(409, detail={"code": "UNSUPPORTED_CAPABILITY"})
             members = self._deps.network_members(body.network_id)
         result = self._deps.execute_plan(body, members)
+        runtime_snapshot = snapshot()
+        if runtime_snapshot:
+            result['runtime_id'] = runtime_snapshot['runtime_id']
+            result['runtime_required_nodes'] = [state.node_id, *selected_workers(result, members)]
         result["effective_config"] = effective_configuration(body, result, path)
         if body.network_id and self._deps.network_diagnostics:
             result.update(self._deps.network_diagnostics(body.network_id))
@@ -137,6 +150,10 @@ class InferenceHandlers:
         return result
 
     def run(self, body: RunBody) -> dict[str, Any]:
+        with self._deps.runtime_context() if self._deps.runtime_context else nullcontext():
+            return self._run(body)
+
+    def _run(self, body: RunBody) -> dict[str, Any]:
         state = self._deps.state
         if state.role != "master":
             raise HTTPException(400, "run requires master role")
@@ -151,9 +168,22 @@ class InferenceHandlers:
         self._deps.validate_vision(body)
         if body.network_id and self._deps.network_run is None:
             raise HTTPException(409, detail={"code": "UNSUPPORTED_CAPABILITY"})
-        context = self._deps.network_run(body.network_id) if self._deps.network_run else nullcontext(state.members)
-        with context as members:
-            plan_result = self._deps.execute_plan(body, members)
+        members = self._deps.network_members(body.network_id) if body.network_id and self._deps.network_members else state.members
+        plan_result = self._deps.execute_plan(body, members)
+        if plan_result.get("fit_status") == "overflow":
+            raise HTTPException(400, plan_result.get("hint") or "model and context exceed cluster budget (overflow)")
+        rpc_context = self._deps.rpc_context(body, plan_result, members) if self._deps.rpc_context else nullcontext()
+        with rpc_context:
+            return self._launch(body, path, plan_result, members)
+
+    def _launch(self, body: RunBody, path: Path, plan_result: dict[str, Any], members: dict[str, Any]) -> dict[str, Any]:
+        state = self._deps.state
+        if self._deps.network_run_selected:
+            context = self._deps.network_run_selected(body.network_id, selected_workers(plan_result, members))
+        else:
+            context = self._deps.network_run(body.network_id) if self._deps.network_run else nullcontext(members)
+        with context as launch_members:
+            plan_result = remap_rpc_plan(plan_result, members, launch_members)
             if body.network_id and self._deps.network_diagnostics:
                 plan_result.update(self._deps.network_diagnostics(body.network_id))
             if plan_result.get("fit_status") == "overflow":
@@ -163,7 +193,7 @@ class InferenceHandlers:
                 )
             path = self._deps.resolve_model(body.model)
             rpc_servers = list(plan_result.get("rpc_endpoints") or [])
-            if not body.network_id:
+            if not body.network_id and self._deps.rpc_context is None:
                 self._deps.ensure_rpc_peers_reachable(rpc_servers)
             root = self._deps.repository_root()
             backend = (state.members.get(state.node_id) or {}).get("backend") or "cpu"
@@ -181,6 +211,9 @@ class InferenceHandlers:
                 extra_args=extra,
             )
             effective = effective_configuration(body, plan_result, path)
+            selected_runtime = snapshot()
+            if selected_runtime:
+                effective['runtime'] = {key: selected_runtime[key] for key in ('runtime_id', 'build_id', 'repository', 'commit', 'ref')}
             self._deps.stop_previous_master()
             state.active_config = None
             state.process_pid = None

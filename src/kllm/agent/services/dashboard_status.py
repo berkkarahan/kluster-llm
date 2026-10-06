@@ -30,6 +30,8 @@ class DashboardStatusService:
         software_identity: Callable[[], dict[str, Any]],
         default_device: str,
         managed_networks: Callable[[], list[dict[str, Any]]] | None = None,
+        rpc_lifecycle: Callable[[], dict[str, Any]] | None = None,
+        runtimes: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._state = state
         self._load_config = load_config
@@ -42,6 +44,8 @@ class DashboardStatusService:
         self._software_identity = software_identity
         self._default_device = default_device
         self._managed_networks = managed_networks
+        self._rpc_lifecycle = rpc_lifecycle
+        self._runtimes = runtimes
 
     def status(self) -> StatusPayload:
         """Build the full status response, including a fresh local capacity probe."""
@@ -54,6 +58,7 @@ class DashboardStatusService:
         activity = self._inference_activity()
         return {
             "role": state.role,
+            **({'runtimes': self._runtimes()} if self._runtimes else {}),
             "node_id": state.node_id,
             "join_key": state.join_key if state.role == "master" else None,
             "master_host": state.master_host,
@@ -62,6 +67,7 @@ class DashboardStatusService:
             "members": state.members,
             "process_pid": state.process_pid,
             "process_role": state.process_role,
+            "rpc_status": (state.members.get(state.node_id) or {}).get("rpc_status", "idle"),
             "last_plan": self._last_plan(state),
             "model_name": state.model_name,
             "download": self._download_progress(),
@@ -70,6 +76,7 @@ class DashboardStatusService:
             "software": self._software_identity(),
             "capacity": capacity,
             **self._common_state_fields(state),
+            **({"rpc_lifecycle": self._rpc_lifecycle()} if self._rpc_lifecycle else {}),
             **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
@@ -99,6 +106,7 @@ class DashboardStatusService:
         capacity = {key: member[key] for key in capacity_fields if key in member}
         activity = self._inference_activity()
         return {
+            **({'runtimes': self._runtimes()} if self._runtimes else {}),
             "role": state.role,
             "node_id": state.node_id,
             "join_key": state.join_key if state.role == "master" else None,
@@ -108,6 +116,7 @@ class DashboardStatusService:
             "members": {node_id: dict(value) for node_id, value in state.members.items()},
             "process_pid": state.process_pid,
             "process_role": state.process_role,
+            "rpc_status": member.get("rpc_status", "idle"),
             "last_plan": self._last_plan(state),
             "model_name": state.model_name,
             "download": self._download_progress(),
@@ -118,6 +127,7 @@ class DashboardStatusService:
             },
             "capacity": capacity,
             **self._common_state_fields(state),
+            **({"rpc_lifecycle": self._rpc_lifecycle()} if self._rpc_lifecycle else {}),
             **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,

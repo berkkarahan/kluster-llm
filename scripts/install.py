@@ -908,6 +908,18 @@ def _wheel_for_reinstall(python: Path, wheel: Path) -> Path:
     return _wheel_omitting_console_scripts(wheel, busy)
 
 
+def _stage_editable_extension(wheel: Path) -> None:
+    """Keep uv's source-layout editable import on the just-built native module."""
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            path = Path(name)
+            if path.parent.as_posix() == 'kllm' and path.name.startswith('_native.') and path.suffix in ('.so', '.pyd'):
+                destination = ROOT / 'src' / 'kllm' / path.name
+                temporary = destination.with_name(destination.name + '.new')
+                temporary.write_bytes(archive.read(name))
+                os.replace(temporary, destination)
+
+
 def build_rust(python: Path, *, release: bool) -> None:
     ensure_rust()
     env = _venv_env(python)
@@ -935,6 +947,7 @@ def build_rust(python: Path, *, release: bool) -> None:
     built = sorted(wheels.glob("kllm-*.whl"))
     if not built:
         raise SystemExit(f"error: maturin produced no wheel in {wheels}")
+    _stage_editable_extension(built[-1])
     wheel = str(_wheel_for_reinstall(python, built[-1]))
     # --no-deps: only replace the kllm wheel / extension. Force-reinstalling
     # the full dependency tree races with running agents and can corrupt
@@ -1966,6 +1979,9 @@ def verify_llama_installed(tag: str, *, expected: str | None = None) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
+    p.add_argument('--source-repo', help='Public HTTPS Git source for an isolated managed runtime')
+    p.add_argument('--revision', help='Full immutable Git commit for --source-repo')
+    p.add_argument('--runtime-dir', type=Path, help='Isolated destination; never replaces vendor/bin')
     p.add_argument("--skip-ui", action="store_true", help="Skip dashboard npm build")
     p.add_argument("--rpc-tcp-only", action="store_true", help="Source-build RPC with RDMA disabled for managed private networks")
     p.add_argument("--skip-rust", action="store_true", help="Skip maturin / Python package build")
@@ -2097,6 +2113,17 @@ def _run_stages(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if any((args.source_repo, args.revision, args.runtime_dir)):
+        if not all((args.source_repo, args.revision, args.runtime_dir)) or not args.llama_only or args.check:
+            raise SystemExit('Managed builds require --llama-only, --source-repo, --revision and --runtime-dir')
+        sys.path.insert(0, str(ROOT / 'src'))
+        from kllm.runtimes.build import managed_build
+        try:
+            managed_build(sys.modules[__name__], args.source_repo, args.revision, args.runtime_dir, args.backend)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f'error: {error}', file=sys.stderr)
+            return 1
+        return 0
     tag = read_pinned_release(args.tag)
 
     if args.llama_only:

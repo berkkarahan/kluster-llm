@@ -452,9 +452,10 @@ def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monk
     assert r.json()["gpu_ids"] == [0]
     assert captured["payload"]["gpu_ids"] == [0]
     assert captured["payload"]["vram_bytes"] == 24 * 1024**3
-    assert captured["worker_kwargs"]["env"] is None
-    assert captured["worker_kwargs"]["devices"] == ["CUDA0", "CPU"]
-    assert agent.STATE.members[agent.STATE.node_id]["rpc_devices"] == [
+    assert "worker_kwargs" not in captured
+    assert agent.STATE.process_pid is None
+    assert agent.STATE.members[agent.STATE.node_id]["rpc_devices"] == []
+    assert agent.STATE.members[agent.STATE.node_id]["rpc_capabilities"] == [
         {"index": 0, "device": "CUDA0", "backend": "cuda", "memory_kind": "gpu"},
         {"index": 1, "device": "CPU", "backend": "cpu", "memory_kind": "ram"},
     ]

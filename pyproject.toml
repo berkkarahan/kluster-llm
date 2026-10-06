@@ -22,6 +22,7 @@ dependencies = [
     "pydantic>=2.7",
     "cryptography>=44",
     "websockets>=15",
+    "PyYAML>=6.0",
 ]
 
 [project.urls]

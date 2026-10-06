@@ -23,7 +23,21 @@ from kllm.state import DEFAULT_CONTROL_PORT, home_dir
 
 console = Console()
 
-AGENTS = ("claude", "opencode", "codex", "hermes", "openclaw", "pi")
+class AgentRegistry:
+    """Dynamic registry for coding agent launchers."""
+    def __init__(self):
+        self._planners: dict[str, Callable[..., LaunchPlan]] = {}
+
+    def register(self, name: str, planner: Callable[..., LaunchPlan]):
+        self._planners[name.lower().strip()] = planner
+
+    def get_planner(self, name: str) -> Callable[..., LaunchPlan] | None:
+        return self._planners.get(name.lower().strip())
+
+    def list_agents(self) -> list[str]:
+        return sorted(self._planners.keys())
+
+registry = AgentRegistry()
 
 
 @dataclass
@@ -319,24 +333,25 @@ def plan_pi(base: str, token: str, model: str, persist: bool, extra: list[str]) 
     return LaunchPlan(agent="pi", argv=[bin_, "--provider", "kllm", "--model", model, *extra], env=env, cleanup_dirs=cleanup)
 
 
-PLANNERS: dict[str, Callable[..., LaunchPlan]] = {
-    "claude": lambda **kw: plan_claude(
-        kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]
-    ),
-    "opencode": lambda **kw: plan_opencode(
-        kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]
-    ),
-    "codex": lambda **kw: plan_codex(
-        kw["base"], kw["token"], kw["model"], kw["persist"], kw["yolo"], kw["extra"]
-    ),
-    "hermes": lambda **kw: plan_hermes(
-        kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
-    ),
-    "openclaw": lambda **kw: plan_openclaw(
-        kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
-    ),
-    "pi": lambda **kw: plan_pi(kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]),
-}
+# Register built-in planners
+registry.register("claude", lambda **kw: plan_claude(
+    kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]
+))
+registry.register("opencode", lambda **kw: plan_opencode(
+    kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]
+))
+registry.register("codex", lambda **kw: plan_codex(
+    kw["base"], kw["token"], kw["model"], kw["persist"], kw["yolo"], kw["extra"]
+))
+registry.register("hermes", lambda **kw: plan_hermes(
+    kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
+))
+registry.register("openclaw", lambda **kw: plan_openclaw(
+    kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
+))
+registry.register("pi", lambda **kw: plan_pi(
+    kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
+))
 
 
 def build_launch_plan(
@@ -354,15 +369,16 @@ def build_launch_plan(
     timeout: float = 600,
 ) -> LaunchPlan:
     agent = agent.lower().strip()
-    if agent not in PLANNERS:
-        raise typer.BadParameter(f"unknown agent {agent!r}; choose from {', '.join(AGENTS)}")
+    planner = registry.get_planner(agent)
+    if not planner:
+        raise typer.BadParameter(f"unknown agent {agent!r}; choose from {', '.join(registry.list_agents())}")
     base = _base_url(port, url)
     api_key = api_key or os.environ.get("KLLM_API_KEY")
     if (url or os.environ.get("KLLM_URL")) and not api_key and not _is_loopback_url(base):
         raise typer.BadParameter("an explicit endpoint requires --api-key or KLLM_API_KEY")
     token = api_key or ensure_api_token()
     base, model_id = _ensure_inference(base, token, model, serve, context, timeout)
-    return PLANNERS[agent](
+    return planner(
         base=base,
         token=token,
         model=model_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -176,6 +177,42 @@ def kill_tracked() -> bool:
     if info.agent_pid and _alive(info.agent_pid):
         native.stop_process(info.agent_pid, force=True)
         killed = True
+    return killed
+
+
+# A node runs at most one rpc-server. A rejoin or agent restart can orphan a
+# previously launched instance; it keeps holding the RPC port, so the next
+# launch fails to bind and the worker silently stops contributing.
+_RPC_SERVER_NAMES = frozenset(
+    {"rpc-server", "rpc-server.exe", "ggml-rpc-server", "ggml-rpc-server.exe"}
+)
+
+
+def stop_stray_rpc_servers() -> int:
+    """Terminate leftover rpc-server processes that would block the RPC port.
+
+    Returns the number of processes targeted. Best-effort: permission or
+    platform errors are ignored so a join/relaunch can still proceed.
+    """
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a runtime dependency
+        return 0
+    me = os.getpid()
+    killed = 0
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            pid = proc.info.get("pid")
+            name = (proc.info.get("name") or "").lower()
+        except (psutil.Error, OSError):
+            continue
+        if pid in (None, me) or name not in _RPC_SERVER_NAMES:
+            continue
+        try:
+            proc.kill()
+            killed += 1
+        except (psutil.Error, OSError):
+            continue
     return killed
 
 

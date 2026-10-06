@@ -584,6 +584,60 @@ def _worker_post_heartbeat() -> None:
     _membership_heartbeat_service().post_heartbeat()
 
 
+_worker_launch_lock = threading.Lock()
+_worker_runtime_retry = {"failures": 0, "next_attempt": 0.0}
+_WORKER_RUNTIME_RETRY_BASE_S = 15.0
+_WORKER_RUNTIME_RETRY_MAX_S = 300.0
+
+
+def _worker_runtime_healthy() -> bool:
+    if STATE.process_role != "worker" or not STATE.process_pid:
+        return False
+    try:
+        return bool(native.process_alive(int(STATE.process_pid)))
+    except Exception:
+        return True
+
+
+def _ensure_worker_runtime() -> None:
+    """Restart a joined worker's rpc-server after it dies or a rejoin loses it.
+
+    A worker can stay connected on the control plane while its rpc-server is not
+    running, which makes the cluster look healthy but fail every Run at the RPC
+    preflight. Reconcile the local runtime so a connected worker stays serveable.
+    """
+    if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
+        return
+    if _worker_runtime_healthy():
+        _worker_runtime_retry["failures"] = 0
+        _worker_runtime_retry["next_attempt"] = 0.0
+        return
+    now = time.monotonic()
+    if now < _worker_runtime_retry["next_attempt"]:
+        return
+    # Never block the heartbeat cadence waiting on an in-flight join; the join
+    # itself brings the runtime up.
+    if not _worker_launch_lock.acquire(blocking=False):
+        return
+    try:
+        # A join may have started the worker while this tick was waiting.
+        if _worker_runtime_healthy():
+            return
+        result = _runtime_setup_service().ensure_worker(STATE)
+    finally:
+        _worker_launch_lock.release()
+    if result is None or not result.get("error"):
+        _worker_runtime_retry["failures"] = 0
+        _worker_runtime_retry["next_attempt"] = 0.0
+        return
+    _worker_runtime_retry["failures"] = min(_worker_runtime_retry["failures"] + 1, 5)
+    delay = min(
+        _WORKER_RUNTIME_RETRY_BASE_S * (2 ** (_worker_runtime_retry["failures"] - 1)),
+        _WORKER_RUNTIME_RETRY_MAX_S,
+    )
+    _worker_runtime_retry["next_attempt"] = now + delay
+
+
 def _probe_worker_latencies() -> None:
     _membership_heartbeat_service().probe_latencies()
 
@@ -624,6 +678,7 @@ _membership_background = MembershipLoop(
     interval_seconds=membership_mod.HEARTBEAT_INTERVAL_S,
     synchronize_master=lambda: _sync_master_liveness(shrink=True),
     post_worker_heartbeat=lambda: _worker_post_heartbeat(),
+    ensure_worker_runtime=lambda: _ensure_worker_runtime(),
     schedule_worker_probe=lambda: _schedule_worker_latency_probe(),
     schedule_capacity_refresh=lambda: _schedule_local_capacity_refresh(),
 )
@@ -802,6 +857,8 @@ def _runtime_setup_service() -> RuntimeSetupService:
         resolve_gpu_selection=_resolve_gpu_selection,
         register_child=runtime.register_child,
         rpc_log_path=cluster_log.rpc_server_log_path,
+        process_alive=native.process_alive,
+        stop_stray_rpc_servers=runtime.stop_stray_rpc_servers,
     )
 
 
@@ -1209,12 +1266,18 @@ def _cluster_join_service() -> ClusterJoinService:
             register_child=runtime.register_child,
             rpc_server_log_path=cluster_log.rpc_server_log_path,
             post_worker_heartbeat=_worker_post_heartbeat,
+            stop_process=native.stop_process,
+            clear_children=runtime.clear_children,
+            stop_stray_rpc_servers=runtime.stop_stray_rpc_servers,
         )
     )
 
 
 def _join_cluster(body: JoinBody) -> dict[str, Any]:
-    return _cluster_join_service().join(body)
+    # Serialize with the background reconciler so a rejoin and a runtime
+    # self-heal cannot start two rpc-servers on the same RPC port.
+    with _worker_launch_lock:
+        return _cluster_join_service().join(body)
 
 
 def _worker_bring_up_wg(join_key: str, reg: dict[str, Any]) -> str:

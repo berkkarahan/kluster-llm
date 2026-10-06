@@ -26,6 +26,8 @@ def build_runtime_setup_service(
     resolve_gpu_selection: Callable[[list[int] | None], ResolvedGpuSelection],
     register_child: Callable[[int, str], None],
     rpc_log_path: Callable[[], Path],
+    process_alive: Callable[[int], bool] = lambda _pid: True,
+    stop_stray_rpc_servers: Callable[[], int] = lambda: 0,
 ) -> RuntimeSetupService:
     """Wire platform adapters into the domain runtime installer."""
 
@@ -45,6 +47,8 @@ def build_runtime_setup_service(
         resolve_gpu_selection=resolve_gpu_selection,
         register_child=register_child,
         rpc_log_path=rpc_log_path,
+        process_alive=process_alive,
+        stop_stray_rpc_servers=stop_stray_rpc_servers,
     )
 
 

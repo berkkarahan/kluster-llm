@@ -1099,3 +1099,70 @@ def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
     assert state.members["w1"]["host"] == "192.168.68.63"
     assert state.members["w1"]["lan_host"] == "192.168.68.63"
     assert state.members["w1"]["rpc_bind"] == "192.168.68.63"
+
+
+def test_worker_runtime_reconciler_restarts_unhealthy_worker(client, monkeypatch):
+    _, agent = client
+    state = agent.STATE
+    state.role = "worker"
+    state.master_host = "10.0.0.1"
+    state.join_key = "secret"
+    state.process_pid = None
+    state.process_role = None
+    monkeypatch.setattr(agent, "_worker_runtime_healthy", lambda: False)
+    calls: list[object] = []
+
+    class FakeService:
+        def ensure_worker(self, current):
+            calls.append(current is state)
+            return {"pid": 7}
+
+    monkeypatch.setattr(agent, "_runtime_setup_service", lambda: FakeService())
+    agent._worker_runtime_retry["failures"] = 0
+    agent._worker_runtime_retry["next_attempt"] = 0.0
+
+    agent._ensure_worker_runtime()
+
+    assert calls == [True]
+
+
+def test_worker_runtime_reconciler_skips_healthy_worker(client, monkeypatch):
+    _, agent = client
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "10.0.0.1"
+    agent.STATE.join_key = "secret"
+    monkeypatch.setattr(agent, "_worker_runtime_healthy", lambda: True)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        agent,
+        "_runtime_setup_service",
+        lambda: type("S", (), {"ensure_worker": lambda self, _state: calls.append(True)})(),
+    )
+
+    agent._ensure_worker_runtime()
+
+    assert calls == []
+
+
+def test_worker_runtime_reconciler_backs_off_after_failure(client, monkeypatch):
+    _, agent = client
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "10.0.0.1"
+    agent.STATE.join_key = "secret"
+    monkeypatch.setattr(agent, "_worker_runtime_healthy", lambda: False)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        agent,
+        "_runtime_setup_service",
+        lambda: type(
+            "S", (), {"ensure_worker": lambda self, _state: calls.append(True) or {"error": "bind failed"}}
+        )(),
+    )
+    agent._worker_runtime_retry["failures"] = 0
+    agent._worker_runtime_retry["next_attempt"] = 0.0
+
+    agent._ensure_worker_runtime()
+    agent._ensure_worker_runtime()
+
+    assert calls == [True]
+    assert agent._worker_runtime_retry["next_attempt"] > 0

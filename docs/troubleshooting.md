@@ -170,6 +170,14 @@ New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Dire
 
 Never open RPC port 50052 to the public internet.
 
+A worker can keep heartbeating (the dashboard still shows it connected) while
+its `rpc-server` is not running. `kllm run` then fails with `RPC peer(s)
+unreachable`. The worker agent now reconciles this on its membership tick: if the
+tracked `rpc-server` is missing or dead it stops any leftover `rpc-server` still
+holding port 50052 and restarts a tracked one. Give it a few seconds, then
+retry. If it keeps failing, check `kllm status` for that node and confirm the
+`rpc-server` binary and port are available.
+
 ### RPC handshake or malformed-response errors
 
 This usually means nodes have different llama.cpp builds. On every node:

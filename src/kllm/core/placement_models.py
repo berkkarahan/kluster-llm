@@ -353,6 +353,8 @@ class PlacementNodeInput:
     latency_ms: float
     devices: tuple[PlacementDeviceInput, ...]
     rpc_devices: tuple[RpcDeviceInput, ...] = ()
+    ram_fraction: float = 1.0
+    vram_fraction: float = 1.0
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PlacementNodeInput:
@@ -382,6 +384,8 @@ class PlacementNodeInput:
             latency_ms=float(value.get("latency_ms") or 0),
             devices=devices,
             rpc_devices=rpc_devices,
+            ram_fraction=max(0.1, min(1.0, float(value.get("ram_fraction", 1.0)))),
+            vram_fraction=max(0.1, min(1.0, float(value.get("vram_fraction", 1.0)))),
         )
 
 

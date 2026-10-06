@@ -13,6 +13,7 @@ def stop_previous_master(state: Any, native: Any, runtime: Any, load_progress: A
     if not state.process_pid:
         return
     native.stop_process(state.process_pid, force=True)
+    state.active_config = None
     runtime.clear_children()
     load_progress.end()
     state.inference_activity = inference_activity.idle()

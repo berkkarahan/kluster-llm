@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +189,8 @@ def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
                 "latency_ms": float(lat) if lat is not None else None,
                 "role": m.get("role", "worker"),
                 "is_master": m.get("role") == "master",
+                "ram_fraction": float(m.get("ram_percent", 100)) / 100,
+                "vram_fraction": float(m.get("vram_percent", 100)) / 100,
             })
         )
     return nodes
@@ -229,11 +232,26 @@ def validate_split_mode(settings: dict[str, Any], result: dict[str, Any]) -> Non
 
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
     path = model_ops.resolve_local_model(body.model)
-    nodes = cluster_nodes(members)
+    nodes = [node if isinstance(node, PlacementNodeInput) else PlacementNodeInput.from_mapping(node)
+             for node in cluster_nodes(members)]
     if not nodes:
         raise HTTPException(400, "no cluster members")
     device = kllm_config.resolve_device(body.device)
     headroom = resolve_headroom(body)
+    # Each physical pool has its own node cap and optional deployment limit.
+    config = kllm_config.load_config()
+    limits: dict[str, dict[str, int]] = {}
+    for index, node in enumerate(nodes):
+        node_config = config if node.is_master else members.get(node.node_id) or {}
+        local_ram = min(node.ram_fraction, float(node_config.get("ram_percent", 80)) / 100)
+        local_vram = min(node.vram_fraction, float(node_config.get("vram_percent", 80)) / 100)
+        ram_limit = min(local_ram, (body.ram_percent or 100) / 100)
+        vram_limit = min(local_vram, (body.vram_percent or 100) / 100)
+        nodes[index] = replace(node, ram_fraction=ram_limit, vram_fraction=vram_limit)
+        limits[node.node_id] = {"ram_percent": round(ram_limit * 100), "vram_percent": round(vram_limit * 100)}
+    # Legacy headroom applies to both pools; new limits are independent.
+    if body.model_config.get("extra") != "ignore":
+        headroom = float(body.headroom) if body.headroom is not None else 1.0
     resolved_settings = estimate_auxiliary_assets(body, resolve_launch_settings(body))
     settings = resolved_settings.to_mapping()
     layout = read_model_layout(path)
@@ -243,19 +261,7 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
                 selected_devices = tuple(d for d in node.devices if d.index in body.gpu_ids)
                 if len(selected_devices) != len(set(body.gpu_ids)):
                     raise HTTPException(400, "gpu_ids includes unavailable devices")
-                nodes[index] = PlacementNodeInput(
-                    node_id=node.node_id,
-                    is_master=node.is_master,
-                    backend=node.backend,
-                    total_ram_bytes=node.total_ram_bytes,
-                    available_ram_bytes=node.available_ram_bytes,
-                    reclaimable_ram_bytes=node.reclaimable_ram_bytes,
-                    unified_memory=node.unified_memory,
-                    rpc_endpoint=node.rpc_endpoint,
-                    latency_ms=node.latency_ms,
-                    devices=selected_devices,
-                    rpc_devices=node.rpc_devices,
-                )
+                nodes[index] = replace(node, devices=selected_devices)
     try:
         result = native.plan_split(
             nodes=nodes,
@@ -271,8 +277,8 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             parallel_slots=settings["parallel_slots"],
             model_layout=layout,
             launch_settings=settings,
-            mmproj_size_bytes=_file_size_bytes(body.mmproj),
-            draft_model_size_bytes=_file_size_bytes(body.draft_model),
+            mmproj_size_bytes=_file_size_bytes(body.mmproj) if body.vision else 0,
+            draft_model_size_bytes=_file_size_bytes(body.draft_model) if body.draft_enabled() else 0,
             vision=bool(body.vision),
             node_shares=body.node_shares,
             required_nodes=body.required_nodes,
@@ -284,6 +290,7 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
     if result.get("fit_status") == "tight":
         warning = result.get("hint") or "Plan is tight against cluster budget"
     result["warning"] = warning
+    result["effective_memory_limits"] = limits
     # Deferred import: placement normalization belongs to the planning path.
     from kllm.placement import PlacementSettings, effective_launch_settings
 

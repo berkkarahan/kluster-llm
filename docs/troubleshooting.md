@@ -296,6 +296,7 @@ The dashboard **Logs** page (`/logs`) reads the same stream for master and worke
 ### Dashboard live updates
 
 - **Live** means the dashboard WebSocket is receiving application updates. It does not certify that every source reading is fresh; check the node's own reading status and observation age.
+- A worker's saved topology is shown as **disconnected** after an agent restart or a failed master heartbeat, even when the local dashboard is reachable. A successful heartbeat restores live membership; saved nodes and readings alone do not confirm a connection.
 - **Refresh** means socket delivery is interrupted. The dashboard retains the last accepted values, reads the aggregate snapshot every two seconds, and probes live delivery every 30 seconds. If ordinary reads also fail, the header shows **updates unavailable**.
 - **reconnecting** means a replacement live connection is being initialized. A healthy connection with unchanged values should remain labeled **live**.
 - An area labeled **denied** remains inaccessible; periodic refresh does not bypass access rules. The header shows its last successful update when available.

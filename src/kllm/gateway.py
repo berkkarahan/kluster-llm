@@ -14,6 +14,7 @@ from starlette.background import BackgroundTask
 import anyio
 
 from kllm.model_defaults import apply_defaults_to_chat_body, resolve_model_defaults
+from kllm.effective_config import apply_active_defaults
 
 
 def infer_base(port: int) -> str:
@@ -62,8 +63,16 @@ def _openai_tools_passthrough(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_model_defaults(
-    body: dict[str, Any], model_path: Path | str | None
+    body: dict[str, Any], model_path: Path | str | None,
+    active_config: dict[str, Any] | None = None, protocol: str = "chat",
 ) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    if active_config is not None:
+        try:
+            return apply_active_defaults(body, active_config, protocol)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     if not model_path:
         return body
     defaults = resolve_model_defaults(model_path)
@@ -75,17 +84,21 @@ async def proxy_chat_completions(
     request: Request,
     *,
     model_path: Path | str | None = None,
+    active_config: dict[str, Any] | None = None,
 ) -> Response:
-    body = _apply_model_defaults(_openai_tools_passthrough(await request.json()), model_path)
+    body = _apply_model_defaults(_openai_tools_passthrough(await request.json()), model_path, active_config)
     return await _proxy(request, port, "/v1/chat/completions", body)
 
 
-async def proxy_responses(port: int, request: Request, *, count_tokens: bool = False) -> Response:
+async def proxy_responses(port: int, request: Request, *, count_tokens: bool = False,
+                          active_config: dict[str, Any] | None = None) -> Response:
     """llama.cpp owns Responses conversion, tool events and token accounting."""
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, "request must be a JSON object")
     body = _coalesce_response_instructions(body)
+    if not count_tokens and active_config is not None:
+        body = apply_active_defaults(body, active_config, "responses")
     return await _proxy(request, port, "/v1/responses/input_tokens" if count_tokens else "/v1/responses", body)
 
 
@@ -292,7 +305,8 @@ async def proxy_anthropic_messages(
     request: Request,
     *,
     model_path: Path | str | None = None,
+    active_config: dict[str, Any] | None = None,
 ) -> Response:
     # v0.5.0 implements Messages natively, including streaming and tool blocks.
-    body = _apply_model_defaults(await request.json(), model_path)
+    body = _apply_model_defaults(await request.json(), model_path, active_config, "messages")
     return await _proxy(request, port, "/v1/messages", body)

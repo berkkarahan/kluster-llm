@@ -56,8 +56,8 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         "split_mode": resolve_split_mode(body),
         "kv_unified": body.parallel_slots == "auto",
         "swa_full": False,
-        "speculative": body.speculative,
-        "draft_max": 3,
+        "speculative": "draft-simple" if body.draft_enabled() and body.speculative == "auto" else body.speculative,
+        "draft_max": 3 if body.draft_max is None else body.draft_max,
         "draft_cache_type_k": "f16",
         "draft_cache_type_v": "f16",
     }
@@ -156,7 +156,7 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
     if result["flash_attention"] not in ("auto", "on", "off"):
         raise HTTPException(400, "flash attention must be auto, on, or off")
     quantized_v = result["cache_type_v"] not in ("f32", "f16", "bf16")
-    if body.draft_model:
+    if body.draft_enabled():
         quantized_v |= result["draft_cache_type_v"] not in ("f32", "f16", "bf16")
     if result["flash_attention"] == "off" and quantized_v:
         raise HTTPException(
@@ -184,7 +184,8 @@ def estimate_auxiliary_assets(
     settings_values = settings.to_mapping()
     warnings = []
     weights = 0
-    for label, path in (("draft model", body.draft_model), ("vision projector", body.mmproj)):
+    for label, path in (("draft model", body.draft_model if body.draft_enabled() else None),
+                        ("vision projector", body.mmproj if body.vision else None)):
         if not path:
             continue
         size = _file_size_bytes(path)
@@ -256,6 +257,6 @@ def estimate_auxiliary_assets(
     if settings.speculative == "draft-simple" and not body.draft_model:
         warnings.append("Draft speculation has no local draft model to price")
     settings_values["auxiliary_weights_bytes"] = weights
-    settings_values["vision_runtime"] = bool(body.vision or body.mmproj)
+    settings_values["vision_runtime"] = bool(body.vision)
     settings_values["estimate_warnings"] = warnings
     return ResolvedLaunchSettings.from_mapping(settings_values)

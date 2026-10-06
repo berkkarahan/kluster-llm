@@ -122,6 +122,7 @@ class UsageCollector:
             ]
             self._deps.runtime_save(tracked)
             state.process_pid = state.process_role = None
+            state.active_config = None
             member = state.members.get(state.node_id)
             if member is not None:
                 member.update(
@@ -192,6 +193,7 @@ class UsageCollector:
                 except (OSError, sqlite3.Error):
                     pass
             state.process_pid = None
+            state.active_config = None
             state.process_role = None
             member = state.members.get(state.node_id)
             if member is not None:

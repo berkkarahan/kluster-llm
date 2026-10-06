@@ -138,6 +138,24 @@ test('all routes fit narrow screens; errors dismiss, reset and remain clear afte
         const { data } = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
         writeFileSync(join(screenshotDir, name + '.png'), Buffer.from(data, 'base64'));
       }
+      async function verifyFieldGroups(route, width) {
+        const violations = await evaluate(`([...document.querySelectorAll('label.field')]
+          .filter(label => label.getClientRects().length).flatMap(label => {
+            const control = label.querySelector('input, select, textarea');
+            if (!control) return [];
+            const group = label.getBoundingClientRect(), child = control.getBoundingClientRect();
+            const style = getComputedStyle(label);
+            const next = label.closest('.toolbar')?.nextElementSibling ?? label.nextElementSibling;
+            return [
+              child.bottom > group.bottom + 1 && 'control extends outside label group',
+              parseFloat(style.borderTopWidth) > 0 && 'label has input border',
+              control.type === 'text' && child.width < 160 && 'text input is too narrow to use',
+              next && next.getBoundingClientRect().top < child.bottom - 1 &&
+                next.getBoundingClientRect().left < child.right && 'following content overlaps control'
+            ].filter(Boolean).map(problem => label.textContent.trim() + ': ' + problem);
+          }))`);
+        assert.deepEqual(violations, [], `${route} at ${width}px`);
+      }
       const routes = ['/', '/models', '/run', '/integrations', '/logs', '/settings'];
       const metrics = [];
       for (const width of [390, 768, 1440]) {
@@ -152,8 +170,44 @@ test('all routes fit narrow screens; errors dismiss, reset and remain clear afte
             assert.equal(result.alerts, 0, `${route} must suppress historical failures after hydration`);
           }
           await screenshot(`${route === '/' ? 'home' : route.slice(1)}-${width}`);
+          if (!baseline) await verifyFieldGroups(route, width);
+          if (route === '/models') {
+            await evaluate("[...document.querySelectorAll('[role=tab]')].find(el => el.textContent.includes('Local')).click()");
+            if (!baseline) await verifyFieldGroups(route, width);
+            if (!baseline) assert.ok(await evaluate(`(() => {
+              const main = document.querySelector('main');
+              return main.scrollWidth <= main.clientWidth + 1;
+            })()`), `Local models overflow their viewport at ${width}px`);
+            await screenshot(`models-local-${width}`);
+          }
+          if (route === '/logs' && !baseline) {
+            const contrast = await evaluate(`(() => {
+              const label = document.querySelector('.btn-mode:has(input:checked)');
+              const fg = getComputedStyle(label.querySelector('span')).color;
+              const bg = getComputedStyle(label).backgroundColor;
+              const luminance = color => {
+                const channels = color.match(/[\\d.]+/g).slice(0, 3).map(Number).map(v => {
+                  v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+                });
+                return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+              };
+              const values = [luminance(fg), luminance(bg)].sort((a,b) => b-a);
+              return (values[0] + .05) / (values[1] + .05);
+            })()`);
+            assert.ok(contrast >= 4.5, `Selected refresh label contrast: ${contrast}`);
+          }
         }
       }
+      role = 'worker'; revision++;
+      for (const width of [390, 768, 1440]) {
+        await call('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+        for (const route of ['/', '/integrations', '/logs']) {
+          await navigate(route);
+          if (!baseline) await verifyFieldGroups(route, width);
+          await screenshot(`worker-${route === '/' ? 'home' : route.slice(1)}-${width}`);
+        }
+      }
+      role = 'master'; revision++;
       await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
       await navigate('/');
       await screenshot('home-1280x720');
@@ -180,6 +234,8 @@ test('all routes fit narrow screens; errors dismiss, reset and remain clear afte
         await pause(250);
         assert.equal(await evaluate("document.querySelectorAll('[data-error-source=apply]').length"), 0);
         // Dismissal is presentation-only: invalid settings continue to block execution.
+        await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Configure').click()");
+        await wait("document.querySelector('#run-context')");
         await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>{appStore.context=0;appStore.validateRunSettings();})");
         await wait("document.querySelector('[data-error-source=\"validation:context\"]')");
         await evaluate("document.querySelector('[data-error-source=\"validation:context\"] button').click()");

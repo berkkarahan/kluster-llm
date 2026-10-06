@@ -133,6 +133,8 @@ class DashboardStatusService:
     @staticmethod
     def _common_state_fields(state: ClusterState) -> StatusPayload:
         return {
+            "active_config": state.active_config if state.process_pid and state.process_role == "master"
+                and (state.active_config or {}).get("process_pid") == state.process_pid else None,
             "logging": logging_overview(state),
             "control_port": state.control_port,
             "rpc_port": state.rpc_port,

@@ -1,20 +1,28 @@
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 @import 'tailwindcss';
 
 :root {
   color-scheme: dark;
   --bg: #0b0d10;
   --surface: #12151a;
-  --surface-2: #181c22;
-  --fg: #e6edf3;
-  --muted: #8b949e;
-  --border: #2a3038;
+  --raised: #181c22;
+  --surface-2: var(--raised);
+  --text: #e6edf3;
+  --fg: var(--text);
+  --muted: #a3adb8;
+  --line: #2a3038;
+  --border: var(--line);
+  --control: #647181;
   --accent: #3dd68c;
-  --warn: #d29922;
-  --danger: #f85149;
-  --info: #58a6ff;
-  --font-ui: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+  --accent-ink: #082116;
+  --warning: #f2c76a;
+  --warn: var(--warning);
+  --danger: #ff8582;
+  --info: #82baff;
+  --green-wash: #132b22;
+  --font-ui: Plex, 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: PlexMono, 'IBM Plex Mono', ui-monospace, monospace;
+  --font: var(--font-ui);
+  --mono: var(--font-mono);
 }
 
 * {
@@ -28,16 +36,8 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-ui);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-body {
-  background-image:
-    linear-gradient(rgba(42, 48, 56, 0.35) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(42, 48, 56, 0.35) 1px, transparent 1px);
-  background-size: 24px 24px;
-  background-attachment: fixed;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
 a {
@@ -152,7 +152,8 @@ textarea {
   color: var(--danger);
 }
 
-.field {
+/* The prototype uses .field for groups too; control chrome belongs only on inputs. */
+:is(input, select, textarea).field {
   min-width: 0;
   width: 100%;
   height: 28px;
@@ -162,7 +163,7 @@ textarea {
   color: var(--fg);
 }
 
-.field:focus {
+:is(input, select, textarea).field:focus {
   outline: 1px solid var(--accent);
   outline-offset: 0;
 }

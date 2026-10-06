@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import math
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 AutoInt = Union[int, Literal["auto"]]
+PositiveAutoInt = Union[Annotated[int, Field(ge=1)], Literal["auto"]]
+NonnegativeAutoInt = Union[Annotated[int, Field(ge=0)], Literal["auto"]]
 AutoStr = Union[str, Literal["auto"]]
 MmapMlock = Literal["auto", "mmap", "mlock", "mmap+mlock", "none"]
 
@@ -30,7 +32,8 @@ def available_threads() -> int:
 class RunSettingsFields(BaseModel):
     """Validated request settings; handlers derive normalized copies at boundaries."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+    _sources: dict[str, str] = PrivateAttr(default_factory=dict)
 
     model: str
     context: int = DEFAULT_CONTEXT
@@ -39,10 +42,10 @@ class RunSettingsFields(BaseModel):
     cache_type_v: str = DEFAULT_CACHE_TYPE
     speculative: AutoStr = "auto"
     draft_model: str | None = None
-    parallel_slots: AutoInt = "auto"
-    batch_size: AutoInt = "auto"
-    micro_batch: AutoInt = "auto"
-    moe_offload: AutoInt = "auto"
+    parallel_slots: PositiveAutoInt = "auto"
+    batch_size: PositiveAutoInt = "auto"
+    micro_batch: PositiveAutoInt = "auto"
+    moe_offload: NonnegativeAutoInt = "auto"
     flash_attention: Literal["auto", "on", "off"] = "auto"
     vision: bool = False
     mmproj: str | None = None
@@ -59,9 +62,11 @@ class RunSettingsFields(BaseModel):
     required_nodes: list[str] = Field(default_factory=list)
     node_priority: list[str] = Field(default_factory=list)
     mmap_mlock: MmapMlock = "auto"
-    checkpoints: AutoInt = "auto"
-    cache_ram: AutoInt = "auto"
+    checkpoints: NonnegativeAutoInt = "auto"
+    cache_ram: NonnegativeAutoInt = "auto"
     threads: int = Field(default_factory=lambda: min(DEFAULT_THREADS, available_threads()))
+    threads_batch: int | None = Field(default=None, ge=1)
+    draft_max: int | None = Field(default=None, ge=0)
     extra_args: list[str] = Field(default_factory=list)
     # Inference sampling / thinking — None means "auto" (GGUF + heuristic defaults).
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -70,11 +75,48 @@ class RunSettingsFields(BaseModel):
     min_p: float | None = Field(default=None, ge=0.0, le=1.0)
     presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
     repeat_penalty: float | None = Field(default=None, ge=0.0, le=2.0)
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    seed: int | None = Field(default=None, ge=-1, le=4294967295)
+    max_output_tokens: int | None = Field(default=None, ge=-1)
+    stop: list[str] | None = None
     enable_thinking: bool | None = None
-    remember: bool = True
+    reasoning_effort: str | None = None
+    reasoning_budget: int | None = Field(default=None, ge=-1)
+    reasoning_format: Literal["auto", "none", "deepseek", "deepseek-legacy"] | None = None
+    remember: bool = False
     advanced_open: bool = False
     tensor_split: list[float] | None = None
     split_mode: Literal["layer", "row", "tensor"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def canonical_parameters(cls, value: Any) -> Any:
+        from kllm.parameter_catalog import canonicalize_parameters
+        if isinstance(value, dict):
+            values = canonicalize_parameters(value, legacy=cls.model_config.get("extra") == "ignore")
+            if values.get("mmproj") and "vision" not in values:
+                values["vision"] = True
+            if values.get("draft_model") and "speculative" not in values:
+                values["speculative"] = "draft"
+            return values
+        return value
+
+    def draft_enabled(self) -> bool:
+        return bool(self.draft_model and (self.speculative == "auto" or self.speculative.startswith("draft")))
+
+    @field_validator("max_output_tokens")
+    @classmethod
+    def output_limit(cls, value: int | None) -> int | None:
+        if value == 0:
+            raise ValueError("max_output_tokens must be positive, -1 (unlimited), or null (inherit)")
+        return value
+
+    @field_validator("stop")
+    @classmethod
+    def stop_strings(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and any(not item or "\0" in item for item in value):
+            raise ValueError("stop must contain nonempty literal strings without NUL")
+        return value
 
     @field_validator("threads")
     @classmethod
@@ -106,8 +148,8 @@ class RunSettingsFields(BaseModel):
             raise ValueError(
                 "tensor_split is not supported on the primary path; use automatic placement"
             )
-        if self.vram_percent is not None and self.ram_percent is not None:
-            raise ValueError("pass only one of vram_percent or ram_percent")
+        if self.threads_batch is not None and self.threads_batch > available_threads():
+            raise ValueError(f"threads_batch must be 1–{available_threads()} on the master")
         if self.vram_weight + self.latency_weight <= 0:
             raise ValueError("vram_weight and latency_weight cannot both be zero")
         if self.node_shares is not None:
@@ -159,6 +201,8 @@ class RunSettingsFields(BaseModel):
             "checkpoints": norm_auto_int(self.checkpoints),
             "cache_ram": norm_auto_int(self.cache_ram),
             "threads": self.threads,
+            "threads_batch": self.threads_batch,
+            "draft_max": self.draft_max,
             "extra_args": list(self.extra_args),
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -166,7 +210,14 @@ class RunSettingsFields(BaseModel):
             "min_p": self.min_p,
             "presence_penalty": self.presence_penalty,
             "repeat_penalty": self.repeat_penalty,
+            "frequency_penalty": self.frequency_penalty,
+            "seed": self.seed,
+            "max_output_tokens": self.max_output_tokens,
+            "stop": self.stop,
             "enable_thinking": self.enable_thinking,
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_budget": self.reasoning_budget,
+            "reasoning_format": self.reasoning_format,
             "remember": self.remember,
             "advanced_open": self.advanced_open,
             "split_mode": self.split_mode,
@@ -175,6 +226,8 @@ class RunSettingsFields(BaseModel):
     def snapshot_for_remember(self) -> dict[str, Any]:
         snap = self.normalized_auto_fields()
         snap.pop("headroom", None)
+        snap.pop("remember", None)
+        snap.pop("advanced_open", None)
         return snap
 
     @classmethod
@@ -186,6 +239,7 @@ class NetworkRequestFields(RunSettingsFields):
     # Request-only: normalization and remembered settings deliberately enumerate
     # the reusable fields above, so this selection never becomes a saved default.
     network_id: str | None = None
+    settings_source: Literal["saved", "defaults"] = "saved"
 
     @field_validator("network_id")
     @classmethod
@@ -202,6 +256,18 @@ class PlanBody(NetworkRequestFields):
 
 class RunBody(NetworkRequestFields):
     pass
+
+
+class LegacyPlanBody(PlanBody):
+    model_config = ConfigDict(frozen=True, extra="ignore", allow_inf_nan=False)
+    settings_source: Literal["saved", "defaults"] = "defaults"
+    remember: bool = True
+
+
+class LegacyRunBody(RunBody):
+    model_config = ConfigDict(frozen=True, extra="ignore", allow_inf_nan=False)
+    settings_source: Literal["saved", "defaults"] = "defaults"
+    remember: bool = True
 
 
 def validation_errors(body: RunSettingsFields) -> dict[str, str]:

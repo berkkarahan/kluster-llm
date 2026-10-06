@@ -220,10 +220,10 @@ test('models search keeps the bar and opens downloadable results for keywords an
       assert.equal(baseline.placeholder, 'Qwen3.8-27B-Uncensored-GGUF:Q4_K_M, org/repo:Q4_K_M, or URL');
       assert.equal(baseline.label, 'Search');
       assert.equal(baseline.button, 'Search');
-      assert.match(baseline.nav, /Home/);
+      assert.match(baseline.nav, /Cluster/);
       assert.match(baseline.nav, /Models/);
-      assert.match(baseline.nav, /Plan & Run/);
-      assert.ok(Math.abs(parseFloat(baseline.gap) - 6.5) < 0.6, `form gap ${baseline.gap}`);
+      assert.match(baseline.nav, /Deploy/);
+      assert.ok(Math.abs(parseFloat(baseline.gap) - 8) < 0.6, `form gap ${baseline.gap}`);
 
       await setQuery(TREE);
       await enter();

@@ -1,3 +1,5 @@
+import { formatArguments, parseArgumentText, PARAMETER_FIELDS, parameterBounds, shellQuote } from './configuration';
+import type { ParameterDescriptor, ExpertFlag, EffectiveConfig } from './types';
 import type {
     AccelBackend,
     ChatMessage,
@@ -168,7 +170,7 @@ class AppStore {
   threadsMax = $state(8);
   templateEmbedded = $state(false);
   modelTemplateText = $state<string | null>(null);
-  templatePresets = $state<{ id: string; label: string }[]>([]);
+  templatePresets = $state<{ id: string; label: string; text?: string }[]>([]);
   estimateError = $state('');
   distributableBytes = $state(0);
   speculative = $state('auto');
@@ -182,15 +184,41 @@ class AppStore {
   cacheRam = $state<number | 'auto'>('auto');
   threads = $state(8);
   extraArgsText = $state('');
+  parameters = $state<ParameterDescriptor[]>([]);
+  expertFlags = $state<ExpertFlag[]>([]);
+  projectors = $state<string[]>([]);
+  settingsLoading = $state(false);
+  settingsLoadError = $state('');
+  savedModelConfig = $state<Record<string, unknown> | null>(null);
+  runDevice = $state<'cpu' | 'gpu' | null>(null);
+  runGpuIds = $state<number[] | null>(null);
+  runVramPercent = $state<number | null>(null);
+  runRamPercent = $state<number | null>(null);
+  threadsBatch = $state<number | null>(null);
+  draftMax = $state<number | null>(null);
+  frequencyPenalty = $state<number | null>(null);
+  seed = $state<number | null>(null);
+  maxOutputTokens = $state<number | null>(null);
+  stopSequences = $state<string[] | null>(null);
+  stopParseError = $state('');
+  reasoningEffort = $state<string | null>(null);
+  reasoningBudget = $state<number | null>(null);
+  reasoningFormat = $state<string | null>(null);
+  chatTemperature = $state<number | null>(null);
+  chatThinking = $state<boolean | null>(null);
+  chatOutputLimit = $state<number | null>(null);
+  chatResponseFormat = $state<'text' | 'json_object' | 'json_schema'>('text');
+  chatSchemaText = $state('');
+  activeRunConfig = $state<EffectiveConfig | null>(null);
   // Inference overrides — seeded from GGUF / Unsloth-style defaults (always numeric in UI)
-  temperature = $state<number>(0.7);
-  topP = $state<number>(0.95);
-  topK = $state<number>(40);
-  minP = $state<number>(0.05);
-  presencePenalty = $state<number>(0);
-  repeatPenalty = $state<number>(1.1);
+  temperature = $state<number | null>(null);
+  topP = $state<number | null>(null);
+  topK = $state<number | null>(null);
+  minP = $state<number | null>(null);
+  presencePenalty = $state<number | null>(null);
+  repeatPenalty = $state<number | null>(null);
   enableThinking = $state<boolean | null>(null);
-  remember = $state(true);
+  remember = $state(false);
   advancedOpen = $state(false);
   fieldErrors = $state<Record<string, string>>({});
   device = $state<'cpu' | 'gpu'>('gpu');
@@ -236,6 +264,7 @@ class AppStore {
     if (this.status?.role === 'idle') return 'idle';
     if (!this.connected) return 'offline';
     const role = this.status?.role;
+    if (role === 'worker' && this.status?.netsec_warnings?.includes('master heartbeat unreachable')) return 'offline';
     if (role === 'master' || role === 'worker') return 'live';
     return 'idle';
   }
@@ -347,6 +376,12 @@ class AppStore {
       errors.observe(`update-worker:${worker.node_id ?? worker.host}`, worker.error ?? '', '', initial);
     }
     this.statusSeen = true;
+    if (this.status?.model_name !== data.model_name || this.status?.active_config?.run_id !== data.active_config?.run_id) {
+      this.chatTemperature = null;
+      this.chatThinking = null;
+      this.chatOutputLimit = null;
+    }
+    this.activeRunConfig = data.active_config ?? null;
     this.status = data;
     this.connected = true;
     const live = data.role === 'master' || data.role === 'worker';
@@ -703,7 +738,9 @@ class AppStore {
 
   private settingsFingerprint(): string {
     // Exclude remember / advanced_open — UI chrome, not run parameters.
-    const body = this.planPayload();
+    let body: Record<string, unknown>;
+    try { body = this.planPayload(); }
+    catch { return JSON.stringify({ invalidExtra: this.extraArgsText, model: this.selectedModel }); }
     delete body.remember;
     delete body.advanced_open;
     return JSON.stringify(body);
@@ -714,6 +751,18 @@ class AppStore {
   }
 
   applyParameterSet(ps: Record<string, unknown>) {
+    this.draftModel = typeof ps.draft_model === 'string' ? ps.draft_model : '';
+    this.mmproj = typeof ps.mmproj === 'string' ? ps.mmproj : '';
+    this.chatTemplateText = typeof ps.chat_template_text === 'string' ? ps.chat_template_text : '';
+    this.runDevice = ps.device === 'cpu' || ps.device === 'gpu' ? ps.device : null;
+    this.runGpuIds = Array.isArray(ps.gpu_ids) ? ps.gpu_ids.map(Number) : null;
+    this.runVramPercent = typeof ps.vram_percent === 'number' ? ps.vram_percent : null;
+    this.runRamPercent = typeof ps.ram_percent === 'number' ? ps.ram_percent : null;
+    for (const key of ['threads_batch', 'draft_max', 'frequency_penalty', 'seed', 'max_output_tokens',
+      'stop', 'reasoning_effort', 'reasoning_budget', 'reasoning_format']) {
+      const field = PARAMETER_FIELDS[key];
+      (this as unknown as Record<string, unknown>)[field] = ps[key] ?? null;
+    }
     if (typeof ps.context === 'number') this.context = ps.context;
     if (typeof ps.context_auto === 'boolean') this.contextAuto = ps.context_auto;
     this.clampContextToModel();
@@ -748,24 +797,23 @@ class AppStore {
     if (ps.cache_ram === 'auto' || typeof ps.cache_ram === 'number')
       this.cacheRam = ps.cache_ram as number | 'auto';
     if (typeof ps.threads === 'number') this.threads = Math.min(this.threadsMax, ps.threads);
-    if (Array.isArray(ps.extra_args)) this.extraArgsText = (ps.extra_args as string[]).join(' ');
+    if (Array.isArray(ps.extra_args)) this.extraArgsText = formatArguments(ps.extra_args as string[]);
     if (typeof ps.remember === 'boolean') this.remember = ps.remember;
     if (typeof ps.advanced_open === 'boolean') this.advancedOpen = ps.advanced_open;
-    if (ps.device === 'cpu' || ps.device === 'gpu') this.device = ps.device;
     if (typeof ps.vram_weight === 'number') this.vramWeight = ps.vram_weight;
     if (typeof ps.latency_weight === 'number') this.latencyWeight = ps.latency_weight;
     if (typeof ps.temperature === 'number') this.temperature = ps.temperature;
-    else this.temperature = this.samplingDefault('temperature');
+    else this.temperature = null;
     if (typeof ps.top_p === 'number') this.topP = ps.top_p;
-    else this.topP = this.samplingDefault('top_p');
+    else this.topP = null;
     if (typeof ps.top_k === 'number') this.topK = ps.top_k;
-    else this.topK = this.samplingDefault('top_k');
+    else this.topK = null;
     if (typeof ps.min_p === 'number') this.minP = ps.min_p;
-    else this.minP = this.samplingDefault('min_p');
+    else this.minP = null;
     if (typeof ps.presence_penalty === 'number') this.presencePenalty = ps.presence_penalty;
-    else this.presencePenalty = this.samplingDefault('presence_penalty');
+    else this.presencePenalty = null;
     if (typeof ps.repeat_penalty === 'number') this.repeatPenalty = ps.repeat_penalty;
-    else this.repeatPenalty = this.samplingDefault('repeat_penalty');
+    else this.repeatPenalty = null;
     if (typeof ps.enable_thinking === 'boolean') this.enableThinking = ps.enable_thinking;
     else if (ps.enable_thinking === null) this.enableThinking = null;
   }
@@ -773,32 +821,48 @@ class AppStore {
   async selectModel(id: string) {
     const generation = ++this.selectionGeneration;
     this.selectedModel = id;
-    this.distributableBytes = 0;
-    await this.loadRunCapabilities();
-    if (generation !== this.selectionGeneration) return;
+    this.resetRunSettings();
+    this.savedModelConfig = null;
+    this.settingsLoadError = '';
+    this.settingsLoading = true;
+    this.parameters = [];
+    this.expertFlags = [];
+    this.projectors = [];
+    this.templateEmbedded = false;
+    this.modelTemplateText = null;
+    this.templatePresets = [];
     try {
+      await this.loadRunCapabilities();
+      if (generation !== this.selectionGeneration) return;
       const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(id)}`);
       if (generation !== this.selectionGeneration) return;
-      if (!r.ok) {
-        this.clampContextToModel();
-        this.seedSamplingDefaults();
-        this.markSettingsClean();
-        this.scheduleEstimate();
-        return;
-      }
+      if (!r.ok) throw new Error('Could not load saved settings. Retry or use defaults.');
       const data = await r.json();
       if (generation !== this.selectionGeneration) return;
-      if (data.parameter_set) this.applyParameterSet(data.parameter_set);
-      else {
-        this.clampContextToModel();
-        this.seedSamplingDefaults();
-      }
-    } catch {
+      this.savedModelConfig = data.parameter_set ?? {};
+      this.applyParameterSet(this.savedModelConfig ?? {});
+      this.markSettingsClean();
+    } catch (error) {
       if (generation !== this.selectionGeneration) return;
-      this.clampContextToModel();
-      this.seedSamplingDefaults();
+      this.settingsLoadError = String(error);
+    } finally {
+      if (generation === this.selectionGeneration) {
+        this.settingsLoading = false;
+        this.scheduleEstimate();
+      }
     }
+  }
+
+  revertSavedSettings() {
+    this.resetRunSettings();
+    if (this.savedModelConfig) this.applyParameterSet(this.savedModelConfig);
     this.markSettingsClean();
+    this.scheduleEstimate();
+  }
+
+  useDefaultSettings() {
+    this.settingsLoadError = '';
+    this.resetRunSettings();
     this.scheduleEstimate();
   }
 
@@ -813,10 +877,13 @@ class AppStore {
         this.threadsMax = info.threads_max;
         this.threads = Math.min(this.threads, this.threadsMax);
       }
+      this.parameters = Array.isArray(info.parameters) ? info.parameters : [];
+      this.expertFlags = Array.isArray(info.expert_flags) ? info.expert_flags : [];
+      this.projectors = Array.isArray(info.projectors) ? info.projectors : [];
       this.templateEmbedded = !!info.template_embedded;
       this.modelTemplateText = typeof info.template_text === 'string' ? info.template_text : null;
       this.templatePresets = Array.isArray(info.templates) ? info.templates : [];
-    } catch { /* keep last known capabilities */ }
+    } catch { /* Selection resets capabilities; never reuse another model's metadata. */ }
   }
 
   setNodeShare(node: string, share: number) {
@@ -862,18 +929,20 @@ class AppStore {
 
   /** Apply GGUF / fallback sampling seeds into the slider-backed fields. */
   seedSamplingDefaults() {
-    this.temperature = this.samplingDefault('temperature');
-    this.topP = this.samplingDefault('top_p');
-    this.topK = this.samplingDefault('top_k');
-    this.minP = this.samplingDefault('min_p');
-    this.presencePenalty = this.samplingDefault('presence_penalty');
-    this.repeatPenalty = this.samplingDefault('repeat_penalty');
+    this.temperature = null;
+    this.topP = null;
+    this.topK = null;
+    this.minP = null;
+    this.presencePenalty = null;
+    this.repeatPenalty = null;
   }
 
   /** Persist the current run settings for this model. */
   async saveModelSettings() {
     const errorGeneration = errors.generation;
     if (!this.selectedModel) return;
+    const model = this.selectedModel;
+    const generation = this.selectionGeneration;
     if (!this.validateRunSettings(true)) {
       pushToast('danger', 'Fix validation errors before saving', 4000, { generation: errorGeneration });
       return;
@@ -881,9 +950,10 @@ class AppStore {
     const body = this.planPayload();
     delete body.remember;
     delete body.advanced_open;
+    delete body.settings_source;
     this.busy = '/v2/inference/model-settings';
     try {
-      const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(this.selectedModel)}`, {
+      const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(model)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ parameter_set: body })
@@ -899,7 +969,11 @@ class AppStore {
         pushToast('danger', apiErrorMessage(data, text, r.status, 'save settings'), 4000, { generation: errorGeneration });
         return;
       }
-      pushToast('ok', `settings saved for ${this.selectedModel}`);
+      pushToast('ok', `settings saved for ${model}`);
+      if (generation !== this.selectionGeneration) return;
+      const saved = data as { parameter_set?: Record<string, unknown> };
+      this.savedModelConfig = saved.parameter_set ?? body;
+      this.applyParameterSet(this.savedModelConfig);
       this.markSettingsClean();
     } catch (e) {
       pushToast('danger', String(e), 4000, { generation: errorGeneration });
@@ -932,6 +1006,21 @@ class AppStore {
     this.cacheRam = 'auto';
     this.threads = Math.min(8, this.threadsMax);
     this.extraArgsText = '';
+    this.runDevice = null;
+    this.runGpuIds = null;
+    this.runVramPercent = null;
+    this.runRamPercent = null;
+    this.threadsBatch = null;
+    this.draftMax = null;
+    this.frequencyPenalty = null;
+    this.seed = null;
+    this.maxOutputTokens = null;
+    this.stopSequences = null;
+    this.stopParseError = '';
+    this.reasoningEffort = null;
+    this.reasoningBudget = null;
+    this.reasoningFormat = null;
+    this.remember = false;
     this.seedSamplingDefaults();
     this.enableThinking = null;
     this.advancedOpen = false;
@@ -940,10 +1029,11 @@ class AppStore {
     this.latencyWeight = 0.4;
     this.planResult = null;
     this.distributableBytes = 0;
-    this.markSettingsClean();
   }
 
   planRunBlockedReason(): string | null {
+    if (this.settingsLoading) return 'Loading model configuration…';
+    if (this.settingsLoadError) return this.settingsLoadError;
     if (!this.models.length) return 'Add a local model before planning or running.';
     if (this.status?.role !== 'master') return 'Start as cluster master before Plan & Run.';
     const members = this.status?.members ?? {};
@@ -953,6 +1043,7 @@ class AppStore {
 
   validateRunSettings(explicit = false): boolean {
     const err: Record<string, string> = {};
+    if (this.stopParseError) err.stop = this.stopParseError;
     const maxCtx = this.selectedModelMaxContext();
     if (!this.contextAuto && this.context < MIN_CONTEXT)
       err.context = `Context must be at least ${MIN_CONTEXT} when Auto is off.`;
@@ -966,6 +1057,17 @@ class AppStore {
     if (this.latencyWeight < 0 || this.latencyWeight > 1) err.latencyWeight = 'Latency weight must be 0–1.';
     if (this.vramWeight + this.latencyWeight <= 0)
       err.placementWeights = 'VRAM and latency weights cannot both be zero.';
+    try { parseArgumentText(this.extraArgsText); } catch (error) { err.extra_args = String(error); }
+    for (const descriptor of this.parameters) {
+      const value = this.parameterValue(descriptor.id);
+      if (value === null || value === undefined || value === 'auto') continue;
+      const bounds = parameterBounds(descriptor);
+      if (typeof value === 'number' && (!Number.isFinite(value) || bounds.integer && !Number.isInteger(value)
+        || bounds.min !== undefined && value < bounds.min || bounds.max !== undefined && value > bounds.max)) {
+        err[descriptor.id] = `${descriptor.id}: enter a valid value${bounds.min !== undefined ? ` ≥ ${bounds.min}` : ''}${bounds.max !== undefined ? ` ≤ ${bounds.max}` : ''}.`;
+      }
+    }
+    if (this.maxOutputTokens === 0) err.max_output_tokens = 'Response limit must be positive or -1 for unlimited.';
     const fields = new Set([...Object.keys(this.fieldErrors), ...Object.keys(err)]);
     this.fieldErrors = err;
     for (const field of fields) {
@@ -976,11 +1078,71 @@ class AppStore {
     return Object.keys(err).length === 0;
   }
 
+  parameterValue(name: string): unknown {
+    const field = PARAMETER_FIELDS[name];
+    return field ? (this as unknown as Record<string, unknown>)[field] : undefined;
+  }
+
+  setParameter(name: string, value: unknown) {
+    const field = PARAMETER_FIELDS[name];
+    if (!field) return;
+    (this as unknown as Record<string, unknown>)[field] = value;
+    this.scheduleEstimate();
+  }
+
+  parameterDescriptor(name: string): ParameterDescriptor | undefined {
+    const descriptor = this.parameters.find(item => item.id === name);
+    if (descriptor && this.chatTemplate !== 'default'
+      && descriptor.unavailable_reason !== 'Not supported by the installed llama-server') {
+      const text = this.chatTemplate === 'custom' ? this.chatTemplateText
+        : this.templatePresets.find(item => item.id === this.chatTemplate)?.text ?? '';
+      if (['reasoning_effort', 'reasoning_budget', 'enable_thinking'].includes(name)) {
+        const available = name === 'reasoning_effort' ? text.includes('reasoning_effort')
+          : name === 'enable_thinking' ? text.includes('enable_thinking')
+          : text.includes('<think>') && text.includes('</think>');
+        const choices = name === 'reasoning_effort' ? ['default', ...['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+          .filter(level => text.includes(`'${level}'`) || text.includes(`"${level}"`))] : descriptor.choices;
+        return { ...descriptor, choices, available, unavailable_reason: available ? null : 'Selected template does not declare this control' };
+      }
+    }
+    return descriptor;
+  }
+
+  effectiveConfig(): EffectiveConfig | null {
+    return (this.planResult?.effective_config as EffectiveConfig | undefined) ?? null;
+  }
+
+  async copyConfiguration(format: 'json' | 'cli') {
+    const body = this.networkPlanPayload();
+    delete body.remember;
+    delete body.advanced_open;
+    const text = format === 'json' ? JSON.stringify(body, null, 2) : this.configurationCommand(body);
+    try { await navigator.clipboard.writeText(text); pushToast('ok', `${format.toUpperCase()} copied`); }
+    catch { pushToast('danger', 'Clipboard unavailable; select the configuration text to copy.'); }
+  }
+
+  configurationCommand(body = this.networkPlanPayload()): string {
+    const tokens = ['kllm run', '--settings defaults', `--model ${shellQuote(this.selectedModel)}`];
+    for (const item of this.parameters) {
+      const value = body[item.id];
+      if (value === null || value === undefined || item.id === 'extra_args') continue;
+      if (typeof value === 'boolean') {
+        if (item.id === 'enable_thinking') tokens.push(value ? '--enable-thinking' : '--no-enable-thinking');
+        else if (item.id === 'vision') tokens.push(value ? '--vision' : '--no-vision');
+        else if (item.id === 'context_auto') tokens.push(value ? '--context-auto' : '--no-context-auto');
+        else if (value) tokens.push(item.cli);
+      } else if (Array.isArray(value)) for (const element of value) tokens.push(`${item.cli} ${shellQuote(element)}`);
+      else if (item.id === 'node_shares' && typeof value === 'object')
+        for (const [node, share] of Object.entries(value)) tokens.push(`--node-share ${shellQuote(`${node}=${share}`)}`);
+      else if (typeof value !== 'object') tokens.push(`${item.cli} ${shellQuote(value)}`);
+    }
+    if (this.selectedNetworkId) tokens.push(`--network-id ${shellQuote(this.selectedNetworkId)}`);
+    for (const flag of parseArgumentText(this.extraArgsText)) tokens.push(`--extra-arg=${shellQuote(JSON.stringify(flag))}`);
+    return tokens.join(' ');
+  }
+
   planPayload() {
-    const extra = this.extraArgsText
-      .split(/\s+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const extra = parseArgumentText(this.extraArgsText);
     const body: Record<string, unknown> = {
       model: this.selectedModel,
       context: this.context,
@@ -999,10 +1161,12 @@ class AppStore {
       required_nodes: this.nodeShares ? [] : [...this.requiredNodes],
       vision: this.vision,
       mmproj: this.mmproj || null,
-      device: this.device,
+      device: this.runDevice,
+      gpu_ids: this.runGpuIds,
+      settings_source: 'defaults',
       split_mode: 'layer',
-      vram_percent: this.device === 'gpu' ? this.vramPercent : undefined,
-      ram_percent: this.device === 'cpu' ? this.ramPercent : undefined,
+      vram_percent: this.runVramPercent,
+      ram_percent: this.runRamPercent,
       vram_weight: this.vramWeight,
       latency_weight: this.latencyWeight,
       chat_template: this.chatTemplate,
@@ -1011,6 +1175,15 @@ class AppStore {
       checkpoints: this.checkpoints,
       cache_ram: this.cacheRam,
       threads: this.threads,
+      threads_batch: this.threadsBatch,
+      draft_max: this.draftMax,
+      seed: this.seed,
+      max_output_tokens: this.maxOutputTokens,
+      frequency_penalty: this.frequencyPenalty,
+      stop: this.stopSequences,
+      reasoning_effort: this.reasoningEffort,
+      reasoning_budget: this.reasoningBudget,
+      reasoning_format: this.reasoningFormat,
       extra_args: extra,
       temperature: this.temperature,
       top_p: this.topP,
@@ -1523,7 +1696,7 @@ class AppStore {
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
     this.estimateTimer = null;
     ++this.estimateSeq;
-    this.planResult = (await this.post('/v2/inference/plans', this.networkPlanPayload())) as Record<string, unknown>;
+    this.planResult = (await this.post('/v2/inference/plans', { ...this.networkPlanPayload(), remember: false })) as Record<string, unknown>;
   }
 
   /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
@@ -1547,7 +1720,7 @@ class AppStore {
     if (!this.validateRunSettings()) return;
     if (this.busy) return;
     const seq = ++this.estimateSeq;
-    const payload = this.networkPlanPayload();
+    const payload: Record<string, unknown> = { ...this.networkPlanPayload(), remember: false };
     this.estimating = true;
     try {
       const r = await fetch('/v2/inference/plans?preview=true', {
@@ -1638,6 +1811,7 @@ class AppStore {
     const errorGeneration = errors.generation;
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings(true)) return;
+    if (this.estimating || !this.planResult || this.estimateError) return;
     if (this.planResult?.fit_status === 'overflow') {
       pushToast('danger', String(this.planResult.hint ?? 'overflow — adjust context and re-plan'), 4000, { generation: errorGeneration });
       return;
@@ -1649,6 +1823,11 @@ class AppStore {
     this.lastApplyError = null;
     if (this.selectedNetworkId) await this.loadToken();
     const data = (await this.post('/v2/inference/runs', this.networkPlanPayload())) as Record<string, unknown>;
+    this.activeRunConfig = (data.effective_config ?? null) as EffectiveConfig | null;
+    if (this.remember) {
+      this.savedModelConfig = this.planPayload();
+      this.markSettingsClean();
+    }
     const plan = (data.plan ?? {}) as Record<string, unknown>;
     if (Object.keys(plan).length) {
       this.planResult = plan;
@@ -1676,7 +1855,13 @@ class AppStore {
   async sendChat() {
     const errorGeneration = errors.generation;
     const content = this.chatInput.trim();
-    if (!content || this.chatStreaming) return;
+    if (!content || this.chatStreaming || !this.status?.inference_up) return;
+    if (this.chatResponseFormat === 'json_schema') {
+      try {
+        const schema = JSON.parse(this.chatSchemaText);
+        if (!schema || typeof schema !== 'object' || Array.isArray(schema)) throw new Error('Schema must be a JSON object.');
+      } catch (error) { pushToast('danger', `Invalid output schema: ${String(error)}`); return; }
+    }
     if (!this.apiToken) await this.loadToken();
     this.chat = [...this.chat, { role: 'user', content }, { role: 'assistant', content: '' }];
     this.chatInput = '';
@@ -1693,15 +1878,13 @@ class AppStore {
           model: this.status?.model_name || this.selectedModel || 'default',
           messages: this.chat.slice(0, -1),
           stream: true,
-          temperature: this.temperature,
-          top_p: this.topP,
-          top_k: this.topK,
-          min_p: this.minP,
-          presence_penalty: this.presencePenalty,
-          repeat_penalty: this.repeatPenalty,
-          ...(this.enableThinking != null
-            ? { chat_template_kwargs: { enable_thinking: this.enableThinking } }
-            : {})
+          ...(this.chatTemperature !== null ? { temperature: this.chatTemperature } : {}),
+          ...(this.chatOutputLimit !== null ? { max_tokens: this.chatOutputLimit } : {}),
+          ...(this.chatThinking !== null ? { chat_template_kwargs: { enable_thinking: this.chatThinking } } : {}),
+          ...(this.chatResponseFormat === 'json_object' ? { response_format: { type: 'json_object' } } : {}),
+          ...(this.chatResponseFormat === 'json_schema' ? { response_format: {
+            type: 'json_schema', json_schema: { name: 'chat_output', strict: true, schema: JSON.parse(this.chatSchemaText) }
+          } } : {})
         }),
         signal: this.abort.signal
       });

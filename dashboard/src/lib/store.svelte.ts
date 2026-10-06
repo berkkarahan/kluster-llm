@@ -1438,7 +1438,7 @@ class AppStore {
         data = text;
       }
       if (!r.ok) {
-        throw new Error(String(text));
+        throw new Error(apiErrorMessage(data, text, r.status, path));
       }
       if (path === '/v2/models/downloads' && data && typeof data === 'object'
         && typeof (data as { operation_id?: unknown }).operation_id === 'string') {

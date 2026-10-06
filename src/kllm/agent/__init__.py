@@ -549,7 +549,7 @@ def _ensure_master_control_route(master_host: str, master_port: int) -> list[str
     warnings: list[str] = []
     try:
         handle = cp_proxy.ensure_for_master(master_host, master_port)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         raise HTTPException(502, str(exc)) from exc
     if handle is None:
         STATE.cp_proxy_port = None

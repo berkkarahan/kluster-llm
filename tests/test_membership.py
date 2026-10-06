@@ -752,6 +752,8 @@ def test_cluster_snapshot_shapes_node():
 
 
 def test_worker_heartbeat_unreachable_stays_worker(client):
+    from types import SimpleNamespace
+
     c, agent = client
     agent.STATE.role = "worker"
     agent.STATE.master_host = "10.0.0.1"
@@ -766,6 +768,24 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
     assert agent.STATE.role == "worker"
     assert agent.STATE.node_id in agent.STATE.members
     assert any("unreachable" in w for w in (agent.STATE.netsec_warnings or []))
+    assert "master heartbeat unreachable" in c.get("/v2/node").json()["netsec_warnings"]
+
+    snapshot = dict(agent.STATE.members)
+    response = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"accepted": True, "cluster_members": snapshot},
+    )
+    with (
+        patch.object(agent, "_ensure_master_control_route", return_value=[]),
+        patch.object(
+            agent.http_clients, "control_client",
+            return_value=SimpleNamespace(post=lambda *a, **k: response),
+        ),
+    ):
+        agent._worker_post_heartbeat()
+    assert agent.STATE.role == "worker"
+    assert agent.STATE.members == snapshot
+    assert "master heartbeat unreachable" not in c.get("/v2/node").json()["netsec_warnings"]
 
 
 def test_worker_heartbeat_precedes_capacity_refresh(client):

@@ -118,6 +118,7 @@ from kllm.agent.schemas import (
     LlamaSetupBody,
     LogsIngestBody,
     ModelSettingsBody,
+    LegacyModelSettingsBody,
     RegisterBody,
     SearchBody,
     StartBody,
@@ -168,7 +169,7 @@ from kllm.run_planning import (
     validate_vision_for_run,
 )
 from kllm.run_launch import build_master_launch
-from kllm.run_settings import PlanBody, RunBody
+from kllm.run_settings import PlanBody, RunBody, LegacyPlanBody, LegacyRunBody
 from kllm import membership as membership_mod
 from kllm.state import (
     DEFAULT_CONTROL_PORT,
@@ -902,7 +903,8 @@ async def chat_completions(
             model_path = model_ops.resolve_local_model(STATE.model_name)
         except FileNotFoundError:
             model_path = None
-    return await gateway.proxy_chat_completions(STATE.infer_port, request, model_path=model_path)
+    return await gateway.proxy_chat_completions(STATE.infer_port, request, model_path=model_path,
+                                                active_config=_active_config())
 
 
 async def anthropic_messages(
@@ -915,11 +917,19 @@ async def anthropic_messages(
             model_path = model_ops.resolve_local_model(STATE.model_name)
         except FileNotFoundError:
             model_path = None
-    return await gateway.proxy_anthropic_messages(STATE.infer_port, request, model_path=model_path)
+    return await gateway.proxy_anthropic_messages(STATE.infer_port, request, model_path=model_path,
+                                                  active_config=_active_config())
 
 
 async def responses(request: Request, _: None = Depends(_require_api_token)) -> Any:
-    return await gateway.proxy_responses(STATE.infer_port, request)
+    return await gateway.proxy_responses(STATE.infer_port, request, active_config=_active_config())
+
+
+def _active_config() -> dict[str, Any] | None:
+    snapshot = STATE.active_config
+    if snapshot and STATE.process_role == "master" and snapshot.get("process_pid") == STATE.process_pid:
+        return snapshot
+    return None
 
 
 async def response_tokens(request: Request, _: None = Depends(_require_api_token)) -> Any:
@@ -1568,6 +1578,8 @@ def _inference_handlers() -> InferenceHandlers:
     return InferenceHandlers(
         InferenceDependencies(
             state=STATE,
+            resolve_settings=lambda body: _run_settings_handlers().resolve(body),
+            preflight=lambda body, path: _run_settings_handlers().preflight(body, path),
             ensure_master_member=lambda: _ensure_master_member(persist=True),
             merge_extra=merge_and_sanitize_extra,
             execute_plan=execute_plan,
@@ -1634,6 +1646,21 @@ def run(body: RunBody) -> dict[str, Any]:
     return _inference_handlers().run(body)
 
 
+def legacy_plan(body: LegacyPlanBody, preview: bool = False) -> dict[str, Any]:
+    return _inference_handlers().plan(body, preview)
+
+
+def legacy_run(body: LegacyRunBody) -> dict[str, Any]:
+    return _inference_handlers().run(body)
+
+
+def legacy_put_model_settings(model: str, body: LegacyModelSettingsBody) -> dict[str, Any]:
+    from kllm.run_settings import RunSettingsFields
+    from kllm.parameter_catalog import canonicalize_parameters
+    values = {key: value for key, value in body.parameter_set.items() if key in RunSettingsFields.model_fields}
+    return put_model_settings(model, ModelSettingsBody(parameter_set=canonicalize_parameters(values, legacy=True)))
+
+
 def stop_inference() -> dict[str, Any]:
     """Stop llama-server and drop the loaded model. The cluster stays up."""
     return _inference_handlers().stop()
@@ -1695,7 +1722,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_hf_token": get_hf_token,
     "put_hf_token": put_hf_token,
 }
-legacy_v1_router = _build_v1_router(_route_handlers)
+legacy_v1_router = _build_v1_router({**_route_handlers, "plan": legacy_plan, "run": legacy_run,
+                                  "put_model_settings": legacy_put_model_settings})
 app.include_router(legacy_v1_router)
 app.include_router(_build_v2_router(_route_handlers))
 app.include_router(build_network_router(_managed_network_service))

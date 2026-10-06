@@ -103,16 +103,16 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.doesNotMatch(hardware, /hw-split-mode|Row \(legacy|Tensor \(experimental/);
     const { default: RunPage } = await server.ssrLoadModule('/src/routes/run/+page.svelte');
     const page = render(RunPage).body;
-    const runAt = page.indexOf('>Run</button>');
-    const stopAt = page.indexOf('>Stop</button>');
-    assert.ok(runAt !== -1 && stopAt > runAt, 'Stop sits immediately after Run');
-    assert.match(page, /Estimated total memory: 8\.0 GiB/);
+    assert.doesNotMatch(page, />Run<\/button>/, 'Launch belongs to the review step');
+    appStore.status = { ...appStore.status, process_role: 'master', inference_up: true, model_name: 'active.gguf' };
+    const activePage = render(RunPage).body;
+    assert.match(activePage, /aria-label="Running model".*Stop model/s);
+    assert.match(page, /8\.0 GiB.*Estimated total memory/s);
     assert.match(page, /Estimated GPU memory: 6\.0 GiB/);
     assert.match(page, /Estimated master CPU RAM: 2\.0 GiB/);
-    assert.match(page, /aria-label="Planning"/);
-    assert.match(page, /Advanced settings/);
+    assert.match(page, /aria-label="Memory plan"/);
+    assert.match(page, /Review &amp; deploy/);
     assert.doesNotMatch(page, /VRAM weight|Latency weight|Placement weights/);
-    assert.match(page, /15\.2 GiB/);
     const fitted = appStore.planResult;
     appStore.planResult = {
       estimated_bytes: Math.round(54.4 * 1024 ** 3), budget_bytes: Math.round(20.3 * 1024 ** 3),
@@ -138,8 +138,8 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.doesNotMatch(shared, /Selected VRAM capacity:/);
     appStore.device = 'cpu';
     const cpu = render(RunPage).body;
-    assert.match(cpu, /Estimated total memory: 8\.0 GiB/);
-    assert.doesNotMatch(cpu, /Estimated GPU memory:/);
+    assert.match(cpu, /8\.0 GiB.*Estimated total memory/s);
+    assert.match(cpu, /Estimated GPU memory: 6\.0 GiB/, 'changing node defaults must not relabel an existing deployment plan');
     // Inventory can arrive before status: its unified flag must prevent a false discrete total.
     appStore.device = 'gpu';
     appStore.status = null;
@@ -164,13 +164,13 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     t.mock.timers.tick(300);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(appStore.planResult.budget_bytes, 15.2 * 1024 ** 3);
-    assert.match(render(RunPage).body, /usable total memory budget 15\.2 GiB/);
+    assert.match(render(RunPage).body, /15\.2 GiB.*usable total memory budget/s);
     appStore.applyParameterSet({ node_shares: { master: 1 } });
     appStore.flashAttention = 'off';
     assert.equal(appStore.planPayload().node_shares, null);
     assert.deepEqual(appStore.planPayload().node_priority, ['master']);
     assert.equal(appStore.planPayload().flash_attention, 'off');
-    assert.match(render(RunPage).body, /Earlier nodes receive as much workload/);
+    assert.match(render(RunPage).body, /unchecked nodes remain eligible/);
     appStore.status = { ...appStore.status, members: {
       master: { node_id: 'master', role: 'master' }, worker: { node_id: 'worker', role: 'worker' }
     } };

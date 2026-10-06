@@ -68,6 +68,8 @@ class RegisterBody(BaseModel):
     available_ram_bytes: int = 0
     vram_bytes: int | None = None
     backend: str = "unknown"
+    vram_percent: int = Field(default=80, ge=10, le=100)
+    ram_percent: int = Field(default=80, ge=10, le=100)
     actual_backend: str | None = None
     requested_backend: str | None = None
     devices: list[dict[str, Any]] = Field(default_factory=list)
@@ -170,7 +172,12 @@ class TemplateCheckBody(BaseModel):
 
 
 class ModelSettingsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     parameter_set: dict[str, Any] = Field(default_factory=dict)
+
+
+class LegacyModelSettingsBody(ModelSettingsBody):
+    model_config = ConfigDict(extra="ignore")
 
 # Additive managed-network schemas retain their strict feature contracts.
 ManagedNetworkAdapterSelection = network_allocation.AdapterSelection

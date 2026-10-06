@@ -168,18 +168,17 @@
   }
 </script>
 
-<div class="page-frame logs-page p-3 flex flex-col gap-3 min-h-0">
-  <header class="flex items-end justify-between gap-3 flex-wrap">
+<div class="stack logs-page">
+  <header class="page-heading">
     <div>
-      <h1 class="page-title">Cluster Log Trail</h1>
-      <p class="page-description">
-        Master and worker activity · times in UTC · Stop logging discards new output across the cluster; inference continues.
-      </p>
+      <p class="eyebrow">Activity</p>
+      <h1 id="page-title">Cluster activity</h1>
+      <p>Master and worker activity. Times are UTC. Pausing this view is separate from stopping cluster logging.</p>
     </div>
     <span class="chip chip-muted mono">{trail.entries.length} buffered</span>
   </header>
 
-  <section class="panel p-2 flex flex-wrap items-end gap-3" aria-label="Log controls">
+  <section class="panel panel-pad log-controls od-cluster" aria-label="Log controls">
     <button class="btn" disabled={changingLogging || !logging || appStore.status?.role !== 'master'} onclick={toggleLogging}>
       {logging?.enabled === false ? 'Resume logging' : 'Stop logging'}
     </button>
@@ -275,7 +274,7 @@
     {/if}
   </div>
 
-  <section class="panel flex-1 min-h-0 flex flex-col overflow-hidden" aria-label="Log entries">
+  <section class="panel log-view flex-1 min-h-0 flex flex-col overflow-hidden" aria-label="Log entries">
     <div class="logs-head mono text-[10px] uppercase tracking-wider grid shrink-0" style="color: var(--muted)">
       <span>UTC</span>
       <span>Node</span>
@@ -322,8 +321,11 @@
 </div>
 
 <style>
-  .logs-page {
+  .logs-page.stack {
     height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
   }
 
@@ -339,8 +341,9 @@
   }
 
   .btn-mode:has(input:checked) {
-    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
-    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
   }
 
   .logs-page select:focus-visible {

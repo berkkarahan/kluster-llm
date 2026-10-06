@@ -176,6 +176,7 @@ class ClusterState:
     # refused on macOS because it would not provide Metal + Vulkan.
     llama_warnings: list[str] = field(default_factory=list)
     last_settings: dict[str, Any] | None = None
+    active_config: dict[str, Any] | None = None
     apply_error: str | None = None
     apply_warning: str | None = None
     # Latest master inference state, mirrored to workers through heartbeats.
@@ -230,6 +231,7 @@ class ClusterState:
         self.process_role = None
         self.last_plan = None
         self.model_name = None
+        self.active_config = None
         self.gpu_ids = None
         self.rpc_bind = None
         self.overlay = "none"

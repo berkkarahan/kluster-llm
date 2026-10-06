@@ -8,7 +8,6 @@ import shlex
 from kllm.exceptions import ValidationError
 
 FLAG_RE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9-_]*$")
-SHELL_META = re.compile(r"[;&|`$<>(){}\\!\n\r]")
 BLOCKED_FLAGS = frozenset(
     {
         "--host",
@@ -21,9 +20,15 @@ BLOCKED_FLAGS = frozenset(
         "--model", "-m", "--model-url", "-mu", "--hf-repo", "-hf", "-hfr",
         "--chat-template", "--chat-template-file", "--jinja", "--no-jinja",
         "--no-kv-offload", "-nkvo", "--no-op-offload",
+        "--kv-offload", "-kvo", "--lazy-mode", "-lzm",
         "--kv-unified-per-slot", "--model-draft", "-md", "--mmproj", "-mm",
         "-h",
         "-p",
+        "--help", "--usage", "--version", "--list-devices", "--cache-list", "-cl", "--completion-bash",
+        "--api-key", "--api-key-file", "--ssl-key-file", "--ssl-cert-file", "--webui", "--no-webui",
+        "--path", "--media-path", "--models-dir", "--models-preset", "--models-max", "--models-autoload",
+        "--props", "--tools", "--tools-file", "--mcp", "--mcp-config", "--hf-token", "-hft", "--hf-file", "-hff",
+        "--log-file", "--log-disable", "--log-prompts-dir", "--log-verbosity", "--verbosity", "-lv",
     }
 )
 
@@ -33,7 +38,7 @@ class ExtraArgsError(ValidationError):
 
 
 def tokenize_extra_args(raw: list[str]) -> list[str]:
-    """Flatten whitespace-separated tokens from a list of strings."""
+    """Parse repeated CLI strings once. API argv arrays must not use this helper."""
     out: list[str] = []
     for part in raw:
         if not part or not str(part).strip():
@@ -47,30 +52,25 @@ def tokenize_extra_args(raw: list[str]) -> list[str]:
 
 
 def sanitize_extra_args(tokens: list[str]) -> list[str]:
-    """Validate tokens; reject shell metacharacters and unsafe cluster overrides."""
-    cleaned = tokenize_extra_args(tokens)
-    safe: list[str] = []
-    i = 0
-    while i < len(cleaned):
-        tok = cleaned[i]
-        if SHELL_META.search(tok):
-            raise ExtraArgsError(f"extra_args: shell metacharacters not allowed in {tok!r}")
-        if tok.startswith("-") and not FLAG_RE.match(tok):
-            raise ExtraArgsError(f"extra_args: invalid flag {tok!r}")
-        if tok in BLOCKED_FLAGS:
+    """Validate an argv vector, preserving literal paths, JSON and negative values."""
+    cleaned: list[str] = []
+    for token in tokens:
+        if not isinstance(token, str) or "\0" in token:
+            raise ExtraArgsError("extra_args: arguments must be strings without NUL")
+        if token.startswith("--") and "=" in token:
+            cleaned.extend(token.split("=", 1))
+        else:
+            cleaned.append(token)
+    if cleaned and not FLAG_RE.fullmatch(cleaned[0]):
+        raise ExtraArgsError(f"extra_args: expected a flag, got {cleaned[0]!r}")
+    for tok in cleaned:
+        if FLAG_RE.fullmatch(tok) and (
+            tok in BLOCKED_FLAGS
+            or tok.startswith(("--models-", "--no-models-", "--tool", "--mcp", "--ssl-", "--api-key", "--log-", "--no-log-", "--hf-", "--docker-"))
+            or tok.endswith("-default")
+        ):
             raise ExtraArgsError(f"extra_args: {tok!r} is managed by kllm and cannot be overridden")
-        safe.append(tok)
-        if tok.startswith("-") and i + 1 < len(cleaned) and not cleaned[i + 1].startswith("-"):
-            nxt = cleaned[i + 1]
-            if SHELL_META.search(nxt):
-                raise ExtraArgsError(f"extra_args: unsafe value for {tok!r}")
-            if tok in ("--host", "--port", "--rpc"):
-                raise ExtraArgsError(f"extra_args: {tok!r} is managed by kllm")
-            safe.append(nxt)
-            i += 2
-            continue
-        i += 1
-    return safe
+    return cleaned
 
 
 def merge_extra_args(first_class: list[str], extra: list[str]) -> list[str]:

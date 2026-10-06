@@ -9,6 +9,21 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_control_pool():
+    """Keep pooled clients and test doubles local to each test."""
+    from kllm import http_clients
+
+    previous = http_clients.control
+    http_clients.control = None
+    yield
+    current = http_clients.control
+    http_clients.control = previous
+    close = getattr(current, "close", None)
+    if current is not previous and callable(close):
+        close()
+
+
 @pytest.fixture
 def native_inventory_counts(tmp_path, monkeypatch):
     """Install a deterministic native inventory adapter and count expensive acquisitions."""

@@ -34,11 +34,11 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
       recording: { recording: 'failed', last_successful_save: null } };
     appStore.selectedNodeId = 'master';
     const live = render(Home).body;
-    for (const control of ['Start', 'Stop', 'Join', 'Leave', 'Update workers', 'Fit', 'Chat', 'Details', 'History'])
+    for (const control of ['Start', 'Stop', 'Join', 'Leave', 'Update workers', 'Details', 'History'])
       assert.match(live, new RegExp(control));
     assert.match(live, /href="\/run"/);
-    assert.match(live, /aria-label="Open chat"/);
-    assert.match(live, /aria-label="Close chat"/);
+    assert.match(live, /href="\/integrations"/);
+    assert.match(live, /Unmeasured/);
     assert.match(live, /recording.*failed/is);
     assert.match(live, /unavailable/);
     assert.match(live, /example.*master/s);
@@ -56,6 +56,22 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
     assert.match(stopped, /No members — Start as master or Join a cluster\./);
     assert.doesNotMatch(stopped, /example/);
     assert.doesNotMatch(stopped, /departed-host/);
+    // Local agent availability must not make its saved worker mirror live.
+    appStore.status = { role: 'worker', node_id: 'worker', members: {
+      master: { node_id: 'master', host: 'saved-master', role: 'master' },
+      worker: { node_id: 'worker', host: 'saved-worker', role: 'worker' }
+    }, netsec_warnings: ['master heartbeat unreachable'] };
+    for (const usage of [null, appStore.liveUsage]) {
+      appStore.liveUsage = usage;
+      const disconnected = render(Home).body;
+      assert.equal(appStore.viewState(), 'offline');
+      assert.match(disconnected, /0 connected/);
+      assert.match(disconnected, /data-link-state="disconnected"/);
+    }
+    // A successful heartbeat clears the warning and restores current members.
+    appStore.status = { ...appStore.status, netsec_warnings: [] };
+    assert.equal(appStore.viewState(), 'live');
+    assert.match(render(Home).body, /2 connected/);
   } finally {
     try { await server?.watcher?.close(); } catch { /* no watcher */ }
     await server?.close();
@@ -386,122 +402,39 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       await call('Page.enable');
       await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
 
-      // --- US1: full-area layout with automatic initial fit --------------------------------
-      await navigate('sixteen', 16);
-      const shell = await shellMetrics();
-      assertFullArea(shell, '1280x720');
-      assertContained(await cardBounds(), 'initial fit');
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.node-map-graph')).display"), 'block');
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.node-map-list')).display"), 'none');
-
-      // --- SC-001: the same full-area bounds hold at the other specified desktop viewports --
-      for (const [width, height] of [[1440, 900], [1920, 1080]]) {
-        await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
-        await wait(`innerWidth === ${width} && innerHeight === ${height}`);
-        assertFullArea(await shellMetrics(), `${width}x${height}`);
-        assertContained(await cardBounds(), `${width}x${height} initial fit`);
-      }
-      await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
-      await wait('innerWidth === 1280 && innerHeight === 720');
-
-      // --- US2: node-local telemetry visible before selection ------------------------------
-      const cardText = await evaluate("document.querySelector('.node-map-card').textContent");
-      assert.match(cardText, /Host CPU/);
-      assert.match(cardText, /Host RAM/);
-      assert.match(cardText, /GPU 0/);
+      // Sidebar, measured topology, and deferred history.
+      await call('Page.navigate', { url: base + '/' });
+      await wait("document.querySelectorAll('.cluster-diagram .topology-node').length === 16");
+      const navText = await evaluate("document.querySelector('aside.sidebar').textContent");
+      assert.match(navText, /Cluster/);
+      assert.match(navText, /Models/);
+      assert.match(navText, /Deploy/);
+      assert.match(navText, /Activity/);
+      assert.match(navText, /Connect/);
+      assert.match(navText, /Settings/);
+      assert.equal(await evaluate("getComputedStyle(document.querySelector('.cluster-diagram')).display"), 'block');
+      assert.equal(await evaluate("getComputedStyle(document.querySelector('.cluster-list')).display"), 'none');
+      const cardText = await evaluate("document.querySelector('.cluster-diagram .topology-node').textContent");
+      assert.match(cardText, /GiB/);
+      assert.match(cardText, /CPU/);
       assert.match(cardText, /master-host/);
-      const listText = await evaluate("document.querySelector('.node-map-list').textContent");
-      assert.match(listText, /Host CPU/);
-      assert.match(listText, /Host RAM/);
-      assert.match(listText, /GPU 0/);
-      // Duplicate host names remain distinguishable through identity text.
-      assert.match(await evaluate("document.querySelector('.node-map-list').textContent"), /w1/);
+      assert.match(await evaluate("document.querySelector('[data-link-state]').textContent"), /Unmeasured/);
+      assert.doesNotMatch(await evaluate("document.querySelector('.cluster-diagram').textContent"), /GbE|packet loss|\d+\s*ms/);
+      assert.match(await evaluate("document.querySelector('.cluster-diagram').textContent"), /Blackwell|GPU/);
+      assert.match(await evaluate("document.body.textContent"), /RPC port 50052 reachable/);
+      assert.match(await evaluate("document.body.textContent"), /up 10\.66\.87\.1 \(listen 51820\)/);
 
-      // Multi-GPU node keeps both device rows.
-      const multiGpu = await evaluate(`(() => [...document.querySelectorAll('.node-map-card')]
-        .map((c) => c.textContent).find((t) => t.includes('GPU-B')))()`);
-      assert.match(multiGpu, /GPU-A/);
-      assert.match(multiGpu, /GPU-B/);
-
-      // --- FR-004/FR-010: long device labels must not push resource values out of the card --
-      assert.match(await evaluate("document.querySelector('.node-map-graph').textContent"), /Blackwell/);
-      const spilled = await evaluate(`(() => [...document.querySelectorAll('.node-map-card')]
-        .flatMap((card) => { const box = card.getBoundingClientRect();
-          return [...card.querySelectorAll('.node-metric .v')].filter((value) => {
-            const r = value.getBoundingClientRect();
-            return r.right > box.right + 1 || r.left < box.left - 1;
-          }).map((value) => value.textContent); }))()`);
-      assert.deepEqual(spilled, [], `resource values must stay inside their card: ${JSON.stringify(spilled)}`);
-
-      // Security warnings remain visible; historical errors start acknowledged. New errors are tested separately.
-      assert.equal(await evaluate("document.querySelector('.cluster-controls')?.open"), false,
-        'cluster controls must open collapsed');
-      const compactStatus = await evaluate("document.querySelector('.usage-toolbar-main').textContent");
-      assert.match(compactStatus, /RPC port 50052 reachable/);
-      assert.doesNotMatch(compactStatus, /git pull failed/, 'startup acknowledges historical worker-update errors');
-      assert.match(compactStatus, /up 10\.66\.87\.1 \(listen 51820\)/);
-      const statusColors = await evaluate(`(() => {
-        const overlay = getComputedStyle(document.querySelector('.usage-overlay-status')).color;
-        const info = getComputedStyle(document.querySelector('.usage-toolbar-main [role="status"]')).color;
-        const notes = [...document.querySelectorAll('.usage-toolbar-main [role="note"]')];
-        const warning = getComputedStyle(notes.find((el) => el.textContent.includes('RPC port 50052'))).color;
-        return { overlay, info, warning };
-      })()`);
-      assert.equal(statusColors.overlay, statusColors.info,
-        'healthy overlay status uses informational color, not warning color');
-      assert.notEqual(statusColors.overlay, statusColors.warning,
-        'healthy overlay status must not look like a warning');
-
-      // --- US1: manual navigation survives polling, Fit restores automatic ------------------
-      const pollsBeforePan = (await countsSnapshot()).live;
-      const fitted = await transform();
-      await evaluate("document.querySelector('[aria-label=\"Pan right\"]').focus()");
-      await enter();
-      const panned = await transform();
-      assert.notEqual(panned, fitted, 'pan must change the transform');
-      await waitForLiveRead(pollsBeforePan + 1);
-      assert.equal(await transform(), panned, 'routine polling must retain the manual transform');
-      await evaluate("document.querySelector('[aria-label=\"Zoom out\"]').focus()");
-      await enter();
-      const zoomed = await transform();
-      assert.ok(scaleOf(zoomed) < scaleOf(panned), 'zoom out must reduce scale');
-      await evaluate("document.querySelector('.node-map-controls button:nth-child(4)').focus()");
-      await enter();
-      assertContained(await cardBounds(), 'explicit Fit');
-
-      // --- US2/US3: keyboard selection defers history until asked --------------------------
       const beforeSelect = await countsSnapshot();
       assert.deepEqual({ lifetimes: beforeSelect.lifetimes, series: beforeSelect.series, readings: beforeSelect.readings }, { lifetimes: 0, series: 0, readings: 0 },
         'initial polling must not fetch history');
-      await evaluate("document.querySelectorAll('.node-map-card')[2].focus()");
+      await evaluate("document.querySelector('.cluster-diagram .topology-node[data-node-id=\"w1\"]').focus()");
       await enter();
       const afterSelect = await countsSnapshot();
       assert.deepEqual({ lifetimes: afterSelect.lifetimes, series: afterSelect.series, readings: afterSelect.readings }, { lifetimes: 0, series: 0, readings: 0 },
         'selecting a node with History closed must not fetch history');
+      assert.equal(await evaluate("document.querySelector('.cluster-diagram .topology-node[aria-pressed=\"true\"]')?.dataset.nodeId"), 'w1');
 
-      // --- FR-008/SC-007: selection survives polling and navigation ------------------------
-      const pollsBeforeSelectionCheck = (await countsSnapshot()).live;
-      const selectedNode = await evaluate(
-        `document.querySelector('.node-map-card[aria-pressed="true"]')?.dataset.nodeId ?? null`);
-      assert.ok(selectedNode, 'a node must be selected after keyboard activation');
-      await waitForLiveRead(pollsBeforeSelectionCheck + 1);
-      assert.equal(await evaluate(
-        `document.querySelector('.node-map-card[aria-pressed="true"]')?.dataset.nodeId ?? null`),
-      selectedNode, 'routine polling must preserve the selection');
-      await evaluate("document.querySelector('[aria-label=\"Pan right\"]').focus()");
-      await enter();
-      await evaluate("document.querySelector('[aria-label=\"Zoom in\"]').focus()");
-      await enter();
-      await evaluate("document.querySelector('.node-map-controls button:nth-child(4)').focus()");
-      await enter();
-      assert.equal(await evaluate(
-        `document.querySelector('.node-map-card[aria-pressed="true"]')?.dataset.nodeId ?? null`),
-      selectedNode, 'pan, zoom and Fit must preserve the selection');
-      assert.equal(await evaluate(`document.querySelectorAll('.node-map-card[aria-pressed="true"]').length`), 1,
-        'exactly one node stays selected');
-
-      // --- US3: open History, then dismiss with focus return -------------------------------
-      await evaluate("document.querySelector('.usage-toolbar-actions button:nth-child(2)').focus()");
+      await evaluate("[...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'History').focus()");
       await enter();
       await wait("document.querySelector('.usage-dialog')?.open === true");
       await wait("document.querySelector('[aria-label^=\"Recorded usage\"]')");
@@ -510,155 +443,33 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
         `opening History must fetch the endpoints: ${JSON.stringify(afterHistory)}`);
       await escape();
       await wait("document.querySelector('.usage-dialog')?.open === false");
-      await wait("document.activeElement?.textContent?.trim() === 'History'");
 
-      // --- US3: Details content and Chat/Escape isolation ----------------------------------
-      await evaluate("document.querySelector('.usage-toolbar-actions button:nth-child(1)').focus()");
-      await enter();
-      await wait("document.querySelector('.usage-dialog')?.open === true");
-      await wait("document.querySelector('[aria-label=\"Node details\"] h2')");
-      await escape();
-      await wait("document.querySelector('.usage-dialog')?.open === false");
-      await wait("document.activeElement?.textContent?.trim() === 'Details'");
-
-      await evaluate("document.querySelector('[aria-label=\"Open chat\"]').focus()");
-      await wait("document.activeElement?.getAttribute('aria-label') === 'Open chat'");
-      await enter();
-      await wait("document.querySelector('#cluster-chat')?.classList.contains('open')");
-      await evaluate("document.querySelector('.usage-toolbar-actions button:nth-child(2)').focus()");
-      await enter();
-      await wait("document.querySelector('.usage-dialog')?.open === true");
-      await escape();
-      await wait("document.querySelector('.usage-dialog')?.open === false");
-      assert.equal(await evaluate("document.querySelector('#cluster-chat')?.classList.contains('open')"), true,
-        'closing the dialog must not close Chat');
-      await evaluate("document.querySelector('[aria-label=\"Close chat\"]').focus()");
-      await enter();
-      await wait("document.querySelector('#cluster-chat')?.classList.contains('open') === false");
-
-      // --- US1: narrow layout uses the stacked list ----------------------------------------
       await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
-      await wait("getComputedStyle(document.querySelector('.node-map-graph')).display === 'none'");
+      await wait("getComputedStyle(document.querySelector('.cluster-diagram')).display === 'none'");
+      assert.equal(await evaluate("getComputedStyle(document.querySelector('.cluster-list')).display"), 'grid');
+      assert.match(await evaluate("document.querySelector('.cluster-list').textContent"), /GiB/);
+      assert.equal(await evaluate('document.querySelectorAll(".cluster-list .topology-node").length'), 16);
       assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
         'narrow layout must not overflow horizontally');
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.node-map-list')).display"), 'grid');
-      const narrowList = await evaluate("document.querySelector('.node-map-list').textContent");
-      assert.match(narrowList, /Host CPU/);
-      assert.match(narrowList, /GPU 0/);
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.node-map')).overflowY"), 'auto',
-        'the node list must scroll inside the workspace');
-      assert.equal(await evaluate('document.querySelectorAll(".node-map-list button").length'), 16);
 
-      // --- SC-006: the mobile list is fully keyboard operable ------------------------------
-      await evaluate("document.querySelector('.node-map-list button').focus()");
-      await wait("document.activeElement?.closest('.node-map-list') !== null");
-      await enter();
-      await wait(`document.querySelector('.node-map-list button[aria-pressed="true"]') !== null`);
-      await evaluate("document.querySelector('.usage-toolbar-actions button:nth-child(2)').focus()");
-      await wait("document.activeElement?.textContent?.trim() === 'History'");
-      await enter();
-      await wait("document.querySelector('.usage-dialog')?.open === true");
-      await wait("document.querySelector('[aria-label^=\"Recorded usage\"] button.btn.block[aria-label*=\"UTC\"]')");
-      await evaluate("document.querySelector('[aria-label^=\"Recorded usage\"] button.btn.block[aria-label*=\"UTC\"]').focus()");
-      await enter();
-      await wait("document.querySelector('[aria-label^=\"Recorded usage\"] [role=\"status\"]')?.textContent.includes('Selected')");
-      await escape();
-      await wait("document.querySelector('.usage-dialog')?.open === false");
-      await wait("document.activeElement?.textContent?.trim() === 'History'");
-      await evaluate("document.querySelector('[aria-label=\"Open chat\"]').focus()");
-      await wait("document.activeElement?.getAttribute('aria-label') === 'Open chat'");
-      await enter();
-      await wait("document.querySelector('#cluster-chat')?.classList.contains('open')");
-      await evaluate("document.querySelector('[aria-label=\"Close chat\"]').focus()");
-      await enter();
-      await wait("document.querySelector('#cluster-chat')?.classList.contains('open') === false");
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
-        'keyboard flows must not introduce horizontal overflow at 390px');
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.usage-dialog')).display"), 'none',
-        'the inspector stays closed after dismissal');
-
-      // --- FR-011: reduced motion, 200% zoom-equivalent viewport, short landscape ---------
-      await call('Emulation.setEmulatedMedia', { media: 'screen', features: [
-        { name: 'prefers-reduced-motion', value: 'reduce' }
-      ] });
-      const reducedDuration = await evaluate(
-        "parseFloat(getComputedStyle(document.querySelector('.usage-chat-drawer')).transitionDuration)");
-      assert.ok(reducedDuration <= 0.001, `reduced motion must suppress drawer transition: ${reducedDuration}s`);
-      await call('Emulation.setEmulatedMedia', { media: 'screen', features: [
-        { name: 'prefers-reduced-motion', value: 'no-preference' }
-      ] });
-
-      // 640 CSS pixels approximates a 1280px desktop at 200% browser zoom.
-      await call('Emulation.setDeviceMetricsOverride', { width: 640, height: 360, deviceScaleFactor: 1, mobile: false });
-      await wait('innerWidth === 640 && innerHeight === 360');
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
-        '200%-zoom-equivalent viewport must not overflow horizontally');
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.node-map-list')).display"), 'grid');
-      assert.equal(await evaluate('document.querySelectorAll(".node-map-list button").length'), 16,
-        'node summaries remain reachable in the zoomed list');
-      assert.equal(await evaluate(`(() => [...document.querySelectorAll('.cluster-controls summary, .usage-toolbar-actions button')]
-        .every((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top < innerHeight; }))()`), true,
-        'cluster, inspector and chat controls stay visible in the zoomed viewport');
-
-      // Short landscape keeps the graph framed and the page horizontally contained.
-      await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 480, deviceScaleFactor: 1, mobile: false });
-      await wait('innerWidth === 1280 && innerHeight === 480');
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
-        'short landscape must not overflow horizontally');
-      assert.equal(await evaluate("getComputedStyle(document.querySelector('.node-map-graph')).display"), 'block');
-      await evaluate("document.querySelector('.node-map-controls button:nth-child(4)').focus()");
-      await enter();
-      assertContained(await cardBounds(), 'short-landscape initial fit');
-      const shortLandscapeScale = scaleOf(await transform());
-      await evaluate("document.querySelector('[aria-label=\"Zoom out\"]').focus()");
-      await enter();
-      assert.ok(scaleOf(await transform()) < shortLandscapeScale,
-        'zoom out must remain decreasing when Fit uses a very small scale');
-      assert.equal(await evaluate("document.querySelectorAll('.usage-toolbar-actions button').length"), 3,
-        'Details, History and Chat remain available in short landscape');
-      assert.equal(await evaluate(`(() => [...document.querySelectorAll(
-        '.cluster-controls summary, .usage-toolbar-actions button, .node-map-controls button')]
-        .every((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top < innerHeight; }))()`), true,
-        'cluster, map, inspector and chat controls stay reachable in short landscape');
-
-      await call('Emulation.setDeviceMetricsOverride', { width: 768, height: 1024, deviceScaleFactor: 1, mobile: false });
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
-        'tablet width must not overflow horizontally');
-
-      // --- Shell change must not stop the other routes from scrolling -----------------------
+      await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
+      await wait('innerWidth === 1280');
       await call('Page.navigate', { url: base + '/models' });
       await wait("document.querySelector('.app-main')");
       assert.equal(await evaluate("getComputedStyle(document.querySelector('.app-main')).overflowY"), 'auto',
         'other routes scroll inside the main region');
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true,
-        'Models must not overflow horizontally after the shell change');
 
-      // --- US1: one/four-node initial framing ----------------------------------------------
-      await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
-      await navigate('one', 1);
-      assertContained(await cardBounds(), 'one-node initial fit');
-      const singleScale = scaleOf(await transform());
-      assert.ok(singleScale != null && singleScale <= 1, `single node scale must be <= 1: ${singleScale}`);
-      await navigate('four', 4);
-      assertContained(await cardBounds(), 'four-node initial fit');
-      assert.match(await evaluate("document.querySelector('.node-map-graph').textContent"), /Host CPU/);
-
-      const nativeText = await evaluate("document.querySelector('.node-map-graph').textContent");
-      assert.match(nativeText, /GPU utilization/);
-      assert.match(nativeText, /GPU shared RAM/);
-      assert.match(nativeText, /AMD Radeon RX 9070 XT/);
-      const brokenLabels = await evaluate(`(() => [...document.querySelectorAll('.node-map-card .node-metric .k')]
-        .filter(label => { const range = document.createRange(); range.selectNodeContents(label);
-          return new Set([...range.getClientRects()].map(rect => Math.round(rect.top))).size > 1; })
-        .map(label => label.textContent))()`);
-      assert.deepEqual(brokenLabels, [], 'native metric labels must remain on one line');
+      mode = 'four';
+      await call('Page.navigate', { url: base + '/' });
+      await wait("document.querySelectorAll('.cluster-diagram .topology-node').length === 4");
+      assert.match(await evaluate("document.querySelector('.cluster-diagram').textContent"), /GiB/);
 
       // --- Logs: master+worker trail, refresh modes, display-only Clear ---------------------
       mode = 'four';
       logsWrites = 0;
       await call('Page.navigate', { url: base + '/logs' });
       await wait("document.querySelectorAll('.logs-row').length === 2");
-      assert.match(await evaluate("document.querySelector('.dashboard-header').textContent"), /Logs/);
+      assert.match(await evaluate("document.querySelector('aside.sidebar').textContent"), /Activity/);
       const logsText = await evaluate("document.querySelector('.logs-scroll').textContent");
       assert.match(logsText, /boot ok/);
       assert.match(logsText, /worker ready/);

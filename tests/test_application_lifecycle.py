@@ -11,8 +11,10 @@ from kllm.state import ClusterState
 
 
 @pytest.mark.asyncio
-async def test_agent_lifespan_closes_app_resources_when_application_fails():
-    state = ClusterState(node_id="node-1")
+@pytest.mark.parametrize("role", ["idle", "worker"])
+async def test_agent_lifespan_closes_app_resources_when_application_fails(role, monkeypatch):
+    state = ClusterState(node_id="node-1", role=role, members={"old-master": {"role": "master"}})
+    monkeypatch.setattr(state, "save", lambda: None)
     calls: list[str] = []
     feed = SimpleNamespace()
 
@@ -61,6 +63,8 @@ async def test_agent_lifespan_closes_app_resources_when_application_fails():
 
     with pytest.raises(RuntimeError, match="request failed"):
         async with lifespan.run(app):
+            assert ("master heartbeat unreachable" in state.netsec_warnings) == (role == "worker")
+            assert "old-master" in state.members
             assert app.state.inference_client == "inference-client"
             assert app.state.live_feed is feed
             raise RuntimeError("request failed")

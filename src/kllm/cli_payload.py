@@ -47,6 +47,19 @@ def build_plan_run_payload(
     repeat_penalty: float | None = None,
     enable_thinking: bool | None = None,
     split_mode: str | None = None,
+    settings_source: str = "saved",
+    threads_batch: int | None = None,
+    draft_max: int | None = None,
+    seed: int | None = None,
+    max_output_tokens: int | None = None,
+    frequency_penalty: float | None = None,
+    stop: list[str] | None = None,
+    reasoning_effort: str | None = None,
+    reasoning_budget: int | None = None,
+    reasoning_format: str | None = None,
+    gpu_ids: list[int] | None = None,
+    node_priority: list[str] | None = None,
+    network_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -101,4 +114,14 @@ def build_plan_run_payload(
         payload["enable_thinking"] = enable_thinking
     if split_mode is not None:
         payload["split_mode"] = split_mode
+    payload["settings_source"] = settings_source
+    for key, value in {
+        "threads_batch": threads_batch, "draft_max": draft_max, "seed": seed,
+        "max_output_tokens": max_output_tokens, "frequency_penalty": frequency_penalty,
+        "stop": stop, "reasoning_effort": reasoning_effort, "reasoning_budget": reasoning_budget,
+        "reasoning_format": reasoning_format, "gpu_ids": gpu_ids, "node_priority": node_priority,
+        "network_id": network_id,
+    }.items():
+        if value is not None:
+            payload[key] = value
     return payload

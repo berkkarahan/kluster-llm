@@ -2,11 +2,20 @@
   import { appStore } from '$lib/store.svelte';
   import { pushToast } from '$lib/toast';
   import { onMount } from 'svelte';
+  import ChatPanel from '$lib/components/ChatPanel.svelte';
   import { connectCommand, shellQuote, type CommandShell } from '$lib/connect-command';
 
-  const agents = ['claude', 'opencode', 'codex', 'hermes', 'openclaw', 'pi'];
+  const agents = [
+    { id: 'claude', name: 'Claude' },
+    { id: 'opencode', name: 'OpenCode' },
+    { id: 'codex', name: 'Codex' },
+    { id: 'hermes', name: 'Hermes' },
+    { id: 'openclaw', name: 'OpenClaw' },
+    { id: 'pi', name: 'Pi' }
+  ];
 
   let shell = $state<CommandShell>('bash');
+  let harness = $state('codex');
   let origin = $state('');
   onMount(() => { origin = window.location.origin; shell = /Win/.test(navigator.platform) ? 'powershell' : 'bash'; });
   const model = $derived((appStore.status?.process_pid || appStore.status?.inference_up)
@@ -30,33 +39,53 @@
   }
 </script>
 
-<div class="page-frame max-w-3xl mx-auto p-4">
-  <h1 class="page-title">Connect harnesses</h1>
-  <p class="page-description">
-    Launch an installed coding agent using the cluster model. Set KLLM_API_KEY in your terminal first.
-  </p>
-
-  <div class="panel p-3 mb-4 mono text-[12px]" style="border-color: var(--border)">
-    <div>API base <span style="color: var(--accent)">{endpoint}</span></div>
-    <div>Model: {model || 'Select or run a model first'}</div>
-    <label>Shell <select class="field" bind:value={shell}><option value="bash">Bash / Zsh</option><option value="powershell">PowerShell</option></select></label>
-    <div class="mt-1">
-      Token
-      <button class="btn ml-2" disabled={!appStore.apiToken || remoteMaster} onclick={() => copy(appStore.apiToken || '')}>Copy token</button>
-      <button class="btn ml-1" onclick={() => appStore.loadToken()}>Refresh</button>
-      <button class="btn ml-1" disabled={!appStore.apiToken || remoteMaster} onclick={() => copy(tokenCommand())}>Copy token setup</button>
+<div class="stack">
+  <header class="page-heading">
+    <div>
+      <p class="eyebrow">Connect</p>
+      <h1 id="page-title">Connect a harness</h1>
+      <p>Point a coding agent at this cluster, then chat with the running model.</p>
     </div>
-    {#if remoteMaster}<p>Get KLLM_API_KEY from the <a href={endpoint}>master dashboard</a>; this worker's token cannot authenticate inference.</p>{/if}
-  </div>
+  </header>
 
-  <div class="flex flex-col gap-2">
+  <section class="panel panel-pad stack-sm">
+    <div class="od-stat">
+      <span class="stat-label">Endpoint</span>
+      <strong class="mono">{endpoint || '—'}</strong>
+    </div>
+    <p>Model: {model || 'Select or run a model first'}</p>
+    <label class="field" style="max-width: 240px">
+      Shell
+      <select class="field" bind:value={shell}>
+        <option value="bash">Bash / Zsh</option>
+        <option value="powershell">PowerShell</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" disabled={!appStore.apiToken || remoteMaster} onclick={() => copy(appStore.apiToken || '')}>Copy token</button>
+      <button class="btn" type="button" onclick={() => appStore.loadToken()}>Refresh</button>
+      <button class="btn" type="button" disabled={!appStore.apiToken || remoteMaster} onclick={() => copy(tokenCommand())}>Copy token setup</button>
+    </div>
+    {#if remoteMaster}<p>Get KLLM_API_KEY from the <a href={endpoint}>master dashboard</a>. This worker token cannot authenticate inference.</p>{/if}
+  </section>
+
+  <div class="connection-grid">
     {#each agents as agent}
-      <div class="connect-row panel px-3 py-2 flex items-center gap-3" style="border-color: var(--border)">
-        <span class="mono w-24" style="color: var(--accent)">{agent}</span>
-        <code class="connect-command mono flex-1 text-[12px]" style="color: var(--muted)">{cmd(agent)}</code>
-        <button class="btn" disabled={!model || !endpoint} onclick={() => copy(cmd(agent))}>Copy</button>
-        <button class="btn" disabled={!model || !endpoint} onclick={() => copy(cmd(agent, true))}>--no-launch</button>
-      </div>
+      <button class="harness" class:active={harness === agent.id} type="button" onclick={() => harness = agent.id}>
+        <span class="harness-letter">{agent.name.slice(0, 1)}</span>
+        <span class="od-field">
+          <strong>{agent.name}</strong>
+          <small>{agent.id}</small>
+        </span>
+      </button>
     {/each}
   </div>
+
+  <div class="code-row">
+    <code>{cmd(harness) || 'Select or run a model first'}</code>
+    <button class="btn" type="button" disabled={!model || !endpoint} onclick={() => copy(cmd(harness))}>Copy</button>
+    <button class="btn" type="button" disabled={!model || !endpoint} onclick={() => copy(cmd(harness, true))}>--no-launch</button>
+  </div>
+
+  <ChatPanel />
 </div>

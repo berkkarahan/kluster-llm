@@ -737,7 +737,7 @@ def test_prefer_prebuilt_allowed_on_macos_cpu(install, monkeypatch, tmp_path):
     monkeypatch.setattr(install, "install_llama", lambda *a, **k: None)
     monkeypatch.setattr(install, "verify_llama_installed", lambda *a, **k: None)
 
-    assert install.main(["--llama-only", "--prefer-prebuilt", "--backend", "cpu"]) == 0
+    assert install.main(["--sync", "--llama-only", "--prefer-prebuilt", "--backend", "cpu"]) == 0
 
 
 def test_main_runs_install_stages_concurrently_and_reports_failure(

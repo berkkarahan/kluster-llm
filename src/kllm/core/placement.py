@@ -358,7 +358,7 @@ def plan_devices(
     def ram(n: PlacementNodeInput) -> int:
         # Only measured allocations of the process being replaced may be reclaimed.
         return min(
-            int(n.total_ram_bytes * headroom),
+            int(n.total_ram_bytes * min(headroom, n.ram_fraction)),
             n.available_ram_bytes + n.reclaimable_ram_bytes,
         )
 
@@ -379,7 +379,7 @@ def plan_devices(
                 total = inventory_device.vram_bytes
                 free = inventory_device.free_bytes
                 budget = min(
-                    int(total * headroom), free + inventory_device.reclaimable_bytes
+                    int(total * min(headroom, n.vram_fraction)), free + inventory_device.reclaimable_bytes
                 )
                 if n.unified_memory:
                     budget = min(budget, max(0, ram(n) - (cpu_base if n.is_master else 0)))

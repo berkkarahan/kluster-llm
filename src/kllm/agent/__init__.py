@@ -118,6 +118,7 @@ from kllm.agent.schemas import (
     LlamaSetupBody,
     LogsIngestBody,
     ModelSettingsBody,
+    LegacyModelSettingsBody,
     RegisterBody,
     SearchBody,
     StartBody,
@@ -168,7 +169,7 @@ from kllm.run_planning import (
     validate_vision_for_run,
 )
 from kllm.run_launch import build_master_launch
-from kllm.run_settings import PlanBody, RunBody
+from kllm.run_settings import PlanBody, RunBody, LegacyPlanBody, LegacyRunBody
 from kllm import membership as membership_mod
 from kllm.state import (
     DEFAULT_CONTROL_PORT,
@@ -548,7 +549,7 @@ def _ensure_master_control_route(master_host: str, master_port: int) -> list[str
     warnings: list[str] = []
     try:
         handle = cp_proxy.ensure_for_master(master_host, master_port)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         raise HTTPException(502, str(exc)) from exc
     if handle is None:
         STATE.cp_proxy_port = None
@@ -581,6 +582,60 @@ def _membership_heartbeat_service() -> MembershipHeartbeatService:
 
 def _worker_post_heartbeat() -> None:
     _membership_heartbeat_service().post_heartbeat()
+
+
+_worker_launch_lock = threading.Lock()
+_worker_runtime_retry = {"failures": 0, "next_attempt": 0.0}
+_WORKER_RUNTIME_RETRY_BASE_S = 15.0
+_WORKER_RUNTIME_RETRY_MAX_S = 300.0
+
+
+def _worker_runtime_healthy() -> bool:
+    if STATE.process_role != "worker" or not STATE.process_pid:
+        return False
+    try:
+        return bool(native.process_alive(int(STATE.process_pid)))
+    except Exception:
+        return True
+
+
+def _ensure_worker_runtime() -> None:
+    """Restart a joined worker's rpc-server after it dies or a rejoin loses it.
+
+    A worker can stay connected on the control plane while its rpc-server is not
+    running, which makes the cluster look healthy but fail every Run at the RPC
+    preflight. Reconcile the local runtime so a connected worker stays serveable.
+    """
+    if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
+        return
+    if _worker_runtime_healthy():
+        _worker_runtime_retry["failures"] = 0
+        _worker_runtime_retry["next_attempt"] = 0.0
+        return
+    now = time.monotonic()
+    if now < _worker_runtime_retry["next_attempt"]:
+        return
+    # Never block the heartbeat cadence waiting on an in-flight join; the join
+    # itself brings the runtime up.
+    if not _worker_launch_lock.acquire(blocking=False):
+        return
+    try:
+        # A join may have started the worker while this tick was waiting.
+        if _worker_runtime_healthy():
+            return
+        result = _runtime_setup_service().ensure_worker(STATE)
+    finally:
+        _worker_launch_lock.release()
+    if result is None or not result.get("error"):
+        _worker_runtime_retry["failures"] = 0
+        _worker_runtime_retry["next_attempt"] = 0.0
+        return
+    _worker_runtime_retry["failures"] = min(_worker_runtime_retry["failures"] + 1, 5)
+    delay = min(
+        _WORKER_RUNTIME_RETRY_BASE_S * (2 ** (_worker_runtime_retry["failures"] - 1)),
+        _WORKER_RUNTIME_RETRY_MAX_S,
+    )
+    _worker_runtime_retry["next_attempt"] = now + delay
 
 
 def _probe_worker_latencies() -> None:
@@ -623,6 +678,7 @@ _membership_background = MembershipLoop(
     interval_seconds=membership_mod.HEARTBEAT_INTERVAL_S,
     synchronize_master=lambda: _sync_master_liveness(shrink=True),
     post_worker_heartbeat=lambda: _worker_post_heartbeat(),
+    ensure_worker_runtime=lambda: _ensure_worker_runtime(),
     schedule_worker_probe=lambda: _schedule_worker_latency_probe(),
     schedule_capacity_refresh=lambda: _schedule_local_capacity_refresh(),
 )
@@ -801,6 +857,8 @@ def _runtime_setup_service() -> RuntimeSetupService:
         resolve_gpu_selection=_resolve_gpu_selection,
         register_child=runtime.register_child,
         rpc_log_path=cluster_log.rpc_server_log_path,
+        process_alive=native.process_alive,
+        stop_stray_rpc_servers=runtime.stop_stray_rpc_servers,
     )
 
 
@@ -902,7 +960,8 @@ async def chat_completions(
             model_path = model_ops.resolve_local_model(STATE.model_name)
         except FileNotFoundError:
             model_path = None
-    return await gateway.proxy_chat_completions(STATE.infer_port, request, model_path=model_path)
+    return await gateway.proxy_chat_completions(STATE.infer_port, request, model_path=model_path,
+                                                active_config=_active_config())
 
 
 async def anthropic_messages(
@@ -915,11 +974,19 @@ async def anthropic_messages(
             model_path = model_ops.resolve_local_model(STATE.model_name)
         except FileNotFoundError:
             model_path = None
-    return await gateway.proxy_anthropic_messages(STATE.infer_port, request, model_path=model_path)
+    return await gateway.proxy_anthropic_messages(STATE.infer_port, request, model_path=model_path,
+                                                  active_config=_active_config())
 
 
 async def responses(request: Request, _: None = Depends(_require_api_token)) -> Any:
-    return await gateway.proxy_responses(STATE.infer_port, request)
+    return await gateway.proxy_responses(STATE.infer_port, request, active_config=_active_config())
+
+
+def _active_config() -> dict[str, Any] | None:
+    snapshot = STATE.active_config
+    if snapshot and STATE.process_role == "master" and snapshot.get("process_pid") == STATE.process_pid:
+        return snapshot
+    return None
 
 
 async def response_tokens(request: Request, _: None = Depends(_require_api_token)) -> Any:
@@ -1199,12 +1266,18 @@ def _cluster_join_service() -> ClusterJoinService:
             register_child=runtime.register_child,
             rpc_server_log_path=cluster_log.rpc_server_log_path,
             post_worker_heartbeat=_worker_post_heartbeat,
+            stop_process=native.stop_process,
+            clear_children=runtime.clear_children,
+            stop_stray_rpc_servers=runtime.stop_stray_rpc_servers,
         )
     )
 
 
 def _join_cluster(body: JoinBody) -> dict[str, Any]:
-    return _cluster_join_service().join(body)
+    # Serialize with the background reconciler so a rejoin and a runtime
+    # self-heal cannot start two rpc-servers on the same RPC port.
+    with _worker_launch_lock:
+        return _cluster_join_service().join(body)
 
 
 def _worker_bring_up_wg(join_key: str, reg: dict[str, Any]) -> str:
@@ -1568,6 +1641,8 @@ def _inference_handlers() -> InferenceHandlers:
     return InferenceHandlers(
         InferenceDependencies(
             state=STATE,
+            resolve_settings=lambda body: _run_settings_handlers().resolve(body),
+            preflight=lambda body, path: _run_settings_handlers().preflight(body, path),
             ensure_master_member=lambda: _ensure_master_member(persist=True),
             merge_extra=merge_and_sanitize_extra,
             execute_plan=execute_plan,
@@ -1634,6 +1709,21 @@ def run(body: RunBody) -> dict[str, Any]:
     return _inference_handlers().run(body)
 
 
+def legacy_plan(body: LegacyPlanBody, preview: bool = False) -> dict[str, Any]:
+    return _inference_handlers().plan(body, preview)
+
+
+def legacy_run(body: LegacyRunBody) -> dict[str, Any]:
+    return _inference_handlers().run(body)
+
+
+def legacy_put_model_settings(model: str, body: LegacyModelSettingsBody) -> dict[str, Any]:
+    from kllm.run_settings import RunSettingsFields
+    from kllm.parameter_catalog import canonicalize_parameters
+    values = {key: value for key, value in body.parameter_set.items() if key in RunSettingsFields.model_fields}
+    return put_model_settings(model, ModelSettingsBody(parameter_set=canonicalize_parameters(values, legacy=True)))
+
+
 def stop_inference() -> dict[str, Any]:
     """Stop llama-server and drop the loaded model. The cluster stays up."""
     return _inference_handlers().stop()
@@ -1695,7 +1785,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_hf_token": get_hf_token,
     "put_hf_token": put_hf_token,
 }
-legacy_v1_router = _build_v1_router(_route_handlers)
+legacy_v1_router = _build_v1_router({**_route_handlers, "plan": legacy_plan, "run": legacy_run,
+                                  "put_model_settings": legacy_put_model_settings})
 app.include_router(legacy_v1_router)
 app.include_router(_build_v2_router(_route_handlers))
 app.include_router(build_network_router(_managed_network_service))

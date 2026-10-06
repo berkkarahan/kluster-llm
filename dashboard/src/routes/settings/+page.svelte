@@ -14,8 +14,16 @@
   import type { HomePaths } from '$lib/types';
 
   let home = $state<HomePaths | null>(null);
+  let section = $state('hardware');
 
   const live = $derived(appStore.viewState() === 'live');
+  const sections = [
+    { id: 'hardware', label: 'Hardware' },
+    { id: 'network', label: 'Network' },
+    { id: 'tokens', label: 'Tokens' },
+    { id: 'software', label: 'Software' },
+    { id: 'paths', label: 'Paths' }
+  ];
 
   onMount(async () => {
     try {
@@ -27,35 +35,35 @@
   });
 </script>
 
-<div class="page-frame mx-auto w-full max-w-[960px] px-4 py-5">
-  <div class="mb-4 flex flex-wrap items-end justify-between gap-2">
+<div class="stack">
+  <header class="page-heading">
     <div>
-      <h1 class="page-title">System Settings</h1>
-      <p class="page-description">
-        Cluster runtime, bind, and secret configuration. Applies on next worker restart.
-      </p>
+      <p class="eyebrow">Settings</p>
+      <h1 id="page-title">Node settings</h1>
+      <p>Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.</p>
     </div>
-    <p class="mono m-0 text-[11px] nums" style="color: var(--muted)">
-      node {appStore.status?.node_id ?? '—'} · probed {appStore.probedBackend}
-    </p>
-  </div>
+    <p class="mono small muted">node {appStore.status?.node_id ?? '—'} · probed {appStore.probedBackend}</p>
+  </header>
 
-  <div class="flex flex-col gap-3">
-    <section class="panel p-3.5" aria-labelledby="hw-label">
-      <h2 id="hw-label" class="mono text-[11px] uppercase tracking-wider mb-3" style="color: var(--muted)">
-        Hardware &amp; Compute
-      </h2>
+  <div class="settings-layout">
+    <nav class="settings-nav" aria-label="Settings sections">
+      {#each sections as item}
+        <button type="button" class:active={section === item.id} aria-current={section === item.id ? 'true' : undefined} onclick={() => section = item.id}>{item.label}</button>
+      {/each}
+    </nav>
+    <div class="settings-body">
+    <section class="panel panel-pad" aria-labelledby="hw-label" hidden={section !== 'hardware'}>
+      <h2 id="hw-label">Hardware</h2>
       <HardwareSettings lockBackend={live} />
     </section>
 
-    <NetworkSecurity />
-    <Tokens />
-    <Software />
+    <div hidden={section !== 'network'}><NetworkSecurity /></div>
+    <div hidden={section !== 'tokens'}><Tokens /></div>
+    <div hidden={section !== 'software'}><Software /></div>
 
-    <section class="panel p-3.5" aria-labelledby="data-label">
-      <h2 id="data-label" class="mono text-[11px] uppercase tracking-wider mb-2" style="color: var(--muted)">
-        Data directory
-      </h2>
+    <section class="panel panel-pad" aria-labelledby="data-label" hidden={section !== 'paths'}>
+      <h2 id="data-label">Paths</h2>
+      <p class="muted">Paths reported by /v2/node/home.</p>
       <div class="mono text-[12px] nums">
         {#if home}
           {#each [{ label: 'home', path: home.home }, { label: 'models', path: home.models }, { label: 'logs', path: home.logs }] as item (item.label)}
@@ -72,5 +80,6 @@
         {/if}
       </div>
     </section>
+    </div>
   </div>
 </div>

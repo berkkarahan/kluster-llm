@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -115,3 +116,98 @@ def test_runtime_setup_returns_relaunch_failure_without_losing_install_result():
         "ok": True,
         "relaunch": {"error": "spawn failed"},
     }
+
+
+def _worker_state() -> ClusterState:
+    state = ClusterState(
+        node_id="worker-1",
+        role="worker",
+        master_host="10.0.0.1",
+        join_key="secret",
+        rpc_bind="10.0.0.2",
+        rpc_port=50052,
+        gpu_ids=[2],
+    )
+    state.members[state.node_id] = {"backend": "cuda"}
+    state.save = lambda: None  # type: ignore[method-assign]
+    return state
+
+
+def _service(state: ClusterState, calls: list[object], *, alive: bool | Callable[[int], bool] = True) -> RuntimeSetupService:
+    def process_alive(pid: int) -> bool:
+        return alive(pid) if callable(alive) else bool(alive)
+
+    return RuntimeSetupService(
+        lambda: state,
+        install_pack=lambda *_args: {"ok": True},
+        repository_root=lambda: Path("/repo"),
+        gpu_visibility_env=lambda *_args: {},
+        stop_process=lambda pid, *, force: calls.append(("stop", pid, force)),
+        clear_children=lambda: calls.append(("clear",)),
+        start_worker=lambda **kwargs: calls.append(("start", kwargs)) or {"pid": 99},
+        resolve_gpu_selection=lambda ids: ResolvedGpuSelection(
+            GpuSelection((2,), "cuda", 1024) if ids == [2] else GpuSelection((), "cpu", None),
+            (GpuDeviceInput(index=2, device="GPU-2"),) if ids == [2] else (),
+        ),
+        register_child=lambda pid, role: calls.append(("register", pid, role)),
+        rpc_log_path=lambda: Path("/logs/rpc.log"),
+        process_alive=process_alive,
+        stop_stray_rpc_servers=lambda: calls.append(("stray",)) or 0,
+    )
+
+
+def test_ensure_worker_restarts_when_process_missing_and_clears_strays():
+    state = _worker_state()
+    calls: list[object] = []
+
+    result = _service(state, calls).ensure_worker(state)
+
+    assert result is not None and result.get("pid") == 99
+    assert calls[0] == ("stray",)
+    assert ("register", 99, "rpc-server") in calls
+    assert (state.process_pid, state.process_role) == (99, "worker")
+    assert state.members[state.node_id]["rpc_devices"][0]["device"] == "GPU-2"
+
+
+def test_ensure_worker_skips_healthy_worker():
+    state = _worker_state()
+    state.process_pid = 42
+    state.process_role = "worker"
+    calls: list[object] = []
+
+    result = _service(state, calls, alive=True).ensure_worker(state)
+
+    assert result is None
+    assert calls == []
+
+
+def test_ensure_worker_restarts_dead_tracked_process():
+    state = _worker_state()
+    state.process_pid = 42
+    state.process_role = "worker"
+    calls: list[object] = []
+
+    result = _service(state, calls, alive=lambda pid: pid == 99).ensure_worker(state)
+
+    assert result is not None and result.get("pid") == 99
+    assert ("stop", 42, True) in calls
+
+
+def test_ensure_worker_clears_state_when_replacement_exits_immediately():
+    state = _worker_state()
+    calls: list[object] = []
+
+    result = _service(state, calls, alive=False).ensure_worker(state)
+
+    assert result is not None and result.get("error")
+    assert (state.process_pid, state.process_role) == (None, None)
+    assert state.members[state.node_id]["rpc_devices"] == []
+    assert not any(call[0] == "register" for call in calls if isinstance(call, tuple))
+
+
+def test_ensure_worker_ignores_non_worker_role():
+    state = ClusterState(node_id="master", role="master")
+    calls: list[object] = []
+
+    assert _service(state, calls).ensure_worker(state) is None
+    assert calls == []

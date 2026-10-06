@@ -353,6 +353,9 @@ registry.register("pi", lambda **kw: plan_pi(
     kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
 ))
 
+# Public list of built-in harnesses (registration order-independent).
+AGENTS: list[str] = registry.list_agents()
+
 
 def build_launch_plan(
     agent: str,

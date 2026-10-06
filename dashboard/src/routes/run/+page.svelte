@@ -1,723 +1,296 @@
 <script lang="ts">
+  import { tick, untrack } from 'svelte';
   import ErrorMessage from '$lib/components/ErrorMessage.svelte';
-  import type { DeviceAllocation } from '$lib/types';
-  import AutoEditField from '$lib/components/AutoEditField.svelte';
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
-  import HardwareSettings from '$lib/components/HardwareSettings.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import JinjaEditor from '$lib/components/JinjaEditor.svelte';
-  import SliderField from '$lib/components/SliderField.svelte';
+  import ParameterControl from '$lib/components/ParameterControl.svelte';
+  import ExpertArguments from '$lib/components/ExpertArguments.svelte';
+  import DeploymentPlan from '$lib/components/DeploymentPlan.svelte';
   import { appStore } from '$lib/store.svelte';
-  import { formatGib, formatMemoryComponent } from '$lib/format-memory';
-  import { CONTEXT_STEP, KV_CACHE_TYPES, MIN_CONTEXT } from '$lib/types';
+  import { formatGib } from '$lib/format-memory';
+  import { MIN_CONTEXT } from '$lib/types';
+  import type { DeviceAllocation } from '$lib/types';
+  import { PARAMETER_LABELS } from '$lib/configuration';
 
-  function bumpEstimate() {
-    appStore.scheduleEstimate();
+  let deployStep = $state<1 | 2 | 3>(1);
+  let showJinjaEditor = $state(false);
+  let featureOpen = $state(false);
+  const blocked = $derived(appStore.planRunBlockedReason());
+  const nodeIds = $derived([...new Set([...(appStore.nodePriority ?? []), ...Object.keys(appStore.status?.members ?? {}), ...appStore.requiredNodes])]);
+  const effective = $derived(appStore.effectiveConfig());
+  const allocations = $derived((appStore.planResult?.device_allocations as DeviceAllocation[] | undefined) ?? []);
+  const fit = $derived(String(appStore.planResult?.fit_status ?? ''));
+  const ready = $derived(!blocked && !!appStore.planResult && !appStore.estimating && !appStore.estimateError && ['fits', 'tight'].includes(fit));
+  const estimateReady = $derived(appStore.status?.role === 'master' && !!appStore.selectedModel && !appStore.settingsLoading);
+  const changes = $derived(Object.entries(effective?.requested ?? {}).filter(([key, value]) =>
+    JSON.stringify(value) !== JSON.stringify(appStore.savedModelConfig?.[key])));
+  const cliExport = $derived.by(() => { try { return appStore.configurationCommand(); } catch { return 'Fix argument syntax to export this configuration.'; } });
+  const jsonExport = $derived.by(() => { try { const body = appStore.networkPlanPayload(); delete body.remember; delete body.advanced_open; return JSON.stringify(body, null, 2); } catch { return ''; } });
+  $effect(() => { if (estimateReady) untrack(() => appStore.scheduleEstimate()); });
+
+  async function nextStep(target: 1 | 2 | 3) {
+    if (target === 1) { deployStep = 1; return; }
+    if (!appStore.selectedModel || appStore.settingsLoading || appStore.settingsLoadError) return;
+    if (!appStore.validateRunSettings(true)) {
+      deployStep = 2;
+      featureOpen = true;
+      await tick();
+      const first = Object.keys(appStore.fieldErrors)[0];
+      const element = document.getElementById(`run-${first?.replaceAll('_', '-')}`);
+      element?.closest('details')?.setAttribute('open', '');
+      element?.focus();
+      return;
+    }
+    if (target === 3 && (!appStore.planResult || appStore.estimating)) await appStore.refreshEstimate();
+    deployStep = target;
   }
 
-  const blocked = $derived(appStore.planRunBlockedReason());
-  const loadPhase = $derived(appStore.loadProgress?.phase);
-  const inferenceStoppable = $derived(
-    appStore.status?.role === 'master' && (
-      appStore.status?.process_role === 'master'
-      || !!appStore.status?.inference_up
-      || !!appStore.status?.model_name
-      || loadPhase === 'starting'
-      || loadPhase === 'loading'
-    )
-  );
-  const fitStatus = $derived(
-    appStore.planResult?.fit_status ? String(appStore.planResult.fit_status) : null
-  );
-  const overflowGpuBudget = $derived.by(() => {
-    if (fitStatus !== 'overflow') return null;
-    const budgets = appStore.planResult?.node_gpu_budget_bytes;
-    if (!budgets || typeof budgets !== 'object') return null;
-    let total = 0;
-    let any = false;
-    for (const value of Object.values(budgets as Record<string, unknown>)) {
-      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-        total += value;
-        any = true;
-      }
-    }
-    return any ? total : null;
-  });
-  const overflowRamBudget = $derived.by(() => {
-    if (fitStatus !== 'overflow') return null;
-    const plan = appStore.planResult;
-    const ramBudgets = plan?.node_ram_budget_bytes;
-    if (ramBudgets && typeof ramBudgets === 'object') {
-      return Object.values(ramBudgets as Record<string, number>).reduce((sum, value) => sum + value, 0);
-    }
-    const ids = plan?.node_ids;
-    const budgets = plan?.budgets_bytes;
-    if (!Array.isArray(ids) || !Array.isArray(budgets)) return null;
-    const members = appStore.status?.members ?? {};
-    const master = ids.findIndex((id) => members[String(id)]?.role === 'master');
-    const index = master >= 0 ? master : ids.length === 1 ? 0 : -1;
-    const value = index >= 0 ? budgets[index] : null;
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-  });
-  const maxContext = $derived(appStore.selectedModelMaxContext());
-  const contextDisabled = $derived(appStore.contextAuto || !!appStore.busy);
-  const estimateReady = $derived(
-    appStore.status?.role === 'master' &&
-    Object.keys(appStore.status?.members ?? {}).length > 0 &&
-    appStore.models.length > 0 && !!appStore.selectedModel
-  );
-  $effect(() => {
-    if (estimateReady) appStore.scheduleEstimate();
-  });
-  const settingsDirty = $derived(appStore.settingsDirty());
-  let showJinjaEditor = $state(false);
-  const nodeIds = $derived(Object.keys(appStore.status?.members ?? {}));
-  const automaticNodeIds = $derived([...new Set([...(appStore.nodePriority ?? []), ...nodeIds, ...appStore.requiredNodes])]);
+  function display(value: unknown): string {
+    if (value === null || value === undefined) return 'Inherit default';
+    if (Array.isArray(value)) return value.length ? JSON.stringify(value) : 'None';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
 
-  const parallelMode = $derived(appStore.parallelSlots === 'auto' ? 'auto' : 'edit');
-  const batchMode = $derived(appStore.batchSize === 'auto' ? 'auto' : 'edit');
-  const microMode = $derived(appStore.microBatch === 'auto' ? 'auto' : 'edit');
-  const moeMode = $derived(appStore.moeOffload === 'auto' ? 'auto' : 'edit');
-  const checkpointMode = $derived(appStore.checkpoints === 'auto' ? 'auto' : 'edit');
-  const cacheRamMode = $derived(appStore.cacheRam === 'auto' ? 'auto' : 'edit');
-  const speculativeMode = $derived(appStore.speculative === 'auto' ? 'auto' : 'edit');
+  function layerCount(node: string): string {
+    const assigned = allocations.filter(item => item.node_id === node);
+    if (assigned.some(item => !Number.isFinite(item.layers))) return '—';
+    const cpu = node === appStore.status?.node_id ? Number(appStore.planResult?.cpu_layers ?? NaN) : 0;
+    if (!assigned.length && !Number.isFinite(cpu)) return '—';
+    return String(assigned.reduce((sum, item) => sum + item.layers - (item.output_layer ? 1 : 0), Number.isFinite(cpu) ? cpu : 0));
+  }
 </script>
 
-<div class="page-frame max-w-2xl mx-auto p-4">
-  <h1 class="page-title">
-    PLAN &amp; RUN
-  </h1>
-  <p class="page-description">
-    Model: {appStore.selectedModel || '—'}
-  </p>
-
-  <DownloadPanel />
-
-  {#if appStore.status?.apply_error}
-    <ErrorMessage source="apply" message={appStore.status.apply_error} />
-  {/if}
-  {#if appStore.status?.apply_warning}
-    <p class="mono text-[11px] mb-3" style="color: var(--warn, #b80)">{appStore.status.apply_warning}</p>
-  {/if}
-
-  {#if blocked}
-    <p class="mono text-[11px] mb-3" style="color: var(--accent)">{blocked}</p>
-  {/if}
-
-  <div class="panel p-3 flex flex-col gap-3" style="border-color: var(--border)">
-    {#if appStore.status?.managed_networks !== undefined}
-      <label class="mono text-[11px]" for="run-network">Inference network</label>
-      <select id="run-network" class="field mono" bind:value={appStore.selectedNetworkId} disabled={!!appStore.busy} onchange={bumpEstimate}>
-        <option value="">LAN / WireGuard</option>
-        {#if appStore.selectedNetworkId && !appStore.status.managed_networks.some((network) => network.network_id === appStore.selectedNetworkId && network.observed_state !== 'stopped')}
-          <option value={appStore.selectedNetworkId}>Selected network unavailable · {appStore.selectedNetworkId}</option>
-        {/if}
-        {#each appStore.status.managed_networks.filter((network) => network.observed_state !== 'stopped') as network}
-          <option value={network.network_id}>{network.subnet} · {network.observed_state}</option>
-        {/each}
-      </select>
-      {#if appStore.selectedNetworkId}
-        <p class="mono text-[11px]">This run requires the selected dedicated network. Refresh or retry its verification if admission fails.</p>
-      {/if}
-    {/if}
-    <label class="mono text-[11px]" style="color: var(--muted)" for="run-model">Model</label>
-    <select
-      id="run-model"
-      class="field mono"
-      value={appStore.selectedModel}
-      onchange={(e) => {
-        const v = (e.currentTarget as HTMLSelectElement).value;
-        void appStore.selectModel(v).then(() => bumpEstimate());
-      }}
-    >
-      {#each appStore.models as m}
-        <option value={m.id}>{m.id}</option>
-      {/each}
-    </select>
-
-    <div class="flex items-center gap-2">
-      <label class="mono text-[11px] flex-1" style="color: var(--muted)" title="Context window size for KV cache" for="run-context">
-        Context
-      </label>
-      <label class="mono text-[11px] flex items-center gap-1" style="color: var(--muted)">
-        <input
-          type="checkbox"
-          bind:checked={appStore.contextAuto}
-          disabled={!!blocked || !!appStore.busy}
-          onchange={bumpEstimate}
-        />
-        Auto
-      </label>
-    </div>
-    <SliderField
-      id="run-context"
-      label=""
-      value={appStore.context}
-      min={MIN_CONTEXT}
-      max={maxContext}
-      step={CONTEXT_STEP}
-      disabled={contextDisabled}
-      hint={`Max ${maxContext.toLocaleString()} (model)`}
-      onChange={(v) => {
-        appStore.context = v;
-        bumpEstimate();
-      }}
-    />
-    {#if appStore.fieldErrors.context}
-      <ErrorMessage source="validation:context" message={appStore.fieldErrors.context} snapshot={false} />
-    {/if}
-
-    <section class="panel p-3 flex flex-col gap-3" aria-label="Planning">
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="mono text-[11px] uppercase tracking-wider">Planning</h2>
-        <label class="mono text-[11px]" for="run-placement-mode">Placement</label>
-        <select id="run-placement-mode" class="field mono" style="width: auto" disabled={!!appStore.busy}
-          value={appStore.nodePriority ? 'priority' : 'auto'}
-          onchange={(e) => appStore.setPriorityPlanning(e.currentTarget.value === 'priority')}>
-          <option value="auto">Automatic</option><option value="priority">Priority</option>
-        </select>
-      </div>
-      {#if appStore.estimateError}<ErrorMessage source="estimate" message={appStore.estimateError} snapshot={false} />{/if}
-      {#if !blocked && appStore.planResult?.estimated_bytes != null}
-        <div class="mono text-[11px] p-2" style="background: var(--bg); border: 1px solid var(--border)">
-          Estimated total memory: {formatGib(appStore.planResult.estimated_bytes as number)}
-          / usable total memory budget {formatGib(appStore.planResult.budget_bytes as number)}
-          {#if fitStatus === 'overflow'}
-            {#if overflowGpuBudget != null}<div>GPU budget: {formatGib(overflowGpuBudget)}</div>{/if}
-            {#if overflowRamBudget != null}<div>RAM budget: {formatGib(overflowRamBudget)}</div>{/if}
-          {:else}
-            {#if appStore.device === 'gpu' && appStore.planResult.vram_alloc_bytes != null}
-              <div>Estimated GPU memory: {formatGib(appStore.planResult.vram_alloc_bytes as number)}</div>
-            {/if}
-            {#if appStore.planResult.cpu_alloc_bytes != null}
-              <div>Estimated master CPU RAM: {formatGib(Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[appStore.status?.node_id ?? ''] ?? appStore.planResult.cpu_alloc_bytes))}</div>
-              {#if Number(appStore.planResult.ram_alloc_bytes) > Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[appStore.status?.node_id ?? ''] ?? appStore.planResult.cpu_alloc_bytes)}
-                <div>Estimated CPU RAM across nodes: {formatGib(Number(appStore.planResult.ram_alloc_bytes))}</div>
-              {/if}
-            {/if}
-          {/if}
-          {#if fitStatus}<span style:color={fitStatus === 'overflow' ? 'var(--danger)' : fitStatus === 'tight' ? 'var(--warn)' : 'var(--accent)'}>{fitStatus}</span>{/if}
-          {#if appStore.estimating}<span style="color: var(--muted)"> · updating…</span>{/if}
-          {#if appStore.planResult.weights_estimate_bytes != null}
-            <dl class="grid grid-cols-2 gap-x-3 gap-y-1 mt-2">
-              {#each [
-                ['Model weights', 'weights_estimate_bytes'], ['Auxiliary weights', 'auxiliary_weights_bytes'],
-                ['KV cache', 'kv_estimate_bytes'], ['Recurrent state', 'recurrent_state_bytes'],
-                ['Host checkpoints', 'checkpoint_estimate_bytes'], ['Compute buffers', 'compute_estimate_bytes'],
-                ['Auxiliary runtime', 'auxiliary_runtime_bytes'], ['Execution reserve', 'execution_overhead_bytes']
-              ] as [label, key]}
-                <dt>{label}</dt><dd>{formatMemoryComponent(appStore.planResult[key] as number)}</dd>
-              {/each}
-            </dl>
-          {/if}
-          {#if appStore.planResult.resolved_launch_settings}
-            {@const resolved = appStore.planResult.resolved_launch_settings as Record<string, unknown>}
-            <p class="mt-2">Resolved: context {String(resolved.context)}, batch {String(resolved.batch_size)}, micro-batch {String(resolved.micro_batch)}, {String(resolved.parallel_slots)} slot(s).</p>
-            <p>K cache: {String(resolved.cache_type_k ?? appStore.cacheTypeK)} · V cache: {String(resolved.cache_type_v ?? appStore.cacheTypeV)}. Quantization changes KV storage; weights and host checkpoints are separate.</p>
-          {/if}
-          {#if appStore.estimateNote}<p class="mt-1" aria-live="polite">{appStore.estimateNote}</p>{/if}
-          {#if appStore.planResult.estimate_complete === false}
-            <p class="mt-2" style="color: var(--danger)">Incomplete estimate: some memory costs are approximate or unpriced.</p>
-          {/if}
-          {#each (appStore.planResult.estimate_warnings as string[] | undefined) ?? [] as warning}
-            <p class="mt-1">{warning}</p>
-          {/each}
-        </div>
-        <p class="mono text-[11px] mt-2" style="color: var(--muted)">
-          Memory changes with context, K/V cache types, physical micro-batch, slots, Flash Attention/SWA,
-          checkpoints, draft/vision assets, adapters, split mode and model architecture.
-          Node shares, GPU selection, device mode, headroom and placement weights select where memory is allocated;
-          active device count can change workspace reserves.
-          Sampling, templates/thinking and threads do not reserve model memory.
-          Cache RAM is a server cache limit; mmap/mlock primarily affect host residency.
-        </p>
-      {/if}
-      <p class="mono text-[11px]" style="color: var(--muted)">{appStore.nodePriority ? 'Move nodes up or down to prioritize their devices. Earlier nodes receive as much workload as capacity and required nodes allow.' : 'Automatic planning chooses devices by capacity and latency.'} GPUs are preferred; CPU RAM is used if needed. Checked nodes must host at least one model layer.</p>
-        {#each automaticNodeIds as node, priorityIndex (node)}
-          {@const member = appStore.status?.members?.[node]}
-          {@const allocations = (appStore.planResult?.device_allocations as DeviceAllocation[] | undefined) ?? []}
-          <div class="mono text-[11px] flex flex-col gap-1">
-            {#if appStore.nodePriority}
-              <div class="flex items-center gap-2">
-                <span>{priorityIndex + 1}. {member?.role === 'master' ? 'Master' : 'Worker'} · {node}{!member ? ' · unavailable' : ''}</span>
-                <button class="btn mono" aria-label={'Move ' + node + ' up'} disabled={!!appStore.busy || priorityIndex === 0} onclick={() => appStore.moveNodePriority(node, -1)}>↑</button>
-                <button class="btn mono" aria-label={'Move ' + node + ' down'} disabled={!!appStore.busy || priorityIndex === automaticNodeIds.length - 1} onclick={() => appStore.moveNodePriority(node, 1)}>↓</button>
-                {#if !member}<button class="btn mono" aria-label={'Remove unavailable ' + node} disabled={!!appStore.busy} onclick={() => appStore.removeNodePriority(node)}>Remove</button>{/if}
-              </div>
-            {/if}
-            <label class="flex items-center gap-2" for={'required-' + node}>
-              <input id={'required-' + node} type="checkbox" checked={appStore.requiredNodes.includes(node)}
-                disabled={!!appStore.busy || (!member && !appStore.requiredNodes.includes(node))}
-                onchange={(e) => appStore.setNodeRequired(node, e.currentTarget.checked)} />
-              Must use this node · {member?.role === 'master' ? 'Master' : 'Worker'} · {node}{!member ? ' · unavailable' : ''}
-            </label>
-            {#if appStore.planResult}
-              <span style="color: var(--muted)">
-                GPU: {formatGib(Number((appStore.planResult.node_vram_alloc_bytes as Record<string, number> | undefined)?.[node] ?? 0))}
-                / {formatGib(Number((appStore.planResult.node_gpu_budget_bytes as Record<string, number> | undefined)?.[node] ?? 0))} usable
-                · CPU RAM: {formatGib(Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[node] ?? 0))}
-                / {formatGib(Number((appStore.planResult.node_ram_budget_bytes as Record<string, number> | undefined)?.[node] ?? 0))} usable
-                · {allocations.filter((a) => a.node_id === node).reduce((n, a) => n + a.layers - (a.output_layer ? 1 : 0), member?.role === 'master' && appStore.planResult.fit_status !== 'overflow' ? Math.min(Number(appStore.planResult.cpu_layers ?? 0), Number(appStore.planResult.estimated_layers ?? 0)) : 0)} model layers
-                {member?.unified_memory ? ' · shared RAM/GPU pool' : ''}
-              </span>
-            {/if}
-          </div>
-        {/each}
-      {#if fitStatus === 'overflow' && appStore.planResult?.hint}
-        <ErrorMessage source="plan-overflow" message={String(appStore.planResult.hint)} snapshot={false} />
-      {/if}
+<div class="stack deploy-page">
+  <header class="page-heading">
+    <div><p class="eyebrow">Deploy</p><h1 id="page-title">Deploy a model</h1><p>Choose a model, configure it, and review the real memory plan.</p></div>
+  </header>
+  {#if appStore.status?.process_role === 'master' || appStore.status?.inference_up}
+    <section class="panel running-model" aria-label="Running model">
+      <div><span class="tag">Running</span><strong>{appStore.status?.model_name ?? 'Loading model'}</strong><p class="small muted">Configuration edits apply to the next deployment.</p></div>
+      <button class="btn btn-danger" disabled={!!appStore.busy || appStore.status?.role !== 'master'} onclick={() => appStore.stopInference()}>Stop model</button>
     </section>
-
-    <details bind:open={appStore.advancedOpen} class="panel p-3">
-      <summary class="mono text-[11px] cursor-pointer uppercase tracking-wider">Advanced settings</summary>
-      <div class="flex flex-col gap-3 mt-2 pl-1">
-        <div class="mono text-[11px] uppercase tracking-wider" style="color: var(--muted)">Performance</div>
-        <AutoEditField
-          label="Parallel requests"
-          mode={parallelMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setAutoInt('parallelSlots', m)}
-        >
-          <SliderField
-            id="run-parallel"
-            label=""
-            value={typeof appStore.parallelSlots === 'number' ? appStore.parallelSlots : 2}
-            min={1}
-            max={32}
-            step={1}
-            numberWidth="4.5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => {
-              appStore.parallelSlots = v;
-              bumpEstimate();
-            }}
-          />
-        </AutoEditField>
-
-        <AutoEditField
-          label="Batch size"
-          mode={batchMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setAutoInt('batchSize', m)}
-        >
-          <SliderField
-            id="run-batch"
-            label=""
-            value={typeof appStore.batchSize === 'number' ? appStore.batchSize : 512}
-            min={1}
-            max={2048}
-            step={1}
-            numberWidth="5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => {
-              appStore.batchSize = v;
-              if (typeof appStore.microBatch === 'number' && appStore.microBatch > v) appStore.microBatch = v;
-              bumpEstimate();
-            }}
-          />
-        </AutoEditField>
-
-        <AutoEditField
-          label="Micro-batch"
-          mode={microMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setAutoInt('microBatch', m)}
-        >
-          <SliderField
-            id="run-ubatch"
-            label=""
-            value={typeof appStore.microBatch === 'number' ? appStore.microBatch : 2}
-            min={1}
-            max={Math.min(typeof appStore.batchSize === 'number' ? appStore.batchSize : 512, 512)}
-            step={1}
-            numberWidth="4.5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => { appStore.microBatch = v; bumpEstimate(); }}
-          />
-        </AutoEditField>
-
-        <AutoEditField
-          label="MoE expert offload"
-          mode={moeMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setAutoInt('moeOffload', m)}
-        >
-          <SliderField
-            id="run-moe-offload"
-            label=""
-            value={typeof appStore.moeOffload === 'number' ? appStore.moeOffload : 0}
-            min={0}
-            max={128}
-            step={1}
-            numberWidth="4.5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => { appStore.moeOffload = v; bumpEstimate(); }}
-          />
-        </AutoEditField>
-
-        <label class="mono text-[11px]" style="color: var(--muted)" for="run-flash">Flash Attention</label>
-        <select id="run-flash" class="field mono" bind:value={appStore.flashAttention} disabled={!!appStore.busy} onchange={bumpEstimate}>
-          <option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option>
-        </select>
-
-        <div class="border-t pt-2 flex flex-col gap-3" style="border-color: var(--border)">
-          <div class="mono text-[11px] uppercase tracking-wider" style="color: var(--muted)">Hardware &amp; memory</div>
-          <HardwareSettings lockBackend={appStore.status?.role === 'master' || appStore.status?.role === 'worker'} onChanged={bumpEstimate} />
-          <label class="mono text-[11px]" style="color: var(--muted)" for="run-cache-k">KV cache dtype (K / V)</label>
-          <div class="flex gap-2">
-            <select id="run-cache-k" class="field mono flex-1" bind:value={appStore.cacheTypeK} disabled={!!appStore.busy} onchange={bumpEstimate}>
-              {#each KV_CACHE_TYPES as t}<option value={t}>{t}</option>{/each}
-            </select>
-            <select aria-label="KV cache dtype V" class="field mono flex-1" bind:value={appStore.cacheTypeV} disabled={!!appStore.busy} onchange={bumpEstimate}>
-              {#each KV_CACHE_TYPES as t}<option value={t}>{t}</option>{/each}
-            </select>
-          </div>
-        </div>
-
-        <div class="mono text-[11px] uppercase tracking-wider border-t pt-2" style="color: var(--muted); border-color: var(--border)">Model behavior</div>
-        <AutoEditField
-          label="Speculative / draft model"
-          mode={speculativeMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setSpeculativeMode(m)}
-        >
-          <input class="field mono w-full" placeholder="Draft model path" bind:value={appStore.draftModel}
-            disabled={!!appStore.busy} onchange={bumpEstimate} />
-        </AutoEditField>
-
-        <label class="mono text-[11px] flex items-center gap-2" style="color: var(--fg)">
-          <input
-            type="checkbox"
-            bind:checked={appStore.vision}
-            disabled={!!appStore.busy}
-            onchange={bumpEstimate}
-          />
-          Vision
-        </label>
-        {#if appStore.vision}
-          <label class="mono text-[11px]" style="color: var(--muted)" for="run-mmproj">mmproj path</label>
-          <input
-            id="run-mmproj"
-            class="field mono"
-            placeholder="Path to mmproj GGUF"
-            bind:value={appStore.mmproj}
-            disabled={!!appStore.busy}
-            onchange={bumpEstimate}
-          />
-        {/if}
-
-        <div class="mono text-[11px] uppercase tracking-wider border-t pt-2" style="color: var(--muted); border-color: var(--border)">Sampling</div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <SliderField
-            id="inf-temp"
-            label="Temperature"
-            value={appStore.temperature}
-            min={0}
-            max={2}
-            step={0.05}
-            disabled={!!appStore.busy}
-            onChange={(v) => (appStore.temperature = v)}
-          />
-          <SliderField
-            id="inf-top-p"
-            label="Top P"
-            value={appStore.topP}
-            min={0}
-            max={1}
-            step={0.01}
-            disabled={!!appStore.busy}
-            onChange={(v) => (appStore.topP = v)}
-          />
-          <SliderField
-            id="inf-top-k"
-            label="Top K"
-            value={appStore.topK}
-            min={0}
-            max={200}
-            step={1}
-            numberWidth="4.5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => (appStore.topK = v)}
-          />
-          <SliderField
-            id="inf-min-p"
-            label="Min P"
-            value={appStore.minP}
-            min={0}
-            max={1}
-            step={0.01}
-            disabled={!!appStore.busy}
-            onChange={(v) => (appStore.minP = v)}
-          />
-          <SliderField
-            id="inf-pres"
-            label="Presence penalty"
-            value={appStore.presencePenalty}
-            min={-2}
-            max={2}
-            step={0.05}
-            disabled={!!appStore.busy}
-            onChange={(v) => (appStore.presencePenalty = v)}
-          />
-          <SliderField
-            id="inf-rep"
-            label="Repeat penalty"
-            value={appStore.repeatPenalty}
-            min={0}
-            max={2}
-            step={0.05}
-            disabled={!!appStore.busy}
-            onChange={(v) => (appStore.repeatPenalty = v)}
-          />
-        </div>
-
-        <label class="mono text-[11px]" style="color: var(--muted)" for="inf-think">Enable thinking</label>
-        <select
-          id="inf-think"
-          class="field mono"
-          disabled={!!appStore.busy}
-          value={appStore.enableThinking === null ? 'auto' : appStore.enableThinking ? 'on' : 'off'}
-          onchange={(e) => {
-            const v = (e.currentTarget as HTMLSelectElement).value;
-            appStore.enableThinking = v === 'auto' ? null : v === 'on';
-          }}
-        >
-          <option value="auto">{appStore.autoThinkingHint()}</option>
-          <option value="on">On</option>
-          <option value="off">Off</option>
-        </select>
-
-        <label class="mono text-[11px]" style="color: var(--muted)" for="run-template">Chat template</label>
-        <select id="run-template" class="field mono" value={appStore.chatTemplateText && appStore.chatTemplate === 'default' ? 'custom' : appStore.chatTemplate}
-          disabled={!!appStore.busy} onchange={(e) => {
-            const value = e.currentTarget.value;
-            if (value === 'custom') showJinjaEditor = true;
-            else { appStore.chatTemplate = value; appStore.chatTemplateText = ''; }
-          }}>
-          <option value="default">Auto — {appStore.templateEmbedded ? 'embedded GGUF template' : 'engine fallback'}</option>
-          <option value="chatml">ChatML</option>
-          {#each appStore.templatePresets as preset}<option value={preset.id}>{preset.label}</option>{/each}
-          <option value="custom">Custom Jinja</option>
-        </select>
-        {#if appStore.chatTemplate === 'custom' || appStore.chatTemplateText}
-          <div class="flex gap-2">
-            <button class="btn" type="button" onclick={() => showJinjaEditor = true}>Edit Jinja</button>
-            <button class="btn" type="button" onclick={() => { appStore.chatTemplate = 'default'; appStore.chatTemplateText = ''; }}>Reset to model</button>
-          </div>
-        {:else if appStore.modelTemplateText}
-          <button class="btn self-start" type="button" onclick={() => showJinjaEditor = true}>Copy model template to editor</button>
-        {/if}
-
-        <div class="mono text-[11px] uppercase tracking-wider border-t pt-2" style="color: var(--muted); border-color: var(--border)">Runtime</div>
-
-        <label class="mono text-[11px]" style="color: var(--muted)" for="run-mmap">mmap / mlock</label>
-        <select id="run-mmap" class="field mono" bind:value={appStore.mmapMlock} disabled={!!appStore.busy}>
-          <option value="auto">auto</option>
-          <option value="mmap">mmap</option>
-          <option value="mlock">mlock</option>
-          <option value="mmap+mlock">mmap+mlock</option>
-          <option value="none">none</option>
-        </select>
-
-        <AutoEditField
-          label="Checkpoints"
-          mode={checkpointMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setAutoInt('checkpoints', m)}
-        >
-          <SliderField
-            id="run-ckpt"
-            label=""
-            value={typeof appStore.checkpoints === 'number' ? appStore.checkpoints : 0}
-            min={0}
-            max={64}
-            step={1}
-            numberWidth="4.5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => {
-              appStore.checkpoints = v; bumpEstimate();
-            }}
-          />
-        </AutoEditField>
-
-        <AutoEditField
-          label="Cache RAM (MiB)"
-          mode={cacheRamMode}
-          disabled={!!appStore.busy}
-          onModeChange={(m) => appStore.setAutoInt('cacheRam', m)}
-        >
-          <SliderField
-            id="run-cache-ram"
-            label=""
-            value={typeof appStore.cacheRam === 'number' ? appStore.cacheRam : 0}
-            min={0}
-            max={65536}
-            step={256}
-            numberWidth="5.5rem"
-            disabled={!!appStore.busy}
-            onChange={(v) => {
-              appStore.cacheRam = v; bumpEstimate();
-            }}
-          />
-        </AutoEditField>
-
-        <SliderField
-          id="run-threads"
-          label="Threads"
-          value={appStore.threads}
-          min={1}
-          max={appStore.threadsMax}
-          step={1}
-          numberWidth="4.5rem"
-          disabled={!!appStore.busy}
-          onChange={(v) => {
-            appStore.threads = v; bumpEstimate();
-          }}
-        />
-        {#if appStore.fieldErrors.threads}
-          <ErrorMessage source="validation:threads" message={appStore.fieldErrors.threads} snapshot={false} />
-        {/if}
-
-        <label class="mono text-[11px]" style="color: var(--muted)" for="run-extra">Extra args</label>
-        <input
-          id="run-extra"
-          class="field mono"
-          placeholder="Space-separated llama-server args"
-          bind:value={appStore.extraArgsText}
-          disabled={!!appStore.busy}
-          onchange={bumpEstimate}
-        />
-        <label class="mono text-[11px] flex items-center gap-2" style="color: var(--muted)">
-          <input type="checkbox" bind:checked={appStore.remember} /> Remember settings for this model
-        </label>
-      </div>
-    </details>
-
-    <p class="mono text-[11px]" style="color: var(--muted)">
-      Layer split distributes contiguous model layers across selected devices.
-    </p>
-
-    <LoadProgressPanel />
-
-    {#each Object.entries(appStore.fieldErrors).filter(([field]) => field !== 'context' && field !== 'threads') as [field, message]}
-      <ErrorMessage source={`validation:${field}`} {message} snapshot={false} />
+  {/if}
+  <nav class="steps" aria-label="Deploy steps">
+    {#each ['Select', 'Configure', 'Review & deploy'] as title, index}
+      {#if index}<span class="step-line"></span>{/if}
+      <button type="button" class="step" class:active={deployStep === index + 1} aria-current={deployStep === index + 1 ? 'step' : undefined}
+        disabled={index > 0 && (!appStore.selectedModel || appStore.settingsLoading)} onclick={() => nextStep((index + 1) as 1 | 2 | 3)}>
+        <span class="step-number">{index + 1}</span>{title}
+      </button>
     {/each}
-
-    <div class="flex gap-2 flex-wrap">
-      <button
-        class="btn"
-        type="button"
-        onclick={() => {
-          appStore.resetRunSettings();
-          bumpEstimate();
-        }}>Reset</button
-      >
-      <button
-        class="btn"
-        class:btn-accent={settingsDirty}
-        disabled={!appStore.selectedModel || !!appStore.busy}
-        onclick={() => appStore.saveModelSettings()}>Save settings</button
-      >
-      <button
-        class="btn"
-        disabled={!!blocked || !appStore.selectedModel || !!appStore.busy}
-        onclick={() => appStore.plan()}>Plan</button
-      >
-      <button
-        class="btn btn-accent"
-        disabled={!!blocked || !appStore.selectedModel || !!appStore.busy || !!appStore.estimateError || fitStatus === 'overflow'}
-        onclick={() => appStore.run()}>Run</button
-      >
-      <button
-        class="btn btn-danger"
-        type="button"
-        disabled={!!appStore.busy || !inferenceStoppable}
-        onclick={() => appStore.stopInference()}>Stop</button
-      >
-    </div>
-
-    {#if appStore.status?.inference_up}
-      <p class="mono text-[12px]" style="color: var(--accent)">
-        Inference up — proxy :{appStore.status.control_port ?? 18765}/v1 · llama :{appStore.status.infer_port ?? 8080}
-      </p>
-    {/if}
-
-    {#if !blocked && appStore.planResult}
-      <section class="panel p-3 flex flex-col gap-2 overflow-x-auto" aria-label="Planning results">
-      <h2 class="mono text-[11px] uppercase tracking-wider">Planning results</h2>
-      {#if appStore.planResult.hint}
-        <p class="mono text-[11px]" style="color: var(--muted)">{String(appStore.planResult.hint)}</p>
+  </nav>
+  <div class="deploy-layout">
+    <div class="stack">
+      <DownloadPanel />
+      {#if blocked}<p class="notice small" role="status">{blocked}</p>{/if}
+      {#if appStore.settingsLoadError}
+        <div class="actions"><button class="btn" onclick={() => appStore.selectModel(appStore.selectedModel)}>Retry settings</button><button class="btn" onclick={() => appStore.useDefaultSettings()}>Use defaults</button></div>
       {/if}
-      {#if appStore.planResult.device_requested}
-        <p class="mono text-[12px]" style="color: var(--muted)">
-          Placement: {String(appStore.planResult.device_requested)} → {String(appStore.planResult.device_effective)} · {String(appStore.planResult.split_mode ?? 'layer')} split
-        </p>
-      {/if}
-      {#if appStore.planResult.estimate_confidence}
-        <p class="mono text-[11px]" style="color: var(--muted)">Estimate: {String(appStore.planResult.estimate_confidence)}</p>
-        <p class="mono text-[11px]">Master CPU: {String(appStore.planResult.cpu_layers ?? 0)} layers, estimated RAM {formatGib(appStore.planResult.cpu_alloc_bytes as number)}</p>
-        {#if appStore.planResult.resolved_launch_settings}
-          {@const resolved = appStore.planResult.resolved_launch_settings as Record<string, unknown>}
-          <p class="mono text-[11px]">Resolved: {String(resolved.parallel_slots)} slot(s), batch {String(resolved.batch_size)}, micro-batch {String(resolved.micro_batch)}, Flash Attention {String(resolved.flash_attention)}</p>
+      {#if appStore.status?.apply_error}<ErrorMessage source="apply" message={appStore.status.apply_error} />{/if}
+      <section class="panel deployment-form">
+        {#if deployStep === 1}
+          <div class="deploy-section">
+            <p class="eyebrow">01 / Model</p><h2>What would you like to run?</h2>
+            <label class="field" for="run-model">Model on the master
+              <select id="run-model" class="field" value={appStore.selectedModel} disabled={!!appStore.busy}
+                onchange={(e) => appStore.selectModel(e.currentTarget.value)}>
+                {#each appStore.models as model}<option value={model.id}>{model.id}</option>{/each}
+              </select>
+            </label>
+            <a class="text-button" href="/models">Browse models →</a>
+          </div>
+          <div class="deploy-section">
+            <p class="eyebrow">02 / Compute</p><h2>Choose how the cluster participates</h2>
+            <label class="field" for="run-network">Inference network
+              <select id="run-network" class="field" bind:value={appStore.selectedNetworkId} onchange={() => appStore.scheduleEstimate()}>
+                <option value="">LAN / WireGuard</option>
+                {#each appStore.status?.managed_networks ?? [] as network}<option value={network.network_id}>{network.subnet} · {network.observed_state}</option>{/each}
+              </select>
+            </label>
+            <label class="field" for="run-placement-mode">Placement
+              <select id="run-placement-mode" class="field" value={appStore.nodePriority ? 'priority' : 'auto'}
+                onchange={(e) => appStore.setPriorityPlanning(e.currentTarget.value === 'priority')}>
+                <option value="auto">Automatic</option><option value="priority">Priority</option>
+              </select>
+            </label>
+            <p class="small muted">Automatic placement prefers local GPUs, then remote and pooled devices. Checked nodes must host at least one model layer; unchecked nodes remain eligible.</p>
+            {#if appStore.runGpuIds !== null}
+              <p class="small">Saved local GPU selection: {appStore.runGpuIds.join(', ') || 'CPU only'}.
+                <button class="text-button" onclick={() => appStore.setParameter('gpu_ids', null)}>Use node selection</button></p>
+            {/if}
+            {#each nodeIds as node, index (node)}
+              {@const member = appStore.status?.members[node]}
+              <div class="node-option">
+                <label for={'required-' + node}><input id={'required-' + node} type="checkbox" checked={appStore.requiredNodes.includes(node)}
+                  disabled={!member && !appStore.requiredNodes.includes(node)} onchange={(e) => appStore.setNodeRequired(node, e.currentTarget.checked)} />
+                  Must use this node · {member?.role === 'master' || node === appStore.status?.node_id ? 'Master' : 'Worker'} · {node}{!member ? ' · unavailable' : ''}</label>
+                {#if appStore.nodePriority}
+                  <div class="actions"><span class="small">Priority {index + 1}</span>
+                    <button class="btn" aria-label={'Move ' + node + ' up'} disabled={index === 0} onclick={() => appStore.moveNodePriority(node, -1)}>↑</button>
+                    <button class="btn" aria-label={'Move ' + node + ' down'} disabled={index === nodeIds.length - 1} onclick={() => appStore.moveNodePriority(node, 1)}>↓</button>
+                    {#if !member}<button class="btn" aria-label={'Remove unavailable ' + node} onclick={() => appStore.removeNodePriority(node)}>Remove</button>{/if}
+                  </div>
+                {/if}
+                {#if appStore.planResult}
+                  <p class="small muted">GPU: {formatGib(Number((appStore.planResult.node_vram_alloc_bytes as Record<string, number> | undefined)?.[node]))}
+                    / {formatGib(Number((appStore.planResult.node_gpu_budget_bytes as Record<string, number> | undefined)?.[node]))} usable
+                    · CPU RAM: {formatGib(Number((appStore.planResult.node_ram_alloc_bytes as Record<string, number> | undefined)?.[node]))}
+                    / {formatGib(Number((appStore.planResult.node_ram_budget_bytes as Record<string, number> | undefined)?.[node]))} usable
+                    · {layerCount(node)} model layers
+                    {member?.unified_memory ? ' · shared RAM/GPU pool' : ''}</p>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else if deployStep === 2}
+          <div class="deploy-section">
+            <p class="eyebrow">02 / Configuration</p><h2>Make the model yours</h2>
+            <p class="small muted">Common settings first. All changes here are drafts for the next deployment.</p>
+            <div class="field-grid">
+              <div class="parameter-control">
+                <label class="field" for="run-context">Total context capacity
+                  <input id="run-context" class="field mono" type="number" bind:value={appStore.context} min={MIN_CONTEXT}
+                    max={appStore.selectedModelMaxContext()} step="1" disabled={appStore.contextAuto} oninput={() => appStore.scheduleEstimate()} />
+                </label>
+                <label class="check-row"><input type="checkbox" bind:checked={appStore.contextAuto} onchange={() => appStore.scheduleEstimate()} />Plan context automatically</label>
+                <p class="small muted">Total KV capacity shared by concurrent requests. Model maximum: {appStore.selectedModelMaxContext().toLocaleString()} tokens.</p>
+                {#if appStore.fieldErrors.context}<ErrorMessage source="validation:context" message={appStore.fieldErrors.context} snapshot={false} />{/if}
+              </div>
+              <ParameterControl name="parallel_slots" />
+              <ParameterControl name="max_output_tokens" />
+              <ParameterControl name="enable_thinking" />
+            </div>
+          </div>
+          <details class="advanced" open={appStore.advancedOpen}>
+            <summary>Capacity & performance</summary>
+            <div class="advanced-body field-grid">
+              {#each ['batch_size', 'micro_batch', 'threads', 'threads_batch', 'device'] as name}<ParameterControl {name} />{/each}
+            </div>
+          </details>
+          <details class="advanced">
+            <summary>Memory & loading</summary>
+            <div class="advanced-body">
+              <p class="small muted">Node safety caps: local VRAM {appStore.vramPercent}%, RAM {appStore.ramPercent}%. <a class="text-button" href="/settings">Node settings →</a></p>
+              <div class="field-grid">{#each ['cache_type_k', 'cache_type_v', 'flash_attention', 'vram_percent', 'ram_percent', 'mmap_mlock', 'checkpoints', 'cache_ram'] as name}<ParameterControl {name} />{/each}</div>
+            </div>
+          </details>
+          <details class="advanced">
+            <summary>Generation defaults</summary>
+            <div class="advanced-body">
+              <p class="small muted">Defaults for requests to the next deployed model. Clients and chat sessions can override them.</p>
+              <div class="field-grid">{#each ['temperature', 'top_p', 'top_k', 'min_p', 'presence_penalty', 'repeat_penalty', 'frequency_penalty', 'seed'] as name}<ParameterControl {name} />{/each}</div>
+              <label class="field" for="run-stop">Stop sequences (JSON array)
+                <textarea id="run-stop" class="field mono" value={appStore.stopSequences === null ? '' : JSON.stringify(appStore.stopSequences)} placeholder={'["END", "User:"]'}
+                  oninput={(e) => { try { const value = e.currentTarget.value.trim() ? JSON.parse(e.currentTarget.value) : null; if (value !== null && (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item))) throw new Error(); appStore.stopSequences = value; appStore.stopParseError = ''; appStore.scheduleEstimate(); } catch { appStore.stopParseError = 'Enter a JSON array of nonempty literal strings.'; appStore.validateRunSettings(true); } }}></textarea>
+              </label>
+              <p class="small muted">Empty inherits defaults; [] clears stop sequences.</p>
+            </div>
+          </details>
+          <details class="advanced" bind:open={featureOpen}>
+            <summary>Model features & templates</summary>
+            <div class="advanced-body">
+              <div class="field-grid">{#each ['reasoning_effort', 'reasoning_budget', 'reasoning_format', 'moe_offload'] as name}<ParameterControl {name} />{/each}</div>
+              <label class="field" for="run-speculative">Speculative decoding
+                <select id="run-speculative" class="field" bind:value={appStore.speculative} onchange={() => appStore.scheduleEstimate()}>
+                  <option value="auto">Model / engine default</option><option value="off">Off</option><option value="draft">Draft model</option>
+                </select>
+              </label>
+              {#if appStore.speculative === 'draft' || appStore.draftModel}
+                <label class="field" for="run-draft">Draft model path<input id="run-draft" class="field mono" bind:value={appStore.draftModel} oninput={() => appStore.scheduleEstimate()} /></label>
+                <ParameterControl name="draft_max" />
+              {/if}
+              <label class="check-row"><input type="checkbox" bind:checked={appStore.vision} onchange={() => appStore.scheduleEstimate()} />Enable vision projector</label>
+              {#if appStore.vision}
+                <label class="field" for="run-mmproj">Vision projector
+                  <input id="run-mmproj" class="field mono" list="projectors" bind:value={appStore.mmproj} oninput={() => appStore.scheduleEstimate()} placeholder="Choose an installed projector or enter its path" />
+                  <datalist id="projectors">{#each appStore.projectors as path}<option value={path}></option>{/each}</datalist>
+                </label>
+                <p class="small muted">{appStore.projectors.length ? 'Projectors discovered beside the model.' : 'No projector discovered. Supply a compatible local file.'}</p>
+              {/if}
+              <label class="field" for="run-template">Chat template
+                <select id="run-template" class="field" bind:value={appStore.chatTemplate} onchange={() => { if (appStore.chatTemplate !== 'custom') appStore.chatTemplateText = ''; appStore.scheduleEstimate(); }}>
+                  <option value="default">{appStore.templateEmbedded ? 'Embedded model template' : 'Engine fallback'}</option>
+                  {#each appStore.templatePresets as template}<option value={template.id}>{template.label}</option>{/each}
+                  <option value="custom">Custom Jinja</option>
+                </select>
+              </label>
+              {#if appStore.chatTemplate === 'custom'}<button class="btn" onclick={() => showJinjaEditor = true}>Edit Jinja template</button>{/if}
+            </div>
+          </details>
+          <details class="advanced"><summary>Expert engine options</summary><div class="advanced-body"><ExpertArguments /></div></details>
+          <div class="deploy-section">
+            <div class="actions">
+              <button class="btn" disabled={!appStore.savedModelConfig || !!appStore.busy} onclick={() => appStore.revertSavedSettings()}>Revert to saved</button>
+              <button class="btn" disabled={!!appStore.busy} onclick={() => appStore.useDefaultSettings()}>Restore defaults</button>
+              <button class="btn" class:btn-accent={appStore.settingsDirty()} disabled={!!appStore.busy || appStore.settingsLoading || !!appStore.settingsLoadError}
+                onclick={() => appStore.saveModelSettings()}>Save model defaults</button>
+            </div>
+            <p class="small muted">{appStore.settingsDirty() ? 'Unsaved changes' : 'Saved configuration loaded'} · saving affects future deployments.</p>
+          </div>
+        {:else}
+          <div class="deploy-section">
+            <p class="eyebrow">03 / Review</p><h2>Review & deploy</h2>
+            <strong>{appStore.selectedModel}</strong>
+            <p class="small muted">{appStore.status?.inference_up ? `Deploying replaces ${appStore.status.model_name}.` : 'Launch using the resolved configuration below.'}</p>
+            {#if effective}
+              <h3>Changes from saved configuration</h3>
+              <p class="small muted">{changes.length} changed setting(s). Resolved values include automatic adjustments.</p>
+              <div class="review-table"><table><thead><tr><th>Setting</th><th>Requested</th><th>Effective</th><th>Source</th></tr></thead><tbody>
+                {#each Object.entries(effective.requested).filter(([key]) => key !== 'extra_args') as [key, value]}
+                  <tr class:changed={changes.some(([name]) => name === key)}><td>{PARAMETER_LABELS[key] ?? key.replaceAll('_', ' ')}</td><td>{display(value)}</td>
+                    <td>{display(effective.values[key])}{#if effective.adjustments[key]}<small>{effective.adjustments[key]}</small>{/if}</td><td>{effective.sources[key] ?? 'default'}</td></tr>
+                {/each}
+              </tbody></table></div>
+            {:else}<p class="notice small">Refresh the estimate to review effective values.</p>{/if}
+            {#if allocations.length}
+              <h3>Device allocation</h3><div class="review-table"><table><thead><tr><th>Node / device</th><th>Layers</th><th>Estimated / usable budget</th></tr></thead><tbody>
+                {#each allocations as allocation}<tr><td>{allocation.node_id} / {allocation.device ?? allocation.backend}</td><td>{allocation.layer_start}–{allocation.layer_end - 1}</td><td>{formatGib(allocation.estimated_bytes)} / {formatGib(allocation.budget_bytes)}</td></tr>{/each}
+              </tbody></table></div>
+            {/if}
+            <details class="advanced"><summary>Export configuration</summary><div class="advanced-body">
+              <div class="actions"><button class="btn" onclick={() => appStore.copyConfiguration('cli')}>Copy CLI</button><button class="btn" onclick={() => appStore.copyConfiguration('json')}>Copy JSON</button></div>
+              <label class="field">CLI command<textarea class="field mono" readonly value={cliExport}></textarea></label>
+              <label class="field">API JSON<textarea class="field mono" readonly value={jsonExport}></textarea></label>
+            </div></details>
+            <label class="check-row"><input type="checkbox" bind:checked={appStore.remember} />Save as model default after successful deployment</label>
+          </div>
         {/if}
-      {/if}
-      {#if Array.isArray(appStore.planResult.device_allocations) && (appStore.planResult.split_mode ?? 'layer') === 'layer'}
-        <table class="w-full text-left mono text-[11px] mt-2">
-          <thead><tr><th>device</th><th>layers (zero-based)</th><th>estimated / usable budget</th></tr></thead>
-          <tbody>
-            {#each appStore.planResult.device_allocations as raw}
-              {@const allocation = raw as DeviceAllocation}
-              <tr><td>{allocation.node_id}: {allocation.device} ({allocation.backend})</td>
-                <td>{allocation.layer_start}–{allocation.layer_end - 1}{allocation.output_layer ? ' · includes output' : ''}</td>
-                <td>{formatGib(allocation.estimated_bytes)} / {formatGib(allocation.budget_bytes)}</td></tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-      {#if Array.isArray(appStore.planResult.node_ids)}
-        <table class="w-full text-left border-collapse mono text-[11px] mt-2">
-          <thead>
-            <tr style="color: var(--muted)">
-              <th class="font-medium py-1 border-b" style="border-color: var(--border)">node</th>
-              <th class="font-medium py-1 border-b" style="border-color: var(--border)">share</th>
-              <th class="font-medium py-1 border-b" style="border-color: var(--border)">alloc</th>
-              {#if !appStore.nodeShares}<th class="font-medium py-1 border-b" style="border-color: var(--border)">score</th>{/if}
-              <th class="font-medium py-1 border-b" style="border-color: var(--border)">control RTT</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each appStore.planResult.node_ids as nid, i}
-              <tr>
-                <td class="py-1 border-b" style="border-color: var(--border)">{String(nid)}</td>
-                <td class="py-1 border-b" style="border-color: var(--border)">
-                  {(100 * Number((appStore.planResult.node_alloc_bytes as number[])?.[i] ?? 0) / Math.max(1, Number(appStore.planResult.estimated_bytes ?? 1))).toFixed(1)}%
-                </td>
-                <td class="py-1 border-b" style="border-color: var(--border)">
-                  {formatGib((appStore.planResult.node_alloc_bytes as number[])?.[i])}
-                </td>
-                {#if !appStore.nodeShares}<td class="py-1 border-b" style="border-color: var(--border)">
-                  {Number((appStore.planResult.node_scores as number[])?.[i] ?? 0).toFixed(3)}
-                </td>{/if}
-                <td class="py-1 border-b" style="border-color: var(--border)">
-                  {#if (appStore.planResult.node_latency_ms as number[])?.[i] != null}
-                    {Number((appStore.planResult.node_latency_ms as number[])[i]).toFixed(1)} ms
-                  {:else}
-                    —
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
+        {#if Object.keys(appStore.fieldErrors).length}<div class="notice small" role="alert">{Object.values(appStore.fieldErrors).join(' ')}</div>{/if}
+        <div class="form-foot">
+          <button class="btn" disabled={deployStep === 1} onclick={() => nextStep(deployStep === 3 ? 2 : 1)}>Back</button>
+          {#if deployStep < 3}<button class="btn btn-accent" disabled={!appStore.selectedModel || appStore.settingsLoading || !!appStore.settingsLoadError}
+            onclick={() => nextStep(deployStep === 1 ? 2 : 3)}>{deployStep === 1 ? 'Configure' : 'Review deployment'}</button>
+          {:else}<button class="btn btn-accent" disabled={!ready || !!appStore.busy} onclick={() => appStore.run()}>{appStore.status?.inference_up ? 'Replace running model' : 'Deploy model'}</button>{/if}
+        </div>
       </section>
-    {/if}
+      <LoadProgressPanel />
+    </div>
+    <DeploymentPlan />
   </div>
 </div>
-{#if showJinjaEditor}
-  <JinjaEditor
-    initialText={appStore.chatTemplateText || appStore.modelTemplateText || ''}
-    onApply={(text) => { appStore.chatTemplate = 'custom'; appStore.chatTemplateText = text; bumpEstimate(); }}
-    onClose={() => { showJinjaEditor = false; }}
-  />
-{/if}
+{#if showJinjaEditor}<JinjaEditor initialText={appStore.chatTemplateText || appStore.modelTemplateText || ''}
+  onApply={(text) => { appStore.chatTemplate = 'custom'; appStore.chatTemplateText = text; appStore.scheduleEstimate(); }} onClose={() => showJinjaEditor = false} />{/if}
+
+<style>
+  .deployment-form { overflow: hidden; }
+  h2 { font-size: 20px; font-weight: 600; } h3 { font-size: 15px; font-weight: 600; }
+  .deploy-section { padding: 24px; display: flex; flex-direction: column; gap: 18px; }
+  .advanced { border-top: 1px solid var(--border); border-bottom: 0; border-radius: 0; margin: 0; }
+  .advanced summary { padding: 20px 24px; cursor: pointer; font-size: 14px; }
+  .advanced-body { padding: 0 24px 24px; display: flex; flex-direction: column; gap: 20px; }
+  .advanced-body.field-grid { display: grid; }
+  .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .field { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+  .node-option { padding: 16px; border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .node-option label { display: flex; gap: 10px; align-items: center; font-size: 13px; }
+  .actions, .running-model { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .running-model { padding: 18px 24px; justify-content: space-between; }.running-model strong { margin-left: 12px; }
+  .notice { padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
+  .review-table { overflow-x: auto; } table { width: 100%; font-size: 12px; text-align: left; border-collapse: collapse; }
+  td, th { padding: 12px 8px; border-bottom: 1px solid var(--border); max-width: 240px; overflow-wrap: anywhere; }
+  td small { display: block; color: var(--muted); margin-top: 4px; } tr.changed td:first-child { color: var(--accent); }
+  textarea { min-height: 90px; resize: vertical; }.form-foot { padding: 20px 24px; }
+  @media (max-width: 700px) { .field-grid { grid-template-columns: 1fr; }.deploy-section { padding: 18px; }.advanced summary { padding: 18px; }.advanced-body { padding: 0 18px 18px; } }
+</style>

@@ -170,6 +170,14 @@ New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Dire
 
 Never open RPC port 50052 to the public internet.
 
+A worker can keep heartbeating (the dashboard still shows it connected) while
+its `rpc-server` is not running. `kllm run` then fails with `RPC peer(s)
+unreachable`. The worker agent now reconciles this on its membership tick: if the
+tracked `rpc-server` is missing or dead it stops any leftover `rpc-server` still
+holding port 50052 and restarts a tracked one. Give it a few seconds, then
+retry. If it keeps failing, check `kllm status` for that node and confirm the
+`rpc-server` binary and port are available.
+
 ### RPC handshake or malformed-response errors
 
 This usually means nodes have different llama.cpp builds. On every node:
@@ -296,6 +304,7 @@ The dashboard **Logs** page (`/logs`) reads the same stream for master and worke
 ### Dashboard live updates
 
 - **Live** means the dashboard WebSocket is receiving application updates. It does not certify that every source reading is fresh; check the node's own reading status and observation age.
+- A worker's saved topology is shown as **disconnected** after an agent restart or a failed master heartbeat, even when the local dashboard is reachable. A successful heartbeat restores live membership; saved nodes and readings alone do not confirm a connection.
 - **Refresh** means socket delivery is interrupted. The dashboard retains the last accepted values, reads the aggregate snapshot every two seconds, and probes live delivery every 30 seconds. If ordinary reads also fail, the header shows **updates unavailable**.
 - **reconnecting** means a replacement live connection is being initialized. A healthy connection with unchanged values should remain labeled **live**.
 - An area labeled **denied** remains inaccessible; periodic refresh does not bypass access rules. The header shows its last successful update when available.

@@ -15,6 +15,7 @@ from kllm.model_defaults import (
 )
 from kllm.models.resolved_settings import ResolvedLaunchSettings
 from kllm.run_settings import RunBody
+from kllm.effective_config import deployment_defaults
 
 
 def auto_launch_value(value: int | str, *, numeric_fallback: int = 2) -> str:
@@ -50,7 +51,7 @@ def build_master_launch(
         settings = ResolvedLaunchSettings.from_mapping(raw_settings)
     context = int(plan_result.get("context_effective") or settings.context)
     template = template_launch(body.chat_template, body.chat_template_text, body.model)
-    model_defaults = resolve_model_defaults(model_path)
+    model_defaults = deployment_defaults(body, resolve_model_defaults(model_path))
     if body.chat_template != "default" or body.chat_template_text:
         model_defaults = replace(
             model_defaults, chat_template_kwargs={}, reasoning_format=None, jinja=False
@@ -63,9 +64,22 @@ def build_master_launch(
         min_p=body.min_p,
         presence_penalty=body.presence_penalty,
         repeat_penalty=body.repeat_penalty,
+        frequency_penalty=body.frequency_penalty,
         enable_thinking=body.enable_thinking,
     )
     merged_extra = merge_defaults_into_extra_args(list(settings.extra_args), defaults)
+    for name, flag in (
+        ("threads_batch", "--threads-batch"), ("seed", "--seed"),
+        ("max_output_tokens", "--n-predict"),
+        ("reasoning_effort", "--reasoning-effort"), ("reasoning_budget", "--reasoning-budget"),
+        ("reasoning_format", "--reasoning-format"),
+    ):
+        value = getattr(body, name)
+        if value is not None:
+            if flag in merged_extra:
+                index = merged_extra.index(flag)
+                del merged_extra[index:index + 2]
+            merged_extra += [flag, str(value)]
     launch: dict[str, Any] = {
         "model": str(model_path),
         "tensor_split": plan_result["tensor_split_csv"],
@@ -105,7 +119,7 @@ def build_master_launch(
         launch["extra_args"] += ["--swa-full"]
     if settings.speculative != "auto":
         launch["extra_args"] += ["--spec-type", settings.speculative]
-    if body.draft_model:
+    if body.draft_enabled():
         launch["extra_args"] += [
             "--spec-draft-n-max",
             str(settings.draft_max),
@@ -114,9 +128,9 @@ def build_master_launch(
             "--cache-type-v-draft",
             settings.draft_cache_type_v,
         ]
-    if body.mmproj:
+    if body.vision and body.mmproj:
         launch["mmproj"] = body.mmproj
-    if body.draft_model:
+    if body.draft_enabled():
         launch["draft_model"] = body.draft_model
     launch.update({key: value for key, value in template.items() if key != "jinja"})
     if "jinja" in template:

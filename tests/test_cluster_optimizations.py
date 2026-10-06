@@ -284,7 +284,7 @@ def test_explicit_launch_settings_and_overlapping_args():
 
 @pytest.mark.parametrize("flag", ["--device", "-ngl", "--tensor-split", "--split-mode", "--override-tensor"])
 def test_managed_placement_cannot_be_overridden(flag):
-    with pytest.raises(HTTPException):
+    with pytest.raises((HTTPException, ValueError)):
         settings(extra_args=[flag, "1"])
 
 

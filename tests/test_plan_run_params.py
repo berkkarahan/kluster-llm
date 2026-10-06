@@ -242,13 +242,12 @@ def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
         run_settings.RunBody(model="toy.gguf", threads=5)
     from kllm.run_planning import resolve_launch_settings
     monkeypatch.setattr("kllm.run_settings_resolution.available_threads", lambda: 4)
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException, match="threads"):
+    with pytest.raises(ValueError, match="threads"):
         resolve_launch_settings(run_settings.RunBody(model="toy.gguf", extra_args=["--threads", "5"]))
     c, _, tmp = client
     _model_file(tmp)
     saved = c.put("/v1/model-settings/toy.gguf", json={"parameter_set": {
-        "threads": 4, "chat_template": "preset:qwen3-0.6b", "flash_attention": "off",
+        "threads": 4, "chat_template": "preset:qwen3-0.6b", "flash_attention": "off", "cache_type_v": "f16",
         "node_shares": {"worker": 0.3, "master1": 0.7},
     }})
     assert saved.status_code == 200, saved.text

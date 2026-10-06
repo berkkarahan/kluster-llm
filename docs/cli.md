@@ -106,7 +106,7 @@ Memory budget for plan/run uses `vram_percent` or `ram_percent` from config (as 
 - **CPU:** RAM-only budgets scaled by `ram_percent`; GPU picker ignored. Master CPU layers use the local prefix; worker CPU layers use RPC offload routing, so their upstream `ngl` can be positive while VRAM allocation is zero.
 - **Fallback:** automatic GPU planning tries GPU placements before CPU RAM. Updated workers advertise a CPU RPC device to contribute RAM; older workers remain accelerator-only. Plan responses distinguish RAM/GPU allocations per node and count unified memory once.
 
-Dashboard Plan & Run exposes device-gated controls (GPUs + VRAM % vs RAM %) and persists via `PUT /v1/config`. System Settings reports measured local discrete GPU capacity in one-decimal GiB, counting each selected GPU once; missing measurements show as unavailable. Plans show usable per-device budgets limited by headroom and available memory, GPU-only and CPU RAM allocations separately, and explicitly labeled total-memory estimates/budgets. Unified GPU capacity is shared RAM, not extra VRAM.
+Dashboard deployment controls affect the next deployment. Node Settings owns hardware selection and persistent RAM/VRAM safety caps. Optional deployment RAM and VRAM limits are independent; each node uses the lower of its safety cap and the deployment limit, bounded by available memory. Unified GPU capacity is shared RAM, not extra VRAM. The persistent memory summary reports separate components, incomplete estimates, warnings, and resolved settings throughout Select, Configure, and Review.
 
 ```bash
 kllm plan --model NAME --device gpu --vram-percent 70
@@ -116,6 +116,8 @@ kllm run --model NAME --device cpu --ram-percent 50
 ### Plan / run RUN SETTINGS flags
 
 `kllm plan` and `kllm run` share the same body as the dashboard Plan & Run panel. Overflow (`fit_status=overflow`) blocks **run** (exit code 1); **tight** prints a warning and still launches.
+
+Commands load the model's saved configuration by default. Explicit flags override saved values; `--settings defaults` starts from Kluster defaults. The defaults below apply when no saved value exists. Preview and Plan do not save automatically. Save explicitly in the dashboard, or pass `--remember` to save after success. Restore defaults edits the draft; Save makes that reset persistent. There is one saved configuration per model.
 
 | Flag | Default | Notes |
 |------|---------|--------|
@@ -135,11 +137,24 @@ kllm run --model NAME --device cpu --ram-percent 50
 | `--presence-penalty` / `--repeat-penalty` | model default | Penalty overrides |
 | `--enable-thinking` / `--no-enable-thinking` | template default | Force thinking on/off for hybrid models |
 | `--extra-arg` (repeatable) | — | Sanitized; cannot override `--host` / `--port` / `--rpc` |
-| `--remember` / `--no-remember` | remember on | Upserts `~/.kllm/model-settings.json` after successful plan/run |
+| `--settings saved\|defaults` | saved | Saved model configuration or clean defaults |
+| `--remember` / `--no-remember` | off | Explicitly save after successful plan/run |
+| `--threads-batch` | generation threads | Prompt-processing threads on the master |
+| `--draft-max` | 3 | Maximum draft tokens when draft-model speculation is enabled |
+| `--seed` | engine default | -1 random, or an unsigned 32-bit seed |
+| `--max-output-tokens` | engine default | Positive response limit or -1 |
+| `--frequency-penalty` | model / Kluster default | Generation penalty |
+| `--stop` (repeatable) | inherited | Literal stop sequences |
+| `--reasoning-effort`, `--reasoning-budget`, `--reasoning-format` | inherited | Template and installed-engine capability checks apply |
+| `--chat-template-text` | — | Inline custom Jinja; also used in exported commands |
 | `--vram-weight`, `--latency-weight` | 0.6 / 0.4 | Greedy placement score weights (VRAM capacity vs low latency); normalized by sum |
 | `--split-mode` | system default | `layer`, `row`, or `tensor`; overrides the system setting for this plan/run |
 
 No primary `--tensor-split` / `--tensor-parallel` (automatic layer/RPC placement: prefer master-local, then single remote, then VRAM-proportional pool — see [layer-split-calculator.md](layer-split-calculator.md)).
+
+The dashboard uses the v2 schema and an installed `llama-server --help` catalog. Unknown fields, conflicting typed/extra options, managed flags, unsupported flags, and invalid arguments fail before the running model is stopped. API `extra_args` is a literal argv array; CLI `--extra-arg` strings are shell-tokenized once. The Expert editor accepts JSON argv for lossless paths and JSON values. Review exports both JSON and a POSIX-shell command. Legacy v1 retains permissive fields and historical remember behavior; old profiles are normalized on read.
+
+Deployment records an active configuration tied to its process and run ID. Gateway requests inherit that snapshot, with explicit client values taking precedence. Chat overrides belong to the session and do not edit deployment drafts or saved settings. Responses, Chat Completions, and Messages use their protocol-specific output/stop fields. Messages cannot represent every sampling override; unsupported per-request fields return an error rather than being silently discarded. Deployment defaults still apply through the engine.
 
 Automatic planning prefers GPU-only placements, then uses master and advertised
 worker CPU RAM when needed. `--require-node master-id --require-node worker-id`

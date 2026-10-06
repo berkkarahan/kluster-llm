@@ -97,7 +97,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
           network={...network,observed_state:body.action==='stop'?'stopped':'ready',desired_state:body.action==='stop'?'stopped':'active',revision:network.revision+1};
           return json({network_id:networkId,operation_id:operationId},202);
         }
-        if(path==='/v2/inference/plans') return json({fit_status:'ok'});
+        if(path==='/v2/inference/plans') return json({fit_status:'fits'});
         if(path==='/v2/inference/runs') {
           assert.equal(body.network_id,networkId);
           network.blocking_runs=[{run_id:operationId,state:'active'}];
@@ -196,7 +196,9 @@ test('private network app setup, selected run, blocked stop and cleanup',
       await evaluate("fetch('/v2/status').then(r=>r.json()).then(status=>window.networkStore.status=status)",true);
       await wait("document.querySelector('#run-network option[value=\""+networkId+"\"]')");
       await evaluate(`(()=>{const s=document.querySelector('#run-network');s.value=${JSON.stringify(networkId)};s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-      await click('Run');
+      await click('Configure');
+      await click('Review deployment');
+      await click('Deploy model');
       await wait("window.networkStore.planResult?.network_run_id");
       await click('Refresh prerequisites and status');
       await wait("document.body.textContent.includes('Stop dependent inference first')");

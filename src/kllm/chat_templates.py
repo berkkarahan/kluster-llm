@@ -16,6 +16,15 @@ LEGACY = {"llama3", "phi3", "gemma", "mistral-v3-tekken"}
 MAX_TEMPLATE_BYTES = 64 * 1024
 
 
+def selected_template_text(name: str, text: str | None, embedded: str) -> str:
+    """Read the template selected for deployment without writing launch files."""
+    if text:
+        return text
+    if name in PRESETS:
+        return (Path(__file__).parent / "templates" / PRESETS[name][1]).read_text(encoding="utf-8")
+    return embedded if name == "default" else ""
+
+
 def validate_selection(name: str, text: str | None) -> None:
     if name not in {"default", "custom", "chatml", *PRESETS, *LEGACY}:
         raise ValueError(f"unknown chat template: {name}")

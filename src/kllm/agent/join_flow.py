@@ -31,7 +31,13 @@ def resolve_master_endpoint(master_host: str | None, master_port: int, key: str)
     """Use the given master, or the single LAN master that matches the join key."""
     if master_host:
         return master_host, master_port
-    found = discovery.browse_masters(timeout=2.5, key=key, port=master_port or DEFAULT_CONTROL_PORT)
+    try:
+        found = discovery.browse_masters(timeout=2.5, key=key, port=master_port or DEFAULT_CONTROL_PORT)
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            f"master discovery failed: {exc}; pass master_host or check the join key",
+        ) from exc
     if not found:
         raise HTTPException(
             404,
@@ -98,7 +104,13 @@ def post_register(
         with httpx.Client(timeout=15.0) as client:
             health = client.get(f"{base}/health")
             health.raise_for_status()
-            peer_protocol = health.json().get("control_protocol")
+            try:
+                health_payload = health.json()
+            except ValueError as exc:
+                raise HTTPException(502, "master returned an invalid health response") from exc
+            if not isinstance(health_payload, dict):
+                raise HTTPException(502, "master returned an invalid health response")
+            peer_protocol = health_payload.get("control_protocol")
             if peer_protocol != CONTROL_PROTOCOL_VERSION:
                 raise HTTPException(
                     426,
@@ -143,7 +155,10 @@ def post_register(
             detail = resp.text
         raise HTTPException(resp.status_code, detail)
     resp.raise_for_status()
-    payload = resp.json()
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise HTTPException(502, "master returned an invalid response") from exc
     if not isinstance(payload, dict):
         raise HTTPException(502, "master returned an invalid response")
     return payload

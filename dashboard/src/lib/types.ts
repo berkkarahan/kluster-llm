@@ -88,6 +88,21 @@ export type InferenceActivity = {
 /** Per-model run settings as stored by PUT /v2/inference/model-settings/{model}. */
 export type ParameterSet = Record<string, unknown>;
 
+export type ParameterDescriptor = {
+  id: string; cli: string; section: string; scope: string; memory_affecting: boolean;
+  available: boolean; unavailable_reason?: string | null; applies: string;
+  type?: string; default?: unknown; minimum?: number; maximum?: number;
+  enum?: string[]; choices?: string[];
+  anyOf?: { type?: string; minimum?: number; maximum?: number; enum?: string[] }[];
+};
+
+export type ExpertFlag = { flag: string; arguments: string[]; description: string };
+export type EffectiveConfig = {
+  schema_version: number; model: string; process_pid?: number; run_id?: string;
+  requested: ParameterSet; values: ParameterSet; sources: Record<string, string>;
+  adjustments: Record<string, string>; generation_defaults: ParameterSet;
+};
+
 export type ModelSettingsDoc = {
   model: string;
   parameter_set: ParameterSet;
@@ -132,6 +147,7 @@ export type HfTokenStatus = {
 };
 
 export type Status = {
+  active_config?: EffectiveConfig | null;
   managed_networks?: ManagedNetwork[];
   logging?: LoggingStatus;
   role: string;

@@ -51,6 +51,24 @@ def test_membership_tick_orders_role_work_before_capacity(role, expected):
     assert events == expected
 
 
+def test_membership_tick_reconciles_worker_runtime_before_capacity():
+    events: list[str] = []
+    loop = MembershipLoop(
+        stop=background_tasks.threading.Event(),
+        state=lambda: ClusterState(role="worker"),
+        interval_seconds=2.0,
+        synchronize_master=lambda: events.append("synchronize"),
+        post_worker_heartbeat=lambda: events.append("heartbeat"),
+        ensure_worker_runtime=lambda: events.append("runtime"),
+        schedule_worker_probe=lambda: events.append("probe"),
+        schedule_capacity_refresh=lambda: events.append("refresh"),
+    )
+
+    loop.tick()
+
+    assert events == ["heartbeat", "runtime", "refresh"]
+
+
 def test_membership_loop_logs_tick_failure_and_continues(caplog):
     state = ClusterState(role="master")
     ticks = iter((False, False, True))

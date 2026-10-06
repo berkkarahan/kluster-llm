@@ -171,3 +171,31 @@ def test_health_includes_pid(kllm_home):
     data = health()
     assert data["ok"] is True
     assert data["pid"] == os.getpid()
+
+
+def test_stop_stray_rpc_servers_kills_only_rpc_processes(kllm_home, monkeypatch):
+    import psutil
+
+    _, runtime = kllm_home
+
+    class Proc:
+        def __init__(self, pid: int, name: str):
+            self.info = {"pid": pid, "name": name}
+            self.killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    procs = [
+        Proc(101, "rpc-server"),
+        Proc(102, "RPC-SERVER.EXE"),
+        Proc(103, "llama-server"),
+        Proc(os.getpid(), "python"),
+    ]
+    monkeypatch.setattr(psutil, "process_iter", lambda _attrs=None: iter(procs))
+
+    assert runtime.stop_stray_rpc_servers() == 2
+    assert procs[0].killed is True
+    assert procs[1].killed is True
+    assert procs[2].killed is False
+    assert procs[3].killed is False

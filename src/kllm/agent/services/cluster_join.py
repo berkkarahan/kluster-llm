@@ -42,6 +42,9 @@ class ClusterJoinDependencies:
     register_child: Callable[[int, str], None]
     rpc_server_log_path: Callable[[], Path]
     post_worker_heartbeat: Callable[[], None]
+    stop_process: Callable[..., Any] = lambda *_args, **_kwargs: None
+    clear_children: Callable[[], None] = lambda: None
+    stop_stray_rpc_servers: Callable[[], int] = lambda: 0
 
 
 class ClusterJoinService:
@@ -199,6 +202,14 @@ class ClusterJoinService:
         root = self._deps.repo_root()
         rpc_devices = worker_rpc_devices(gpus, backend)
         member = state.members.setdefault(state.node_id, {})
+        # A rejoin must not leave the previous rpc-server holding the RPC port,
+        # which would make the new launch fail to bind and silently drop the node.
+        if state.process_pid:
+            self._deps.stop_process(state.process_pid, force=True)
+            self._deps.clear_children()
+            state.process_pid = None
+            state.process_role = None
+        self._deps.stop_stray_rpc_servers()
         member["rpc_devices"] = []
         try:
             launched = self._deps.start_worker(

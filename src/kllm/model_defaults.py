@@ -44,6 +44,7 @@ _LAUNCH_FLAG_MAP = (
     ("min_p", "--min-p"),
     ("presence_penalty", "--presence-penalty"),
     ("repeat_penalty", "--repeat-penalty"),
+    ("frequency_penalty", "--frequency-penalty"),
 )
 
 _cache_lock = threading.Lock()
@@ -268,6 +269,7 @@ def overlay_user_inference(
     min_p: float | None = None,
     presence_penalty: float | None = None,
     repeat_penalty: float | None = None,
+    frequency_penalty: float | None = None,
     enable_thinking: bool | None = None,
 ) -> ModelDefaults:
     """Apply explicit user overrides on top of GGUF/heuristic defaults.
@@ -291,6 +293,8 @@ def overlay_user_inference(
         overrides["presence_penalty"] = float(presence_penalty)
     if repeat_penalty is not None:
         overrides["repeat_penalty"] = float(repeat_penalty)
+    if frequency_penalty is not None:
+        overrides["frequency_penalty"] = float(frequency_penalty)
     for key, val in overrides.items():
         sampling[key] = val
         sources[key] = "user"

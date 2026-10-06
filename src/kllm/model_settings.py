@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from kllm.state import ensure_home
+
+_store_lock = threading.RLock()
 
 
 def _store_path() -> Path:
@@ -33,7 +38,14 @@ def _load_raw() -> dict[str, Any]:
 
 def _save_raw(data: dict[str, Any]) -> None:
     path = _store_path()
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    fd, name = tempfile.mkstemp(prefix=".model-settings-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def get_model_settings(model_id: str) -> dict[str, Any] | None:
@@ -52,9 +64,10 @@ def get_model_settings(model_id: str) -> dict[str, Any] | None:
 
 
 def upsert_model_settings(model_id: str, parameter_set: dict[str, Any]) -> dict[str, Any]:
-    data = _load_raw()
-    models = data.setdefault("models", {})
-    stamp = datetime.now(timezone.utc).isoformat()
-    models[model_id] = {"parameter_set": parameter_set, "updated_at": stamp}
-    _save_raw(data)
+    with _store_lock:
+        data = _load_raw()
+        models = data.setdefault("models", {})
+        stamp = datetime.now(timezone.utc).isoformat()
+        models[model_id] = {"parameter_set": parameter_set, "updated_at": stamp}
+        _save_raw(data)
     return {"model": model_id, "parameter_set": parameter_set, "updated_at": stamp}

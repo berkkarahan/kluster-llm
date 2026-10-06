@@ -24,6 +24,7 @@ class MembershipLoop:
         post_worker_heartbeat: Callable[[], None],
         schedule_worker_probe: Callable[[], None],
         schedule_capacity_refresh: Callable[[], None],
+        ensure_worker_runtime: Callable[[], None] | None = None,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
     ) -> None:
         self._stop = stop
@@ -33,6 +34,7 @@ class MembershipLoop:
         self._post_worker_heartbeat = post_worker_heartbeat
         self._schedule_worker_probe = schedule_worker_probe
         self._schedule_capacity_refresh = schedule_capacity_refresh
+        self._ensure_worker_runtime = ensure_worker_runtime
         self._thread_factory = thread_factory
         self._start_lock = threading.Lock()
         self._started = False
@@ -45,6 +47,8 @@ class MembershipLoop:
             self._schedule_worker_probe()
         elif role == "worker":
             self._post_worker_heartbeat()
+            if self._ensure_worker_runtime is not None:
+                self._ensure_worker_runtime()
         self._schedule_capacity_refresh()
 
     def run(self) -> None:

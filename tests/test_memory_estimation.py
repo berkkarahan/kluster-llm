@@ -124,12 +124,12 @@ def costs(layout, **kwargs):
 
 
 def test_resolved_launch_settings_are_immutable_and_round_trip_wire_values():
-    resolved = resolve_launch_settings(
-        RunBody(model="fixture.gguf", extra_args=["--temp", "0.2"])
-    )
+    body = RunBody(model="fixture.gguf", extra_args=["--temp", "0.2"])
+    resolved = resolve_launch_settings(body)
 
     assert isinstance(resolved, ResolvedLaunchSettings)
-    assert resolved.extra_args == ("--temp", "0.2")
+    assert body.temperature == 0.2
+    assert resolved.extra_args == ()
     assert ResolvedLaunchSettings.from_mapping(resolved.to_mapping()) == resolved
     with pytest.raises(FrozenInstanceError):
         resolved.context = 8192
@@ -399,4 +399,3 @@ def test_batch_and_micro_batch_ceilings():
     assert settings()["micro_batch"] == 128
     assert settings(batch_size=2048, context=512)["batch_size"] == 2048
     assert settings(batch_size=1024, micro_batch=2048)["micro_batch"] == 512
-

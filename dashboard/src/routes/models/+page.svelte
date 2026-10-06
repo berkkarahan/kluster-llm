@@ -9,6 +9,19 @@
 
   let modalOpen = $state(false);
   let searchDialog = $state<HTMLDivElement | null>(null);
+  let libraryTab = $state<'local' | 'discover'>('discover');
+  let family = $state('');
+  let libraryQuery = $state('');
+
+  function familyOf(id: string): string {
+    return id.match(/^[A-Za-z]+/)?.[0] ?? 'Other';
+  }
+
+  const families = $derived([...new Set(appStore.models.map((model) => familyOf(model.id)))].sort());
+  const visibleModels = $derived(appStore.models.filter((model) => {
+    const text = `${model.id} ${model.filename ?? ''}`.toLowerCase();
+    return (!family || familyOf(model.id) === family) && (!libraryQuery || text.includes(libraryQuery.toLowerCase()));
+  }));
 
   function fitChip(fit: ModelSearchFit) {
     if (fit === 'fits') return 'chip-ok';
@@ -94,11 +107,18 @@
   }
 </script>
 
-<div class="page-frame max-w-4xl mx-auto p-4">
-  <h1 class="page-title">Models</h1>
-  <p class="page-description">
-    Search Hugging Face GGUFs, download on the master (workers need no local copy), then Load from Plan &amp; Run.
-  </p>
+<div class="stack">
+  <header class="page-heading">
+    <div>
+      <p class="eyebrow">Models</p>
+      <h1 id="page-title">Model library</h1>
+      <p>Search Hugging Face GGUFs, download on the master, then deploy a local model.</p>
+    </div>
+  </header>
+  <div class="tabs" role="tablist">
+    <button class="tab" class:active={libraryTab === 'local'} type="button" role="tab" aria-selected={libraryTab === 'local'} onclick={() => libraryTab = 'local'}>Local library</button>
+    <button class="tab" class:active={libraryTab === 'discover'} type="button" role="tab" aria-selected={libraryTab === 'discover'} onclick={() => libraryTab = 'discover'}>Discover</button>
+  </div>
 
   <div class="flex flex-col gap-3 mb-4">
     {#if appStore.downloadJob && appStore.downloadJob.state !== 'idle'}
@@ -111,7 +131,7 @@
     <LoadProgressPanel />
   </div>
 
-  <div class="panel p-3 mb-4 flex flex-col gap-2" style="border-color: var(--border)">
+  <div class="panel panel-pad stack-sm" hidden={libraryTab !== 'discover'}>
     <label class="mono text-[11px]" style="color: var(--muted)" for="model-source">Search</label>
     <form
       class="flex gap-2"
@@ -168,8 +188,24 @@
     </div>
   </div>
 
-  <div class="panel model-table-scroll" style="border-color: var(--border)">
-    <table class="w-full text-left">
+  <div hidden={libraryTab !== 'local'}>
+    <div class="toolbar">
+      <label class="search-field">
+        <span class="sr-only">Search local models</span>
+        <input bind:value={libraryQuery} placeholder="Search local models" />
+      </label>
+      <label class="field">
+        Family
+        <select class="field" bind:value={family}>
+          <option value="">All families</option>
+          {#each families as name}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+  <div class="panel table-scroll model-table-scroll">
+    <table class="data-table">
       <thead>
         <tr class="mono text-[11px]" style="color: var(--muted)">
           <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">name</th>
@@ -179,7 +215,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each appStore.models as m}
+        {#each visibleModels as m}
           <tr class="mono" class:bg-selected={appStore.selectedModel === m.id}>
             <td class="px-3 py-2 border-b" style="border-color: var(--border)">{m.id}</td>
             <td class="px-3 py-2 border-b" style="border-color: var(--border)">{formatGb(m.size_bytes ?? null)}</td>
@@ -197,7 +233,7 @@
                 <button
                   class="btn btn-accent"
                   disabled={!!appStore.busy}
-                  onclick={() => void useModel(m.id)}>Load</button
+                  onclick={() => void useModel(m.id)}>Deploy</button
                 >
                 <button
                   class="btn btn-danger"
@@ -214,6 +250,7 @@
         {/each}
       </tbody>
     </table>
+  </div>
   </div>
 </div>
 

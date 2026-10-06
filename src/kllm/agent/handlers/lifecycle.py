@@ -123,6 +123,7 @@ class ClusterLifecycleHandlers:
 
     def stop(self) -> dict[str, str]:
         state = self._state()
+        state.active_config = None
         if state.process_pid:
             try:
                 self._end_usage(state.node_id)
@@ -149,6 +150,7 @@ class ClusterLifecycleHandlers:
 
     def leave(self) -> dict[str, str]:
         state = self._state()
+        state.active_config = None
         if state.role == "worker" and state.master_host and state.join_key:
             try:
                 self._unregister_worker()

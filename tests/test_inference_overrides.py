@@ -48,8 +48,6 @@ def test_run_settings_inference_round_trip():
             "context",
             "threads",
             "extra_args",
-            "remember",
-            "advanced_open",
             "cache_type_k",
             "cache_type_v",
             "vram_weight",

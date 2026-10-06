@@ -13,6 +13,7 @@ from kllm.commands.agent_runtime import _client
 from kllm.commands.ui import console
 from kllm.run_settings import PlanBody, available_threads
 from kllm.state import DEFAULT_CONTROL_PORT
+from kllm.extra_args import tokenize_extra_args, ExtraArgsError
 
 
 def _headroom_override(
@@ -102,9 +103,30 @@ def _run_settings_options(
     flash_attention: str = "auto",
     node_share: list[str] | None = None,
     require_node: list[str] | None = None,
+    ctx: typer.Context | None = None,
+    settings: str = "saved",
+    threads_batch: int | None = None,
+    draft_max: int | None = None,
+    seed: int | None = None,
+    max_output_tokens: int | None = None,
+    frequency_penalty: float | None = None,
+    stop: list[str] | None = None,
+    reasoning_effort: str | None = None,
+    reasoning_budget: int | None = None,
+    reasoning_format: str | None = None,
+    gpu_id: list[int] | None = None,
+    node_priority: list[str] | None = None,
+    network_id: str | None = None,
+    chat_template_text: str | None = None,
 ) -> dict[str, object]:
-    headroom = _headroom_override(device, vram_percent, ram_percent)
+    headroom = None
+    if chat_template_file and chat_template_text is not None:
+        raise typer.BadParameter("Choose --chat-template-file or --chat-template-text")
     shares = _parse_node_shares(node_share)
+    try:
+        extra_tokens = tokenize_extra_args(extra_arg)
+    except (ValueError, ExtraArgsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
     payload = build_plan_run_payload(
         model=model,
         context=context,
@@ -127,12 +149,12 @@ def _run_settings_options(
         vision=vision,
         mmproj=mmproj,
         chat_template=chat_template,
-        chat_template_text=_read_chat_template_file(chat_template_file),
+        chat_template_text=chat_template_text if chat_template_text is not None else _read_chat_template_file(chat_template_file),
         load_mode=load_mode,
         ctx_checkpoints=ctx_checkpoints,
         cache_ram=cache_ram,
         threads=threads,
-        extra_args=extra_arg,
+        extra_args=extra_tokens,
         remember=remember,
         vram_weight=vram_weight,
         latency_weight=latency_weight,
@@ -144,7 +166,21 @@ def _run_settings_options(
         repeat_penalty=repeat_penalty,
         enable_thinking=enable_thinking,
         split_mode=split_mode,
+        settings_source=settings, threads_batch=threads_batch, draft_max=draft_max, seed=seed,
+        max_output_tokens=max_output_tokens, frequency_penalty=frequency_penalty, stop=stop,
+        reasoning_effort=reasoning_effort, reasoning_budget=reasoning_budget, reasoning_format=reasoning_format,
+        gpu_ids=gpu_id, node_priority=node_priority, network_id=network_id,
     )
+    if ctx is not None:
+        aliases = {"parallel": "parallel_slots", "load_mode": "mmap_mlock", "ctx_checkpoints": "checkpoints",
+                   "extra_arg": "extra_args", "node_share": "node_shares", "require_node": "required_nodes",
+                   "gpu_id": "gpu_ids"}
+        explicit = {aliases.get(name, name) for name in ctx.params
+                    if getattr(ctx.get_parameter_source(name), "name", "") in {"COMMANDLINE", "ENVIRONMENT"}}
+        if "chat_template_file" in explicit or "chat_template_text" in explicit:
+            explicit.update({"chat_template", "chat_template_text"})
+            payload["chat_template"] = "custom"
+        payload = {key: value for key, value in payload.items() if key in explicit or key in {"model", "settings_source"}}
     return _validate_run_payload(payload)
 
 
@@ -182,7 +218,7 @@ def _print_run_result(data: dict) -> None:
 def plan_cmd(
     model: str = typer.Option(..., "--model"),
     context: int = typer.Option(4096, "--context"),
-    context_auto: bool = typer.Option(False, "--context-auto"),
+    context_auto: bool = typer.Option(False, "--context-auto/--no-context-auto"),
     device: Optional[str] = typer.Option(
         None, "--device", help="cpu|gpu (default: config, else gpu)"
     ),
@@ -208,7 +244,7 @@ def plan_cmd(
     moe_offload: str = typer.Option(
         "auto", "--moe-offload", help="Offload MoE expert weights: auto or a non-negative count"
     ),
-    vision: bool = typer.Option(False, "--vision"),
+    vision: bool = typer.Option(False, "--vision/--no-vision"),
     mmproj: Optional[str] = typer.Option(None, "--mmproj"),
     chat_template: str = typer.Option("default", "--chat-template"),
     chat_template_file: Optional[str] = typer.Option(None, "--chat-template-file"),
@@ -252,8 +288,23 @@ def plan_cmd(
     ),
     require_node: list[str] = typer.Option([], "--require-node", help="Require a model layer on NODE; repeat for multiple nodes"),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
-    remember: bool = typer.Option(True, "--remember/--no-remember"),
+    remember: bool = typer.Option(False, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
+    settings: str = typer.Option("saved", "--settings", help="saved|defaults; explicit flags override this source"),
+    threads_batch: Optional[int] = typer.Option(None, "--threads-batch", min=1),
+    draft_max: Optional[int] = typer.Option(None, "--spec-draft-n-max", min=0),
+    seed: Optional[int] = typer.Option(None, "--seed", min=-1, max=4294967295),
+    max_output_tokens: Optional[int] = typer.Option(None, "--max-output-tokens", min=-1),
+    frequency_penalty: Optional[float] = typer.Option(None, "--frequency-penalty", min=-2, max=2),
+    stop: list[str] = typer.Option([], "--stop", help="Literal stop string; repeat to supply several"),
+    reasoning_effort: Optional[str] = typer.Option(None, "--reasoning-effort"),
+    reasoning_budget: Optional[int] = typer.Option(None, "--reasoning-budget", min=-1),
+    reasoning_format: Optional[str] = typer.Option(None, "--reasoning-format"),
+    gpu_id: list[int] = typer.Option([], "--gpu-id", min=0),
+    node_priority: list[str] = typer.Option([], "--node-priority", help="NODE in priority order; repeat"),
+    network_id: Optional[str] = typer.Option(None, "--network-id"),
+    chat_template_text: Optional[str] = typer.Option(None, "--chat-template-text", help="Inline custom Jinja template"),
+    ctx: typer.Context = None,
 ) -> None:
     """Dry-run capacity-aware layer split with RUN SETTINGS parity."""
     payload = _run_settings_options(
@@ -294,6 +345,10 @@ def plan_cmd(
         flash_attention=flash_attention,
         node_share=node_share,
         require_node=require_node,
+        ctx=ctx, settings=settings, threads_batch=threads_batch, draft_max=draft_max, seed=seed,
+        max_output_tokens=max_output_tokens, frequency_penalty=frequency_penalty, stop=stop,
+        reasoning_effort=reasoning_effort, reasoning_budget=reasoning_budget, reasoning_format=reasoning_format,
+        gpu_id=gpu_id, node_priority=node_priority, network_id=network_id, chat_template_text=chat_template_text,
     )
     with _client(port) as c:
         r = c.post("/v2/inference/plans", json=payload)
@@ -307,7 +362,7 @@ def plan_cmd(
 def run(
     model: str = typer.Option(..., "--model"),
     context: int = typer.Option(4096, "--context"),
-    context_auto: bool = typer.Option(False, "--context-auto"),
+    context_auto: bool = typer.Option(False, "--context-auto/--no-context-auto"),
     device: Optional[str] = typer.Option(
         None, "--device", help="cpu|gpu (default: config, else gpu)"
     ),
@@ -333,7 +388,7 @@ def run(
     moe_offload: str = typer.Option(
         "auto", "--moe-offload", help="Offload MoE expert weights: auto or a non-negative count"
     ),
-    vision: bool = typer.Option(False, "--vision"),
+    vision: bool = typer.Option(False, "--vision/--no-vision"),
     mmproj: Optional[str] = typer.Option(None, "--mmproj"),
     chat_template: str = typer.Option("default", "--chat-template"),
     chat_template_file: Optional[str] = typer.Option(None, "--chat-template-file"),
@@ -377,8 +432,23 @@ def run(
     ),
     require_node: list[str] = typer.Option([], "--require-node", help="Require a model layer on NODE; repeat for multiple nodes"),
     extra_arg: list[str] = typer.Option([], "--extra-arg"),
-    remember: bool = typer.Option(True, "--remember/--no-remember"),
+    remember: bool = typer.Option(False, "--remember/--no-remember"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
+    settings: str = typer.Option("saved", "--settings", help="saved|defaults; explicit flags override this source"),
+    threads_batch: Optional[int] = typer.Option(None, "--threads-batch", min=1),
+    draft_max: Optional[int] = typer.Option(None, "--spec-draft-n-max", min=0),
+    seed: Optional[int] = typer.Option(None, "--seed", min=-1, max=4294967295),
+    max_output_tokens: Optional[int] = typer.Option(None, "--max-output-tokens", min=-1),
+    frequency_penalty: Optional[float] = typer.Option(None, "--frequency-penalty", min=-2, max=2),
+    stop: list[str] = typer.Option([], "--stop", help="Literal stop string; repeat to supply several"),
+    reasoning_effort: Optional[str] = typer.Option(None, "--reasoning-effort"),
+    reasoning_budget: Optional[int] = typer.Option(None, "--reasoning-budget", min=-1),
+    reasoning_format: Optional[str] = typer.Option(None, "--reasoning-format"),
+    gpu_id: list[int] = typer.Option([], "--gpu-id", min=0),
+    node_priority: list[str] = typer.Option([], "--node-priority", help="NODE in priority order; repeat"),
+    network_id: Optional[str] = typer.Option(None, "--network-id"),
+    chat_template_text: Optional[str] = typer.Option(None, "--chat-template-text", help="Inline custom Jinja template"),
+    ctx: typer.Context = None,
 ) -> None:
     """Plan and launch master llama-server with RPC workers."""
     payload = _run_settings_options(
@@ -419,6 +489,10 @@ def run(
         flash_attention=flash_attention,
         node_share=node_share,
         require_node=require_node,
+        ctx=ctx, settings=settings, threads_batch=threads_batch, draft_max=draft_max, seed=seed,
+        max_output_tokens=max_output_tokens, frequency_penalty=frequency_penalty, stop=stop,
+        reasoning_effort=reasoning_effort, reasoning_budget=reasoning_budget, reasoning_format=reasoning_format,
+        gpu_id=gpu_id, node_priority=node_priority, network_id=network_id, chat_template_text=chat_template_text,
     )
     with _client(port) as c:
         r = c.post("/v2/inference/runs", json=payload)

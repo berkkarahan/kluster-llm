@@ -383,6 +383,7 @@ def test_gpu_visibility_env():
 def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monkeypatch):
     c, agent = client
     monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent, "_worker_post_heartbeat", lambda: None)
     from kllm.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")

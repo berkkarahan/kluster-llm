@@ -106,14 +106,18 @@ test('run page cache dropdowns and required-node checkbox update the visible pla
         appStore.scheduleEstimate(0);
       })()`);
       await wait("document.body.innerText.includes('K cache: q8_0') && document.body.innerText.includes('6.0 GiB')");
+      await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Configure').click()");
+      await wait("document.querySelector('#run-cache-k')");
+      await evaluate("[...document.querySelectorAll('summary')].find(summary => summary.textContent.includes('Memory & loading')).click()");
       await evaluate(`(() => {
-        for (const select of [document.querySelector('#run-cache-k'), document.querySelector('[aria-label="KV cache dtype V"]')]) {
+        for (const select of [document.querySelector('#run-cache-k'), document.querySelector('#run-cache-v')]) {
           select.value = 'q4_0'; select.dispatchEvent(new Event('change', { bubbles: true }));
         }
       })()`);
       await wait("document.body.innerText.includes('K cache: q4_0') && document.body.innerText.includes('KV cache decreased by 3.0 GiB')");
       assert.equal(requests.at(-1).cache_type_k, 'q4_0');
       assert.equal(requests.at(-1).cache_type_v, 'q4_0');
+      await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Back').click()");
       await evaluate("document.querySelector('#required-worker').click()");
       await wait("document.querySelector('#required-worker').checked && document.body.innerText.includes('Preview recalculated.')");
       assert.deepEqual(requests.at(-1).required_nodes, ['worker']);

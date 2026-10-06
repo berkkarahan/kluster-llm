@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from kllm.membership_state import mark_master_unreachable
 from kllm.state import ClusterState
 
 
@@ -70,6 +71,10 @@ class AgentLifespan:
         deps.reset_usage_state()
         deps.clear_resources()
         deps.clear_remote_resources()
+        # A persisted worker mirror is not evidence of contact in this process.
+        # Keep it for display/recovery until a heartbeat confirms the master.
+        if deps.state().role == "worker":
+            mark_master_unreachable(deps.state())
         deps.control_client()
         try:
             deps.open_usage_store()

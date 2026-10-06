@@ -9,12 +9,14 @@ from collections.abc import Callable
 from typing import Any, Protocol
 from contextlib import nullcontext
 from typing import ContextManager
+from uuid import uuid4
 
 from fastapi import HTTPException
 
 from kllm.agent.run_route import run_response
 from kllm.run_settings import PlanBody, RunBody, RunSettingsFields
 from kllm.state import ClusterState
+from kllm.effective_config import effective_configuration
 
 
 class MasterLaunchBuilder(Protocol):
@@ -70,6 +72,8 @@ class InferenceDependencies:
     network_release: Callable[[], None] | None = None
     network_diagnostics: Callable[[str], dict[str, Any]] | None = None
     network_stop: Callable[[], ContextManager[None]] | None = None
+    resolve_settings: Callable[[PlanBody | RunBody], PlanBody | RunBody] | None = None
+    preflight: Callable[[RunSettingsFields, Path], None] | None = None
 
 
 class InferenceHandlers:
@@ -89,6 +93,11 @@ class InferenceHandlers:
         state = self._deps.state
         if state.role != "master":
             raise HTTPException(400, "plan requires master role")
+        if self._deps.resolve_settings:
+            body = self._deps.resolve_settings(body)
+        path = self._deps.resolve_model(body.model)
+        if self._deps.preflight:
+            self._deps.preflight(body, path)
         self._deps.ensure_master_member()
         self._guard_context(body)
         self._deps.merge_extra(body)
@@ -98,9 +107,12 @@ class InferenceHandlers:
                 raise HTTPException(409, detail={"code": "UNSUPPORTED_CAPABILITY"})
             members = self._deps.network_members(body.network_id)
         result = self._deps.execute_plan(body, members)
+        result["effective_config"] = effective_configuration(body, result, path)
         if body.network_id and self._deps.network_diagnostics:
             result.update(self._deps.network_diagnostics(body.network_id))
-        if preview:
+        if preview or body.model_config.get("extra") != "ignore":
+            if not preview and body.remember:
+                self._deps.remember(body)
             return result
         if state.process_pid:
             self._deps.remember(body)
@@ -128,6 +140,11 @@ class InferenceHandlers:
         state = self._deps.state
         if state.role != "master":
             raise HTTPException(400, "run requires master role")
+        if self._deps.resolve_settings:
+            body = self._deps.resolve_settings(body)
+        path = self._deps.resolve_model(body.model)
+        if self._deps.preflight:
+            self._deps.preflight(body, path)
         self._deps.ensure_master_member()
         self._guard_context(body)
         self._deps.merge_extra(body)
@@ -149,7 +166,6 @@ class InferenceHandlers:
             if not body.network_id:
                 self._deps.ensure_rpc_peers_reachable(rpc_servers)
             root = self._deps.repository_root()
-            self._deps.stop_previous_master()
             backend = (state.members.get(state.node_id) or {}).get("backend") or "cpu"
             gpu_env = self._deps.gpu_visibility_env(backend, state.gpu_ids)
             extra = self._deps.sanitize_extra_args(body.extra_args) if body.extra_args else []
@@ -164,7 +180,15 @@ class InferenceHandlers:
                 gpu_env=gpu_env,
                 extra_args=extra,
             )
+            effective = effective_configuration(body, plan_result, path)
+            self._deps.stop_previous_master()
+            state.active_config = None
+            state.process_pid = None
+            state.process_role = None
+            state.save()
             launched = self._deps.spawn_master(launch_config)
+            effective.update({"process_pid": launched.get("pid"), "run_id": str(uuid4())})
+            state.active_config = effective
             self._deps.finish_master_launch(
                 path,
                 plan_result,
@@ -172,7 +196,7 @@ class InferenceHandlers:
                 lambda: self._deps.persist_last_settings(body),
                 lambda: self._deps.remember(body),
             )
-            return run_response(plan_result, launched)
+            return {**run_response(plan_result, launched), "effective_config": effective}
 
     def stop(self) -> dict[str, Any]:
         state = self._deps.state
@@ -184,6 +208,7 @@ class InferenceHandlers:
             if self._deps.network_release:
                 self._deps.network_release()
             state.model_name = None
+            state.active_config = None
             state.inference_activity = self._deps.inference_idle()
             state.save()
             return {"ok": True, "role": state.role, "model_name": None}

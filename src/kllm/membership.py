@@ -77,6 +77,7 @@ def _does_not_fit_message(plan: dict[str, Any] | None, extra: str | None = None)
 
 
 def _stop_inference(state: ClusterState) -> None:
+    state.active_config = None
     if state.process_pid:
         native.stop_process(state.process_pid, force=True)
         runtime.clear_children()
@@ -110,6 +111,10 @@ def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, An
         extra_args=extra,
     )
     launched = native.start_master(**launch_cfg)
+    from kllm.effective_config import effective_configuration
+    from uuid import uuid4
+    state.active_config = effective_configuration(body, plan_result, path)
+    state.active_config.update({"process_pid": launched.get("pid"), "run_id": str(uuid4())})
     state.process_pid = launched.get("pid")
     state.process_role = "master"
     state.model_name = path.name
@@ -226,4 +231,3 @@ def on_membership_shrink(state: ClusterState) -> None:
     state.apply_error = _does_not_fit_message(plan, plan_error)
     state.apply_warning = None
     state.save()
-

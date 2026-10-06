@@ -1058,7 +1058,7 @@ def test_install_kllm_path_shim_unix(install, monkeypatch, tmp_path):
     assert shim == home / ".local" / "bin" / "kllm"
     text = shim.read_text(encoding="utf-8")
     assert text.startswith("#!/usr/bin/env sh\nexec ")
-    assert " run --directory " in text
+    assert " run --project " in text
     assert ' kllm "$@"' in text
     assert str(uv.resolve()) in text
     assert str(repo.resolve()) in text
@@ -1080,7 +1080,7 @@ def test_install_kllm_path_shim_windows(install, monkeypatch, tmp_path):
     assert shim.name == "kllm.cmd"
     text = shim.read_text(encoding="utf-8")
     assert "@echo off" in text
-    assert " run --directory " in text
+    assert " run --project " in text
     assert " kllm %*" in text
 
 

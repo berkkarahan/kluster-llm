@@ -1048,7 +1048,7 @@ def _any_shell_profile_has_path_shim_marker() -> bool:
 def _write_kllm_shim_unix(shim: Path, *, uv: str, repo_root: Path) -> None:
     uv_q = shlex.quote(str(Path(uv).resolve()))
     root_q = shlex.quote(str(repo_root.resolve()))
-    body = f"#!/usr/bin/env sh\nexec {uv_q} run --directory {root_q} kllm \"$@\"\n"
+    body = f"#!/usr/bin/env sh\nexec {uv_q} run --project {root_q} kllm \"$@\"\n"
     shim.write_text(body, encoding="utf-8", newline="\n")
     _mark_executable(shim)
 
@@ -1056,7 +1056,7 @@ def _write_kllm_shim_unix(shim: Path, *, uv: str, repo_root: Path) -> None:
 def _write_kllm_shim_windows(shim: Path, *, uv: str, repo_root: Path) -> None:
     uv_path = str(Path(uv).resolve())
     root_path = str(repo_root.resolve())
-    body = f'@echo off\r\n"{uv_path}" run --directory "{root_path}" kllm %*\r\n'
+    body = f'@echo off\r\n"{uv_path}" run --project "{root_path}" kllm %*\r\n'
     shim.write_text(body, encoding="utf-8", newline="\r\n")
 
 

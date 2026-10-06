@@ -1,6 +1,8 @@
 """Served catalog and harness configuration boundaries."""
 import json
+import os
 import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -188,6 +190,46 @@ def test_opencode_v2_gets_private_server_flag_after_subcommand(monkeypatch):
     assert plan.argv == ["/bin/opencode", "run", "--standalone", "hello"]
     with pytest.raises(typer.BadParameter, match="another service"):
         connect.plan_opencode("http://master", "key", "model.gguf", False, ["--server=http://other"])
+
+
+def test_opencode_bare_tui_pins_terminal_cwd(monkeypatch):
+    monkeypatch.setattr(connect, "_which", lambda _: "/bin/opencode")
+    monkeypatch.setattr(connect, "_opencode_service_client", lambda _: True)
+    plan = connect.plan_opencode("http://master", "key", "model.gguf", False, [])
+    assert plan.argv == ["/bin/opencode", "--standalone", str(Path.cwd())]
+
+
+def test_opencode_flag_only_extra_still_pins_terminal_cwd(monkeypatch):
+    monkeypatch.setattr(connect, "_which", lambda _: "/bin/opencode")
+    monkeypatch.setattr(connect, "_opencode_service_client", lambda _: False)
+    plan = connect.plan_opencode("http://master", "key", "model.gguf", False, ["-c", "--prompt", "hi"])
+    assert plan.argv == ["/bin/opencode", "-c", "--prompt", "hi", str(Path.cwd())]
+
+
+@pytest.mark.parametrize("extra", [
+    ["run", "hello"],
+    ["mini"],
+    ["acp"],
+    ["--session", "abc", str(Path.cwd())],
+])
+def test_opencode_never_appends_cwd_over_subcommand_or_positional(monkeypatch, extra):
+    monkeypatch.setattr(connect, "_which", lambda _: "/bin/opencode")
+    monkeypatch.setattr(connect, "_opencode_service_client", lambda _: False)
+    plan = connect.plan_opencode("http://master", "key", "model.gguf", False, list(extra))
+    assert plan.argv.count(str(Path.cwd())) == extra.count(str(Path.cwd()))
+
+
+def test_run_plan_launches_in_terminal_cwd(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, env=None, cwd=None, check=False):
+        seen["cwd"] = cwd
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(connect.subprocess, "run", fake_run)
+    plan = connect.LaunchPlan(agent="claude", argv=["claude"], env={})
+    assert connect.run_plan(plan) == 0
+    assert seen["cwd"] == os.getcwd()
 
 
 def test_hermes_plan_pins_runtime_dir_when_pm_store_exists(monkeypatch, tmp_path):

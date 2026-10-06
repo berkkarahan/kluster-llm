@@ -40,6 +40,42 @@ class AgentRegistry:
 registry = AgentRegistry()
 
 
+_OPENCODE_SUBCOMMANDS = {
+    "upgrade", "update", "uninstall", "acp", "api", "debug", "auth", "mcp",
+    "plugin", "models", "stats", "mini", "run", "session", "service",
+    "reload", "pair", "serve",
+}
+
+# Flags whose next argument is a value, not a positional.
+_OPENCODE_VALUE_FLAGS = {
+    "--model", "-m", "--agent", "--session", "-s", "--prompt", "--title",
+    "--file", "-f", "--log-level", "--completions", "--server", "--replay-limit",
+}
+
+
+def _extra_positional(extra: list[str]) -> int:
+    """Index of the first positional argument in *extra*, or -1 when none."""
+    skip_next = False
+    for index, arg in enumerate(extra):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _OPENCODE_VALUE_FLAGS:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return index
+    return -1
+
+
+def _opencode_takes_directory(extra: list[str]) -> bool:
+    """True when the bare interactive TUI can safely take a directory argument."""
+    if extra and extra[0] in _OPENCODE_SUBCOMMANDS:
+        return False
+    return _extra_positional(extra) < 0
+
+
 @dataclass
 class LaunchPlan:
     agent: str
@@ -225,6 +261,10 @@ def plan_opencode(base: str, token: str, model: str, yolo: bool, extra: list[str
             raise typer.BadParameter("OpenCode --server uses another service; omit it to connect this session to kllm")
         if "--standalone" not in extra:
             argv.insert(2 if extra and extra[0] in ("run", "mini", "acp") else 1, "--standalone")
+    # Pin the session (and any background-service project scope) to the
+    # terminal's cwd via the bare TUI's [<directory>] argument.
+    if _opencode_takes_directory(extra):
+        argv.append(str(Path.cwd()))
     return LaunchPlan(agent="opencode", argv=argv, env=env)
 
 
@@ -415,7 +455,8 @@ def run_plan(plan: LaunchPlan) -> int:
     env = os.environ.copy()
     env.update(plan.env)
     try:
-        proc = subprocess.run(plan.argv, env=env, check=False)
+        # Launch explicitly in the terminal's cwd for every agent.
+        proc = subprocess.run(plan.argv, env=env, cwd=os.getcwd(), check=False)
         return int(proc.returncode)
     finally:
         for d in plan.cleanup_dirs:

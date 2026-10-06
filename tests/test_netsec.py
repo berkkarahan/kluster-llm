@@ -439,8 +439,8 @@ def test_join_binds_private_host_not_wildcard(client, monkeypatch):
         )
     assert r.status_code == 200
     assert captured["toward"] == "192.168.10.1"
-    assert captured["host"] == "192.168.10.2"
-    assert captured["host"] != "0.0.0.0"
+    assert "host" not in captured
+    assert agent.STATE.process_pid is None
     assert r.json()["rpc_bind"] == "192.168.10.2"
 
 
@@ -537,7 +537,9 @@ def test_wireguard_join_uses_master_assignment_for_worker_tunnel(client, monkeyp
     assert response.json()["wg_address"] == "10.66.87.2"
     assert response.json()["overlay_status"] == "up 10.66.87.2"
     assert agent.STATE.wg_address == "10.66.87.2"
-    assert started["host"] == "10.66.87.2"
+    assert started == {}
+    assert agent.STATE.rpc_bind == "10.66.87.2"
+    assert agent.STATE.process_pid is None
     assert configurations[-1] == {
         "private_key": "worker-private",
         "address": "10.66.87.2",
@@ -625,7 +627,7 @@ def test_join_honors_rpc_bind_hint_from_master(client, monkeypatch):
             },
         )
     assert r.status_code == 200, r.text
-    assert captured["host"] == "192.168.68.63"
+    assert captured == {}
     assert r.json()["rpc_bind"] == "192.168.68.63"
     assert any("corrected" in w for w in (r.json().get("netsec_warnings") or []))
 
@@ -705,7 +707,7 @@ def test_join_ignores_rpc_bind_hint_that_is_not_local(client, monkeypatch):
             },
         )
     assert r.status_code == 200, r.text
-    assert captured["host"] == "192.168.68.51"
+    assert captured == {}
     assert r.json()["rpc_bind"] == "192.168.68.51"
 
 

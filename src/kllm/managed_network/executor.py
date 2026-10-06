@@ -40,6 +40,7 @@ class ApplyBody(Record):
 
 class VerifyBody(Record):
     health_only: bool = False
+    runtime: bool = False
 
 
 class CleanupBody(Record):
@@ -123,14 +124,6 @@ class LocalNetworkExecutor:
         if self.store.metadata(f'stopped_network:{command.network_id}') or (existing_network is not None and existing_network.observed_state == 'stopped'):
             raise PlatformRefusal('STALE_REVISION', 'Stopped network tombstone cannot be revived')
         self.platform.eligible(self.platform.inspect(assignment.adapter_id))
-        repo = self.repository()
-        if repo is None:
-            raise PlatformRefusal('RPC_PROTOCOL_UNSUPPORTED', 'Installed runtime provenance is unavailable')
-        llama = native.resolve_llama_server(str(repo))
-        rpc = native.resolve_rpc_server(str(repo))
-        if not llama or not rpc:
-            raise PlatformRefusal('RPC_PROTOCOL_UNSUPPORTED', 'Install both runtime binaries before setup')
-        require_tcp_runtime(repo, Path(llama), Path(rpc))
         if self.store.network(network.network_id) is None:
             self.store.put_network(network.model_copy(update={'revision': 1, 'observed_state': 'preparing'}))
         self.store.put_operation(body.operation)
@@ -202,7 +195,7 @@ class LocalNetworkExecutor:
                 raise ValueError('RPC child predates the proven installation')
         except (psutil.Error, OSError, ValueError):
             raise PlatformRefusal('RPC_PROTOCOL_UNSUPPORTED', 'Restart the worker after installing the proven TCP-only runtime') from None
-        return RPCChildIdentity(pid=state.process_pid, start_token=token, bind=bind, port=state.rpc_port, llama_tag='v0.5.0', tcp_only=True, compatibility_digest=digest(evidence))
+        return RPCChildIdentity(pid=state.process_pid, start_token=token, bind=bind, port=state.rpc_port, llama_tag=evidence.get('runtime_id', 'v0.5.0'), tcp_only=True, compatibility_digest=digest(evidence))
 
     def require_rpc_idle(self, child: RPCChildIdentity) -> None:
         try:
@@ -237,9 +230,12 @@ class LocalNetworkExecutor:
             self.diagnostics[key] = diagnostic
         result: dict[str, Any] = {'status': 'verification_pending', 'adapter_fingerprint': snapshot.fingerprint, 'address': prepared.assignment.address, 'routes_verified': True, 'diagnostic_port': body.diagnostic_port}
         if self.state().role == 'worker':
-            child = self.rpc_child()
             master = next(a for a in body.participants if a.node_id == command.master_node_id)
             proof = await self.diagnostics[key].challenge(master.node_id, master.assignment_revision, body.diagnostic_port)
+            result['dedicated_proof'] = proof
+            if not options.runtime:
+                return result
+            child = self.rpc_child()
             if key not in self.bridges:
                 if options.health_only:
                     raise PlatformRefusal('STALE_REVISION', 'Worker bridge identity disappeared')
@@ -300,7 +296,9 @@ class LocalNetworkExecutor:
                 until = min(deadline, time.monotonic() + 2)
                 while True:
                     try:
-                        self.require_rpc_idle(lease.expected_rpc_child_identity)
+                        child = lease.expected_rpc_child_identity
+                        if native.process_alive(child.pid) and native._managed_native()._process_identity(child.pid)[0] == child.start_token:
+                            self.require_rpc_idle(child)
                         break
                     except PlatformRefusal:
                         if time.monotonic() >= until:
@@ -450,6 +448,16 @@ class LocalNetworkExecutor:
                     result = await self._verify(command, deadline)
                 elif command.phase in ('admit_probe', 'admit_run', 'renew_admission', 'release_admission'):
                     result = await asyncio.to_thread(self._admission, command, deadline)
+                elif command.phase == 'release_runtime':
+                    if command.body or any(lease.state != 'released' for lease in self.store.leases(command.network_id)):
+                        raise PlatformRefusal('RPC_BUSY', 'Drain runtime admission before closing its relay')
+                    bridge = self.bridges.get(str(command.network_id))
+                    if bridge:
+                        status = native.network_bridge_status(bridge)
+                        if not await asyncio.to_thread(native.stop_network_bridge, bridge, status['instance_id']):
+                            raise PlatformRefusal('CLEANUP_PENDING', 'Worker relay has not drained')
+                        self.bridges.pop(str(command.network_id), None)
+                    result = {'status': 'configured', 'drained': True}
                 elif command.phase in ('cleanup', 'rollback'):
                     result = await self._cleanup(command, deadline)
                 else:

@@ -184,6 +184,7 @@ def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
                 "unified_memory": m.get("unified_memory", m.get("backend") == "metal"),
                 "devices": devices,
                 "rpc_devices": m.get("rpc_devices", []),
+                "rpc_capabilities": m.get("rpc_capabilities", []),
                 "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
                 "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
                 "latency_ms": float(lat) if lat is not None else None,

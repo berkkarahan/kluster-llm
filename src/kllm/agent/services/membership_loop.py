@@ -47,8 +47,6 @@ class MembershipLoop:
             self._schedule_worker_probe()
         elif role == "worker":
             self._post_worker_heartbeat()
-            if self._ensure_worker_runtime is not None:
-                self._ensure_worker_runtime()
         self._schedule_capacity_refresh()
 
     def run(self) -> None:

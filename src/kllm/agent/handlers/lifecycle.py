@@ -23,7 +23,6 @@ class MasterStartDependencies:
     normalize_overlay: Callable[[str], str]
     generate_join_key: Callable[[], str]
     pick_rpc_bind_host: Callable[[str | None], str]
-    ensure_rpc_firewall: Callable[[int, str], dict[str, Any]]
     select_gpus: Callable[[StartBody], ResolvedGpuSelection]
     build_master_member: Callable[[str], dict[str, Any]]
     setup_overlay: Callable[[str, str], None]
@@ -61,9 +60,6 @@ class MasterStartHandler:
 
         lan_host = self._deps.pick_rpc_bind_host(body.rpc_bind)
         state.rpc_bind = lan_host
-        firewall = self._deps.ensure_rpc_firewall(body.rpc_port, lan_host)
-        if firewall.get("warning"):
-            state.netsec_warnings.append(str(firewall["warning"]))
         gpu = self._deps.select_gpus(body)
         state.gpu_ids = list(gpu.gpu_ids)
         state.members[state.node_id] = self._deps.build_master_member(lan_host)

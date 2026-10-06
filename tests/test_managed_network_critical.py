@@ -189,6 +189,10 @@ async def test_run_reservation_freezes_inventory_and_blocks_stop(tmp_path, monke
     async def phase(op, assignments, stage, bodies, budget):
         return {a.node_id: {'grant_ack': True, 'drained': True, 'status': 'configured'} for a in assignments}
     monkeypatch.setattr(service, '_health', health)
+    async def prepare_rpc(*args):
+        pass
+    monkeypatch.setattr(service, 'prepare_rpc', prepare_rpc)
+    monkeypatch.setattr(native, 'stop_network_bridge', lambda *_args, **_kwargs: True)
     monkeypatch.setattr(service, 'verify_idle', probe)
     monkeypatch.setattr(service, '_phase', phase)
     reservation, copied = await service.admission.reserve(str(network.network_id))

@@ -13,7 +13,7 @@ uv run python scripts/install.py
 
 This creates `.venv` with **uv** (Python version from `.python-version`), installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
 
-llama.cpp is pinned in committed [`llama-release`](../llama-release) to a stable tag (same role as `.python-version`). Every node must run the same tag or RPC HELLO fails. Sync binaries only:
+The committed [`llama-release`](../llama-release) is the stable bootstrap default. Settings → **llama.cpp** also stores upstream releases and public forks, resolved to exact repository/commit snapshots. The master can persist a target and synchronize source builds to children, including future joins/reconnections. Builds prepare beside active inference; new runs require the master and selected workers to match. Backend builds may differ by node. Bootstrap binaries can still be synchronized with:
 
 ```bash
 python scripts/install.py --llama-only
@@ -42,7 +42,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. A Hugging Face file URL keeps its revision and full path. Repository and tree page URLs are not downloads. |
 | `kllm model delete <name>` | Delete a GGUF from the master model store |
 | `kllm plan --model NAME …` | Dry-run plan with RUN SETTINGS + `fit_status` (`fits` / `tight` / `overflow`). RPC is used only when the model exceeds master-local capacity. |
-| `kllm run --model NAME …` | Re-plan, gate on overflow, launch `llama-server` (adds `--rpc` only when the plan needs workers) |
+| `kllm run --model NAME …` | Re-plan, start RPC on selected workers under master control, then launch `llama-server` (adds `--rpc` only when the plan needs workers) |
 | `kllm rebuild` | Run full `scripts/install.py --sync` from the detected repo root (stages in order in one process; honors `KLLM_REPO_ROOT`) |
 | `kllm ui [--no-open]` | Open the Svelte dashboard at `http://127.0.0.1:18765/` |
 | `kllm connect <agent>` | Launch Claude/OpenCode/Codex/… with kllm API baked in |
@@ -55,7 +55,11 @@ Control plane default port: **18765**. Worker RPC default: **50052** (LAN-only; 
 
 ### RPC bind and optional WireGuard
 
-By default workers bind `rpc-server` to a **private interface IP** (not `0.0.0.0`) and `kllm` best-effort opens the host firewall for TCP 50052. Pass `--rpc-bind 0.0.0.0` only for debugging.
+Joining establishes membership and networking and leaves the worker idle. The master starts `rpc-server` only when a model run allocates work to that node, using the saved GPU selection, private bind address, and RPC port. Startup best-effort prepares the host firewall for that endpoint. Wildcard binds are rejected by runtime control; choose one private interface address.
+
+Stopping or replacing the model releases that run's RPC processes while the workers stay joined. Planning and previews start no RPC processes. The same lifecycle applies to LAN, WireGuard, and managed private networks: private-network setup verifies addresses, routes, and signed connectivity; runtime compatibility checks and RPC relay admission occur when inference starts.
+
+Workers accept signed commands from their paired current master. Runtime ownership expires after 15 seconds without renewal (the master renews every 5 seconds). Worker heartbeat, software installation, and agent restart do not start RPC. If RPC or an inference relay fails during serving, the master stops the affected run and reloads its saved settings with the same selected workers, trying at 1-, 2-, and 4-second intervals. Stop cancels recovery. Three failed attempts leave inference stopped with an error; 60 seconds of healthy serving resets the retry budget. Interrupted inference requests are not replayed.
 
 Optional overlay (must match on master and workers):
 

@@ -247,7 +247,7 @@ async def test_three_real_agents_bootstrap_and_guided_setup(tmp_path, monkeypatc
         network = lab.nodes[0].service.network_view(network_id)
         assert len(network["participants"]) == 3
         assert all(p["state"] == "ready" for p in network["participants"])
-        assert lab.configurations, "Guided setup must verify actual native bridge boundaries"
+        assert not lab.configurations, "Network setup must verify connectivity without creating RPC relays"
         response = await lab.request(
             0,
             "POST",

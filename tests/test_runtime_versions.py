@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import textwrap
 import threading
 from types import SimpleNamespace
 from uuid import uuid4
+import zipfile
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -133,7 +135,22 @@ def test_removing_unused_version_does_not_remove_another(registry):
     prepared(registry, b)
     registry.remove(a.runtime_id)
     assert registry.capture(b.runtime_id)['commit'] == b.commit
-    assert not (registry.root / a.runtime_id).exists()
+    assert not registry._version_dir(a.runtime_id).exists()
+
+
+def test_staged_job_directories_stay_short_and_resolve_logs(registry):
+    selected = version()
+    registry.add(selected)
+    job_id = 'abc123def456' + '0' * 24
+    registry.data['jobs'][job_id] = {'job_id': job_id, 'runtime_id': selected.runtime_id, 'backend': 'cpu',
+                                     'phase': 'failed', 'error': None}
+    staged = registry._job_dir(selected.runtime_id, job_id)
+    assert staged.parent.parent == registry.root
+    assert staged.parent.name == selected.runtime_id[:16] and staged.name == job_id[:12]
+    assert len(str(staged)) < len(str(registry.root)) + 32
+    (staged).mkdir(parents=True, exist_ok=True)
+    (staged / 'build.log').write_text('staged build output')
+    assert registry.logs(job_id) == 'staged build output'
 
 
 def test_build_cancellation_preserves_running_artifacts(registry):
@@ -308,13 +325,9 @@ def test_local_library_reads_degrade_explicitly_without_signed_control(registry)
     assert client.get('/v2/node/runtimes', headers=headers).json()['control'] == {'available': True}
 
 
-def test_real_git_cmake_build_is_isolated_from_bootstrap(tmp_path, monkeypatch):
-    import shutil
+def _source_fixture_repository(tmp_path, monkeypatch, extra_files=None):
+    """Create a local C runtime fixture and redirect its public URL to the checkout."""
     import subprocess
-    from kllm.llama_pack import _load_install
-    from kllm.runtimes.build import managed_build
-    if not shutil.which('git') or not shutil.which('cmake'):
-        pytest.skip('Git and CMake required for installer boundary check')
     fixture = tmp_path / 'git-source'
     fixture.mkdir()
     (fixture / 'CMakeLists.txt').write_text('''cmake_minimum_required(VERSION 3.15)
@@ -334,6 +347,9 @@ target_link_libraries(rpc-server ggml-rpc)
 ''')
     (fixture / 'rpc.c').write_text('int fixture_rpc(void) {return 0;}')
     (fixture / 'server.c').write_text('#include <stdio.h>\nint main(void){puts("CPU");return 0;}')
+    for relative, text in (extra_files or {}).items():
+        (fixture / relative).parent.mkdir(parents=True, exist_ok=True)
+        (fixture / relative).write_text(text)
     def git(*args):
         return subprocess.check_output(['git', '-C', str(fixture), *args], text=True).strip()
     git('init', '-q')
@@ -343,6 +359,16 @@ target_link_libraries(rpc-server ggml-rpc)
     config = tmp_path / 'gitconfig'
     config.write_text(f'[url "{fixture.as_uri()}"]\n\tinsteadOf = https://github.com/fixture/runtime.git\n')
     monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(config))
+    return commit
+
+
+def test_real_git_cmake_build_is_isolated_from_bootstrap(tmp_path, monkeypatch):
+    import shutil
+    from kllm.llama_pack import _load_install
+    from kllm.runtimes.build import managed_build
+    if not shutil.which('git') or not shutil.which('cmake'):
+        pytest.skip('Git and CMake required for installer boundary check')
+    commit = _source_fixture_repository(tmp_path, monkeypatch)
     install = _load_install(Path(__file__).resolve().parents[1])
     old_bin = install.BIN_DIR
     output = tmp_path / 'managed-artifact'
@@ -355,6 +381,71 @@ target_link_libraries(rpc-server ggml-rpc)
     from kllm.managed_network.transport import require_tcp_runtime
     evidence = require_tcp_runtime(install.ROOT, Path(manifest['llama_server']), Path(manifest['rpc_server']))
     assert evidence['runtime_id'] == manifest['runtime_id']
+
+
+def test_git_environment_disables_prompts_and_enables_long_paths():
+    import shutil
+    import subprocess
+    env = source.git_environment()
+    assert env['GIT_TERMINAL_PROMPT'] == '0'
+    assert env['GIT_CONFIG_COUNT'] == '2'
+    assert (env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']) == ('credential.helper', '')
+    assert (env['GIT_CONFIG_KEY_1'], env['GIT_CONFIG_VALUE_1']) == ('core.longpaths', 'true')
+    if shutil.which('git'):
+        read = subprocess.run(['git', 'config', '--get', 'core.longpaths'], env=env, capture_output=True, text=True)
+        assert read.stdout.strip() == 'true'
+
+
+def test_git_failure_detail_prefers_git_errors_and_falls_back():
+    from kllm.runtimes.build import _git_failure_detail
+    assert _git_failure_detail(
+        "Cloning into 'source'...\n"
+        'error: unable to create file x.svelte: Filename too long\n'
+        "fatal: cannot create directory at 'deep': Filename too long\n"
+    ) == "fatal: cannot create directory at 'deep': Filename too long"
+    assert _git_failure_detail('remote: Enumerating objects: 10\n') == 'remote: Enumerating objects: 10'
+    assert _git_failure_detail('') == 'verify the public repository, network access and resolved commit'
+
+
+def test_vulkan_build_environment_selects_platform_toolchain():
+    from kllm.runtimes.build import _vulkan_build_environment
+    calls = []
+    macos = SimpleNamespace(_is_macos=lambda: True, _is_windows=lambda: False,
+                            ensure_vulkan_macos=lambda: calls.append('macos') or {'CMAKE_PREFIX_PATH': 'brew'})
+    windows = SimpleNamespace(_is_macos=lambda: False, _is_windows=lambda: True,
+                              ensure_windows_vulkan=lambda: calls.append('windows') or {'VULKAN_SDK': 'sdk'})
+    linux = SimpleNamespace(_is_macos=lambda: False, _is_windows=lambda: False)
+    assert _vulkan_build_environment(macos, 'cpu') is None
+    assert _vulkan_build_environment(macos, 'metal') == {'CMAKE_PREFIX_PATH': 'brew'}
+    assert _vulkan_build_environment(windows, 'cuda') is None
+    assert _vulkan_build_environment(windows, 'vulkan') == {'VULKAN_SDK': 'sdk'}
+    assert _vulkan_build_environment(linux, 'vulkan') is None
+    assert calls == ['macos', 'windows']
+
+
+def test_source_materialization_supports_paths_beyond_windows_max_path(tmp_path, monkeypatch):
+    import os
+    import shutil
+    from kllm.runtimes.build import _materialize_source
+    if os.name != 'nt':
+        pytest.skip('Windows MAX_PATH regression; other platforms have no fixed limit')
+    if not shutil.which('git'):
+        pytest.skip('Git required for the source materialization check')
+    deep = Path('deep') / Path(*['x' * 24] * 4) / 'long-file.txt'
+    if len(str(tmp_path / 'git-source' / deep)) > 259:
+        pytest.skip('temporary directory leaves no room below MAX_PATH for the fixture copy')
+    commit = _source_fixture_repository(tmp_path, monkeypatch, {deep: 'long path fixture\n'})
+    base = tmp_path / 'managed-artifact'
+    remaining = 262 - (len(str(base / 'source')) + 1 + len(str(deep)))
+    while remaining > 0:
+        base = base / ('p' * max(min(remaining - 1, 200), 1))
+        remaining -= len(base.name) + 1
+    vendor = base / 'source'
+    assert len(str(vendor / deep)) > 260
+    vendor.parent.mkdir(parents=True, exist_ok=True)
+    _materialize_source(vendor, 'https://github.com/fixture/runtime.git', commit)
+    assert (vendor / deep).is_file()
+    assert (vendor / 'CMakeLists.txt').is_file()
 
 
 @pytest.mark.asyncio
@@ -473,3 +564,229 @@ def test_restart_reaps_only_the_recorded_build_process(tmp_path, matching_identi
         if process.poll() is None:
             process.terminate()
         process.wait(timeout=3)
+
+
+# ── prebuilt release packs and prebuilt-first preparation ─────────────────────
+
+
+def test_packs_tag_matching_accepts_peeled_annotated_tags():
+    from kllm.runtimes import packs
+    values = {
+        'refs/tags/v0.5.0': 'c' * 40,
+        'refs/tags/v0.5.0^{}': 'a' * 40,
+        'refs/tags/v0.6.0': 'b' * 40,
+        'refs/heads/main': 'a' * 40,
+    }
+    assert packs.tags_for_commit(values, 'a' * 40) == {'v0.5.0'}
+    assert packs.tags_for_commit(values, 'b' * 40) == {'v0.6.0'}
+    assert packs.tags_for_commit(values, 'd' * 40) == set()
+
+
+def test_release_for_commit_requires_exact_commit_and_github_host():
+    from kllm.runtimes import packs
+    releases = [{'tag_name': 'v0.5.0', 'assets': [{'name': 'pack.zip'}]}]
+    values = {'refs/tags/v0.5.0': 'a' * 40}
+    repo = 'https://github.com/ggml-org/llama.cpp.git'
+    assert packs.release_for_commit(repo, 'a' * 40, releases=releases, ref_values=values)['tag_name'] == 'v0.5.0'
+    # A commit with no resolving release tag, and a non-GitHub host, are ineligible.
+    assert packs.release_for_commit(repo, 'b' * 40, releases=releases, ref_values=values) is None
+    assert packs.release_for_commit('https://example.com/llama.git', 'a' * 40, releases=releases, ref_values=values) is None
+
+
+def _load_install_module():
+    from kllm.llama_pack import _load_install
+    return _load_install(Path(__file__).resolve().parents[1])
+
+
+def _write_pack_zip(path: Path, install, members=('llama-server', 'rpc-server')):
+    suffix = '.exe' if install._is_windows() else ''
+    with zipfile.ZipFile(path, 'w') as archive:
+        for name in members:
+            archive.writestr(name + suffix, f'controlled {name}\n')
+
+
+def _fake_release(name='pack.zip'):
+    return {'tag_name': 'v0.5.0', 'assets': [{'name': name, 'browser_download_url': 'https://example.invalid/' + name, 'size': 123}]}
+
+
+def test_managed_prebuilt_stages_pack_without_transport_claims(tmp_path, monkeypatch):
+    from kllm.runtimes import build
+    install = _load_install_module()
+    commit = 'a' * 40
+    repository = 'https://github.com/example/llama.cpp.git'
+
+    def download(url, dest, **kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _write_pack_zip(dest, install)
+
+    monkeypatch.setattr(build, 'release_for_commit', lambda *a, **k: _fake_release())
+    monkeypatch.setattr(install, '_download', download)
+    monkeypatch.setattr(install, 'pick_release_asset', lambda assets, backend: assets[0])
+    monkeypatch.setattr(install, '_probe_llama_backends', lambda binary: ['cpu'])
+
+    output = tmp_path / 'managed'
+    manifest = build.managed_prebuilt(install, repository, commit, output, 'cpu')
+
+    assert manifest['prebuilt'] is True and manifest['mode'] == 'prebuilt'
+    assert 'ggml_rpc' not in manifest and 'ggml_rpc_rdma' not in manifest
+    assert manifest['commit'] == commit and manifest['repository'] == repository
+    assert Path(manifest['llama_server']).is_file() and Path(manifest['rpc_server']).is_file()
+    assert Path(manifest['artifact_dir']) == output / 'bin'
+    assert 'rpc-transport.json' not in manifest['artifacts']
+    assert json.loads((output / 'manifest.json').read_text()) == manifest
+    assert not (output / 'prebuilt').exists()
+
+
+def test_managed_prebuilt_refuses_pack_without_rpc_server(tmp_path, monkeypatch):
+    from kllm.runtimes import build
+    from kllm.runtimes.packs import PrebuiltIneligible
+    install = _load_install_module()
+    monkeypatch.setattr(build, 'release_for_commit', lambda *a, **k: _fake_release())
+    monkeypatch.setattr(install, 'pick_release_asset', lambda assets, backend: assets[0])
+    monkeypatch.setattr(install, '_download',
+                        lambda url, dest, **kwargs: (dest.parent.mkdir(parents=True, exist_ok=True), _write_pack_zip(dest, install, members=('llama-server',)))[1])
+
+    output = tmp_path / 'managed'
+    with pytest.raises(PrebuiltIneligible):
+        build.managed_prebuilt(install, 'https://github.com/example/llama.cpp.git', 'a' * 40, output, 'cpu')
+    # A rejected pack must not leave a binary a later source build could be mistaken for.
+    assert not (output / 'bin').exists() or not any((output / 'bin').iterdir())
+    assert not (output / 'prebuilt').exists()
+
+
+def test_managed_prebuilt_refuses_backend_contract_mismatch(tmp_path, monkeypatch):
+    from kllm.runtimes import build
+    from kllm.runtimes.packs import PrebuiltIneligible
+    install = _load_install_module()
+    monkeypatch.setattr(build, 'release_for_commit', lambda *a, **k: _fake_release())
+    monkeypatch.setattr(install, 'pick_release_asset', lambda assets, backend: assets[0])
+    monkeypatch.setattr(install, '_download',
+                        lambda url, dest, **kwargs: (dest.parent.mkdir(parents=True, exist_ok=True), _write_pack_zip(dest, install))[1])
+    monkeypatch.setattr(install, '_probe_llama_backends', lambda binary: ['metal'])
+
+    output = tmp_path / 'managed'
+    # A Metal-only pack cannot satisfy the macOS Metal+Vulkan contract.
+    with pytest.raises(PrebuiltIneligible, match='backends'):
+        build.managed_prebuilt(install, 'https://github.com/example/llama.cpp.git', 'a' * 40, output, 'vulkan')
+    assert not (output / 'bin').exists() or not any((output / 'bin').iterdir())
+
+
+def test_managed_prebuilt_ineligible_without_release(tmp_path, monkeypatch):
+    from kllm.runtimes import build
+    from kllm.runtimes.packs import PrebuiltIneligible
+    install = _load_install_module()
+    monkeypatch.setattr(build, 'release_for_commit', lambda *a, **k: None)
+    output = tmp_path / 'managed'
+    with pytest.raises(PrebuiltIneligible, match='no published release'):
+        build.managed_prebuilt(install, 'https://github.com/example/llama.cpp.git', 'a' * 40, output, 'cpu')
+    assert not (output / 'bin').exists()
+
+
+_PREBUILT_OR_SOURCE = textwrap.dedent('''
+    import hashlib, json, sys
+    from pathlib import Path
+    argv = sys.argv[1:]
+    def value(flag):
+        return argv[argv.index(flag) + 1]
+    destination = Path(value('--runtime-dir'))
+    bins = destination / 'bin'
+    bins.mkdir(parents=True, exist_ok=True)
+    for name in ('llama-server', 'rpc-server', 'libggml-rpc.so'):
+        (bins / name).write_text('controlled ' + name)
+    commit, repository = value('--revision'), value('--source-repo')
+    identity = hashlib.sha256((repository + chr(10) + commit).encode()).hexdigest()
+    manifest = {'schema': 1, 'runtime_id': identity, 'repository': repository, 'commit': commit,
+                'build_id': str(destination.name), 'backend': 'cpu',
+                'artifact_dir': str(bins.resolve()),
+                'llama_server': str((bins / 'llama-server').resolve()),
+                'rpc_server': str((bins / 'rpc-server').resolve()),
+                'artifacts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in bins.iterdir()}}
+    if '--prebuilt' in argv:
+        print('KLLM_RUNTIME_PHASE=downloading', flush=True)
+        print('KLLM_PREBUILT_INELIGIBLE: controlled no pack', flush=True)
+        sys.exit(3)
+    print('KLLM_RUNTIME_PHASE=building', flush=True)
+    manifest.update(mode='source', ggml_rpc='ON', ggml_rpc_rdma='OFF')
+    (destination / 'manifest.json').write_text(json.dumps(manifest))
+    print('KLLM_RUNTIME_PHASE=verifying', flush=True)
+''').lstrip()
+
+
+_PREBUILT_SUCCESS = textwrap.dedent('''
+    import hashlib, json, sys
+    from pathlib import Path
+    argv = sys.argv[1:]
+    def value(flag):
+        return argv[argv.index(flag) + 1]
+    destination = Path(value('--runtime-dir'))
+    if '--prebuilt' not in argv:
+        print('source build must not run when the pack succeeds', flush=True)
+        sys.exit(9)
+    bins = destination / 'bin'
+    bins.mkdir(parents=True, exist_ok=True)
+    for name in ('llama-server', 'rpc-server', 'libggml-rpc.so'):
+        (bins / name).write_text('controlled ' + name)
+    commit, repository = value('--revision'), value('--source-repo')
+    identity = hashlib.sha256((repository + chr(10) + commit).encode()).hexdigest()
+    manifest = {'schema': 1, 'runtime_id': identity, 'repository': repository, 'commit': commit,
+                'build_id': str(destination.name), 'backend': 'cpu', 'mode': 'prebuilt', 'prebuilt': True,
+                'artifact_dir': str(bins.resolve()),
+                'llama_server': str((bins / 'llama-server').resolve()),
+                'rpc_server': str((bins / 'rpc-server').resolve()),
+                'artifacts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in bins.iterdir()}}
+    (destination / 'manifest.json').write_text(json.dumps(manifest))
+    print('KLLM_RUNTIME_PHASE=verifying', flush=True)
+''').lstrip()
+
+
+def _checkout_with_script(tmp_path, script: str) -> Path:
+    checkout = tmp_path / 'checkout'
+    (checkout / 'scripts').mkdir(parents=True)
+    (checkout / 'scripts/install.py').write_text(script, encoding='utf-8')
+    return checkout
+
+
+def test_preparation_falls_back_to_source_when_pack_is_ineligible(tmp_path):
+    checkout = _checkout_with_script(tmp_path, _PREBUILT_OR_SOURCE)
+    manager = RuntimeRegistry(tmp_path / 'home', lambda: checkout)
+    try:
+        selected = version()
+        manager.add(selected)
+        job = manager.build(BuildRequest(runtime_id=selected.runtime_id, backend='cpu', request_id=str(uuid4())))
+        manager.pool.shutdown(wait=True)
+        assert manager.job(job['job_id'])['phase'] == 'prepared'
+        assert manager.job(job['job_id'])['mode'] == 'source'
+        assert 'KLLM_PREBUILT_INELIGIBLE' in manager.logs(job['job_id'])
+        assert manager.capture(selected.runtime_id)['mode'] == 'source'
+    finally:
+        manager.close()
+
+
+def test_preparation_uses_prebuilt_pack_without_transport_evidence(tmp_path):
+    checkout = _checkout_with_script(tmp_path, _PREBUILT_SUCCESS)
+    manager = RuntimeRegistry(tmp_path / 'home', lambda: checkout)
+    try:
+        selected = version()
+        manager.add(selected)
+        job = manager.build(BuildRequest(runtime_id=selected.runtime_id, backend='cpu', request_id=str(uuid4())))
+        manager.pool.shutdown(wait=True)
+        assert manager.job(job['job_id'])['phase'] == 'prepared'
+        assert manager.job(job['job_id'])['mode'] == 'prebuilt'
+        captured = manager.capture(selected.runtime_id)
+        assert captured['prebuilt'] is True and captured['mode'] == 'prebuilt'
+    finally:
+        manager.close()
+
+
+def test_prebuilt_runtime_is_refused_by_the_managed_network_gate(tmp_path):
+    from kllm.managed_network.transport import require_tcp_runtime
+    from kllm.managed_network.platform.base import PlatformRefusal
+    directory = tmp_path / 'artifact' / 'bin'
+    directory.mkdir(parents=True)
+    llma, rpc = directory / 'llama-server', directory / 'rpc-server'
+    llma.write_text('controlled llama')
+    rpc.write_text('controlled rpc')
+    # A prebuilt install has no rpc-transport.json, so the TCP-only gate refuses
+    # it even though the binaries exist (the source build is required).
+    with pytest.raises(PlatformRefusal):
+        require_tcp_runtime(tmp_path, llma, rpc)

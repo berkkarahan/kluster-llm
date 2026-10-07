@@ -2,7 +2,9 @@
   import { appStore } from '$lib/store.svelte';
   import ErrorMessage from './ErrorMessage.svelte';
   import { formatGib, formatMemoryComponent } from '$lib/format-memory';
+  import { runtimeRunReason } from '$lib/runtime-readiness';
   const plan = $derived(appStore.planResult);
+  const runtimeBlocked = $derived(runtimeRunReason(appStore.status?.runtimes, appStore.status?.node_id ?? '', appStore.planResult));
   const resolved = $derived((plan?.resolved_launch_settings ?? {}) as Record<string, unknown>);
   const fit = $derived(String(plan?.fit_status ?? ''));
   const gpuBudget = $derived.by(() => {
@@ -55,6 +57,9 @@
     {#if plan.estimate_complete === false}<p class="notice warning" role="status">Incomplete estimate: some memory costs are approximate or unpriced.</p>{/if}
     {#each (plan.estimate_warnings as string[] | undefined) ?? [] as warning}<p class="small warning">{warning}</p>{/each}
     {#if plan.hint}<p class="small warning">{String(plan.hint)}</p>{/if}
+  {/if}
+  {#if runtimeBlocked}
+    <p class="notice small" role="status">{runtimeBlocked} <a href="/settings?section=llama">Open llama.cpp settings →</a></p>
   {/if}
   {#if appStore.estimateError}<ErrorMessage source="estimate" message={appStore.estimateError} snapshot={false} />{/if}
   {#if appStore.estimateNote}<p class="small muted" aria-live="polite">{appStore.estimateNote}</p>{/if}

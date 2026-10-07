@@ -67,6 +67,75 @@ def test_detect_backend_explicit(install):
     assert install.detect_backend("vulkan") == "vulkan"
 
 
+def test_windows_vulkan_sdk_layout_is_accepted(tmp_path, install, monkeypatch):
+    root = tmp_path / "VulkanSDK" / "1.4.363.0"
+    (root / "Bin").mkdir(parents=True)
+    (root / "Bin" / "glslc.exe").write_text("")
+    (root / "Include" / "vulkan").mkdir(parents=True)
+    (root / "Include" / "vulkan" / "vulkan.h").write_text("")
+    (root / "Lib").mkdir()
+    (root / "Lib" / "vulkan-1.lib").write_text("")
+    monkeypatch.setenv("VULKAN_SDK", str(root))
+    monkeypatch.setattr(install, "_VULKAN_SDK_WINDOWS_ROOT", tmp_path / "absent")
+    monkeypatch.setattr(install, "_which", lambda cmd: None)
+    assert install._windows_vulkan_sdk_root() == root
+    assert install._windows_vulkan_missing(root) == []
+    env = install._windows_vulkan_env(root)
+    assert env["VULKAN_SDK"] == str(root)
+    assert env["PATH"].startswith(str(root / "Bin"))
+    assert env["CMAKE_PREFIX_PATH"].startswith(str(root))
+
+
+def test_windows_vulkan_reports_missing_sdk_pieces(tmp_path, install, monkeypatch):
+    monkeypatch.setenv("VULKAN_SDK", str(tmp_path / "absent"))
+    monkeypatch.setattr(install, "_VULKAN_SDK_WINDOWS_ROOT", tmp_path / "defaults")
+    monkeypatch.setattr(install, "_which", lambda cmd: None)
+    assert install._windows_vulkan_sdk_root() is None
+    assert install._windows_vulkan_missing(None) == [
+        "the LunarG Vulkan SDK (glslc, vulkan-1.lib, Vulkan headers)"
+    ]
+    partial = tmp_path / "partial"
+    (partial / "Bin").mkdir(parents=True)
+    (partial / "Bin" / "glslc.exe").write_text("")
+    assert install._windows_vulkan_missing(partial) == ["Vulkan headers", "vulkan-1.lib"]
+
+
+def test_windows_vulkan_provisions_sdk_via_winget(tmp_path, install, monkeypatch):
+    monkeypatch.setattr(install, "_is_windows", lambda: True)
+    monkeypatch.setattr(install, "_VULKAN_SDK_WINDOWS_ROOT", tmp_path / "VulkanSDK")
+    monkeypatch.delenv("VULKAN_SDK", raising=False)
+    monkeypatch.setattr(install, "_which", lambda cmd: r"C:\fake\winget.exe" if cmd == "winget" else None)
+    root = tmp_path / "VulkanSDK" / "1.4.363.0"
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        (root / "Bin").mkdir(parents=True)
+        (root / "Bin" / "glslc.exe").write_text("")
+        (root / "Include" / "vulkan").mkdir(parents=True)
+        (root / "Include" / "vulkan" / "vulkan.h").write_text("")
+        (root / "Lib").mkdir()
+        (root / "Lib" / "vulkan-1.lib").write_text("")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    env = install.ensure_windows_vulkan()
+    assert commands[0][:3] == [r"C:\fake\winget.exe", "install", "--id"]
+    assert "KhronosGroup.VulkanSDK" in commands[0]
+    assert env["VULKAN_SDK"] == str(root)
+
+
+def test_windows_vulkan_requires_sdk_without_winget(tmp_path, install, monkeypatch):
+    monkeypatch.setattr(install, "_is_windows", lambda: True)
+    monkeypatch.setattr(install, "_VULKAN_SDK_WINDOWS_ROOT", tmp_path / "VulkanSDK")
+    monkeypatch.delenv("VULKAN_SDK", raising=False)
+    monkeypatch.setattr(install, "_which", lambda cmd: None)
+    with pytest.raises(SystemExit) as error:
+        install.ensure_windows_vulkan()
+    assert "LunarG Vulkan SDK" in str(error.value)
+    assert "vulkan.lunarg.com" in str(error.value)
+
+
 def test_parse_args_defaults(install):
     args = install.parse_args([])
     assert args.backend == "auto"

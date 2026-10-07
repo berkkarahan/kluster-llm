@@ -187,22 +187,33 @@ that target automatically. Failed or cancelled builds remain visible until Retry
 The local library stays usable when signed cluster control is unavailable; setting and enforcing
 the cluster target requires the recovered agent.
 
-The library lives in `KLLM_HOME/runtimes` (normally `~/.kllm/runtimes`). Builds contain both
-runtime binaries, libraries, source provenance, digests, and TCP-only RPC evidence. They use
-existing backend presets, including Metal+Vulkan on macOS. They never replace `vendor/bin`,
-and preparation does not start RPC or interrupt active inference. New runs require verified
-matching source identities on the master and selected workers; unused/offline children do not
-block them. Active runs and recovery retain their original runtime until stopped. Unknown or
-incompatible RPC protocols remain unsupported.
+The library lives in `KLLM_HOME/runtimes` (normally `~/.kllm/runtimes`). Preparation
+prefers a matching **prebuilt GitHub release pack**: a pack is eligible only when a published
+release's tag resolves to the pinned commit, and only if it provides both `llama-server` and
+`rpc-server` and satisfies this node's backend contract. Otherwise, and whenever a source build
+is required for verified TCP-only RPC evidence, preparation compiles the exact commit. Builds
+contain both runtime binaries, libraries, source provenance, digests, and (for source builds)
+TCP-only RPC evidence. They use existing backend presets, including Metal+Vulkan on macOS, never
+replace `vendor/bin`, and preparation does not start RPC or interrupt active inference. New runs
+require verified matching source identities on the master and selected workers; unused/offline
+children do not block them. Active runs and recovery retain their original runtime until stopped.
+Unknown or incompatible RPC protocols remain unsupported, and a prebuilt pack never carries the
+TCP-only evidence the managed private network gate requires — prepare that version from source.
 
 Existing installations appear as legacy entries. Prepare a managed version before an enforced
 run; a tag stamp alone is not proof of a fork's exact revision. Upgrade/rebuild participating
 agents for runtime-management and native path-selection support. `python scripts/build.py`
 also refreshes the source-layout native module imported by `uv run`.
 
-The agent invokes the primary installer in isolated managed mode:
+The agent invokes the primary installer in isolated managed mode, trying a prebuilt pack first
+and falling back to a source build when no pack is eligible:
 
 ```bash
+uv run python scripts/install.py --llama-only --prebuilt \
+  --source-repo https://github.com/ggml-org/llama.cpp.git \
+  --revision <full-40-character-commit> --runtime-dir <isolated-build-directory> \
+  --backend auto
+# fallback (verified TCP-only RPC; required for the managed 10GbE private network)
 uv run python scripts/install.py --llama-only --from-source --rpc-tcp-only \
   --source-repo https://github.com/ggml-org/llama.cpp.git \
   --revision <full-40-character-commit> --runtime-dir <isolated-build-directory> \
@@ -217,6 +228,8 @@ remains the bootstrap default for existing installer commands and `--check`.
 | `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
 | `--prefer-prebuilt` | Prefer GitHub release zips (default on Windows/Linux; rejected on macOS, which must build Metal+Vulkan). |
 | `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp` (macOS default for Metal+Vulkan). |
+| `--prebuilt` | Managed mode: install a matching release pack; exit with a marker for the caller to fall back to source. |
+| `--rpc-tcp-only` | Source-build RPC with RDMA disabled (verified evidence for managed private networks; rejected with `--prebuilt`). |
 | `--tag TAG` | Override `llama-release` (keep every node on the same tag). |
 | `--force` | Reinstall llama.cpp even when `vendor/bin/llama-release.txt` matches. |
 | `--release` | Release-mode maturin build. |
@@ -321,6 +334,7 @@ Each worker runs `git pull --ff-only`, then `scripts/install.py` if `llama-relea
 | CMake cache points to a removed SDK/OpenSSL directory | Stale cached package path | Re-run the installer: it discards its stale build tree for missing package paths and resets dangling linker flags. Windows drive/UNC paths and quoted SDK paths with spaces are recognized; a dangling linker flag alone does not discard the tree. |
 | `llama-server` missing | Prebuilt miss or cmake fail | `python scripts/install.py --llama-only --force`; or `--from-source`; set `KLLM_LLAMA_SERVER` if you have a binary |
 | `rpc-server` missing | Some prebuilt packs omit it | `python scripts/install.py --llama-only --from-source` (`-DGGML_RPC=ON`); verify it was staged in `vendor/bin/` |
+| `Could NOT find Vulkan` / `missing: glslc` on Windows | Vulkan node without the LunarG SDK | Managed/source builds provision `KhronosGroup.VulkanSDK` via winget when missing; if winget or elevation is unavailable, install it from https://vulkan.lunarg.com/sdk/home#windows and retry in Settings → llama.cpp |
 | `install.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/install.py --llama-only` on **every** node; do not mix HEAD source with a pinned nightly |
 | WireGuard warning | No admin / no package manager | Install WG manually from https://www.wireguard.com/install/ ; do **not** use `--overlay wireguard` until `wg` works |
 | `kllm` command not found | Venv not activated | Activate `.venv` (§2.4) |

@@ -9,7 +9,7 @@ The user's task-generation instruction is to keep end-to-end checks and some tes
 ## Prerequisites
 
 - Follow [agent install guide](../../docs/agent-install.md) on every participating machine. Use the committed stable llama-release and run `python scripts/install.py --check` on each node; install recorded TCP-only binaries with `uv run python scripts/install.py --llama-only --rpc-tcp-only` and restart the agents/workers. An older running RPC process is ineligible even when files on disk have been replaced.
-- Dedicated connected physical Ethernet adapters, reported negotiated speed >=10 Gbps, readable DHCP configuration, and ordinary cluster management connectivity on a separate unaffected path.
+- Dedicated connected physical Ethernet adapters, reported negotiated speed >=1 Gbps (10 Gbps preferred), readable DHCP configuration, and ordinary cluster management connectivity on a separate unaffected path.
 - Original-account agents with the supported native helper binary. Read the administrator notice and enable access locally on each computer through its OS approval prompt. Do not move agent credentials to a root/admin account.
 - One master and two workers for the primary acceptance, connected through a dedicated switch; a direct cable suffices for the one-worker subset. Windows, Linux and macOS hardware coverage must be recorded, including one mixed-platform pair.
 - Automatically bootstrapped/pinned node fingerprints and protected local administrator grants. Workers must support managed-network-v2; unsupported nodes remain legacy cluster members but cannot participate.
@@ -102,7 +102,7 @@ uv sync --reinstall-package kllm
 make test
 ```
 
-T011/T023/T030 are complete with the documented controlled OS/runtime boundaries; only T039 physical acceptance remains pending. This machine has no isolated three-node 10GbE lab, Windows/Linux runtime hosts or privileged temporary-address test environment. Do not mark SC-001–SC-008, physical timing, real-model generation, ARP/DAD behavior, cable-loss or mixed-OS cleanup passed from local tests.
+T011/T023/T030 are complete with the documented controlled OS/runtime boundaries; T039 remains pending for the managed setup lifecycle, Linux-host coverage, inference, and recovery journey. This machine has a manually configured three-node 1-Gbps Windows/Mac switched link, but that does not prove managed setup ownership/cleanup, physical RPC startup, or real-model generation. Do not mark SC-001–SC-008, physical timing, ARP/DAD behavior, cable-loss, or mixed-OS cleanup passed from local tests.
 
 ## Guided revision validation (2026-10-01)
 
@@ -117,6 +117,6 @@ uv run python scripts/build.py --skip-llama --skip-wireguard --skip-toolchains
 make test
 ```
 
-The current master has a connected 1Gbps Ethernet link and no eligible dedicated 10GbE adapter. Do not perform physical setup or count it as accepted on this topology until the hardware and per-machine runtime/administrator requirements are met.
+The current Windows master and two Mac workers were manually configured on a dedicated switch at 1 Gbps per endpoint: Windows Ethernet `10.10.10.3/24`, Mac adapters `10.10.10.1/24` and `10.10.10.2/24`, with no IPv4 gateway on the private interfaces and Wi-Fi retaining the default route. Both private control TCP connections succeeded and the master's live member timestamps showed fresh worker heartbeats. The active Windows RPC firewall rule was verified as local `.3`, remote `10.10.10.0/24`, Ethernet only. Inference was stopped, so no 50052 listener or RPC connect test was available. This records manual mixed-OS network evidence only; it does not prove the revised guided setup, physical RPC startup, model generation, or managed cleanup/restore.
 
 Latest guided validation: full Python suite 716 passed / 11 existing skips, 111 focused network/install checks, 42 native library tests plus three standalone-helper tests, scoped Ruff/mypy and Svelte checks, supported native/helper/dashboard build, and Linux/Windows helper compilation. Dashboard cases passed individually; the aggregate runner encountered an unrelated usage-history timeout that passed on isolated rerun. The first broad Python attempt encountered a planner call-count timing failure; isolated rerun and the later complete suite passed. These transient failures are recorded rather than claiming the first `make test` attempt passed.

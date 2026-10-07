@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from kllm import native
 from ..models import LocalMutationJournal, NodeAssignment
+from ..speed import MIN_DEDICATED_LINK_SPEED_MBPS
 from ..store import digest
 from .inspection import InterfaceState, NetworkError
 
@@ -148,10 +149,10 @@ class PlatformAdapter(ABC):
             raise PlatformRefusal('INSUFFICIENT_PERMISSION', 'Agent requires root/administrator privileges')
         if not state.physical_ethernet or not state.connected:
             raise PlatformRefusal('INVALID_ADAPTER', 'Select a connected physical Ethernet adapter')
-        if state.speed_mbps is None:
+        if state.speed_mbps is None or state.speed_mbps <= 0:
             raise PlatformRefusal('UNKNOWN_LINK_SPEED', 'Negotiated speed is unknown')
-        if state.speed_mbps < 10000:
-            raise PlatformRefusal('LINK_TOO_SLOW', 'Negotiated speed must be at least 10000 Mbps')
+        if state.speed_mbps < MIN_DEDICATED_LINK_SPEED_MBPS:
+            raise PlatformRefusal('LINK_TOO_SLOW', 'Negotiated speed must be at least 1000 Mbps (1 Gbps)')
         if state.dhcp is not False:
             raise PlatformRefusal('DHCP_ENABLED', 'DHCP must be proved disabled before any change')
         if not native.managed_network_available():

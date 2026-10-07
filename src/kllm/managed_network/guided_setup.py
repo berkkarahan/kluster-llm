@@ -14,6 +14,7 @@ from .allocation import OperationRequest, ParticipantSelection, StartRequest, pr
 from .helper import HelperClient
 from .models import Digest, Identifier, Record, Revision, private_subnet
 from .platform.base import PlatformRefusal
+from .speed import MIN_DEDICATED_LINK_SPEED_MBPS
 
 if TYPE_CHECKING:
     from kllm.agent.services.managed_network import ManagedNetworkService
@@ -170,10 +171,12 @@ class GuidedSetup:
         if not adapter.get("connected"):
             return "Connect an Ethernet cable to this adapter."
         speed = adapter.get("link_speed_mbps")
-        if speed is None:
+        if speed is None or speed <= 0:
             return "The connection speed could not be verified."
-        if speed < 10000:
-            return f"This connection is {speed / 1000:g} Gbps; at least 10 Gbps is required."
+        if speed < MIN_DEDICATED_LINK_SPEED_MBPS:
+            return (
+                f"This connection is {speed} Mbps; at least 1000 Mbps (1 Gbps) is required."
+            )
         if adapter.get("facts", {}).get("default_route"):
             return "This adapter carries the computer’s internet connection."
         if any(
@@ -206,7 +209,7 @@ class GuidedSetup:
                 if physical:
                     message = physical[0]["reason"]
                 elif not message:
-                    message = "Connect a dedicated 10GbE Ethernet adapter to this computer."
+                    message = "Connect a dedicated physical Ethernet adapter to this computer."
                 error_code = error_code or "NO_ADAPTER"
             selected = candidates[0]["adapter_id"] if len(candidates) == 1 else ""
             if len(candidates) > 1 and not error_code:

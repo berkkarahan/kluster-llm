@@ -1,11 +1,11 @@
 ---
 name: kllm-10gbe
-description: "Guide users through creating, verifying, troubleshooting, and restoring a dedicated private network (10GbE preferred; use the best available negotiated link) on Windows, macOS, Linux, or mixed-OS Kluster clusters."
+description: "Guide users through creating, verifying, troubleshooting, and restoring a dedicated private Ethernet network (at least 1 Gbps; 10GbE preferred) on Windows, macOS, Linux, or mixed-OS Kluster clusters."
 ---
 
 # Create a dedicated private network
 
-10 Gbps is preferred, not required: use the best negotiated physical link the hardware actually provides.
+Require a known negotiated physical Ethernet speed of at least 1 Gbps; 10 Gbps is preferred, not required. Report the speed each endpoint actually negotiates rather than inferring it from the switch, adapter label, or cable.
 
 Guide the user in small steps, using the OS of each computer. Locate the Kluster checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.state.repo_root()`; repository paths below resolve against that root.
 
@@ -18,7 +18,7 @@ Read only the references for participating platforms:
 
 Ask for missing facts that change setup: computers and OS versions, the intended master, adapter identities, direct cable versus dedicated switch, and how each computer currently reaches the internet/master. Two computers can use a direct Ethernet link; more participants normally use a dedicated switch. Check that adapters, cables/transceivers, switch ports and drivers support the intended link; read negotiated speed instead of trusting a product label. Do not substitute Thunderbolt IP, bonding, bridging, internet sharing, or jumbo frames for an Ethernet setup without a separate user request.
 
-Keep the management/internet path on its existing interface. Reject Wi-Fi/virtual interfaces, interfaces carrying the default route or cluster-management connection, and unknown speed/configuration. Record the negotiated speed of every candidate and prefer the fastest available link; accept any negotiated speed the user has, and never report an assumed speed as measured. Multiple eligible adapters require identification by the user; a single safe eligible adapter can be selected by the application. If no eligible adapter exists, explain the specific hardware/configuration gap before suggesting changes.
+Keep the management/internet path on its existing interface. Reject Wi-Fi/virtual interfaces, interfaces carrying the default route or cluster-management connection, speeds below 1 Gbps, and unknown speed/configuration. Record each candidate's negotiated speed and prefer the fastest eligible link. Multiple eligible adapters require identification by the user; a single safe eligible adapter can be selected by the application. If no eligible adapter exists, explain the specific hardware/configuration gap before suggesting changes.
 
 ## Guided Kluster setup (default)
 
@@ -31,7 +31,7 @@ Keep the management/internet path on its existing interface. Reject Wi-Fi/virtua
 
 ## Explicit manual fallback
 
-For a requested manual two-computer link, use `scripts/configure_10gbe.py` after read-only inspection and recording the selected adapters' original DHCP/address/route settings. Its `configure` action requires administrator access, an explicit physical connected adapter, verified speed >=10 Gbps, DHCP already disabled, and a non-conflicting RFC1918 subnet. It does not disable DHCP, set a gateway/DNS, or prepare persistent settings for you. The 10 Gbps gate is a property of the script, not a cluster requirement: when the script rejects a slower link, use the documented manual direct-link operation below instead of forcing the script.
+For a requested manual two-computer link, `scripts/configure_10gbe.py` remains a 10 Gbps-only utility. Its `configure` action requires administrator access, an explicit physical connected adapter, verified speed >=10 Gbps, DHCP already disabled, and a non-conflicting RFC1918 subnet. It does not disable DHCP, set a gateway/DNS, or prepare persistent settings for you. This utility's speed gate is stricter than the managed-network requirement; when it rejects a slower link, use the documented OS-native fallback below rather than forcing the script.
 
 Prepare those prerequisites through the relevant OS reference after explaining the exact selected-adapter changes. Run opposite roles on the two hosts, using each one's own adapter ID:
 
@@ -45,7 +45,7 @@ Coordinator receives the first usable address; worker receives the second. Scrip
 
 ## Documented manual direct-link operation
 
-This is the approved path when the script's 10 Gbps gate rejects the link, when no helper is available, or when the user configures a direct cable by hand. Observed on a two-Mac AX88179A USB-Ethernet link (1000baseT full-duplex, macOS 26.7 and 27.0).
+Use the OS-native fallback when the standalone script's 10 Gbps gate rejects a supported 1 Gbps link, when no helper is available, or when the user requests manual configuration. An Anker AX88179A is a Gigabit Ethernet adapter: a 10GbE switch does not raise its negotiated endpoint speed. In one mixed Windows/Mac switched setup, a Windows Realtek 5GbE adapter and the Mac AX88179A adapters all negotiated 1 Gbps.
 
 1. Inspect on each computer: OS version, hardware ports, network services, addresses, and routes:
 
@@ -72,11 +72,14 @@ This is the approved path when the script's 10 Gbps gate rejects the link, when 
    The empty router argument is valid and persists across reboot. Keep the default and management routes on the existing interface. A shared subnet on only one end causes asymmetric routing: the peer answers over the management LAN where the address does not exist, and the test fails for a reason unrelated to the link.
 6. Verify both directions (see below) before reporting success, then record the addresses for the completion report.
 
+For a Windows participant on a dedicated switch, use the Windows reference's manual switched-network procedure and allocate a distinct address to every node. Do not run the two-role script repeatedly on a multi-worker switch because every worker would receive the same address.
+
 ## Verification and recovery
 
 - Verify the peer in both directions through the dedicated interfaces. `reachable` is an echo response; `unreachable` is explicit routing failure; `unable-to-verify` can be ICMP filtering or an offline peer. Do not report a timeout as proof that the link failed. When inbound ping fails but the link is up, check the OS firewall before blaming the link: macOS firewall stealth mode silently drops ICMP while TCP to listening services still works. Confirm layer 2 with `arp -an | grep <device>` (the peer MAC must appear) and layer 3 with a TCP connect such as `nc -z -w 3 <peer-ip> <open-port>` against a known listener. Do not disable the firewall to make ping work; on managed computers it cannot be disabled anyway. Find a peer's addresses with `dscacheutil -q host -a name <name>.local` or `ping <name>.local`, and expect several answers (management and dedicated) — match the address to the interface you intend to test.
 - Record negotiated link speed separately from throughput. If requested, use an installed `iperf3` with server/client bound to the dedicated private addresses, then repeat with `-R` for the other direction. Measure actual results; make no fixed latency, bandwidth, or inference-speed promises. Stop only the test server started for this check.
-- Check control traffic and, when inference is intentionally started, RPC through the correct private endpoints. Keep upstream RPC TCP 50052 private. Never solve reachability by globally disabling a firewall or by disabling the management NIC.
+- Configure the master to advertise/bind its private address and each worker to join that private master while binding its own private address. Check fresh accepted heartbeats, not cached membership. Keep join keys out of command logs and reports; do not dump raw master status JSON because it can contain the join key.
+- Check control traffic over the private endpoints. Keep upstream RPC TCP 50052 private to the node address, private subnet, and dedicated interface; verify TCP 50052 only while inference is intentionally running. No listener on an idle node is normal. Never solve reachability by globally disabling a firewall or by disabling the management NIC.
 - Stop dependent inference before network stop/add/retry. Use the application's owned restoration. Reconnect unavailable computers to resolve **cleanup pending**. Lost ownership or changed snapshots require local **Review network recovery**; keep current settings or remove only the exact reviewed owned delta.
 - In manual mode, remove only addresses/rules created during this setup and restore the recorded OS profile/DHCP state — a macOS service that was DHCP before the manual change returns with `networksetup -setdhcp '<service>'`. If baseline or ownership is uncertain, preserve settings and explain the unresolved recovery instead of guessing.
 

@@ -11,6 +11,7 @@ from kllm import native
 from .helper import HelperClient
 from .models import NodeAssignment
 from .platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal, Prepared
+from .speed import MIN_DEDICATED_LINK_SPEED_MBPS
 
 
 class ConflictHandle:
@@ -50,13 +51,13 @@ class HelperPlatform(PlatformAdapter):
         state = snapshot.state
         if not state.physical_ethernet or not state.connected:
             raise PlatformRefusal("INVALID_ADAPTER", "Connect a dedicated Ethernet adapter")
-        if state.speed_mbps is None:
+        if state.speed_mbps is None or state.speed_mbps <= 0:
             raise PlatformRefusal(
                 "UNKNOWN_LINK_SPEED", "The adapter’s connection speed could not be verified"
             )
-        if state.speed_mbps < 10000:
+        if state.speed_mbps < MIN_DEDICATED_LINK_SPEED_MBPS:
             raise PlatformRefusal(
-                "LINK_TOO_SLOW", "The Ethernet connection must be at least 10 Gbps"
+                "LINK_TOO_SLOW", "The Ethernet connection must negotiate at least 1 Gbps (1000 Mbps)"
             )
         if state.dhcp is None:
             raise PlatformRefusal("UNKNOWN_DHCP", "The adapter’s configuration could not be read")

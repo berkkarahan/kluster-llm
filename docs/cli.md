@@ -257,7 +257,7 @@ Flags: `--model`, `--api-key` / `KLLM_API_KEY`, `--url` / `KLLM_URL`, `--timeout
 
 `--kllm-skills all|operations|development|none` selects the provisioned Kluster
 skill pack (default `all`). The [library](../skills/README.md) includes dedicated
-Windows/macOS/Linux 10GbE guidance. Selected copies live in isolated agent homes
+Windows/macOS/Linux private Ethernet guidance (10GbE preferred). Selected copies live in isolated agent homes
 or temporary session skill sources; ordinary profiles and other native skills
 are not rewritten. Persistent sessions refresh only owned unchanged copies and
 require review for local edits. `none` removes unchanged persistent session-owned
@@ -315,7 +315,7 @@ kllm cluster update
 
 ### App-managed dedicated Ethernet
 
-Home → Private 10GbE network guides setup from the master. The panel is hidden by default; show it with `kllm flags private-network-setup --enable` (hide it again with `--disable`). First install/update Kluster and join the intended cluster on every computer. Connect a dedicated Ethernet adapter with a negotiated link of at least 10 Gbps, keeping ordinary cluster management on a separate adapter.
+Home → Private 10GbE network guides setup from the master. The panel is hidden by default; show it with `kllm flags private-network-setup --enable` (hide it again with `--disable`). First install/update Kluster and join the intended cluster on every computer. Connect a dedicated physical Ethernet adapter negotiating at least 1 Gbps (10 Gbps preferred), keeping ordinary cluster management on a separate adapter.
 
 The panel explains administrator access before requesting permission. On each computer, acknowledge that notice and click **Enable administrator access on this computer**. Approve the operating system prompt once. Kluster installs a protected networking helper; the agent and its credentials stay under your original account. The master can then handle the dedicated adapter settings for all authorized computers.
 

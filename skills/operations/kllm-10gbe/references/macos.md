@@ -11,7 +11,7 @@ netstat -rn -f inet
 route -n get <master-management-ip>
 ```
 
-Record addresses/prefixes, DHCP/manual mode, service, DNS and routes before changes. Inspect `ifconfig` media/status for the connected link and record the negotiated speed (for example `1000baseT <full-duplex>`); any working negotiated speed is acceptable and 10 Gbps is preferred. Do not infer speed from the adapter model or Thunderbolt bus rating. If speed is unreported, fix inspection/driver support before applying network changes. Inactive `Ethernet Adapter (enX)` entries with locally administered MACs (`42:ff:34:...`) are virtual adapters — identify the real adapter by chipset name (for example `AX88179A`) and `status: active`. Device numbers are per-machine; map them fresh every time. The chosen device must not carry the default or management route. Do not treat macOS neighbor-cache host routes as proof of a subnet conflict; use the application's current assessment.
+Record addresses/prefixes, DHCP/manual mode, service, DNS and routes before changes. Inspect `ifconfig` media/status for the connected link and record the negotiated speed (for example `1000baseT <full-duplex>`); at least 1 Gbps is required and 10 Gbps is preferred. Do not infer speed from the adapter model or Thunderbolt bus rating. If speed is unreported, fix inspection/driver support before applying network changes. Inactive `Ethernet Adapter (enX)` entries with locally administered MACs (`42:ff:34:...`) are virtual adapters — identify the real adapter by chipset name (for example `AX88179A`) and `status: active`. Device numbers are per-machine; map them fresh every time. The chosen device must not carry the default or management route. Do not treat macOS neighbor-cache host routes as proof of a subnet conflict; use the application's current assessment.
 
 ## Guided setup
 
@@ -36,7 +36,7 @@ If the OS already has the exact address, configure reports it unchanged. The scr
 
 ## Direct link when the script's speed gate rejects the adapter
 
-The guarded script requires >=10 Gbps; a working slower link (for example an AX88179A USB adapter at `1000baseT <full-duplex>`) is configured manually instead. Observed on a two-Mac direct cable.
+The standalone guarded script requires >=10 Gbps; the managed-network flow supports a known negotiated speed of >=1 Gbps. If the user requests manual configuration or the helper is unavailable, use the OS-native steps above for a slower link instead of forcing the script. An AX88179A USB adapter at `1000baseT <full-duplex>` is a Gigabit link, not a 10GbE link.
 
 1. Record the baseline: both services were usually DHCP with a `169.254.x.x` APIPA address and no router — expected on a direct cable with no DHCP server, not a fault.
 2. Check `netstat -rn -f inet` for an existing prefix that overlaps the intended subnet. Assigning a `/24` inside the management LAN's range (for example `192.168.68.0/24` on a LAN that uses `/22`) shadows the LAN route with a more specific prefix and blackholes those hosts. Choose a range with no existing routes (for example `10.10.10.0/24`).

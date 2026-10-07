@@ -395,7 +395,7 @@ Physical Windows/Linux/macOS and mixed-node acceptance remains required before t
 
 **Administrator access needed:** open Kluster on the named computer and use the local enable button. A remote master cannot open the OS approval prompt. Denial leaves the computer unconfigured; retry locally. The helper is installed by the supported build/install flow, while the agent remains in the original user account. A missing helper binary means update Kluster through [agent installation](agent-install.md).
 
-**No eligible 10GbE connection:** check the cable, switch, adapter and negotiated speed. A 1 Gbps Ethernet connection is insufficient even when the adapter is advertised as 10GbE. Wi-Fi, virtual interfaces and adapters carrying the default or cluster-management connection are excluded. Unknown speed or DHCP/profile state requires fixing the OS configuration before setup.
+**No eligible dedicated Ethernet connection:** check the cable, switch, adapter and negotiated speed. Managed private-network setup requires a reported speed of at least 1 Gbps; 10 Gbps is preferred. Wi-Fi, virtual interfaces and adapters carrying the default or cluster-management connection are excluded. Unknown speed or DHCP/profile state requires fixing the OS configuration before setup.
 
 **Restoration needs attention:** reconnect the named computer and refresh. If the agent or helper lost ownership continuity, open its local panel and choose **Review network recovery**. Keep current settings preserves them and releases Kluster's claim; restore removes only the exact reviewed address and restores its owned configuration. Changed snapshots require another review. Active or uncertain inference reservations block recovery.
 

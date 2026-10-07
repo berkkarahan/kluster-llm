@@ -9,7 +9,7 @@ native skill interface.
 |---|---|---|
 | Operations | `kllm-install` | Bootstrap, rebuild and repair a node |
 | Operations | `kllm-cluster` | Master/worker membership and lifecycle |
-| Operations | `kllm-10gbe` | Guided Windows/macOS/Linux private 10GbE setup and recovery |
+| Operations | `kllm-10gbe` | Guided Windows/macOS/Linux private Ethernet setup (10GbE preferred) and recovery |
 | Operations | `kllm-models` | Model download, configuration, planning and inference |
 | Operations | `kllm-connect` | Agent endpoints, authentication and readiness |
 | Operations | `kllm-diagnose` | Evidence-led runtime/network troubleshooting |

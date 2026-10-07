@@ -266,6 +266,7 @@ class ManagedNetworkService:
                 prepare_deadline = time.monotonic() + 15
                 inventories = await self.inventories()
                 selected = {}
+                groups = []
                 for participant in request.participants:
                     if participant.node_id not in self.state().members:
                         raise PlatformRefusal('INVALID_ADAPTER', 'Every selected participant must be currently enrolled')
@@ -274,8 +275,9 @@ class ManagedNetworkService:
                     if adapter is None:
                         raise PlatformRefusal(node_inventory.get('error_code', 'INVALID_ADAPTER'), 'Selected worker is unpaired, unavailable or lacks this adapter')
                     selected[participant.node_id] = adapter
+                    groups.append((adapter, [a for a in node_inventory.get('adapters', []) if a is not adapter]))
                 if request.subnet is None:
-                    proposals = propose(list(selected.values()), len(request.participants))
+                    proposals = propose(groups, len(request.participants))
                     if not proposals or network.subnet != proposals[0]:
                         # Proposals are fixed before network persistence; do not rewrite
                         # an authority-bound subnet after the operation was committed.

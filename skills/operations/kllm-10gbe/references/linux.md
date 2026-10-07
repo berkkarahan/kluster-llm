@@ -10,7 +10,7 @@ ip route get <master-management-ip>
 ethtool <selected-device>
 ```
 
-If `ethtool` is absent or access is refused, obtain speed through the supported OS/application inspection path; do not replace unknown speed with 10 Gbps. Record the selected interface's addresses, DHCP/profile state, routes and DNS. Verify it is physical, connected, with its negotiated speed recorded (any working speed is acceptable; 10 Gbps is preferred), and excluded from the internet/default and cluster-management path.
+If `ethtool` is absent or access is refused, obtain speed through the supported OS/application inspection path; do not replace unknown speed with 10 Gbps. Record the selected interface's addresses, DHCP/profile state, routes and DNS. Verify it is physical, connected, with a known negotiated speed of at least 1 Gbps (10 Gbps preferred), and excluded from the internet/default and cluster-management path.
 
 Determine whether NetworkManager or systemd-networkd actually owns this interface. The presence of a binary/service alone is insufficient:
 

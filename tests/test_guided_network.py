@@ -29,6 +29,33 @@ def service(tmp_path, role="master", node_id="master"):
     )
 
 
+@pytest.mark.parametrize(
+    ("speed", "reason"),
+    [
+        (None, "could not be verified"),
+        (0, "could not be verified"),
+        (-1, "could not be verified"),
+        (999, "1000 Mbps"),
+        (1000, ""),
+        (2500, ""),
+    ],
+)
+def test_guided_adapter_speed_minimum_is_one_gigabit(speed, reason):
+    adapter = {
+        "physical_ethernet": True,
+        "connected": True,
+        "link_speed_mbps": speed,
+        "dhcp": False,
+        "addresses": [],
+        "facts": {},
+    }
+    actual = GuidedSetup.adapter_reason(adapter, set())
+    if reason:
+        assert reason in actual
+    else:
+        assert actual == ""
+
+
 def test_mutual_bootstrap_refuses_bad_proof_replay_and_changed_identity(tmp_path):
     master, worker = service(tmp_path), service(tmp_path, "worker", "worker")
     try:

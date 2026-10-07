@@ -9,7 +9,7 @@
 ## Constraints for Planning
 
 - Python application code belongs in src/kllm, native code in crates/kllm-native, and app controls in dashboard.
-- Preserve dedicated-link eligibility: selected adapter, DHCP disabled, reported speed at least 10 Gbps, conflict checks, temporary addresses, and no gateway or DNS changes.
+- Preserve dedicated-link eligibility: selected adapter, DHCP disabled, reported speed at least 1 Gbps (10 Gbps preferred), conflict checks, temporary addresses, and no gateway or DNS changes. Unknown, zero, and sub-1-Gbps speeds remain ineligible.
 - The standalone configure_10gbe workflow assigns fixed coordinator/worker addresses. Multi-worker app setup requires unique master-owned assignments rather than repeating its fixed worker address.
 - Preserve ordinary management and LAN/WireGuard workflows. Verify dedicated endpoints before new inference runs use them.
 - Keep unauthenticated upstream RPC private; authenticate setup signals using current cluster trust and master ownership.

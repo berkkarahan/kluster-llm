@@ -204,7 +204,7 @@
 <details class="panel legacy-network" ontoggle={toggle} data-testid="network-advanced">
   <summary>Manual configuration and diagnostics</summary>
   <div class="network-content">
-    <p>Use a dedicated Ethernet adapter with DHCP disabled, at least 10 Gbps negotiated speed, and a privileged agent. Pair each worker and master locally before starting.</p>
+    <p>Use a dedicated Ethernet adapter with DHCP disabled, at least 1 Gbps negotiated speed (10 Gbps preferred), and a privileged agent. Pair each worker and master locally before starting.</p>
     {#if error}<ErrorMessage source="advanced-network" message={error} snapshot={false} generation={errorGeneration} />{/if}
     {#if identity}
       <label>Public identity to copy to the paired node

@@ -75,7 +75,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
         if(path===`/v2/cluster/network-setup/operations/${operationId}`) return json({phase:operationPending?'preparing':'complete',operation_revision:operationRevision,terminal_result:operationPending?null:{state:network.observed_state},participants:[]});
         if(path==='/v2/network-test/plain-error') return res.writeHead(500,{'Content-Type':'text/plain'}).end('Internal Server Error');
         if(path==='/v2/network-test/invalid-json') return res.writeHead(200,{'Content-Type':'text/plain'}).end('invalid');
-        if(path==='/v2/network-test/refusal') return json({error:{code:'unprocessable_entity',message:'The request could not be completed.',details:{code:'LINK_TOO_SLOW',message:'Negotiated speed must be at least 10000 Mbps'}}},422);
+        if(path==='/v2/network-test/refusal') return json({error:{code:'unprocessable_entity',message:'The request could not be completed.',details:{code:'LINK_TOO_SLOW',message:'Negotiated speed must be at least 1000 Mbps (1 Gbps)'}}},422);
         if(path==='/v2/node/network-identity') return json({node_id:'master',key_id:'b'.repeat(64),public_key:'fake-public-key',cluster_binding_id:networkId,permission:true,paired_peers:[]});
         if(path.startsWith('/v2/node/network-identity/peers/')) return json(body);
         if(path==='/v2/node/network-adapters') return json({node_id:'master',adapters:[adapter],selection:JSON.stringify({adapter_id:'eth-test'})});
@@ -157,7 +157,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
       for (const [path, expected] of [
         ['plain-error', 'Network request GET /v2/network-test/plain-error returned 500: Internal Server Error'],
         ['invalid-json', 'Network request GET /v2/network-test/invalid-json returned 200: Invalid JSON response'],
-        ['refusal', 'LINK_TOO_SLOW: Negotiated speed must be at least 10000 Mbps']
+        ['refusal', 'LINK_TOO_SLOW: Negotiated speed must be at least 1000 Mbps (1 Gbps)']
       ]) {
         const message = await evaluate(`window.networkStore.networkRequest('/v2/network-test/${path}').then(() => 'unexpected success', error => error.message)`, true);
         assert.equal(message, expected);

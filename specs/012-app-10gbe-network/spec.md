@@ -18,7 +18,7 @@ As a beginner cluster operator, I read the administrator notice, enable access o
 
 **Why this priority**: Coordinated setup is the requested capability and removes repetitive manual configuration.
 
-**Independent Test**: With one master and two joined workers on a dedicated 10GbE switch, approve access locally, let Kluster select safe adapters and a subnet, start setup once, and verify distinct private addresses and readiness on all three nodes.
+**Independent Test**: With one master and two joined workers on a dedicated Ethernet switch, including adapters negotiating exactly 1 Gbps, approve access locally, let Kluster select safe adapters and a subnet, start setup once, and verify distinct private addresses and readiness on all three nodes.
 
 **Acceptance Scenarios**:
 
@@ -81,7 +81,7 @@ As an operator, I stop or retry the managed network and recover after interrupti
 - **FR-001**: The app MUST disclose administrator access before the OS prompt, allow one-time local authorization on each computer, and let an operator on the current master select joined participants; select a single safe dedicated adapter automatically and ask only when multiple eligible adapters exist, then start, inspect, retry, add nodes to, and stop a managed private network.
 - **FR-002**: The master MUST initiate worker setup through an authenticated socket signal over existing cluster management connectivity. Each worker MUST perform its own local setup and report preparation, application, verification, and cleanup results.
 - **FR-003**: Workers MUST accept network-changing signals only from their authenticated current master. Unauthorized, malformed, stale, and conflicting signals MUST fail explicitly without host changes.
-- **FR-004**: Before any participant changes configuration, every selected node MUST pass preparation checks for adapter identity, physical link, OS-reported negotiated speed of at least 10 Gbps, known DHCP configuration, supported configuration manager, protected helper authorization, platform capability, local permission, and address/route conflicts. Conditions that can change MUST be rechecked before application.
+- **FR-004**: Before any participant changes configuration, every selected node MUST pass preparation checks for adapter identity, physical link, OS-reported negotiated speed of at least 1 Gbps (10 Gbps preferred), known DHCP configuration, supported configuration manager, protected helper authorization, platform capability, local permission, and address/route conflicts. Unknown, zero, and sub-1-Gbps speed MUST be refused. Conditions that can change MUST be rechecked before application.
 - **FR-005**: The app MUST offer an unused private IPv4 subnet and allow operator selection of another. The master MUST allocate unique usable addresses, reject detected conflicts and insufficient capacity, and preserve current assignments when adding nodes.
 - **FR-006**: Setup MUST add temporary configuration to selected adapters without changing default routes, DNS profiles, gateways, unrelated adapters, or user-owned addresses. It MAY disable IPv4 DHCP on the selected dedicated adapter after saving the original configuration, and MUST restore only owned configuration changes on stop or rollback. Uncertain ownership requires local review.
 - **FR-007**: Setup and recovery MUST preserve the existing management path. Failure of the dedicated link MUST NOT deliberately remove ordinary management connectivity.
@@ -118,7 +118,7 @@ As an operator, I stop or retry the managed network and recover after interrupti
 
 ## Assumptions
 
-- Operators supply connected 10GbE adapters, compatible cables, and a switch where needed. Software configures existing hardware; it cannot create physical capacity.
+- Operators supply connected physical Ethernet adapters negotiating at least 1 Gbps (10 Gbps preferred), compatible cables, and a switch where needed. Software configures existing hardware; it cannot create physical capacity or increase the endpoint's negotiated speed.
 - Workers are already enrolled and reachable over ordinary cluster management connectivity. Initial enrollment over an unconfigured dedicated link is outside scope.
 - Initial scope is one private IPv4 subnet, a direct link for one worker or a switch for several. Automatic physical bridging, IPv6, routing across sites, and permanent OS configuration are outside scope.
 - Operators select each adapter once and arrange local OS permissions. Master initiation coordinates prepared nodes; it does not grant remote administrator rights.

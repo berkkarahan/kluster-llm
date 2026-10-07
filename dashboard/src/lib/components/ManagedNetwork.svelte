@@ -167,7 +167,7 @@
 <details class="panel managed-network" ontoggle={toggle} data-testid="managed-network">
   <summary><span>Private 10GbE network</span><span class:ready={network?.observed_state === 'ready'}>{networkLabel}</span></summary>
   <div class="guided-content">
-    <p class="intro">Connect your computers to a dedicated 10GbE switch or cable. Kluster handles the network settings and tests the connection.</p>
+    <p class="intro">Connect your computers to a dedicated Ethernet switch or cable. Links at 1 Gbps or faster are supported; 10 Gbps is preferred. Kluster handles the network settings and tests the connection.</p>
     <section class="admin-notice" aria-label="Administrator access requirements">
       <strong>Administrator access is needed first</strong>
       <p>{assessment?.administrator_notice ?? local?.administrator_notice ?? notice}</p>

@@ -10,6 +10,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+const MIN_DEDICATED_LINK_SPEED_MBPS: u64 = 1_000;
+#[cfg(any(target_os = "windows", test))]
+const MIN_DEDICATED_LINK_SPEED_BPS: u64 = MIN_DEDICATED_LINK_SPEED_MBPS * 1_000_000;
+
+fn has_minimum_link_speed(speed_mbps: u64) -> bool {
+    speed_mbps >= MIN_DEDICATED_LINK_SPEED_MBPS
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_speed_is_eligible(speed_bits_per_second: u64) -> bool {
+    speed_bits_per_second >= MIN_DEDICATED_LINK_SPEED_BPS
+}
+
 pub fn command(program: &str, args: &[&str]) -> Result<String> {
     #[cfg(unix)]
     let executable = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
@@ -180,9 +193,9 @@ pub fn validate(scope: &Scope) -> Result<()> {
                     }
             })
             .unwrap_or(0);
-        if speed < 10000 {
+        if !has_minimum_link_speed(u64::from(speed)) {
             return Err(refuse(
-                "A verified connection of at least 10 Gbps is required",
+                "A verified Ethernet connection of at least 1 Gbps is required",
             ));
         }
         let default = command("route", &["-n", "get", "default"])?;
@@ -204,12 +217,15 @@ pub fn validate(scope: &Scope) -> Result<()> {
         if !std::path::Path::new(&format!("{dir}/device")).exists()
             || std::path::Path::new(&format!("{dir}/wireless")).exists()
             || std::fs::read_to_string(format!("{dir}/operstate"))?.trim() != "up"
-            || std::fs::read_to_string(format!("{dir}/speed"))?
-                .trim()
-                .parse::<u32>()?
-                < 10000
+            || !has_minimum_link_speed(
+                std::fs::read_to_string(format!("{dir}/speed"))?
+                    .trim()
+                    .parse::<u64>()?,
+            )
         {
-            return Err(refuse("Connected physical 10GbE is required"));
+            return Err(refuse(
+                "Connected physical Ethernet at 1 Gbps or faster is required",
+            ));
         }
         let routes: Value = serde_json::from_str(&command(
             "ip",
@@ -238,7 +254,7 @@ pub fn validate(scope: &Scope) -> Result<()> {
         let data: Value = serde_json::from_str(&powershell(scope, "$a=Get-NetAdapter -InterfaceIndex $i; [pscustomobject]@{Hardware=$a.HardwareInterface; Description=$a.InterfaceDescription; Speed=[long]$a.LinkSpeed; Up=($a.Status -eq 'Up'); Default=@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count; Addresses=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 | Select-Object -ExpandProperty IPAddress)} | ConvertTo-Json -Compress")?)?;
         if data["Hardware"] != true
             || data["Up"] != true
-            || data["Speed"].as_u64().unwrap_or(0) < 10_000_000_000
+            || !windows_speed_is_eligible(data["Speed"].as_u64().unwrap_or(0))
             || data["Default"].as_u64().unwrap_or(1) != 0
             || data["Description"]
                 .as_str()
@@ -246,7 +262,9 @@ pub fn validate(scope: &Scope) -> Result<()> {
                 .to_lowercase()
                 .contains("wireless")
         {
-            return Err(refuse("A dedicated physical 10GbE adapter is required"));
+            return Err(refuse(
+                "A dedicated physical Ethernet adapter at 1 Gbps or faster is required",
+            ));
         }
         for ip in &scope.management {
             if data["Addresses"]
@@ -258,6 +276,21 @@ pub fn validate(scope: &Scope) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::{has_minimum_link_speed, windows_speed_is_eligible};
+
+    #[test]
+    fn managed_network_requires_known_gigabit_speed() {
+        assert!(!has_minimum_link_speed(0));
+        assert!(!has_minimum_link_speed(999));
+        assert!(has_minimum_link_speed(1_000));
+        assert!(has_minimum_link_speed(10_000));
+        assert!(!windows_speed_is_eligible(999_999_999));
+        assert!(windows_speed_is_eligible(1_000_000_000));
+    }
 }
 
 pub fn configuration(scope: &Scope) -> Result<Value> {

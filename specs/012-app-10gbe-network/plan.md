@@ -20,7 +20,7 @@ Existing shared-key membership does not authenticate a unique master. Bootstrap 
 
 **Testing**: Existing pytest/pytest-asyncio/xdist, Rust unit/integration tests, Node dashboard tests, Svelte check and production build. Add controlled subprocess/platform fixtures, actual loopback WebSocket/native bridge tests, crash/restart persistence tests, and a physical mixed-OS acceptance matrix.
 
-**Target Platform**: Windows, Linux and macOS with dedicated physical Ethernet, known negotiated speed >=10 Gbps, known DHCP configuration, automatically selected safe adapter, helper permissions, existing cluster management, and matching stable llama-release.
+**Target Platform**: Windows, Linux and macOS with dedicated physical Ethernet negotiating at least 1 Gbps (10 Gbps preferred), known DHCP configuration, automatically selected safe adapter, helper permissions, existing cluster management, and matching stable llama-release.
 
 **Project Type**: Distributed Python CLI/agent with Rust native runtime and a local browser dashboard.
 

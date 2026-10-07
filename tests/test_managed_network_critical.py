@@ -136,6 +136,58 @@ async def test_all_node_preparation_refusal_makes_no_host_changes(tmp_path, monk
     await service.close()
 
 
+@pytest.mark.parametrize(
+    ("speed", "expected_code"),
+    [
+        (None, "UNKNOWN_LINK_SPEED"),
+        (0, "UNKNOWN_LINK_SPEED"),
+        (-1, "UNKNOWN_LINK_SPEED"),
+        (999, "LINK_TOO_SLOW"),
+        (1000, None),
+    ],
+)
+def test_platform_eligibility_uses_one_gigabit_floor(speed, expected_code, monkeypatch):
+    from kllm import native
+    from kllm.managed_network.helper_platform import HelperPlatform
+    from kllm.managed_network.platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal
+    from kllm.managed_network.platform.inspection import InterfaceState
+
+    class Candidate(PlatformAdapter):
+        def inventory(self):
+            return []
+
+        def inspect(self, adapter_id):
+            raise NotImplementedError
+
+        def add_exact(self, snapshot, assignment):
+            raise NotImplementedError
+
+        def delete_exact(self, snapshot, assignment):
+            raise NotImplementedError
+
+        def check_source_route(self, snapshot, source, peer):
+            raise NotImplementedError
+
+    monkeypatch.setattr("kllm.managed_network.platform.base.is_admin", lambda: True)
+    monkeypatch.setattr(native, "managed_network_available", lambda: True)
+    snapshot = AdapterSnapshot(
+        "eth-test",
+        "eth-test",
+        1,
+        "a" * 64,
+        "02:00:00:00:00:01",
+        InterfaceState("eth-test", True, speed, False, (), ()),
+        permission=True,
+    )
+    for candidate in (Candidate(), object.__new__(HelperPlatform)):
+        if expected_code:
+            with pytest.raises(PlatformRefusal) as error:
+                candidate.eligible(snapshot)
+            assert error.value.code == expected_code
+        else:
+            candidate.eligible(snapshot)
+
+
 @pytest.mark.asyncio
 async def test_run_reservation_freezes_inventory_and_blocks_stop(tmp_path, monkeypatch):
     """Admission orchestration with controlled bridge/workload boundaries.

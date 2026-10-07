@@ -36,10 +36,29 @@ def build_router(registry: Callable, control: Callable, state: Callable, token_v
         except (ValueError, OSError) as error:
             raise HTTPException(409, detail={'code': 'RUNTIME_NOT_READY', 'message': str(error)}) from None
 
+    def cluster_status():
+        """Cluster-aware status when signed control is live; local library otherwise.
+
+        Saving, building and selecting local versions must not depend on the
+        signed node channel. Reads therefore degrade explicitly with
+        ``control.available false`` instead of hiding a local library behind 503.
+        """
+        try:
+            selected = control()
+        except HTTPException as error:
+            detail = error.detail if isinstance(error.detail, dict) else {}
+            snapshot = registry().snapshot()
+            snapshot['control'] = {'available': False,
+                                   'message': detail.get('message') or str(error.detail)}
+            return snapshot
+        value = selected.status()
+        value.setdefault('control', {'available': True})
+        return value
+
     @router.get('/node/runtimes')
     async def library(request: Request):
         authorize(request)
-        return await work(lambda: control().status())
+        return await work(cluster_status)
 
     @router.get('/node/runtimes/sources')
     async def sources(request: Request, repository: str):
@@ -98,7 +117,7 @@ def build_router(registry: Callable, control: Callable, state: Callable, token_v
     @router.get('/cluster/runtime-target')
     async def target(request: Request):
         authorize(request)
-        return await work(lambda: control().status())
+        return await work(cluster_status)
 
     @router.put('/cluster/runtime-target')
     async def set_target(request: Request):

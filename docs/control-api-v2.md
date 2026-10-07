@@ -18,6 +18,8 @@ Control requests use resource paths under `/v2`. Errors use `{ "error": { "code"
 | Telemetry and logs | `GET /v2/telemetry`, `/lifetimes`, `/series`, and `/readings`; `POST /v2/telemetry/ingest`; `GET` and `POST /v2/logs` |
 | Events and credentials | HTTP and WebSocket `GET /v2/events`; `GET /v2/credentials/api-token` and `/huggingface`; `PUT /v2/credentials/huggingface` |
 
+`GET /v2/node/runtimes` and `GET /v2/cluster/runtime-target` report a `control: {available, message}` marker. With `available: false` the local version library is still returned so saving, building and local selection keep working; `PUT /v2/cluster/runtime-target` returns `503` with `RUNTIME_CONTROL_UNAVAILABLE` until signed node control recovers.
+
 Inference clients keep using the OpenAI-compatible `POST /v1/chat/completions` and Anthropic-compatible `POST /v1/messages` routes. The old control paths remain temporarily available while external callers move to v2.
 
 On first startup with an older cluster-state file, the agent stops tracked model/runtime child processes, clears transient membership, join keys, active plans, and process state, then starts idle. It retains the node identity, run settings, models, credentials, and usage history. Rejoin each node after the coordinated upgrade. RPC port 50052 remains restricted to a private LAN or WireGuard overlay.

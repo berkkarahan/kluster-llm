@@ -273,6 +273,41 @@ def test_api_auth_worker_target_rejection_and_frozen_source_save(registry):
     assert registry.snapshot()['versions'][0]['version']['commit'] == value.commit
 
 
+def test_local_library_reads_degrade_explicitly_without_signed_control(registry):
+    selected = version()
+    registry.add(selected)
+    state = ClusterState(role='master', node_id='master')
+    reason = 'Signed node runtime control is unavailable (local identity key changed); restart or recover the local agent'
+
+    def unavailable():
+        raise HTTPException(503, detail={'code': 'RUNTIME_CONTROL_UNAVAILABLE', 'message': reason})
+
+    app = FastAPI()
+    app.include_router(build_router(lambda: registry, unavailable, lambda: state,
+                                    token_verifier=lambda value: value == 'test'))
+    client = TestClient(app, client=('127.0.0.1', 9999))
+    headers = {'x-api-key': 'test'}
+    library = client.get('/v2/node/runtimes', headers=headers)
+    assert library.status_code == 200
+    body = library.json()
+    assert body['control'] == {'available': False, 'message': reason}
+    assert [entry['version']['runtime_id'] for entry in body['versions']] == [selected.runtime_id]
+    assert client.get('/v2/cluster/runtime-target', headers=headers).json()['control']['available'] is False
+    # Local library changes and cluster-target writes keep their own contracts.
+    assert client.post('/v2/node/runtimes', json=selected.model_dump(), headers=headers).status_code == 200
+    request = TargetRequest(runtime_id=selected.runtime_id, expected_revision=0, request_id=str(uuid4())).model_dump()
+    blocked = client.put('/v2/cluster/runtime-target', json=request, headers=headers)
+    assert blocked.status_code == 503
+    assert blocked.json()['detail'] == {'code': 'RUNTIME_CONTROL_UNAVAILABLE', 'message': reason}
+
+    healthy = control(registry)
+    live = FastAPI()
+    live.include_router(build_router(lambda: registry, lambda: healthy, healthy.service.state,
+                                     token_verifier=lambda value: value == 'test'))
+    client = TestClient(live, client=('127.0.0.1', 9999))
+    assert client.get('/v2/node/runtimes', headers=headers).json()['control'] == {'available': True}
+
+
 def test_real_git_cmake_build_is_isolated_from_bootstrap(tmp_path, monkeypatch):
     import shutil
     import subprocess
@@ -289,6 +324,9 @@ option(GGML_RPC_RDMA "RDMA" OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_library(ggml-rpc SHARED rpc.c)
+# MSVC produces no import library without exported symbols, so the fixture
+# mirrors a real RPC library with the export-all behavior upstream uses.
+set_target_properties(ggml-rpc PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 add_executable(llama-server server.c)
 add_executable(rpc-server server.c)
 target_link_libraries(llama-server ggml-rpc)

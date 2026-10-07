@@ -178,8 +178,9 @@ test('master installs the bootstrap pin, reuses saved identity, and leaves activ
       async function evaluate(expression) {const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});assert.equal(r.exceptionDetails,undefined);return r.result.value;}
       async function wait(expression) {for(let i=0;i<100;i++){if(await evaluate(`Boolean(${expression})`))return;await pause(100);}assert.fail(`Timeout ${expression}: ${await evaluate('document.body.innerText')}`);}
       await call('Page.navigate',{url:base+'/settings?section=llama'});
-      await wait("document.querySelector('#target-heading') && document.querySelector('button')");
-      await evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Install v0.5.0 and set target').click()");
+      const install = "[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Install v0.5.0 and set target')";
+      await wait(`${install} && !${install}.disabled`);
+      await evaluate(`${install}.click()`);
       await wait("document.querySelector('.pending-note')?.textContent.includes('v0.5.0')");
       assert.deepEqual(commands.map(c=>c.path), ['/v2/node/runtimes/resolve','/v2/node/runtimes','/v2/cluster/runtime-target']);
       assert.deepEqual([commands[0].value.repository, commands[0].value.ref, commands[0].value.ref_type], [upstream, 'v0.5.0', 'tag']);

@@ -184,6 +184,8 @@ Choose a release/tag, branch, or full commit; the selecting node resolves it to 
 repository/commit identity. **Set target & sync** persists the master's target and starts
 isolated downloads/builds on the master and children. Joining and reconnecting children prepare
 that target automatically. Failed or cancelled builds remain visible until Retry or a new target.
+The local library stays usable when signed cluster control is unavailable; setting and enforcing
+the cluster target requires the recovered agent.
 
 The library lives in `KLLM_HOME/runtimes` (normally `~/.kllm/runtimes`). Builds contain both
 runtime binaries, libraries, source provenance, digests, and TCP-only RPC evidence. They use

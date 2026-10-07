@@ -134,12 +134,27 @@ class NetworkStore:
             return row[0] if row else None
 
     def pin_identity(self, node_id: str, key_id: str) -> None:
-        with self.transaction() as db:
+        """Pin the signing key; adopt a rebuilt local node label.
+
+        The private key is the cryptographic identity. The node label changes
+        when the operator rebuilds or restores local cluster state; refusing to
+        start then leaves every signed feature (and inference admission) stuck
+        with no supported recovery. A changed key is still refused: that is an
+        identity swap, not a label rotation.
+        """
+        with self.execution(), self.transaction() as db:
             row = db.execute("SELECT value FROM metadata WHERE key='local_identity'").fetchone()
             value = f'{node_id}:{key_id}'
             if row and row[0] != value:
-                raise StoreConflict('local identity changed; explicit recovery required')
-            db.execute("INSERT OR IGNORE INTO metadata VALUES ('local_identity',?)", (value,))
+                pinned_key = row[0].partition(':')[2]
+                if pinned_key != key_id:
+                    raise StoreConflict('local identity key changed; explicit re-pairing required')
+                # Authority and accepted channels name the previous label.
+                # Peers and owned-resource journals are retained for review,
+                # rejoin and cleanup.
+                db.execute('DELETE FROM authority')
+                db.execute('DELETE FROM channels')
+            db.execute("INSERT INTO metadata VALUES ('local_identity',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (value,))
 
     def cluster_binding(self) -> UUID:
         with self.transaction() as db:

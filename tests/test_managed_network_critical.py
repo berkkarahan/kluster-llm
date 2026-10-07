@@ -62,6 +62,37 @@ def test_signed_authority_replay_and_changed_identity(tmp_path):
     worker_store.close()
 
 
+def test_rebuilt_node_label_keeps_the_pinned_key_and_drops_stale_fences(tmp_path):
+    from kllm.managed_network.identity import LocalIdentity
+
+    store = NetworkStore(tmp_path)
+    try:
+        original = LocalIdentity(tmp_path, 'old-node', store)
+        authority = store.startup_authority('old-node', original.key_id)
+        store.accept_authority(authority.model_copy(update={'accepted_channel_id': uuid4()}), 'old-node')
+        rotated = LocalIdentity(tmp_path, 'new-node', store)
+        assert (rotated.node_id, rotated.key_id) == ('new-node', original.key_id)
+        assert store.metadata('local_identity') == f'new-node:{original.key_id}'
+        with pytest.raises(StoreConflict):
+            store.check_authority(authority)
+    finally:
+        store.close()
+
+
+def test_changed_private_key_still_requires_explicit_recovery(tmp_path):
+    import secrets
+    from kllm.managed_network.identity import LocalIdentity
+
+    store = NetworkStore(tmp_path)
+    try:
+        LocalIdentity(tmp_path, 'node', store)
+        (tmp_path / 'network-identity/ed25519.key').write_bytes(secrets.token_bytes(32))
+        with pytest.raises(StoreConflict, match='key changed'):
+            LocalIdentity(tmp_path, 'node', store)
+    finally:
+        store.close()
+
+
 def test_durable_idempotency_and_restart_no_stale_ready(tmp_path):
     from kllm.managed_network.models import LocalMutationJournal, NetworkOperation, RunNetworkReservation, utc_now
 

@@ -398,6 +398,23 @@ kllm run --model file.gguf
 - Engine / RPC policy: [engine-decision.md](engine-decision.md)  
 - Network: [`network-config/`](../network-config/)
 
+## Install agent skills
+
+The canonical [skill library](../skills/README.md) separates operations from
+development and includes `kllm-10gbe` with Windows, macOS and Linux references.
+`python3 scripts/install_skills.py` installs project-local discovery copies for
+Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw and Pi. Use `python`/`py -3`
+on Windows, or `uv run python` in the project environment. This standalone
+standard-library installer needs neither the native extension nor elevation.
+
+Use `--dry-run` before installation, repeat `--agent` to select clients,
+`--category operations|development|all` to select content, or `--scope user` for
+user-wide copies. Reruns update unchanged owned copies; `--force` backs up selected
+conflicts outside discovery roots. Existing skills and trust settings remain
+independent. CONNECT provisions copies automatically from this checkout through
+`--kllm-skills`; installed CLIs without a discoverable checkout can set
+`KLLM_REPO_ROOT`. Skills do not themselves authorize host networking changes.
+
 ## Guided private-network administrator helper
 
 The supported installer builds and copies `vendor/bin/kllm-network-helper` (`.exe` on Windows) independently of Python. No helper runs with elevated privileges during install/build. Home → Private 10GbE network displays the administrator notice; the local enable button requests OS approval and installs the protected helper for the original user's account and pinned cluster master.

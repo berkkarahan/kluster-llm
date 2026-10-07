@@ -78,6 +78,11 @@ uv run kllm connect claude
 
 See [docs/cli.md](docs/cli.md) for the complete command reference. Automated agents should follow [docs/agent-install.md](docs/agent-install.md).
 
+Portable [agent skills](skills/README.md) cover operations and repository development,
+including guided Windows/macOS/Linux 10GbE networking. Install project discovery
+copies for supported agents with `python3 scripts/install_skills.py`; preview with
+`--dry-run`. CONNECT sessions load the library through `--kllm-skills`.
+
 ## Network requirements
 
 - Keep RPC port 50052 on a private LAN or WireGuard overlay. Upstream llama.cpp RPC has no authentication.

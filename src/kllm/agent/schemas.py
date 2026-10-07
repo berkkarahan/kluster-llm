@@ -74,6 +74,12 @@ class RegisterBody(BaseModel):
     requested_backend: str | None = None
     devices: list[dict[str, Any]] = Field(default_factory=list)
     rpc_devices: list[dict[str, Any]] = Field(default_factory=list)
+    rpc_capabilities: list[dict[str, Any]] = Field(default_factory=list)
+    rpc_control_version: int = Field(default=0, ge=0, le=1)
+    runtime_management_version: int = Field(default=0, ge=0, le=1)
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    rpc_status: Literal["idle", "starting", "serving", "recovering", "failed", "cleanup_pending"] = "idle"
+    rpc_error: str | None = Field(default=None, max_length=512)
 
     unified_memory: bool = False
     binary_version: str | None = None
@@ -92,7 +98,7 @@ class RegisterBody(BaseModel):
     resource_session: dict[str, Any] | None = None
     logging_ack: LoggingAcknowledgement | None = None
 
-    @field_validator("rpc_devices")
+    @field_validator("rpc_devices", "rpc_capabilities")
     @classmethod
     def validate_rpc_devices(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
         RpcDeviceInput.parse_inventory(value)

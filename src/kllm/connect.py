@@ -19,7 +19,8 @@ import typer
 from rich.console import Console
 
 from kllm.auth import ensure_api_token
-from kllm.state import DEFAULT_CONTROL_PORT, home_dir
+from kllm import agent_skills
+from kllm.state import DEFAULT_CONTROL_PORT, home_dir, repo_root
 
 console = Console()
 
@@ -397,6 +398,63 @@ registry.register("pi", lambda **kw: plan_pi(
 AGENTS: list[str] = registry.list_agents()
 
 
+def _attach_skills(plan: LaunchPlan, skills: list[agent_skills.Skill] | None,
+                   selection: str) -> None:
+    """Provision only the Kluster pack; leave the harness's other sources alone."""
+    profile_keys = {
+        "codex": "CODEX_HOME", "hermes": "HERMES_HOME",
+        "openclaw": "OPENCLAW_STATE_DIR", "pi": "PI_CODING_AGENT_DIR",
+    }
+    key = profile_keys.get(plan.agent)
+    if selection == "none":
+        if key and key in plan.env:
+            root = Path(plan.env[key]) / "skills"
+            if (root / agent_skills.MANIFEST).exists():
+                agent_skills.install_skills([], root, prune=True)
+        return
+    if skills is None:
+        plan.notes.append("Kluster skill library unavailable; set KLLM_REPO_ROOT to a checkout containing skills/.")
+        return
+    if key and key in plan.env:
+        root = Path(plan.env[key]) / "skills"
+        agent_skills.install_skills(skills, root, prune=True)
+    elif plan.agent in ("claude", "opencode"):
+        scratch = Path(tempfile.mkdtemp(prefix=f"kllm-{plan.agent}-skills-"))
+        plan.cleanup_dirs.append(scratch)
+        root = scratch / ".claude/skills" if plan.agent == "claude" else scratch / "skills"
+        agent_skills.install_skills(skills, root)
+        if plan.agent == "claude":
+            plan.argv[1:1] = ["--add-dir", str(scratch)]
+        else:
+            config = json.loads(plan.env["OPENCODE_CONFIG_CONTENT"])
+            inherited = os.environ.get("OPENCODE_CONFIG_CONTENT")
+            try:
+                user_config = json.loads(inherited) if inherited else {}
+                if not isinstance(user_config, dict):
+                    raise ValueError("expected a JSON object")
+            except ValueError as error:
+                raise agent_skills.SkillError("Invalid inherited OPENCODE_CONFIG_CONTENT; expected a JSON object") from error
+            existing = user_config.get("skills", config.get("skills"))
+            if _opencode_service_client(plan.argv[0]):
+                if existing is not None and (not isinstance(existing, list) or not all(isinstance(p, str) for p in existing)):
+                    raise agent_skills.SkillError("OpenCode V2 skills configuration must be an array of sources")
+                config["skills"] = [*(existing or []), str(root)]
+            else:
+                if existing is not None and not isinstance(existing, dict):
+                    raise agent_skills.SkillError("OpenCode V1 skills configuration must be an object")
+                settings = dict(existing or {})
+                paths = settings.get("paths", [])
+                if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+                    raise agent_skills.SkillError("OpenCode skills.paths must be an array of paths")
+                settings["paths"] = [*paths, str(root)]
+                config["skills"] = settings
+            plan.env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+    else:
+        plan.notes.append(f"Kluster skill injection is unavailable for registered harness {plan.agent}.")
+        return
+    plan.notes.append(f"Kluster skills: {selection} ({len(skills)}), copied to {root}")
+
+
 def build_launch_plan(
     agent: str,
     *,
@@ -410,18 +468,27 @@ def build_launch_plan(
     extra: list[str] | None = None,
     url: str | None = None,
     timeout: float = 600,
+    kllm_skills: str = "all",
 ) -> LaunchPlan:
     agent = agent.lower().strip()
     planner = registry.get_planner(agent)
     if not planner:
         raise typer.BadParameter(f"unknown agent {agent!r}; choose from {', '.join(registry.list_agents())}")
+    try:
+        agent_skills.validate_selection(kllm_skills, session=True)
+        repository = repo_root()
+        library = repository / "skills" if repository else None
+        skills = (agent_skills.discover_skills(library, kllm_skills)
+                  if kllm_skills != "none" and library is not None and library.exists() else None)
+    except (OSError, agent_skills.SkillError) as error:
+        raise typer.BadParameter(str(error)) from error
     base = _base_url(port, url)
     api_key = api_key or os.environ.get("KLLM_API_KEY")
     if (url or os.environ.get("KLLM_URL")) and not api_key and not _is_loopback_url(base):
         raise typer.BadParameter("an explicit endpoint requires --api-key or KLLM_API_KEY")
     token = api_key or ensure_api_token()
     base, model_id = _ensure_inference(base, token, model, serve, context, timeout)
-    return planner(
+    plan = planner(
         base=base,
         token=token,
         model=model_id,
@@ -429,6 +496,15 @@ def build_launch_plan(
         yolo=yolo,
         extra=list(extra or []),
     )
+    try:
+        _attach_skills(plan, skills, kllm_skills)
+    except BaseException as error:
+        for directory in plan.cleanup_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+        if isinstance(error, (OSError, agent_skills.SkillError)):
+            raise typer.BadParameter(f"Could not prepare Kluster skills: {error}") from error
+        raise
+    return plan
 
 
 def print_plan(plan: LaunchPlan) -> None:

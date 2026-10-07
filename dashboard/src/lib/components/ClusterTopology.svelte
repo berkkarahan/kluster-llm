@@ -83,6 +83,11 @@
     return state || 'unavailable';
   }
 
+  function runtimeLabel(node: UsageNode): string {
+    if (node.rpc_status === 'idle') return node.role === 'worker' ? 'Joined · idle' : 'Idle';
+    return ({ starting: 'Starting', serving: 'Serving', recovering: 'Recovering', failed: 'Failed', cleanup_pending: 'Cleanup pending' } as Record<string, string>)[node.rpc_status ?? ''] ?? '';
+  }
+
   function linked(workerId: string): boolean {
     const masterId = master?.node_id;
     if (!masterId) return false;
@@ -126,7 +131,7 @@
       <span class="node-icon"><Icon name={masterCard ? 'server' : 'monitor'} /></span>
       <span class="od-field od-fill">
         <strong>{node.host || node.node_id}</strong>
-        <span class="topology-node-role">{node.role} · {node.node_id}</span>
+        <span class="topology-node-role">{node.role} · {node.node_id}{node.connected && node.rpc_status ? ` · ${runtimeLabel(node)}` : ''}</span>
       </span>
       <span class="topology-health" class:offline={!node.connected || offline}>
         <Icon name={node.connected && !offline ? 'circleCheck' : 'alert'} small />

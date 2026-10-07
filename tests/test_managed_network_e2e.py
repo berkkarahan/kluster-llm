@@ -33,6 +33,8 @@ async def test_three_agent_signed_start_idempotency_and_safe_refusal(tmp_path, m
             return [self.inspect('ethernet')]
         def inspect(self, adapter_id):
             return AdapterSnapshot(adapter_id, adapter_id, 1, 'd' * 64, '02:00:00:00:00:01', InterfaceState(adapter_id, True, 10000, False, (), ()))
+        def prepare(self, *args):
+            raise base.PlatformRefusal('UNSUPPORTED_CAPABILITY', 'Controlled adapter refuses host mutation')
         def add_exact(self, *args):
             mutations.append('add')
             raise AssertionError('The unverified runtime must never reach host mutation')
@@ -106,7 +108,7 @@ async def test_three_agent_signed_start_idempotency_and_safe_refusal(tmp_path, m
             result = (await request(0, 'GET', f'/v2/cluster/network-operations/{accepted["operation_id"]}')).json()
             assert result['phase'] == 'failed'
             assert {item['node_id'] for item in result['results']} == set(nodes)
-            assert all(item['error_code'] == 'RPC_PROTOCOL_UNSUPPORTED' for item in result['results'] if item['stage'] == 'prepare')
+            assert all(item['error_code'] == 'UNSUPPORTED_CAPABILITY' for item in result['results'] if item['stage'] == 'prepare')
             network = (await request(0, 'GET', f'/v2/cluster/networks/{accepted["network_id"]}')).json()
             assert len({item['address'] for item in network['participants']}) == 3
             assert network['observed_state'] == 'failed'
@@ -209,7 +211,8 @@ async def test_native_three_agent_ready_admission_and_partial_restart(tmp_path, 
         busy = await lab.request(0, 'POST', '/v2/inference/runs', json={'model': 'controlled.gguf', 'network_id': started['network_id']})
         assert busy.status_code == 409 and busy.json()['detail']['code'] == 'RPC_BUSY', busy.text
         assert lab.nodes[0].state.process_pid == old_pid and native.process_alive(old_pid)
-        await lab.request(0, 'POST', '/v2/inference/runs/stop')
+        stopped = await lab.request(0, 'POST', '/v2/inference/runs/stop')
+        assert stopped.status_code == 200, stopped.text
         network = master.store.network(started['network_id'])
         stop = await master.begin_operation(network.network_id, OperationRequest(request_id=uuid4(), expected_revision=network.revision, action='stop'))
         await master.wait_operation(stop['operation_id'])

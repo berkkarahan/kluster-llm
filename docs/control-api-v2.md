@@ -7,6 +7,9 @@ Control requests use resource paths under `/v2`. Errors use `{ "error": { "code"
 | Resource | Routes |
 |---|---|
 | Node | `GET /v2/node`, `/devices`, `/config`, `/home`; `PUT /v2/node/config`; `POST /v2/node/runtime` |
+| llama.cpp library | `GET/POST /v2/node/runtimes`; `GET /sources`, `POST /resolve`; `DELETE /{runtime_id}` |
+| Runtime builds | `POST /v2/node/runtime-builds`; `GET /{job_id}` and `/{job_id}/logs`; `POST /{job_id}/cancel` |
+| Runtime selection | `PUT /v2/node/runtime-selection` (idle nodes); `GET/PUT /v2/cluster/runtime-target` |
 | Cluster | `GET`, `POST`, and `DELETE /v2/cluster`; `POST` and `DELETE /v2/cluster/membership` |
 | Members | `GET /v2/cluster/nodes`; `POST /v2/cluster/nodes/register`, `/unregister`, and `/heartbeat`; `GET /v2/cluster/discovery` |
 | Updates | `POST /v2/cluster/updates` and `/progress` |

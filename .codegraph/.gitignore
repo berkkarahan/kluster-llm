@@ -1,0 +1,3 @@
+# Keep generated CodeGraph indexes and transient runtime files local.
+*
+!.gitignore

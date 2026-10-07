@@ -51,7 +51,7 @@ def test_membership_tick_orders_role_work_before_capacity(role, expected):
     assert events == expected
 
 
-def test_membership_tick_reconciles_worker_runtime_before_capacity():
+def test_membership_tick_never_starts_worker_runtime():
     events: list[str] = []
     loop = MembershipLoop(
         stop=background_tasks.threading.Event(),
@@ -66,7 +66,7 @@ def test_membership_tick_reconciles_worker_runtime_before_capacity():
 
     loop.tick()
 
-    assert events == ["heartbeat", "runtime", "refresh"]
+    assert events == ["heartbeat", "refresh"]
 
 
 def test_membership_loop_logs_tick_failure_and_continues(caplog):

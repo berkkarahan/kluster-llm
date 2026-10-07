@@ -80,9 +80,11 @@ maintainer reproduce both expected behavior and failures.
 - Python environments MUST use `uv` and the committed Python/dependency configuration. Follow
   `docs/agent-install.md` for setup and recovery; after packaging changes, use
   `uv run python scripts/install.py` or `uv run python scripts/build.py` to rebuild.
-- Production llama.cpp binaries MUST use the committed stable `llama-release` tag on every node.
-  Pin changes MUST document node synchronization via `python scripts/install.py --llama-only` and
-  verification via `python scripts/install.py --check`.
+- The committed stable `llama-release` tag is the bootstrap default. Explicit managed runtime
+  selections MAY use public forks, releases, tags, branches, or commits, resolved to immutable
+  repository/commit identities. Every run participant MUST use the same source identity with
+  verified node-local artifacts and compatible RPC transport. Bootstrap pin changes retain
+  `python scripts/install.py --llama-only` and `--check` verification.
 - Upstream RPC is unauthenticated. Port **50052** MUST remain on a private LAN or WireGuard overlay
   and MUST NOT be exposed publicly.
 - Specifications, plans, tasks, and reviews MUST comply with
@@ -132,4 +134,4 @@ Any temporary exception MUST record its rationale, bounded scope, maintainer app
 follow-up action with a review date in the change record. Exceptions MUST NOT permit public RPC
 exposure, secret disclosure, or removal of safeguards against data loss.
 
-**Version**: 1.1.0 | **Ratified**: 2026-09-28 | **Last Amended**: 2026-09-29
+**Version**: 1.2.0 | **Ratified**: 2026-09-28 | **Last Amended**: 2026-10-06

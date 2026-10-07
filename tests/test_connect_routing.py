@@ -95,8 +95,9 @@ def test_all_harnesses_preserve_served_model_and_provider(monkeypatch, agent):
             assert provider["apiKey"] == "${KLLM_API_KEY}"
             assert provider["api"] == "openai-completions"
         for directory in plan.cleanup_dirs:
-            for file in directory.iterdir():
-                assert "private-key" not in file.read_text(), "credentials belong in process environment"
+            for file in directory.rglob("*"):
+                if file.is_file():
+                    assert "private-key" not in file.read_text(), "credentials belong in process environment"
     finally:
         for directory in plan.cleanup_dirs:
             shutil.rmtree(directory)
@@ -136,7 +137,7 @@ def test_loopback_endpoint_reuses_local_token(monkeypatch, tmp_path, url, source
             200 if request.headers.get("authorization") == "Bearer local-token" else 401,
             json={"data": [{"id": "/models/ready.gguf"}]}))
 
-    plan = connect.build_launch_plan("claude", url=url if source == "option" else None)
+    plan = connect.build_launch_plan("claude", url=url if source == "option" else None, kllm_skills="none")
 
     assert plan.env["ANTHROPIC_AUTH_TOKEN"] == "local-token"
     assert plan.env["ANTHROPIC_BASE_URL"] == url
@@ -160,7 +161,7 @@ def test_supplied_token_precedes_local_token(monkeypatch, tmp_path, url, api_key
             200 if request.headers.get("authorization") == f"Bearer {expected}" else 401,
             json={"data": [{"id": "ready.gguf"}]}))
 
-    plan = connect.build_launch_plan("claude", url=url, api_key=api_key)
+    plan = connect.build_launch_plan("claude", url=url, api_key=api_key, kllm_skills="none")
 
     assert plan.env["ANTHROPIC_AUTH_TOKEN"] == expected
     assert not (tmp_path / "api_token").exists()

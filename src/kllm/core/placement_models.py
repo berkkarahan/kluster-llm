@@ -369,7 +369,9 @@ class PlacementNodeInput:
         if any(not isinstance(device, Mapping) for device in raw_devices):
             raise ValidationError(f"{node_id}: device inventory contains an invalid entry")
         devices = tuple(PlacementDeviceInput.from_mapping(device) for device in raw_devices)
-        rpc_devices = RpcDeviceInput.parse_inventory(value.get("rpc_devices") or ())
+        rpc_devices = RpcDeviceInput.parse_inventory(
+            value.get("rpc_capabilities") or value.get("rpc_devices") or ()
+        )
         return cls(
             node_id=node_id,
             is_master=bool(value.get("is_master")),

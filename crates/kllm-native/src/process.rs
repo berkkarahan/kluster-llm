@@ -352,7 +352,7 @@ impl LaunchConfig {
         let env = extract_env(dict)?;
         let log_path = opt_string(dict, "log_path")?.map(PathBuf::from);
 
-        let binary = resolve_llama_server(repo_root.as_deref()).ok_or_else(|| {
+        let binary = opt_string(dict, "binary_path")?.or_else(|| resolve_llama_server(repo_root.as_deref())).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
                 "llama-server not found; set KLLM_LLAMA_SERVER or build vendor/llama.cpp",
             )
@@ -448,7 +448,7 @@ impl LaunchConfig {
         let env = extract_env(dict)?;
         let log_path = opt_string(dict, "log_path")?.map(PathBuf::from);
 
-        let binary = resolve_rpc_server(repo_root.as_deref()).ok_or_else(|| {
+        let binary = opt_string(dict, "binary_path")?.or_else(|| resolve_rpc_server(repo_root.as_deref())).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
                 "rpc-server not found; set KLLM_RPC_SERVER or run scripts/install.py",
             )

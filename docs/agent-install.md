@@ -118,7 +118,7 @@ python3 scripts/install.py --backend cuda --from-source
    The reusable `vendor/llama.cpp/build` tree is installer-owned: it is discarded when the pin, backend flags or a recorded OpenSSL package path changes, so a toolchain upgrade (`brew upgrade openssl@3`) cannot leave a cache that half-resolves a package. A dangling `-L` in an exported `LDFLAGS` is ignored rather than treated as stale, so it cannot force a rebuild every run.
    On macOS the default install **aborts** when the Metal+Vulkan build fails; it never downgrades to a Metal-only pack, and `--prefer-prebuilt` is rejected outright. Verification probes the binary the runtime actually launches (`vendor/bin/llama-server`, which `kllm-native` resolves first), not the CMake build output, and `--check` exits non-zero on a backend mismatch.
    llama-server's embedded HTTPS server is the expendable part: if `cmake` configure fails, the installer clears the cached OpenSSL entries and dangling linker flags and retries **with HTTPS enabled** (the real fix); only if that fails does it fall back to `-DLLAMA_OPENSSL=OFF`, recorded as `https=off` in the stamp. The fallback is never latched, so the next run restores HTTPS.
-   `kllm join` reuses a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot, reporting the refusal as a `llama:` warning in the join output rather than downgrading the node.
+   Runtime setup can reuse a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot. Joining only enrolls the node and never extracts a runtime pack or starts RPC.
 5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
 6. Installs a global **`kllm`** launcher under `~/.local/bin` (Windows: `kllm.cmd`) that runs `uv run kllm` for this checkout, and idempotently adds `~/.local/bin` to the user PATH when needed (`--skip-path-shim` to skip).
 
@@ -177,6 +177,39 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 
 ## 3. Installer flags (use only when needed)
 
+### Managed runtime library
+
+Settings → **llama.cpp** stores multiple upstream versions and public HTTPS Git forks.
+Choose a release/tag, branch, or full commit; the selecting node resolves it to an immutable
+repository/commit identity. **Set target & sync** persists the master's target and starts
+isolated downloads/builds on the master and children. Joining and reconnecting children prepare
+that target automatically. Failed or cancelled builds remain visible until Retry or a new target.
+
+The library lives in `KLLM_HOME/runtimes` (normally `~/.kllm/runtimes`). Builds contain both
+runtime binaries, libraries, source provenance, digests, and TCP-only RPC evidence. They use
+existing backend presets, including Metal+Vulkan on macOS. They never replace `vendor/bin`,
+and preparation does not start RPC or interrupt active inference. New runs require verified
+matching source identities on the master and selected workers; unused/offline children do not
+block them. Active runs and recovery retain their original runtime until stopped. Unknown or
+incompatible RPC protocols remain unsupported.
+
+Existing installations appear as legacy entries. Prepare a managed version before an enforced
+run; a tag stamp alone is not proof of a fork's exact revision. Upgrade/rebuild participating
+agents for runtime-management and native path-selection support. `python scripts/build.py`
+also refreshes the source-layout native module imported by `uv run`.
+
+The agent invokes the primary installer in isolated managed mode:
+
+```bash
+uv run python scripts/install.py --llama-only --from-source --rpc-tcp-only \
+  --source-repo https://github.com/ggml-org/llama.cpp.git \
+  --revision <full-40-character-commit> --runtime-dir <isolated-build-directory> \
+  --backend auto
+```
+
+All three managed source arguments are required together. The committed stable `llama-release`
+remains the bootstrap default for existing installer commands and `--check`.
+
 | Flag | When to use |
 |------|-------------|
 | `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
@@ -234,6 +267,8 @@ kllm join --key '<join-key>'
 ```
 
 Join uses the join key fingerprint over mDNS to find the master; `--master` is only needed when discovery fails. Overlay must match master (`none` vs `wireguard`). Control plane stays on LAN; RPC may move to `10.66.87.0/24` when overlay is on.
+
+A joined worker is idle until the master selects it for a model run and commands RPC startup. Joining, heartbeats, runtime installation, and restarting the agent never independently start RPC. Stopping the model stops its workers' RPC processes and preserves cluster membership and networking. Managed private-network setup can verify connectivity before llama binaries are installed; the master checks runtime prerequisites at inference startup.
 
 ### 4.3 Model + inference (master)
 
@@ -362,6 +397,23 @@ kllm run --model file.gguf
 - Troubleshooting: [troubleshooting.md](troubleshooting.md)  
 - Engine / RPC policy: [engine-decision.md](engine-decision.md)  
 - Network: [`network-config/`](../network-config/)
+
+## Install agent skills
+
+The canonical [skill library](../skills/README.md) separates operations from
+development and includes `kllm-10gbe` with Windows, macOS and Linux references.
+`python3 scripts/install_skills.py` installs project-local discovery copies for
+Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw and Pi. Use `python`/`py -3`
+on Windows, or `uv run python` in the project environment. This standalone
+standard-library installer needs neither the native extension nor elevation.
+
+Use `--dry-run` before installation, repeat `--agent` to select clients,
+`--category operations|development|all` to select content, or `--scope user` for
+user-wide copies. Reruns update unchanged owned copies; `--force` backs up selected
+conflicts outside discovery roots. Existing skills and trust settings remain
+independent. CONNECT provisions copies automatically from this checkout through
+`--kllm-skills`; installed CLIs without a discoverable checkout can set
+`KLLM_REPO_ROOT`. Skills do not themselves authorize host networking changes.
 
 ## Guided private-network administrator helper
 

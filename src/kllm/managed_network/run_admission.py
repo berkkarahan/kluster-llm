@@ -38,7 +38,7 @@ class RunAdmission:
         result: dict[str, Any] = self.call(self.preview(UUID(network_id)))
         return result
 
-    def inventory(self, network_id: UUID) -> tuple[Any, list, dict]:
+    def inventory(self, network_id: UUID, *, runtime: bool = False, selected: list[str] | None = None) -> tuple[Any, list, dict]:
         service = self.service
         network = service.store.network(network_id)
         if network is None or network.desired_state != 'active' or network.observed_state not in ('ready', 'verifying'):
@@ -47,6 +47,8 @@ class RunAdmission:
         if (network.cluster_binding_id, network.master_node_id, network.master_key_id) != (authority.cluster_binding_id, authority.master_node_id, authority.master_key_id):
             raise PlatformRefusal('UNPAIRED_IDENTITY', 'Selected network belongs to another authority')
         assignments = service.store.assignments(network_id)
+        if selected is not None:
+            assignments = [a for a in assignments if a.node_id == service.identity.node_id or a.node_id in selected]
         members = {}
         for assignment in assignments:
             original = service.state().members.get(assignment.node_id)
@@ -54,6 +56,14 @@ class RunAdmission:
                 raise PlatformRefusal('STALE_REVISION', 'Selected participant is no longer enrolled')
             member = deepcopy(original)
             if assignment.node_id != service.identity.node_id:
+                if not runtime:
+                    endpoint = assignment.logical_rpc_endpoint
+                    if not endpoint:
+                        raise PlatformRefusal('STALE_REVISION', 'Network participant has no configured RPC endpoint')
+                    host, port = endpoint.rsplit(':', 1)
+                    member.update(host=host, rpc_bind=host, rpc_port=int(port))
+                    members[assignment.node_id] = member
+                    continue
                 bridge = service.master_bridges.get((str(network_id), assignment.node_id))
                 if bridge is None or not assignment.launch_rpc_endpoint or not assignment.logical_rpc_endpoint or assignment.rpc_child_identity is None:
                     raise PlatformRefusal('STALE_REVISION', 'Selected bridge disappeared')
@@ -61,9 +71,9 @@ class RunAdmission:
                 if status['closed'] or status['last_error'] or status['listener'] != assignment.launch_rpc_endpoint:
                     raise PlatformRefusal('STALE_REVISION', 'Selected bridge changed')
                 host, port = assignment.launch_rpc_endpoint.rsplit(':', 1)
-                member.update(host=host, lan_host=host, rpc_port=int(port))
+                member.update(host=host, rpc_bind=host, rpc_port=int(port))
             members[assignment.node_id] = member
-        if service.identity.node_id not in members or len(members) < 2:
+        if service.identity.node_id not in members or (selected is None and len(members) < 2):
             raise PlatformRefusal('STALE_REVISION', 'Selected network requires its master and a worker')
         return network, assignments, members
 
@@ -76,7 +86,7 @@ class RunAdmission:
         async with self.service.lock:
             return self.inventory(network_id)[2]
 
-    async def reserve(self, network_id: str | None):
+    async def reserve(self, network_id: str | None, selected: list[str] | None = None):
         service = self.service
         await service.lock.acquire()
         reservation = None
@@ -85,10 +95,15 @@ class RunAdmission:
                 raise PlatformRefusal('INFERENCE_ACTIVE', 'Stop and drain the current managed inference before starting another run')
             if network_id is None:
                 return None, deepcopy(service.state().members)
-            network, assignments, members = self.inventory(UUID(network_id))
+            network, assignments, members = self.inventory(UUID(network_id), selected=selected)
             operation = service.store.operation(network.current_operation_id)
             if operation is None:
                 raise PlatformRefusal('STALE_REVISION', 'Selected network has no current operation')
+            # Network proof is independent of process readiness. RPC workers have
+            # already been started by the master's runtime ownership context.
+            await asyncio.wait_for(service._health(network, operation, assignments), 5)
+            await service.prepare_rpc(network, operation, assignments)
+            network, assignments, members = self.inventory(UUID(network_id), runtime=True, selected=selected)
             workers = [a for a in assignments if a.node_id != service.identity.node_id]
             reservation = RunNetworkReservation(run_id=uuid4(), network_id=network.network_id, assignment_revisions={a.node_id: a.assignment_revision for a in assignments}, logical_endpoints=[a.logical_rpc_endpoint for a in workers], launch_endpoints=[a.launch_rpc_endpoint for a in workers], relay_instance_ids=[UUID(native.network_bridge_status(service.master_bridges[(str(network.network_id), a.node_id)])['instance_id']) for a in workers], state='reserved')
             service.store.reservation(reservation)
@@ -174,9 +189,25 @@ class RunAdmission:
             lease.drain_ack = acknowledged
             service.store.lease(lease)
             drained = drained and acknowledged
+        participants = [a for a in service.store.assignments(reservation.network_id) if a.node_id in reservation.assignment_revisions and a.node_id != service.identity.node_id]
+        if drained:
+            closed = await service._phase(operation, participants, 'release_runtime', {a.node_id: {} for a in participants}, 5)
+            drained = all(result.get('drained') is True for result in closed.values())
         reservation.state = 'released' if drained else 'uncertain'
         service.store.reservation(reservation)
         service.freshness.invalidate(reservation.network_id, 'Run ended; obtain a new idle protocol proof')
+        if drained:
+            for assignment in participants:
+                key = (str(reservation.network_id), assignment.node_id)
+                bridge = service.master_bridges.get(key)
+                if bridge:
+                    status = native.network_bridge_status(bridge)
+                    if not await asyncio.to_thread(native.stop_network_bridge, bridge, status['instance_id']):
+                        raise PlatformRefusal('CLEANUP_PENDING', 'Master relay has not drained')
+                    service.master_bridges.pop(key, None)
+                assignment.launch_rpc_endpoint = None
+                assignment.rpc_child_identity = None
+                service.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
 
     async def release_stopped(self, *, lock_held: bool = False):
         service = self.service
@@ -190,6 +221,8 @@ class RunAdmission:
                 if (run.child_pid and native.process_alive(run.child_pid) and native._managed_native()._process_identity(run.child_pid)[0] == run.child_start_token) or (run.child_pid is None and service.state().process_pid and native.process_alive(service.state().process_pid)):
                     raise PlatformRefusal('INFERENCE_ACTIVE', 'Recorded dependent child is still alive')
                 await self.release(run)
+                if run.state != 'released':
+                    raise PlatformRefusal('CLEANUP_PENDING', 'Runtime release is awaiting a worker acknowledgement')
 
 
     @contextmanager
@@ -203,9 +236,9 @@ class RunAdmission:
             self.call(unlock())
 
     @contextmanager
-    def context(self, network_id: str | None):
+    def context(self, network_id: str | None, selected: list[str] | None = None):
         previous_pid = self.service.state().process_pid
-        reservation, members = self.call(self.reserve(network_id))
+        reservation, members = self.call(self.reserve(network_id, selected))
         success = False
         try:
             yield members

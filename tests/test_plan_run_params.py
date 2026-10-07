@@ -285,7 +285,10 @@ def test_dashboard_layer_overrides_legacy_config_at_plan_and_run_boundary(client
         ran = c.post("/v1/run", json=payload)
     assert ran.status_code == 200, ran.text
     assert ran.json()["plan"]["split_mode"] == "layer"
-    assert [call.kwargs["launch_settings"]["split_mode"] for call in planner.call_args_list] == ["layer", "layer"]
+    # Membership/capacity refresh may recompute the plan in the background.
+    # Every computation must retain the dashboard's explicit layer setting.
+    modes = [call.kwargs["launch_settings"]["split_mode"] for call in planner.call_args_list]
+    assert len(modes) >= 2 and set(modes) == {"layer"}
     assert launch.call_args.kwargs["split_mode"] == "layer"
     assert c.get("/v1/config").json()["split_mode"] == legacy
 

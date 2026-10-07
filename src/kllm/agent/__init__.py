@@ -7,6 +7,9 @@ import sqlite3
 from contextlib import asynccontextmanager
 import httpx
 from kllm import http_clients, rpc_cache
+from kllm.runtimes.registry import RuntimeRegistry
+from kllm.agent.services.runtime_control import RuntimeControlService
+from kllm.agent.handlers.runtimes import build_router as build_runtime_router
 import secrets
 import sys
 import threading
@@ -56,7 +59,6 @@ from kllm.agent.live import (
 )
 from kllm.agent.join_flow import (
     build_register_payload,
-    cached_llama_pack_warning,
     post_register,
 )
 from .origin import (
@@ -281,9 +283,19 @@ def _close_usage_store(app: FastAPI) -> None:
 
 async def _start_managed_network(app: FastAPI) -> None:
     from kllm.agent.services.managed_network import ManagedNetworkService
+    from kllm.agent.services.worker_rpc import WorkerRpcService
+    from kllm.agent.services.rpc_runs import RpcRunCoordinator
     try:
         service = ManagedNetworkService(home_dir(), lambda: STATE, _master_control_base)
+        registry = _runtime_registry()
+        service.runtimes = RuntimeControlService(service, registry,
+            lambda: kllm_config.load_config().get('accel_backend') or 'auto',
+            native_supported=lambda: native.native_available() and getattr(native.require_native(), 'RUNTIME_SELECTION_VERSION', 0) == 1)
+        service.worker_rpc = WorkerRpcService(lambda: STATE, _runtime_setup_service, lock=_worker_launch_lock, before_stop=service.release_worker_bridges, registry=registry)
+        service.rpc_runs = RpcRunCoordinator(service, lambda body: _inference_handlers().run(body), lambda: membership_mod._stop_inference(STATE))
         await service.start()
+        if not STATE.process_pid and registry.data.get('running'):
+            registry.running(None)
         app.state.managed_network = service
     except (OSError, ValueError, RuntimeError, sqlite3.Error):
         app.state.managed_network_error = "Managed network identity/store is unavailable; local recovery required"
@@ -292,6 +304,13 @@ async def _start_managed_network(app: FastAPI) -> None:
 async def _stop_managed_network(app: FastAPI) -> None:
     service = getattr(app.state, 'managed_network', None)
     if service is not None:
+        try:
+            if service.rpc_runs is not None and service.rpc_runs.run_id is not None and STATE.role == 'master':
+                await asyncio.to_thread(service.rpc_runs.stop, lambda: _inference_handlers().stop())
+            if service.worker_rpc is not None:
+                await asyncio.to_thread(service.worker_rpc.reconcile_startup)
+        except (HTTPException, RuntimeError, ValueError):
+            pass  # Ambiguous ownership stays durable for the next reconciliation.
         # A managed run is coupled to these bridge instances. Legacy runs keep
         # their existing lifecycle when no durable network reservation exists.
         for network in service.store.networks():
@@ -320,6 +339,15 @@ def _managed_network_service():
 def _managed_network_summaries() -> list[dict[str, Any]]:
     service = getattr(app.state, 'managed_network', None)
     return service.summaries() if service is not None else []
+
+
+def _rpc_lifecycle_status() -> dict[str, Any]:
+    service = getattr(app.state, 'managed_network', None)
+    coordinator = service.rpc_runs if service is not None else None
+    if STATE.role == 'master' and coordinator is not None:
+        return {'status': coordinator.phase, 'workers': list(coordinator.workers), 'retries': coordinator.retries}
+    member = STATE.members.get(STATE.node_id) or {}
+    return {'status': member.get('rpc_status', 'idle'), 'error': member.get('rpc_error')}
 
 
 def _agent_lifespan() -> AgentLifespan:
@@ -431,15 +459,47 @@ def _persist_last_settings(body: PlanBody | RunBody) -> None:
     STATE.last_settings = data
 
 
+def _relaunch_after_membership_change(state: ClusterState) -> None:
+    membership_mod.on_membership_shrink(
+        state,
+        apply_serving=lambda _state, body, _plan: run(body),
+        stop_serving=lambda _state: stop_inference(),
+    )
+
+
 _membership_maintenance = MembershipMaintenance(
     state=lambda: STATE,
     store=lambda: _usage_store(),
-    shrink_cluster=lambda state: membership_mod.on_membership_shrink(state),
+    shrink_cluster=_relaunch_after_membership_change,
 )
 
 
 def _sync_master_liveness(*, shrink: bool = True) -> list[str]:
     return _membership_maintenance.synchronize(shrink=shrink)
+
+
+def _runtime_registry():
+    registry = getattr(app.state, 'runtime_registry', None)
+    if registry is None or registry.closed or registry.root.parent != home_dir():
+        if registry is not None:
+            registry.close()
+        registry = RuntimeRegistry(home_dir(), repo_root)
+        app.state.runtime_registry = registry
+    return registry
+
+
+def _runtime_control():
+    service = getattr(app.state, 'managed_network', None)
+    control = getattr(service, 'runtimes', None)
+    if control is None:
+        raise HTTPException(503, 'Signed node runtime control is unavailable; restart or recover the local agent')
+    return control
+
+
+def _runtime_status():
+    service = getattr(app.state, 'managed_network', None)
+    control = getattr(service, 'runtimes', None)
+    return control.status() if control is not None else _runtime_registry().snapshot()
 
 
 def _heartbeat_payload() -> dict[str, Any]:
@@ -452,6 +512,7 @@ def _heartbeat_payload_builder() -> HeartbeatPayloadBuilder:
         software_identity=cluster_update.software_identity,
         process_started_at=_tracked_process_start,
         process_start_token=_tracked_process_token,
+        runtime_status=lambda: _runtime_control().local_status() if getattr(getattr(app.state, 'managed_network', None), 'runtimes', None) else {},
     )
 
 
@@ -480,7 +541,16 @@ def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
         logging_control.apply(STATE, data["logging"])
     snapshot = data.get("cluster_members")
     if isinstance(snapshot, dict):
-        STATE.members = dict(snapshot)
+        with _worker_launch_lock:
+            local = STATE.members.get(STATE.node_id) or {}
+            STATE.members = dict(snapshot)
+            # Runtime ownership is local, never supplied by a cluster snapshot.
+            if STATE.node_id in STATE.members:
+                STATE.members[STATE.node_id] = dict(STATE.members[STATE.node_id])
+                STATE.members[STATE.node_id].pop('rpc_owner', None)
+                for key in ('rpc_owner', 'rpc_status', 'rpc_error', 'rpc_devices', 'rpc_capabilities', 'rpc_control_version'):
+                    if key in local:
+                        STATE.members[STATE.node_id][key] = local[key]
     if "last_plan" in data:
         STATE.last_plan = data.get("last_plan")
     if "apply_error" in data:
@@ -584,7 +654,7 @@ def _worker_post_heartbeat() -> None:
     _membership_heartbeat_service().post_heartbeat()
 
 
-_worker_launch_lock = threading.Lock()
+_worker_launch_lock = threading.RLock()
 _worker_runtime_retry = {"failures": 0, "next_attempt": 0.0}
 _WORKER_RUNTIME_RETRY_BASE_S = 15.0
 _WORKER_RUNTIME_RETRY_MAX_S = 300.0
@@ -600,42 +670,10 @@ def _worker_runtime_healthy() -> bool:
 
 
 def _ensure_worker_runtime() -> None:
-    """Restart a joined worker's rpc-server after it dies or a rejoin loses it.
-
-    A worker can stay connected on the control plane while its rpc-server is not
-    running, which makes the cluster look healthy but fail every Run at the RPC
-    preflight. Reconcile the local runtime so a connected worker stays serveable.
-    """
-    if STATE.role != "worker" or not STATE.master_host or not STATE.join_key:
-        return
-    if _worker_runtime_healthy():
-        _worker_runtime_retry["failures"] = 0
-        _worker_runtime_retry["next_attempt"] = 0.0
-        return
-    now = time.monotonic()
-    if now < _worker_runtime_retry["next_attempt"]:
-        return
-    # Never block the heartbeat cadence waiting on an in-flight join; the join
-    # itself brings the runtime up.
-    if not _worker_launch_lock.acquire(blocking=False):
-        return
-    try:
-        # A join may have started the worker while this tick was waiting.
-        if _worker_runtime_healthy():
-            return
-        result = _runtime_setup_service().ensure_worker(STATE)
-    finally:
-        _worker_launch_lock.release()
-    if result is None or not result.get("error"):
-        _worker_runtime_retry["failures"] = 0
-        _worker_runtime_retry["next_attempt"] = 0.0
-        return
-    _worker_runtime_retry["failures"] = min(_worker_runtime_retry["failures"] + 1, 5)
-    delay = min(
-        _WORKER_RUNTIME_RETRY_BASE_S * (2 ** (_worker_runtime_retry["failures"] - 1)),
-        _WORKER_RUNTIME_RETRY_MAX_S,
-    )
-    _worker_runtime_retry["next_attempt"] = now + delay
+    """Compatibility entry point; membership never authorizes RPC startup."""
+    # Runtime ownership is reconciled by the signed control service. Heartbeats
+    # report membership and capacity even when the node is idle.
+    return
 
 
 def _probe_worker_latencies() -> None:
@@ -678,7 +716,6 @@ _membership_background = MembershipLoop(
     interval_seconds=membership_mod.HEARTBEAT_INTERVAL_S,
     synchronize_master=lambda: _sync_master_liveness(shrink=True),
     post_worker_heartbeat=lambda: _worker_post_heartbeat(),
-    ensure_worker_runtime=lambda: _ensure_worker_runtime(),
     schedule_worker_probe=lambda: _schedule_worker_latency_probe(),
     schedule_capacity_refresh=lambda: _schedule_local_capacity_refresh(),
 )
@@ -872,7 +909,7 @@ def health() -> dict[str, Any]:
         "pid": os.getpid(),
     }
     if getattr(app.state, 'managed_network', None) is not None:
-        out['capabilities'] = ['managed-network-v1', 'managed-network-v2']
+        out['capabilities'] = ['managed-network-v1', 'managed-network-v2', 'rpc-control-v1']
     # Non-secret fingerprint (same as mDNS ``kid``) so Join-by-key can HTTP-probe
     # when Bonjour/mDNS is unavailable on the LAN.
     if STATE.role == "master" and STATE.join_key:
@@ -1092,6 +1129,8 @@ def _dashboard_status_service() -> DashboardStatusService:
         software_identity=cluster_update.software_identity,
         default_device=kllm_config.DEFAULT_DEVICE,
         managed_networks=_managed_network_summaries,
+        rpc_lifecycle=_rpc_lifecycle_status,
+        runtimes=_runtime_status,
     )
 
 
@@ -1163,7 +1202,6 @@ def _master_start_handler() -> MasterStartHandler:
             normalize_overlay=netsec.normalize_overlay,
             generate_join_key=generate_join_key,
             pick_rpc_bind_host=netsec.pick_rpc_bind_host,
-            ensure_rpc_firewall=netsec.ensure_rpc_firewall,
             select_gpus=_master_gpu_selection,
             build_master_member=_build_master_member_record,
             setup_overlay=_setup_master_overlay,
@@ -1196,6 +1234,10 @@ def _unregister_worker() -> None:
 def _managed_network_before_reset() -> None:
     service = getattr(app.state, 'managed_network', None)
     if service is not None:
+        if STATE.role == 'master' and service.rpc_runs is not None:
+            service.rpc_runs.stop(lambda: _inference_handlers().stop())
+        elif service.worker_rpc is not None:
+            service.worker_rpc.reconcile_startup()
         from kllm.managed_network.recovery import before_reset
         service.admission.call(before_reset(service))
 
@@ -1250,7 +1292,6 @@ def _cluster_join_service() -> ClusterJoinService:
             gpu_selection=_join_gpu_selection,
             probe_capacity=_probe_capacity_for_cluster,
             pick_rpc_bind_host=netsec.pick_rpc_bind_host,
-            ensure_rpc_firewall=netsec.ensure_rpc_firewall,
             ensure_master_control_route=_ensure_master_control_route,
             load_or_create_keypair=netsec.load_or_create_keypair,
             software_identity=cluster_update.software_identity,
@@ -1259,16 +1300,9 @@ def _cluster_join_service() -> ClusterJoinService:
             drop_cp_proxy=_drop_cp_proxy,
             apply_cluster_snapshot=_apply_cluster_snapshot,
             worker_bring_up_wireguard=_worker_bring_up_wg,
-            cached_llama_pack_warning=cached_llama_pack_warning,
-            gpu_visibility_env=_gpu_visibility_env,
-            repo_root=repo_root,
-            start_worker=native.start_worker,
-            register_child=runtime.register_child,
-            rpc_server_log_path=cluster_log.rpc_server_log_path,
             post_worker_heartbeat=_worker_post_heartbeat,
             stop_process=native.stop_process,
             clear_children=runtime.clear_children,
-            stop_stray_rpc_servers=runtime.stop_stray_rpc_servers,
         )
     )
 
@@ -1277,6 +1311,11 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
     # Serialize with the background reconciler so a rejoin and a runtime
     # self-heal cannot start two rpc-servers on the same RPC port.
     with _worker_launch_lock:
+        service = getattr(app.state, 'managed_network', None)
+        if service and service.worker_rpc:
+            service.worker_rpc.reconcile_startup()
+            if (STATE.members.get(STATE.node_id) or {}).get('rpc_status') == 'cleanup_pending':
+                raise HTTPException(409, 'Reconcile the tracked RPC process locally before joining')
         return _cluster_join_service().join(body)
 
 
@@ -1308,6 +1347,7 @@ def _membership_handlers() -> MembershipHandlers:
         store=_usage_store,
         master_lan_host=_master_lan_host,
         inference_activity=_inference_activity,
+        shrink_cluster=_relaunch_after_membership_change,
     )
 
 
@@ -1638,9 +1678,11 @@ def _run_settings_handlers() -> RunSettingsHandlers:
 
 
 def _inference_handlers() -> InferenceHandlers:
+    service = getattr(app.state, 'managed_network', None)
     return InferenceHandlers(
         InferenceDependencies(
             state=STATE,
+            runtime_context=(service.runtimes.operation if service is not None and service.runtimes is not None else None),
             resolve_settings=lambda body: _run_settings_handlers().resolve(body),
             preflight=lambda body, path: _run_settings_handlers().preflight(body, path),
             ensure_master_member=lambda: _ensure_master_member(persist=True),
@@ -1690,6 +1732,8 @@ def _inference_handlers() -> InferenceHandlers:
                 _managed_network_service().admission.call(_managed_network_service().admission.release_stopped(lock_held=True))
                 if getattr(app.state, 'managed_network', None) is not None else None
             ),
+            rpc_context=(service.rpc_runs.context if service is not None and service.rpc_runs is not None else None),
+            network_run_selected=(service.admission.context if service is not None and service.rpc_runs is not None else None),
         )
     )
 
@@ -1706,7 +1750,10 @@ def plan(body: PlanBody, preview: bool = False) -> dict[str, Any]:
 
 
 def run(body: RunBody) -> dict[str, Any]:
-    return _inference_handlers().run(body)
+    service = getattr(app.state, 'managed_network', None)
+    if service is None and getattr(app.state, 'managed_network_error', None):
+        raise HTTPException(503, 'Recover signed node/runtime control before starting inference')
+    return service.rpc_runs.launch(body) if service is not None and service.rpc_runs is not None else _inference_handlers().run(body)
 
 
 def legacy_plan(body: LegacyPlanBody, preview: bool = False) -> dict[str, Any]:
@@ -1714,7 +1761,7 @@ def legacy_plan(body: LegacyPlanBody, preview: bool = False) -> dict[str, Any]:
 
 
 def legacy_run(body: LegacyRunBody) -> dict[str, Any]:
-    return _inference_handlers().run(body)
+    return run(body)
 
 
 def legacy_put_model_settings(model: str, body: LegacyModelSettingsBody) -> dict[str, Any]:
@@ -1726,7 +1773,8 @@ def legacy_put_model_settings(model: str, body: LegacyModelSettingsBody) -> dict
 
 def stop_inference() -> dict[str, Any]:
     """Stop llama-server and drop the loaded model. The cluster stays up."""
-    return _inference_handlers().stop()
+    service = getattr(app.state, 'managed_network', None)
+    return service.rpc_runs.stop(lambda: _inference_handlers().stop()) if service is not None and service.rpc_runs is not None else _inference_handlers().stop()
 
 
 def _mount_dashboard() -> None:
@@ -1790,6 +1838,7 @@ legacy_v1_router = _build_v1_router({**_route_handlers, "plan": legacy_plan, "ru
 app.include_router(legacy_v1_router)
 app.include_router(_build_v2_router(_route_handlers))
 app.include_router(build_network_router(_managed_network_service))
+app.include_router(build_runtime_router(lambda: _runtime_registry(), lambda: _runtime_control(), lambda: STATE))
 _mount_dashboard()
 
 

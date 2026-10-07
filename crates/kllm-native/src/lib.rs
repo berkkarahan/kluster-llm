@@ -99,6 +99,7 @@ fn process_alive(py: Python<'_>, pid: u32) -> PyResult<bool> {
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("RESOURCE_SCHEMA_VERSION", 2u32)?;
+    m.add("RUNTIME_SELECTION_VERSION", 1u32)?;
     m.add_function(wrap_pyfunction!(network::arp_conflict::probe_ipv4_conflict, m)?)?;
     #[cfg(unix)]
     {

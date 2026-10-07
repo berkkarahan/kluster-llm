@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
@@ -14,7 +13,6 @@ from kllm.agent.join_flow import require_join_overlay, resolve_master_endpoint
 from kllm.agent.schemas import JoinBody
 from kllm.agent.services.gpus import ResolvedGpuSelection
 from kllm.agent.services.rpc_devices import worker_rpc_devices
-from kllm.core.gpu_selection import GpuDeviceInput
 from kllm.state import ClusterState
 
 
@@ -26,7 +24,6 @@ class ClusterJoinDependencies:
     gpu_selection: Callable[[JoinBody], ResolvedGpuSelection]
     probe_capacity: Callable[[], dict[str, Any]]
     pick_rpc_bind_host: Callable[..., str]
-    ensure_rpc_firewall: Callable[[int, str], dict[str, Any]]
     ensure_master_control_route: Callable[[str, int], list[str]]
     load_or_create_keypair: Callable[[], tuple[str, str]]
     software_identity: Callable[[], dict[str, Any]]
@@ -35,20 +32,13 @@ class ClusterJoinDependencies:
     drop_cp_proxy: Callable[[], None]
     apply_cluster_snapshot: Callable[[dict[str, Any]], None]
     worker_bring_up_wireguard: Callable[[str, dict[str, Any]], str]
-    cached_llama_pack_warning: Callable[[str], str | None]
-    gpu_visibility_env: Callable[[str, list[int] | None], dict[str, str]]
-    repo_root: Callable[[], Path | None]
-    start_worker: Callable[..., dict[str, Any]]
-    register_child: Callable[[int, str], None]
-    rpc_server_log_path: Callable[[], Path]
     post_worker_heartbeat: Callable[[], None]
     stop_process: Callable[..., Any] = lambda *_args, **_kwargs: None
     clear_children: Callable[[], None] = lambda: None
-    stop_stray_rpc_servers: Callable[[], int] = lambda: 0
 
 
 class ClusterJoinService:
-    """Join the current node to a master and start its local RPC worker."""
+    """Enroll the node and configure networking for later master commands."""
 
     def __init__(self, dependencies: ClusterJoinDependencies) -> None:
         self._deps = dependencies
@@ -85,9 +75,6 @@ class ClusterJoinService:
         state.wg_public_key = None
         state.overlay_status = None
 
-        firewall = self._deps.ensure_rpc_firewall(body.rpc_port, lan_host)
-        if firewall.get("warning"):
-            state.netsec_warnings.append(str(firewall["warning"]))
         state.netsec_warnings.extend(
             self._deps.ensure_master_control_route(master_host, master_port)
         )
@@ -115,6 +102,12 @@ class ClusterJoinService:
             git_head=identity.get("git_head"),
             llama_release=identity.get("llama_release"),
         )
+        payload.update(
+            rpc_capabilities=worker_rpc_devices(gpu.devices, backend),
+            rpc_control_version=1,
+            runtime_management_version=1,
+            rpc_status="idle",
+        )
         base = (
             f"http://127.0.0.1:{int(state.cp_proxy_port)}"
             if state.cp_proxy_port
@@ -139,10 +132,13 @@ class ClusterJoinService:
             except Exception as exc:
                 raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
 
-        pack_warning = self._deps.cached_llama_pack_warning(str(backend))
-        if pack_warning:
-            state.llama_warnings = [*state.llama_warnings, pack_warning]
-        launched = self._launch_worker(body, rpc_bind_host, backend, gpu.devices, state)
+        # Rejoining releases only the process already tracked by this agent.
+        # Joining never starts a process or searches for unrelated RPC servers.
+        if state.process_pid and state.process_role == "worker":
+            self._deps.stop_process(state.process_pid, force=True)
+            self._deps.clear_children()
+        state.process_pid = None
+        state.process_role = None
 
         state.role = "worker"
         state.join_key = body.key
@@ -154,12 +150,19 @@ class ClusterJoinService:
         local["host"] = rpc_bind_host
         local["lan_host"] = rpc_bind_host
         local["rpc_bind"] = rpc_bind_host
+        local["rpc_capabilities"] = worker_rpc_devices(gpu.devices, backend)
+        local["rpc_devices"] = []
+        local["rpc_control_version"] = 1
+        local['runtime_management_version'] = 1
+        local["rpc_status"] = "idle"
+        local.pop("rpc_owner", None)
         state.save()
         self._deps.post_worker_heartbeat()
         return {
             "role": "worker",
             "master": master_host,
-            "launch": launched,
+            "launch": {"pid": None, "deferred": True},
+            "rpc_status": "idle",
             "rpc_bind": state.rpc_bind,
             "overlay": state.overlay,
             "wg_address": state.wg_address,
@@ -190,44 +193,3 @@ class ClusterJoinService:
             f"rpc bind corrected to {hint} (master peer address)"
         ]
         return hint
-
-    def _launch_worker(
-        self,
-        body: JoinBody,
-        rpc_bind_host: str,
-        backend: str,
-        gpus: tuple[GpuDeviceInput, ...],
-        state: ClusterState,
-    ) -> dict[str, Any]:
-        root = self._deps.repo_root()
-        rpc_devices = worker_rpc_devices(gpus, backend)
-        member = state.members.setdefault(state.node_id, {})
-        # A rejoin must not leave the previous rpc-server holding the RPC port,
-        # which would make the new launch fail to bind and silently drop the node.
-        if state.process_pid:
-            self._deps.stop_process(state.process_pid, force=True)
-            self._deps.clear_children()
-            state.process_pid = None
-            state.process_role = None
-        self._deps.stop_stray_rpc_servers()
-        member["rpc_devices"] = []
-        try:
-            launched = self._deps.start_worker(
-                host=rpc_bind_host,
-                port=body.rpc_port,
-                repo_root=str(root) if root else None,
-                # --device is authoritative. Visibility masks would renumber
-                # CUDA/Vulkan devices and invalidate the advertised RPC indices.
-                env=None,
-                devices=[device["device"] for device in rpc_devices],
-                log_path=str(self._deps.rpc_server_log_path()),
-            )
-            state.process_pid = launched["pid"]
-            state.process_role = "worker"
-            if launched.get("pid"):
-                member["rpc_devices"] = rpc_devices
-                self._deps.register_child(int(launched["pid"]), "rpc-server")
-            return launched
-        except Exception as exc:
-            # A worker may join before its local RPC binary has been installed.
-            return {"error": str(exc), "pid": None}

@@ -762,6 +762,90 @@ def ensure_vulkan_macos() -> dict[str, str]:
     return env
 
 
+# Windows from-source Vulkan builds need the LunarG SDK: glslc and the Vulkan
+# headers/library for ``find_package(Vulkan COMPONENTS glslc REQUIRED)``, plus
+# the SDK's cmake configs for ``find_package(SPIRV-Headers CONFIG REQUIRED)``.
+_VULKAN_SDK_WINDOWS_ID = "KhronosGroup.VulkanSDK"
+_VULKAN_SDK_WINDOWS_ROOT = Path(r"C:\VulkanSDK")
+
+
+def _windows_vulkan_sdk_root() -> Path | None:
+    """Locate a Windows Vulkan SDK: VULKAN_SDK first, then default LunarG installs."""
+    roots: list[Path] = []
+    sdk = os.environ.get("VULKAN_SDK", "").strip()
+    if sdk:
+        roots.append(Path(sdk))
+    if _VULKAN_SDK_WINDOWS_ROOT.is_dir():
+        roots += sorted((p for p in _VULKAN_SDK_WINDOWS_ROOT.iterdir() if p.is_dir()), reverse=True)
+    return next((root for root in roots if (root / "Bin" / "glslc.exe").is_file()), None)
+
+
+def _windows_vulkan_missing(root: Path | None) -> list[str]:
+    """Names the pieces a Windows ``GGML_VULKAN=ON`` cmake configure still needs."""
+    if root is None:
+        return [] if _which("glslc") else ["the LunarG Vulkan SDK (glslc, vulkan-1.lib, Vulkan headers)"]
+    missing: list[str] = []
+    if not (root / "Bin" / "glslc.exe").is_file() and not _which("glslc"):
+        missing.append("glslc")
+    if not (root / "Include" / "vulkan" / "vulkan.h").is_file():
+        missing.append("Vulkan headers")
+    if not (root / "Lib" / "vulkan-1.lib").is_file():
+        missing.append("vulkan-1.lib")
+    return missing
+
+
+def _windows_vulkan_env(root: Path | None) -> dict[str, str]:
+    """Cmake env extras so this process builds before any shell/env refresh."""
+    if root is None:
+        return {}
+    existing = os.environ.get("CMAKE_PREFIX_PATH", "")
+    return {
+        "VULKAN_SDK": str(root),
+        "PATH": os.pathsep.join([str(root / "Bin"), os.environ.get("PATH", "")]),
+        "CMAKE_PREFIX_PATH": os.pathsep.join([str(root), existing] if existing else [str(root)]),
+    }
+
+
+def ensure_windows_vulkan() -> dict[str, str]:
+    """Provision the LunarG Vulkan SDK when a Windows Vulkan source build needs it.
+
+    Returns cmake env extras. Raises SystemExit when the SDK cannot be provisioned.
+    """
+    if not _is_windows():
+        return {}
+    root = _windows_vulkan_sdk_root()
+    if _windows_vulkan_missing(root):
+        winget = _which("winget")
+        if winget:
+            print("Installing the LunarG Vulkan SDK via winget (source builds need glslc)...")
+            result = _run(
+                [
+                    winget,
+                    "install",
+                    "--id",
+                    _VULKAN_SDK_WINDOWS_ID,
+                    "--exact",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--disable-interactivity",
+                ],
+                check=False,
+            )
+            if result.returncode != 0:
+                _warn(f"winget install exited with {result.returncode}; verifying the SDK anyway")
+            root = _windows_vulkan_sdk_root()
+    missing = _windows_vulkan_missing(root)
+    if missing:
+        raise SystemExit(
+            "error: a Windows Vulkan source build needs missing: "
+            + ", ".join(missing)
+            + ". Install the LunarG Vulkan SDK from https://vulkan.lunarg.com/sdk/home#windows "
+            + "(winget install --id KhronosGroup.VulkanSDK --exact, elevated) and re-run."
+        )
+    return _windows_vulkan_env(root)
+
+
 # ── kllm package + UI ────────────────────────────────────────────────────────
 
 # Console scripts the wheel RECORD deletes on force-reinstall.
@@ -1342,6 +1426,8 @@ def build_llama_from_source(backend: str, tag: str | None = None, *, rpc_tcp_onl
     if _is_macos() and backend != "cpu":
         cmake_env = ensure_vulkan_macos()
         print("macOS source build: enabling Metal + Vulkan (CPU always available)")
+    elif _is_windows() and backend == "vulkan":
+        cmake_env = ensure_windows_vulkan()
 
     # Keep the signature independent of the HTTPS ladder so a run that had to
     # disable HTTPS still reuses this cache and re-attempts HTTPS next time.
@@ -2010,6 +2096,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Compile the pinned llama.cpp tag (macOS default: Metal+Vulkan multi-backend)",
     )
     p.add_argument(
+        "--prebuilt",
+        action="store_true",
+        help=(
+            "Managed mode: install a matching prebuilt GitHub release pack instead of "
+            "compiling. Ineligible or failing packs exit with a marker so the caller can "
+            "fall back to --from-source."
+        ),
+    )
+    p.add_argument(
         "--tag",
         default=None,
         help="Override the llama.cpp tag in llama-release (e.g. v0.5.0; stable only)",
@@ -2116,7 +2211,27 @@ def main(argv: list[str] | None = None) -> int:
     if any((args.source_repo, args.revision, args.runtime_dir)):
         if not all((args.source_repo, args.revision, args.runtime_dir)) or not args.llama_only or args.check:
             raise SystemExit('Managed builds require --llama-only, --source-repo, --revision and --runtime-dir')
+        if args.prebuilt and args.from_source:
+            raise SystemExit('error: choose either --prebuilt or --from-source, not both')
+        if args.prebuilt and args.rpc_tcp_only:
+            raise SystemExit(
+                'error: --rpc-tcp-only requires a source build; prebuilt packs carry no '
+                'TCP-only RPC evidence'
+            )
         sys.path.insert(0, str(ROOT / 'src'))
+        if args.prebuilt:
+            from kllm.runtimes.build import PrebuiltIneligible, managed_prebuilt
+            try:
+                managed_prebuilt(sys.modules[__name__], args.source_repo, args.revision, args.runtime_dir, args.backend)
+            except PrebuiltIneligible as error:
+                # The registry treats any nonzero prebuilt exit as a signal to
+                # compile from source; the marker keeps the log honest.
+                print(f'KLLM_PREBUILT_INELIGIBLE: {error}', file=sys.stderr)
+                return 3
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                print(f'error: {error}', file=sys.stderr)
+                return 1
+            return 0
         from kllm.runtimes.build import managed_build
         try:
             managed_build(sys.modules[__name__], args.source_repo, args.revision, args.runtime_dir, args.backend)

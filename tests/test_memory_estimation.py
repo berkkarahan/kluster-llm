@@ -206,6 +206,21 @@ def test_pure_recurrent_architecture_has_no_kv_and_scales_state(tmp_path):
     assert two.checkpoint_bytes == 2 * one.checkpoint_bytes
 
 
+def test_gpt_oss_alternating_swa_pattern_prices_full_attention_layers(tmp_path):
+    layout = synthetic_gguf(
+        tmp_path / "gpt-oss.gguf", "gpt-oss",
+        **{"attention.sliding_window": 128, "attention.head_count": 64, "attention.head_count_kv": 8},
+    )
+    result = costs(layout)
+    # llama.cpp openai-moe.cpp loads the alternating pattern (set_swa_pattern(2)):
+    # even layers keep the 128-token window, odd layers pay the padded full context.
+    row = (512 // 32) * 34  # q8_0 K/V row for 8 KV heads × 64 elements
+    assert result.complete and result.warnings == ()
+    assert result.kv_bytes == (2 * 4096 + 2 * 256) * (row + row)
+    # Marking every layer as sliding-window (the old fallback) would price 4 windows.
+    assert result.kv_bytes > 4 * 256 * (row + row)
+
+
 def test_flash_swa_and_split_scratch(tmp_path):
     layout = synthetic_gguf(tmp_path / "model.gguf", "gemma2", **{"attention.sliding_window": 256})
     small = costs(layout)

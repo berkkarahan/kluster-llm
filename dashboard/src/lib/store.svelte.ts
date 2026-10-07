@@ -41,9 +41,33 @@ function isAccelBackend(v: unknown): v is AccelBackend {
 
 let fingerprint = '';
 
+function v2ErrorDetailMessage(details: unknown): string {
+  if (typeof details === 'string') return details;
+  if (Array.isArray(details)) {
+    return details
+      .map((item) => (typeof item === 'object' && item !== null && typeof (item as { msg?: unknown }).msg === 'string'
+        ? String((item as { msg: string }).msg) : ''))
+      .filter(Boolean)
+      .slice(0, 3)
+      .join('; ');
+  }
+  if (typeof details === 'object' && details !== null) {
+    const detail = details as { code?: unknown; message?: unknown };
+    if (typeof detail.message === 'string' && detail.message) return detail.message;
+    return Object.values(details as Record<string, unknown>)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .join('; ');
+  }
+  return '';
+}
+
 function apiErrorMessage(data: unknown, text: string, status: number, fallback: string): string {
   if (typeof data === 'object' && data !== null && 'error' in data) {
-    const error = (data as { error?: { message?: unknown } }).error;
+    const error = (data as { error?: { message?: unknown; details?: unknown } }).error;
+    // The v2 envelope keeps the actionable text in details; message alone is
+    // the generic "The request could not be completed." placeholder.
+    const details = v2ErrorDetailMessage(error?.details);
+    if (details) return details;
     if (typeof error?.message === 'string') return error.message;
   }
   if (typeof data === 'object' && data !== null && 'detail' in data) {

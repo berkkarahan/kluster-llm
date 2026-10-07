@@ -215,6 +215,7 @@ def memory_costs(
         "gemma",
         "gemma2",
         "gemma3",
+        "gpt-oss",
         "deepseek2",
         "deepseek3",
     )
@@ -256,6 +257,11 @@ def memory_costs(
                 i % (2 if arch == "gemma2" else 6) != (1 if arch == "gemma2" else 5)
                 for i in range(len(layers))
             ]
+        elif arch == "gpt-oss":
+            # llama.cpp openai-moe.cpp applies the alternating pattern for gpt-oss
+            # (set_swa_pattern(2)): even layers use the sliding window, odd layers
+            # keep full attention.
+            swa_layers = [i % 2 == 0 for i in range(len(layers))]
         else:
             swa_layers = [True] * len(layers)
     if swa and isinstance(swa_layers, int):

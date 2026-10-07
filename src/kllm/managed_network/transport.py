@@ -50,4 +50,4 @@ def require_tcp_runtime(repo: Path, llama: Path, rpc: Path) -> dict:
             raise ValueError('RPC transport library evidence missing')
         return evidence
     except (OSError, ValueError, KeyError, TypeError):
-        raise PlatformRefusal('RPC_PROTOCOL_UNSUPPORTED', 'Both runtime ends need a recorded TCP-only build; install with --llama-only --rpc-tcp-only') from None
+        raise PlatformRefusal('RPC_PROTOCOL_UNSUPPORTED', 'Both runtime ends need a source-built TCP-only runtime; prepare this version from source in Settings → llama.cpp (or install with --llama-only --rpc-tcp-only)') from None

@@ -5,6 +5,7 @@ export type RuntimeVersion = {
 export type RuntimeBuild = {
   runtime_id: string; build_id: string; backend: string; commit: string;
   size_bytes?: number; platform?: string; architecture?: string;
+  mode?: 'prebuilt' | 'source'; prebuilt?: boolean; asset?: string;
 };
 export type RuntimeJob = {
   job_id: string | null; runtime_id: string; backend: string; phase: string;

@@ -42,6 +42,12 @@ def file_digest(path: Path) -> str:
 
 
 class RuntimeRegistry:
+    # llama.cpp's Windows toolchain (cl.exe, MSBuild tlogs) is not long-path
+    # aware, so staged builds use short directory names: a nested
+    # vulkan-shaders-gen configure adds ~80 characters below the build root.
+    _VERSION_DIR_CHARS = 16
+    _JOB_DIR_CHARS = 12
+
     def __init__(self, home: Path, repository: Callable[[], Path | None], *, builder=None):
         self.root = home / 'runtimes'
         self.path = self.root / 'registry.json'
@@ -78,6 +84,12 @@ class RuntimeRegistry:
                 changed = True
         if changed:
             self._save()
+
+    def _version_dir(self, runtime_id: str) -> Path:
+        return self.root / runtime_id[:self._VERSION_DIR_CHARS]
+
+    def _job_dir(self, runtime_id: str, job_id: str) -> Path:
+        return self._version_dir(runtime_id) / job_id[:self._JOB_DIR_CHARS]
 
     def _save(self):
         atomic_json(self.path, self.data)
@@ -142,8 +154,13 @@ class RuntimeRegistry:
 
     def verify(self, manifest: dict):
         directory = Path(manifest['artifact_dir']).resolve()
-        if not directory.is_relative_to(self.root.resolve()) or manifest['ggml_rpc'] != 'ON' or manifest['ggml_rpc_rdma'] != 'OFF':
-            raise ValueError('Runtime artifact or RPC transport is not verified')
+        if not directory.is_relative_to(self.root.resolve()):
+            raise ValueError('Runtime artifact is not verified')
+        # Prebuilt manifests make no transport claims by design (an upstream
+        # release archive cannot prove RDMA is off); only source manifests must
+        # carry the verified TCP-only evidence the managed network gate needs.
+        if not manifest.get('prebuilt') and (manifest.get('ggml_rpc') != 'ON' or manifest.get('ggml_rpc_rdma') != 'OFF'):
+            raise ValueError('Runtime RPC transport is not verified')
         stats = tuple((name, (directory / name).stat().st_mtime_ns, (directory / name).stat().st_ctime_ns,
                        (directory / name).stat().st_size) for name in manifest['artifacts'] if Path(name).name == name)
         key = body_digest(manifest)
@@ -172,7 +189,10 @@ class RuntimeRegistry:
                 raise KeyError(identity)
             del self.data['versions'][identity]
             self._save()
-            shutil.rmtree(self.root / identity, ignore_errors=False) if (self.root / identity).exists() else None
+            # Also drop any pre-shortening directory left by an older checkout.
+            for directory in (self._version_dir(identity), self.root / identity):
+                if directory.exists():
+                    shutil.rmtree(directory, ignore_errors=False)
 
     def build(self, request: BuildRequest) -> dict:
         with self.lock:
@@ -270,57 +290,91 @@ class RuntimeRegistry:
                     self.data['jobs'][identity].update(phase='failed', error=str(error)[:1000], finished_at=time.time())
                     self._save()
 
+    def _installer_command(self, repo: Path, version: RuntimeVersion, backend: str, destination: Path, *, prebuilt: bool) -> list[str]:
+        """Installer invocation for one preparation attempt.
+
+        A source build always passes ``--rpc-tcp-only``: that verified TCP-only
+        RPC evidence is what the managed private network gate consumes.
+        """
+        command = [sys.executable, '-u', str(repo / 'scripts/install.py'), '--llama-only',
+                   '--source-repo', version.repository, '--revision', version.commit,
+                   '--runtime-dir', str(destination), '--backend', backend]
+        command.extend(['--prebuilt'] if prebuilt else ['--from-source', '--rpc-tcp-only'])
+        return command
+
+    def _spawn_installer(self, repo: Path, command: list[str], identity: str, output, log: Path) -> int:
+        """Run one installer attempt, streaming its log and tracking its process."""
+        self._phase(identity, 'downloading')
+        process = subprocess.Popen(command, env=git_environment(), cwd=repo, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, start_new_session=os.name != 'nt')
+        try:
+            with self.lock:
+                self.processes[identity] = process
+                try:
+                    created_at = psutil.Process(process.pid).create_time()
+                except psutil.NoSuchProcess:
+                    created_at = None
+                self.data['jobs'][identity].update(pid=process.pid, process_created_at=created_at)
+                self._save()
+                if self.cancel_events[identity].is_set():
+                    self._kill(process)
+            assert process.stdout is not None
+            for line in iter(lambda: process.stdout.readline(8192), ''):
+                output.write(line)
+                output.flush()
+                if log.stat().st_size > 1024 * 1024:
+                    output.seek(0)
+                    output.truncate()
+                    output.write('[Earlier build output truncated]\n')
+                if line.startswith('KLLM_RUNTIME_PHASE='):
+                    phase = line.strip().split('=', 1)[1]
+                    if phase in ('downloading', 'building', 'verifying'):
+                        self._phase(identity, phase)
+            return process.wait()
+        finally:
+            if process.poll() is None:
+                self._kill(process)
+                process.wait(timeout=10)
+            process.stdout.close()
+            with self.lock:
+                self.processes.pop(identity, None)
+
+    def _prepare_runtime(self, repo: Path, version: RuntimeVersion, backend: str, destination: Path,
+                         identity: str, output, log: Path) -> str:
+        """Return the mode that produced the manifest: ``prebuilt`` or ``source``."""
+        code = self._spawn_installer(
+            repo, self._installer_command(repo, version, backend, destination, prebuilt=True), identity, output, log)
+        if self.cancel_events[identity].is_set():
+            raise ValueError('Runtime build cancelled')
+        if code != 0:
+            # No matching pack, an ineligible contract, or a download failure.
+            output.write('Prebuilt runtime unavailable; compiling from source\n')
+            output.flush()
+            if self._spawn_installer(
+                    repo, self._installer_command(repo, version, backend, destination, prebuilt=False),
+                    identity, output, log) != 0:
+                raise ValueError('Runtime build failed; inspect this operation’s build log')
+            return 'source'
+        return 'prebuilt'
+
     def _install(self, version: RuntimeVersion, backend: str, identity: str) -> dict:
         repo = self.repository()
         if repo is None:
             raise ValueError('Kluster checkout unavailable; set KLLM_REPO_ROOT')
-        destination = self.root / version.runtime_id / identity
+        destination = self._job_dir(version.runtime_id, identity)
         destination.mkdir(parents=True, exist_ok=True)
         log = destination / 'build.log'
-        command = [sys.executable, '-u', str(repo / 'scripts/install.py'), '--llama-only', '--from-source',
-                   '--source-repo', version.repository, '--revision', version.commit,
-                   '--runtime-dir', str(destination), '--backend', backend, '--rpc-tcp-only']
-        self._phase(identity, 'downloading')
         with log.open('w', encoding='utf-8') as output:
-            process = subprocess.Popen(command, env=git_environment(), cwd=repo, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, text=True, start_new_session=os.name != 'nt')
-            try:
-                with self.lock:
-                    self.processes[identity] = process
-                    try:
-                        created_at = psutil.Process(process.pid).create_time()
-                    except psutil.NoSuchProcess:
-                        created_at = None
-                    self.data['jobs'][identity].update(pid=process.pid, process_created_at=created_at)
-                    self._save()
-                    if self.cancel_events[identity].is_set():
-                        self._kill(process)
-                assert process.stdout is not None
-                for line in iter(lambda: process.stdout.readline(8192), ''):
-                    output.write(line)
-                    output.flush()
-                    if log.stat().st_size > 1024 * 1024:
-                        output.seek(0)
-                        output.truncate()
-                        output.write('[Earlier build output truncated]\n')
-                    if line.startswith('KLLM_RUNTIME_PHASE='):
-                        phase = line.strip().split('=', 1)[1]
-                        if phase in ('downloading', 'building', 'verifying'):
-                            self._phase(identity, phase)
-                if process.wait() != 0:
-                    raise ValueError('Runtime build failed; inspect this operation’s build log')
-            finally:
-                if process.poll() is None:
-                    self._kill(process)
-                    process.wait(timeout=10)
-                process.stdout.close()
-                with self.lock:
-                    self.processes.pop(identity, None)
-        return json.loads((destination / 'manifest.json').read_text())
+            mode = self._prepare_runtime(repo, version, backend, destination, identity, output, log)
+        manifest = json.loads((destination / 'manifest.json').read_text())
+        with self.lock:
+            self.data['jobs'][identity]['mode'] = mode
+            self._save()
+        return manifest
 
     def logs(self, identity: str) -> str:
         job = self.job(identity)
-        path = self.root / job['runtime_id'] / identity / 'build.log'
+        path = self._job_dir(job['runtime_id'], identity) / 'build.log'
         if not path.exists():
             return ''
         with path.open('rb') as handle:

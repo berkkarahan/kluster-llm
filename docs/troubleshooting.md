@@ -57,6 +57,18 @@ uv run python scripts/install.py --llama-only --from-source --force
 
 Do not copy binaries between operating systems or mix tags. Override a deliberate external installation with `KLLM_LLAMA_SERVER` and `KLLM_RPC_SERVER`.
 
+Managed source builds are staged under `~/.kllm/runtimes/<short-id>/<short-build>/source`. The short
+directory names keep llama.cpp's Windows toolchain (MSVC `cl.exe`, MSBuild file tracking) inside the
+legacy 260-character path limit, and the managed builder also enables `core.longpaths` for its Git
+steps. Build logs include the exact Git or toolchain error when a stage fails. If a node still
+reports `Filename too long` or `Cannot open source file`, update the Kluster checkout on that node
+and retry, or point `KLLM_HOME` at a shorter directory.
+
+Windows Vulkan source builds also need the LunarG Vulkan SDK (`glslc`, Vulkan headers and
+`vulkan-1.lib`). The managed builder provisions `KhronosGroup.VulkanSDK` via winget when it is
+missing; if winget or elevation is unavailable, install the SDK from
+https://vulkan.lunarg.com/sdk/home#windows and retry — no shell restart is needed.
+
 ### Build tools are missing
 
 Allow the installer to provision its supported toolchains. If a package manager requests a shell restart, open a new terminal and rerun the same installer command. Useful checks are:
@@ -379,7 +391,7 @@ See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-cons
 
 If adapter refresh reports HTTP 500 or a JSON parsing error, check `~/.kllm/logs/agent.log` for the failing `/v2/node/network-adapters` request. Older agents may abort macOS discovery on loopback or tunnel interfaces with no `networksetup` service; update and restart the agent to use discovery that skips uninspectable interfaces. The dashboard reports the request path and HTTP status when an error response is not JSON, and preserves structured prerequisite refusal codes.
 
-Show the panel first with `kllm flags private-network-setup --enable` (it is hidden by default), then use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. Network setup verifies connectivity independently of RPC. At inference startup, `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`). Stop the current model before installing; the next Run lets the master start fresh RPC processes and verify their capabilities.
+Show the panel first with `kllm flags private-network-setup --enable` (it is hidden by default), then use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. Network setup verifies connectivity independently of RPC. At inference startup, `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`). A version prepared from a prebuilt release pack has no such evidence; prepare that version from source in Settings → llama.cpp (or install with `--from-source`) before using the private network. Stop the current model before installing; the next Run lets the master start fresh RPC processes and verify their capabilities.
 
 A connected worker showing **Joined · idle** has no running RPC process by design. Start the model on the master to allocate workers. An upgrade-required error means a selected worker cannot accept signed runtime commands; update its agent and rejoin. **Recovering** means the master is restarting the selected RPC workers and reloading the model. Stop cancels that retry loop. **Cleanup pending** retains ownership information after an unacknowledged stop: reconnect the worker and retry Stop before starting another run. A disconnected worker expires its RPC ownership after 15 seconds and stops the owned process without restarting it.
 

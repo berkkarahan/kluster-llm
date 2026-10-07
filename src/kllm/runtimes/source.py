@@ -11,8 +11,11 @@ from .models import RuntimeVersion, SourceRequest, runtime_id
 
 
 def git_environment() -> dict[str, str]:
-    return {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '1',
-            'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': ''}
+    # Long paths keep staged source checkouts writable when a runtime dir sits
+    # deep; dropped credentials keep public fetches from prompting or reusing helpers.
+    return {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
+            'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
+            'GIT_CONFIG_KEY_1': 'core.longpaths', 'GIT_CONFIG_VALUE_1': 'true'}
 
 
 def refs(repository: str) -> dict:

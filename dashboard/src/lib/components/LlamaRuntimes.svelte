@@ -7,6 +7,8 @@
 
   const upstream = 'https://github.com/ggml-org/llama.cpp.git';
   const library = $derived(appStore.status?.runtimes);
+  const bootstrap = $derived(library?.bootstrap ?? { repository: upstream, ref: 'v0.5.0' });
+  const bootstrapVersion = $derived(library?.versions.find(entry => entry.version.repository === bootstrap.repository && entry.version.ref_type === 'tag' && entry.version.ref === bootstrap.ref)?.version);
   const master = $derived(appStore.status?.role === 'master');
   const worker = $derived(appStore.status?.role === 'worker');
   const target = $derived(library?.target);
@@ -99,8 +101,38 @@
     await action(async () => { await appStore.runtimeAction('/v2/node/runtimes', 'POST', value); draft = value.runtime_id; close(); });
   }
   async function sync() {
+    await setTarget(draft);
+  }
+  async function setTarget(runtimeId: string) {
     await action(async () => {
-      await appStore.runtimeAction('/v2/cluster/runtime-target', 'PUT', { runtime_id: draft, expected_revision: target?.revision ?? 0, request_id: crypto.randomUUID() });
+      try {
+        await appStore.runtimeAction('/v2/cluster/runtime-target', 'PUT', { runtime_id: runtimeId, expected_revision: target?.revision ?? 0, request_id: crypto.randomUUID() });
+      } catch (failure) {
+        // A dropped response can hide a successful target change; refresh before exposing retry.
+        try { await appStore.refreshRuntimes(); } catch { /* Keep the original request error visible. */ }
+        throw failure;
+      }
+    });
+  }
+  async function installDefault() {
+    if (!master) return;
+    await action(async () => {
+      let version = bootstrapVersion;
+      if (!version) {
+        version = await appStore.networkRequest<RuntimeVersion>('/v2/node/runtimes/resolve', 'POST', {
+          repository: bootstrap.repository, ref: bootstrap.ref, ref_type: 'tag', name: bootstrap.ref
+        });
+        await appStore.runtimeAction('/v2/node/runtimes', 'POST', version);
+      }
+      draft = version.runtime_id;
+      try {
+        await appStore.runtimeAction('/v2/cluster/runtime-target', 'PUT', {
+          runtime_id: version.runtime_id, expected_revision: target?.revision ?? 0, request_id: crypto.randomUUID()
+        });
+      } catch (failure) {
+        try { await appStore.refreshRuntimes(); } catch { /* Keep the original request error visible. */ }
+        throw failure;
+      }
     });
   }
   async function build(version: RuntimeVersion) {
@@ -176,7 +208,7 @@
   </section>
 
   <section class="panel" aria-labelledby="library-heading">
-    <div class="runtime-panel-head"><div><h3 id="library-heading">Saved versions <span class="muted small">/ {library?.versions.length ?? 0}</span></h3><p>Keep known-good builds. Try a new revision without replacing them.</p></div><button class="btn" disabled={worker || busy} onclick={add}>+ Add version</button></div>
+    <div class="runtime-panel-head"><div><h3 id="library-heading">Saved versions <span class="muted small">/ {library?.versions.length ?? 0}</span></h3><p>Keep known-good builds. Try a new revision without replacing them.</p></div><div class="version-actions">{#if master}<button class="btn btn-accent" disabled={busy || bootstrapVersion?.runtime_id === target?.version.runtime_id} onclick={installDefault}>Install {bootstrap.ref} and set target</button>{/if}<button class="btn" disabled={worker || busy} onclick={add}>+ Add version</button></div></div>
     {#if !library?.versions.length}<div class="empty"><h3>No managed versions yet</h3><p>{library?.legacy ? 'A legacy runtime is installed. Prepare a managed source snapshot to verify its identity across the cluster.' : 'Save an upstream release or a public Git fork to get started.'}</p><button class="btn" disabled={worker || busy} onclick={add}>Add upstream version</button></div>{/if}
     {#each library?.versions ?? [] as entry (entry.version.runtime_id)}
       {@const version = entry.version}

@@ -25,6 +25,19 @@ Do not invent alternate install flows until that guide’s recovery tree is exha
 | [docs/engine-decision.md](docs/engine-decision.md) | Why llama.cpp RPC; security posture |
 | [README.md](README.md) | Human project overview |
 
+## Agent skills
+
+Canonical project skills are in [`skills/`](skills/README.md), with separate
+`operations/` and `development/` categories. Install native discovery copies with
+`python3 scripts/install_skills.py` (`python`/`py -3` on Windows); use `--dry-run`,
+`--agent`, `--scope`, and `--category` to inspect/select destinations. Existing
+Spec Kit skills stay separate. Use `kllm-10gbe` for guided Windows/macOS/Linux
+private networking and `kllm-develop` / `kllm-test` for repository changes.
+
+`kllm connect --kllm-skills all|operations|development|none` provisions the chosen
+Kluster pack in the session's isolated skill location. See the collection README
+for trust/reload steps, ownership-safe updates, and discovery boundaries.
+
 ### Spec Kit
 
 You MUST follow the memory-first workflow defined in `.specify/memory/workflow.md`. Before planning, prepare context using the best available path: MCP tools if configured, or `/speckit.memory-md.prepare-context` if Spec Kit commands are available.

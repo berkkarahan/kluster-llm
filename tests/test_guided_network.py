@@ -153,7 +153,7 @@ async def test_guided_assessment_and_automatic_subnet_avoid_all_interfaces(tmp_p
             assessment_revision=assessment["assessment_revision"],
         )
         await master.guided.start(request)
-        assert accepted[0].subnet == "172.29.234.0/24"
+        assert accepted[0].subnet == "10.10.10.0/24"
         with pytest.raises(StoreConflict):
             await master.guided.start(request.model_copy(update={"subnet": "10.234.234.0/24"}))
         with pytest.raises(PlatformRefusal, match="private address range"):

@@ -9,7 +9,7 @@ from pydantic import Field, field_validator, model_validator
 from .models import Digest, Identifier, NodeAssignment, Port, Record, Revision, private_subnet
 from .platform.base import PlatformRefusal
 
-CANDIDATES = ('192.168.234.0/24', '172.29.234.0/24', '10.234.234.0/24')
+CANDIDATES = ('10.10.10.0/24', '192.168.234.0/24', '172.29.234.0/24', '10.234.234.0/24')
 
 
 class ParticipantSelection(Record):
@@ -58,22 +58,37 @@ class CancelRequest(Record):
     expected_operation_revision: Revision
 
 
-def propose(inventories: list[dict], count: int) -> list[str]:
+def reusable_addresses(inventory: dict, subnet: ipaddress.IPv4Network) -> list[str]:
+    """Usable static DHCP-disabled addresses already living in this exact subnet."""
+    if inventory.get('dhcp') is not False:
+        return []
+    return [str(parsed.ip) for value in inventory.get('addresses', []) if (parsed := ipaddress.IPv4Interface(value)).network == subnet and parsed.network.prefixlen == subnet.prefixlen and parsed.ip not in (subnet.network_address, subnet.broadcast_address)]
+
+
+def _accepts(inventory: dict, subnet: ipaddress.IPv4Network, *, strict: bool = False) -> bool:
+    reusable = reusable_addresses(inventory, subnet)
+    allowed = () if strict else (subnet, ipaddress.IPv4Network(f'{subnet.broadcast_address}/32'), *(ipaddress.IPv4Network(f'{value}/32') for value in reusable))
+    for value in inventory.get('addresses', []):
+        observed = ipaddress.IPv4Interface(value)
+        if observed.network.overlaps(subnet) and (strict or str(observed.ip) not in reusable):
+            return False
+    for value in inventory.get('routes', []):
+        route = ipaddress.IPv4Network(value)
+        if route.prefixlen and route.overlaps(subnet) and route not in allowed:
+            return False
+    return True
+
+
+def acceptable(inventories: list[dict], subnet: ipaddress.IPv4Network, count: int, *, strict: list[dict] | None = None) -> bool:
+    """Chosen adapters may reuse their exact static addresses; other visible adapters must never overlap."""
+    return count <= subnet.num_addresses - 2 and all(_accepts(inventory, subnet) for inventory in inventories) and all(_accepts(inventory, subnet, strict=True) for inventory in strict or [])
+
+
+def propose(inventories: list[dict], count: int, *, strict: list[dict] | None = None) -> list[str]:
     result = []
     for candidate in CANDIDATES:
         subnet = ipaddress.IPv4Network(candidate)
-        if count > subnet.num_addresses - 2:
-            continue
-        conflict = False
-        for inventory in inventories:
-            for value in inventory.get('routes', []):
-                route = ipaddress.IPv4Network(value)
-                if route.prefixlen and subnet.overlaps(route):
-                    conflict = True
-            for value in inventory.get('addresses', []):
-                if subnet.overlaps(ipaddress.IPv4Interface(value).network):
-                    conflict = True
-        if not conflict:
+        if acceptable(inventories, subnet, count, strict=strict):
             result.append(candidate)
     return result
 

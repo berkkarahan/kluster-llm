@@ -14,7 +14,7 @@
   let localAdapter = $state('');
   let peerIdentity = $state('');
   let replacePeer = $state(false);
-  let subnet = $state('192.168.234.0/24');
+  let subnet = $state('10.10.10.0/24');
   let error = $state('');
   let errorGeneration = $state(errors.generation);
   let busy = $state(false);
@@ -235,7 +235,7 @@
           <ErrorMessage source={`network-adapter:${nodeId}`} message={node.error_code} />
         {/each}
       </fieldset>
-      <label>Private subnet <input bind:value={subnet} aria-label="Dedicated private subnet" placeholder="192.168.234.0/24" /></label>
+      <label>Private subnet <input bind:value={subnet} aria-label="Dedicated private subnet" placeholder="10.10.10.0/24" /></label>
       <button class="btn btn-primary" disabled={busy || !!activeNetwork || !!activeOperation} onclick={start}>Start private network</button>
     {/if}
     {#each networks as network}

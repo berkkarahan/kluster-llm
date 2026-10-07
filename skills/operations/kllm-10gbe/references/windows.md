@@ -9,7 +9,7 @@ Get-NetRoute -AddressFamily IPv4 | Format-Table InterfaceIndex, DestinationPrefi
 Get-NetIPConfiguration -InterfaceIndex <selected-index>
 ```
 
-Record the selected adapter's addresses/prefixes, DHCP state, DNS and routes; identify the internet and cluster-management route using the current master address. The adapter must be physical, connected and negotiated at least 10 Gbps, and must not carry either management path. Numeric indexes are local to each computer and can change after device replacement.
+Record the selected adapter's addresses/prefixes, DHCP state, DNS and routes; identify the internet and cluster-management route using the current master address. The adapter must be physical, connected, with its negotiated speed recorded (any working speed is acceptable; 10 Gbps is preferred), and must not carry either management path. Numeric indexes are local to each computer and can change after device replacement.
 
 ## Guided setup
 

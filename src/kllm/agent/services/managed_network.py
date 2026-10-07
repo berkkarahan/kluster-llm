@@ -174,7 +174,7 @@ class ManagedNetworkService:
                 raise PlatformRefusal('OPERATION_IN_PROGRESS', 'One non-stopped network is allowed per cluster binding')
             if sum(p.node_id == self.identity.node_id for p in request.participants) != 1:
                 raise ValueError('select the local master exactly once')
-            network = ManagedNetwork(network_id=uuid4(), cluster_binding_id=authority.cluster_binding_id, master_node_id=self.identity.node_id, master_key_id=self.identity.key_id, subnet=request.subnet or '192.168.234.0/24')
+            network = ManagedNetwork(network_id=uuid4(), cluster_binding_id=authority.cluster_binding_id, master_node_id=self.identity.node_id, master_key_id=self.identity.key_id, subnet=request.subnet or '10.10.10.0/24')
             operation = NetworkOperation(operation_id=uuid4(), request_id=request.request_id, network_id=network.network_id, cluster_binding_id=authority.cluster_binding_id, action='start', master_term=authority.master_term, master_session_id=authority.master_session_id, expected_network_revision=0, operation_revision=1, participants=[p.node_id for p in request.participants], proposal_digest=body_digest, phase='preparing', deadline=utc_now() + timedelta(seconds=60))
             network.current_operation_id = operation.operation_id
             self.store.put_network(network)

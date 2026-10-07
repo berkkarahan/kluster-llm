@@ -215,7 +215,7 @@ def build_router(service: Callable[[], ManagedNetworkService], token_verifier: C
     @router.get('/cluster/networks')
     async def networks(request: Request) -> dict[str, Any]:
         selected = authorized(request)
-        return {'networks': selected.summaries(), 'subnet_proposals': ['192.168.234.0/24', '172.29.234.0/24', '10.234.234.0/24']}
+        return {'networks': selected.summaries(), 'subnet_proposals': ['10.10.10.0/24', '192.168.234.0/24', '172.29.234.0/24', '10.234.234.0/24']}
 
     @router.post('/cluster/networks', status_code=202)
     async def start(request: Request) -> JSONResponse:

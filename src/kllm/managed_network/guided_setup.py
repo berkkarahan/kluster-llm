@@ -10,7 +10,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator
 
-from .allocation import OperationRequest, ParticipantSelection, StartRequest, propose
+from .allocation import CANDIDATES, OperationRequest, ParticipantSelection, StartRequest, acceptable, propose, reusable_addresses
 from .helper import HelperClient
 from .models import Digest, Identifier, Record, Revision, private_subnet
 from .platform.base import PlatformRefusal
@@ -213,7 +213,11 @@ class GuidedSetup:
                 error_code = error_code or "NO_ADAPTER"
             selected = candidates[0]["adapter_id"] if len(candidates) == 1 else ""
             if len(candidates) > 1 and not error_code:
-                message = "Choose which dedicated Ethernet adapter to use."
+                preferred = [a for a in candidates if reusable_addresses(a, ipaddress.IPv4Network(CANDIDATES[0]))]
+                if len(preferred) == 1:
+                    selected = preferred[0]["adapter_id"]
+                else:
+                    message = "Choose which dedicated Ethernet adapter to use."
             computers.append(
                 {
                     "node_id": node_id,
@@ -272,7 +276,7 @@ class GuidedSetup:
         if request.assessment_revision != assessment["assessment_revision"]:
             raise PlatformRefusal("STALE_REVISION", MESSAGES["STALE_REVISION"])
         computers = {c["node_id"]: c for c in assessment["computers"]}
-        selections, selected = [], []
+        selections, chosen, others = [], [], []
         for node_id in request.nodes:
             computer = computers.get(node_id)
             if computer is None:
@@ -303,27 +307,12 @@ class GuidedSetup:
                     inventory_revision=adapter["inventory_revision"],
                 )
             )
-            selected.extend(computer["adapters"])  # Check ranges on every visible interface.
+            chosen.append(adapter)
+            others.extend(a for a in computer["adapters"] if a is not adapter)
         if request.action == "start":
-            proposals = propose(selected, len(request.nodes))
+            proposals = propose(chosen, len(request.nodes), strict=others)
             subnet = request.subnet or (proposals[0] if proposals else None)
-            if subnet is None:
-                raise PlatformRefusal("SUBNET_CONFLICT", MESSAGES["SUBNET_CONFLICT"])
-            candidate = ipaddress.IPv4Network(subnet)
-            if (
-                len(request.nodes) > candidate.num_addresses - 2
-                or any(
-                    candidate.overlaps(ipaddress.IPv4Interface(a).network)
-                    for adapter in selected
-                    for a in adapter.get("addresses", [])
-                )
-                or any(
-                    candidate.overlaps(route)
-                    for adapter in selected
-                    for value in adapter.get("routes", [])
-                    if (route := ipaddress.IPv4Network(value)).prefixlen
-                )
-            ):
+            if subnet is None or not acceptable(chosen, ipaddress.IPv4Network(subnet), len(request.nodes), strict=others):
                 raise PlatformRefusal("SUBNET_CONFLICT", MESSAGES["SUBNET_CONFLICT"])
             if request.network_id is not None:
                 raise PlatformRefusal(

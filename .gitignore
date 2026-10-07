@@ -74,3 +74,5 @@ dashboard/build/
 /.claude/.kllm-skills-*/
 /.cursor/.kllm-skills-*/
 /.opencode/.kllm-skills-*/
+
+worker-windows

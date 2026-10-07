@@ -28,11 +28,13 @@ class HeartbeatPayloadBuilder:
         software_identity: Callable[[], dict[str, Any]],
         process_started_at: Callable[[], str | None],
         process_start_token: Callable[[], str | None],
+        runtime_status: Callable[[], dict[str, Any]] = lambda: {},
     ) -> None:
         self._state = state
         self._software_identity = software_identity
         self._process_started_at = process_started_at
         self._process_start_token = process_start_token
+        self._runtime_status = runtime_status
 
     def build(self) -> dict[str, Any]:
         """Return the serialized heartbeat fields expected by the control API."""
@@ -44,6 +46,12 @@ class HeartbeatPayloadBuilder:
         return {
             "node_id": state.node_id,
             "rpc_devices": member.get("rpc_devices", []) if state.process_pid and state.process_role == "worker" else [],
+            "rpc_capabilities": member.get("rpc_capabilities", []),
+            "rpc_control_version": 1,
+            "runtime_management_version": 1,
+            "runtime": self._runtime_status(),
+            "rpc_status": member.get("rpc_status", "idle"),
+            "rpc_error": member.get("rpc_error"),
             "host": state.rpc_bind or member.get("host") or member.get("lan_host") or "",
             "rpc_bind": state.rpc_bind,
             "control_port": state.control_port,

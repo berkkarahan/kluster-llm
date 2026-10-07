@@ -25,11 +25,13 @@
     const members = appStore.status?.members ?? {};
     const current = Object.fromEntries(Object.entries(members).map(([id, member]) => {
       const existing = usage[id];
-      if (existing) return [id, existing];
+      const rpc_status = member.role === 'master' ? appStore.status?.rpc_lifecycle?.status : member.rpc_status;
+      if (existing) return [id, { ...existing, rpc_status }];
       return [id, {
         node_id: id,
         host: member.host || id,
         role: member.role === 'worker' ? 'worker' as const : 'master' as const,
+        rpc_status,
         backend: member.actual_backend ?? member.backend ?? null,
         devices: member.devices,
         unified_memory: !!member.unified_memory,

@@ -12,6 +12,7 @@ from kllm.commands.agent_runtime import _ensure_agent
 from kllm.commands.ui import console
 from kllm.connect import AGENTS, build_launch_plan, print_plan, run_plan
 from kllm.state import DEFAULT_CONTROL_PORT
+from kllm.agent_skills import SkillError, validate_selection
 
 
 
@@ -28,8 +29,14 @@ def connect_cmd(
     context: int = typer.Option(4096, "--context"),
     url: Optional[str] = typer.Option(None, "--url", envvar="KLLM_URL"),
     timeout: float = typer.Option(600, "--timeout", min=1),
+    kllm_skills: str = typer.Option("all", "--kllm-skills", help="Kluster skill pack: all|operations|development|none"),
 ) -> None:
     """Launch a coding harness with the kllm API baked in (Unsloth-style)."""
+    if isinstance(kllm_skills, str):
+        try:
+            validate_selection(kllm_skills, session=True)
+        except SkillError as error:
+            raise typer.BadParameter(str(error), param_hint="--kllm-skills") from error
     remote = isinstance(url, str) and bool(url) or bool(os.environ.get("KLLM_URL"))
     if not remote:
         _ensure_agent(port)
@@ -43,6 +50,7 @@ def connect_cmd(
         yolo=yolo,
         context=context,
         extra=list(ctx.args),
+        **({"kllm_skills": kllm_skills} if isinstance(kllm_skills, str) else {}),
         **({"url": url if isinstance(url, str) else None,
             "timeout": timeout if isinstance(timeout, (int, float)) else 600}
            if isinstance(url, str) or isinstance(timeout, (int, float)) else {}),

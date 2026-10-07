@@ -74,6 +74,9 @@ class RuntimeSetupService:
 
     def setup(self, body: LlamaSetupBody) -> RuntimeSetupResult:
         """Install the selected pack and restart a worker RPC server if needed."""
+        state = self._state()
+        if state.process_pid and state.process_role == "worker" and self._process_alive(state.process_pid):
+            raise ValidationError("Stop the model on its master before replacing the worker runtime")
         try:
             result = self._install_pack(body.tag, body.backend, body.force)
         except FileNotFoundError as exc:
@@ -81,11 +84,7 @@ class RuntimeSetupService:
         except Exception as exc:
             raise ValidationError(str(exc)) from exc
 
-        state = self._state()
-        relaunch = None
-        if state.role == "worker" and result.get("ok"):
-            relaunch = self._relaunch_worker(state)
-        return RuntimeSetupResult(result, relaunch)
+        return RuntimeSetupResult(result, None)
 
     def ensure_worker(self, state: ClusterState) -> dict[str, Any] | None:
         """Restart a joined worker's rpc-server when its process is missing or dead.
@@ -94,14 +93,16 @@ class RuntimeSetupService:
         for a healthy or non-worker node. This makes a connected cluster recover
         instead of staying "connected" with no RPC worker to serve on.
         """
-        if state.role != "worker" or not state.master_host or not state.join_key:
-            return None
-        pid = state.process_pid
-        if pid and state.process_role == "worker" and self._process_alive(int(pid)):
-            return None
+        # Kept for callers upgrading from the old worker reconciler. Membership
+        # and installation cannot grant permission to launch an RPC process.
+        return None
+
+    def start_commanded_worker(self, state: ClusterState) -> dict[str, Any]:
+        """Start RPC only after the signed runtime service grants ownership."""
         return self._relaunch_worker(state)
 
     def _relaunch_worker(self, state: ClusterState) -> dict[str, Any]:
+        launched = None
         try:
             root = self._repository_root()
             member = state.members.setdefault(state.node_id, {})
@@ -113,9 +114,8 @@ class RuntimeSetupService:
                 self._clear_children()
             state.process_pid = None
             state.process_role = None
-            self._stop_stray_rpc_servers()
             launched = self._start_worker(
-                host=state.rpc_bind or "0.0.0.0",
+                host=state.rpc_bind or "127.0.0.1",
                 port=state.rpc_port or DEFAULT_RPC_PORT,
                 repo_root=str(root) if root else None,
                 env=None,
@@ -124,6 +124,8 @@ class RuntimeSetupService:
             )
             pid = launched.get("pid")
             if not pid or not self._await_alive(int(pid)):
+                if pid:
+                    self._stop_process(int(pid), force=True)
                 state.process_pid = None
                 state.process_role = None
                 member["rpc_devices"] = []
@@ -136,6 +138,12 @@ class RuntimeSetupService:
             state.save()
             return launched
         except Exception as exc:
+            if launched and launched.get("pid"):
+                self._stop_process(int(launched["pid"]), force=True)
+                self._clear_children()
+            state.process_pid = state.process_role = None
+            state.members.setdefault(state.node_id, {})["rpc_devices"] = []
+            state.save()
             return {"error": str(exc)}
 
     def _await_alive(self, pid: int) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from collections.abc import Callable
 
 from fastapi import HTTPException
 
@@ -155,7 +156,12 @@ def on_membership_grow(state: ClusterState) -> None:
     state.save()
 
 
-def on_membership_shrink(state: ClusterState) -> None:
+def on_membership_shrink(
+    state: ClusterState,
+    *,
+    apply_serving: Callable[[ClusterState, RunBody, dict[str, Any]], None] = _apply_serving,
+    stop_serving: Callable[[ClusterState], None] = _stop_inference,
+) -> None:
     """Replan (and maybe apply) after Leave / unregister / liveness drop.
 
     Does not change RPC bind, overlay, join key, or cluster role.
@@ -204,11 +210,11 @@ def on_membership_shrink(state: ClusterState) -> None:
 
     if fit == "fits":
         try:
-            _apply_serving(state, _settings_body(state.last_settings), plan or {})
+            apply_serving(state, _settings_body(state.last_settings), plan or {})
             state.apply_error = None
             state.apply_warning = None
         except Exception as exc:
-            _stop_inference(state)
+            stop_serving(state)
             state.apply_error = _does_not_fit_message(plan, _exc_text(exc))
             state.apply_warning = None
         state.save()
@@ -216,18 +222,18 @@ def on_membership_shrink(state: ClusterState) -> None:
 
     if fit == "tight":
         try:
-            _apply_serving(state, _settings_body(state.last_settings), plan or {})
+            apply_serving(state, _settings_body(state.last_settings), plan or {})
             state.apply_error = None
             state.apply_warning = (plan or {}).get("warning") or (plan or {}).get("hint") or "tight fit"
         except Exception as exc:
-            _stop_inference(state)
+            stop_serving(state)
             state.apply_error = _does_not_fit_message(plan, _exc_text(exc))
             state.apply_warning = None
         state.save()
         return
 
     # overflow or planner error: do not apply; stop infer; cluster stays up
-    _stop_inference(state)
+    stop_serving(state)
     state.apply_error = _does_not_fit_message(plan, plan_error)
     state.apply_warning = None
     state.save()

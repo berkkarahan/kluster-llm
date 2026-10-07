@@ -47,6 +47,7 @@ target/
 vendor/
 
 # Editor / agent
+/.codegraph/codegraph.db
 .cursor/
 .opencode/
 .spec-kit-memory/
@@ -65,3 +66,11 @@ dashboard/build/
 .specify
 .agents
 .claude
+
+# Generated native skill installations and recovery metadata
+/.hermes/
+/.pi/
+/.agents/.kllm-skills-*/
+/.claude/.kllm-skills-*/
+/.cursor/.kllm-skills-*/
+/.opencode/.kllm-skills-*/

@@ -10,6 +10,7 @@
   import NetworkSecurity from '$lib/components/NetworkSecurity.svelte';
   import Tokens from '$lib/components/Tokens.svelte';
   import Software from '$lib/components/Software.svelte';
+  import LlamaRuntimes from '$lib/components/LlamaRuntimes.svelte';
   import { appStore } from '$lib/store.svelte';
   import type { HomePaths } from '$lib/types';
 
@@ -22,10 +23,12 @@
     { id: 'network', label: 'Network' },
     { id: 'tokens', label: 'Tokens' },
     { id: 'software', label: 'Software' },
+    { id: 'llama', label: 'llama.cpp' },
     { id: 'paths', label: 'Paths' }
   ];
 
   onMount(async () => {
+    if (new URLSearchParams(location.search).get('section') === 'llama') section = 'llama';
     try {
       const r = await fetch('/v2/node/home');
       if (r.ok) home = (await r.json()) as HomePaths;
@@ -40,7 +43,7 @@
     <div>
       <p class="eyebrow">Settings</p>
       <h1 id="page-title">Node settings</h1>
-      <p>Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.</p>
+      <p>{section === 'llama' ? 'Version changes apply to the next model run. Preparation keeps active inference on its current version.' : 'Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.'}</p>
     </div>
     <p class="mono small muted">node {appStore.status?.node_id ?? '—'} · probed {appStore.probedBackend}</p>
   </header>
@@ -60,6 +63,7 @@
     <div hidden={section !== 'network'}><NetworkSecurity /></div>
     <div hidden={section !== 'tokens'}><Tokens /></div>
     <div hidden={section !== 'software'}><Software /></div>
+    {#if section === 'llama'}<LlamaRuntimes />{/if}
 
     <section class="panel panel-pad" aria-labelledby="data-label" hidden={section !== 'paths'}>
       <h2 id="data-label">Paths</h2>

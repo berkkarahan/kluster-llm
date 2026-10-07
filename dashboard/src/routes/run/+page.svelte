@@ -12,16 +12,18 @@
   import { MIN_CONTEXT } from '$lib/types';
   import type { DeviceAllocation } from '$lib/types';
   import { PARAMETER_LABELS } from '$lib/configuration';
+  import { runtimeRunReason } from '$lib/runtime-readiness';
 
   let deployStep = $state<1 | 2 | 3>(1);
   let showJinjaEditor = $state(false);
   let featureOpen = $state(false);
   const blocked = $derived(appStore.planRunBlockedReason());
+  const runtimeBlocked = $derived(runtimeRunReason(appStore.status?.runtimes, appStore.status?.node_id ?? '', appStore.planResult));
   const nodeIds = $derived([...new Set([...(appStore.nodePriority ?? []), ...Object.keys(appStore.status?.members ?? {}), ...appStore.requiredNodes])]);
   const effective = $derived(appStore.effectiveConfig());
   const allocations = $derived((appStore.planResult?.device_allocations as DeviceAllocation[] | undefined) ?? []);
   const fit = $derived(String(appStore.planResult?.fit_status ?? ''));
-  const ready = $derived(!blocked && !!appStore.planResult && !appStore.estimating && !appStore.estimateError && ['fits', 'tight'].includes(fit));
+  const ready = $derived(!blocked && !runtimeBlocked && !!appStore.planResult && !appStore.estimating && !appStore.estimateError && ['fits', 'tight'].includes(fit));
   const estimateReady = $derived(appStore.status?.role === 'master' && !!appStore.selectedModel && !appStore.settingsLoading);
   const changes = $derived(Object.entries(effective?.requested ?? {}).filter(([key, value]) =>
     JSON.stringify(value) !== JSON.stringify(appStore.savedModelConfig?.[key])));
@@ -258,6 +260,7 @@
           </div>
         {/if}
         {#if Object.keys(appStore.fieldErrors).length}<div class="notice small" role="alert">{Object.values(appStore.fieldErrors).join(' ')}</div>{/if}
+        {#if runtimeBlocked}<div class="notice small">{runtimeBlocked} <a href="/settings?section=llama">Open llama.cpp settings →</a></div>{/if}
         <div class="form-foot">
           <button class="btn" disabled={deployStep === 1} onclick={() => nextStep(deployStep === 3 ? 2 : 1)}>Back</button>
           {#if deployStep < 3}<button class="btn btn-accent" disabled={!appStore.selectedModel || appStore.settingsLoading || !!appStore.settingsLoadError}

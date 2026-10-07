@@ -26,6 +26,7 @@ class MembershipHandlers:
         store: Callable[[], usage.UsageStore],
         master_lan_host: Callable[[], str],
         inference_activity: Callable[[], dict[str, Any]],
+        shrink_cluster: Callable[[ClusterState], None] | None = None,
     ) -> None:
         self._state = state
         self._sync_liveness = sync_liveness
@@ -34,6 +35,7 @@ class MembershipHandlers:
         self._store = store
         self._master_lan_host = master_lan_host
         self._inference_activity = inference_activity
+        self._shrink_cluster = shrink_cluster or membership.on_membership_shrink
 
     def register(self, body: RegisterBody, request: Request) -> dict[str, Any]:
         state = self._state()
@@ -165,7 +167,7 @@ class MembershipHandlers:
         if node_id and node_id != state.node_id and node_id in state.members:
             state.members.pop(node_id, None)
             self._resources.prune(state.members)
-            membership.on_membership_shrink(state)
+            self._shrink_cluster(state)
         else:
             state.save()
         return {"ok": True}

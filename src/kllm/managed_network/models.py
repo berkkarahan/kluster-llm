@@ -19,7 +19,7 @@ Digest = Annotated[str, StringConstraints(pattern=r'^[0-9a-f]{64}$')]
 Message = Annotated[str, StringConstraints(max_length=512, pattern=r'^[^\x00-\x1f\x7f]*$')]
 NetworkState = Literal['preparing', 'applying', 'verifying', 'ready', 'degraded', 'failed', 'stopping', 'cleanup_pending', 'stopped']
 AssignmentState = Literal['unselected', 'preparing', 'prepared', 'applying', 'configured', 'verification_pending', 'ready', 'degraded', 'failed', 'cleaning', 'cleanup_pending', 'stopped']
-Phase = Literal['inspect', 'prepare', 'apply', 'verify', 'reconcile', 'rollback', 'cleanup', 'admit_probe', 'admit_run', 'renew_admission', 'release_admission']
+Phase = Literal['inspect', 'prepare', 'apply', 'verify', 'reconcile', 'rollback', 'cleanup', 'admit_probe', 'admit_run', 'renew_admission', 'release_admission', 'release_runtime']
 PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 
 

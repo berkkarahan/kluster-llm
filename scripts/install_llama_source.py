@@ -221,6 +221,7 @@ def compile_configured_tree(
     expected_stamp: str,
     backends_ok: Callable[[str | None, list[str]], bool],
     parse_backends: Callable[[str | None], list[str]],
+    jobs: int | None = None,
 ) -> tuple[bool, str]:
     """Configure, build, and probe. Returns ``(ok, https)``."""
     https = "on"
@@ -255,13 +256,13 @@ def compile_configured_tree(
         write_signature(build_dir, signature)
         remove_binaries(build_dir)
 
-        jobs = str(os.cpu_count() or 4)
+        job_count = str(jobs or os.cpu_count() or 4)
         rpc_target_ok = False
         for target in ["llama-server", *rpc_names]:
             if target in rpc_names and rpc_target_ok:
                 continue
             result = run(
-                ["cmake", "--build", str(build_dir), "--config", "Release", "--target", target, "-j", jobs],
+                ["cmake", "--build", str(build_dir), "--config", "Release", "--target", target, "-j", job_count],
                 cwd=vendor,
                 check=False,
                 env=cmake_env,

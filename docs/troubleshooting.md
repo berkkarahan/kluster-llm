@@ -38,7 +38,11 @@ ls -l vendor/bin/llama-server vendor/bin/rpc-server
 
 ### llama.cpp binary missing or wrong version
 
-Every node must use the tag committed in `llama-release`. Repair and recheck it on every node:
+Every run participant must use the same exact llama.cpp source revision. For managed versions,
+open Settings → llama.cpp on the master, select the target, and inspect each selected node's
+preparation status/logs. Retry failed builds; unused offline nodes do not block a run. Old agents
+need upgrading and a native rebuild. For bootstrap installations, repair the committed
+`llama-release` default and recheck it on every node:
 
 ```bash
 uv run python scripts/install.py --llama-only --force
@@ -375,7 +379,9 @@ See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-cons
 
 If adapter refresh reports HTTP 500 or a JSON parsing error, check `~/.kllm/logs/agent.log` for the failing `/v2/node/network-adapters` request. Older agents may abort macOS discovery on loopback or tunnel interfaces with no `networksetup` service; update and restart the agent to use discovery that skips uninspectable interfaces. The dashboard reports the request path and HTTP status when an error response is not JSON, and preserves structured prerequisite refusal codes.
 
-Use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`) followed by an agent/worker restart. Installing over an already running RPC child does not prove that child's transport capabilities.
+Use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. Network setup verifies connectivity independently of RPC. At inference startup, `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`). Stop the current model before installing; the next Run lets the master start fresh RPC processes and verify their capabilities.
+
+A connected worker showing **Joined · idle** has no running RPC process by design. Start the model on the master to allocate workers. An upgrade-required error means a selected worker cannot accept signed runtime commands; update its agent and rejoin. **Recovering** means the master is restarting the selected RPC workers and reloading the model. Stop cancels that retry loop. **Cleanup pending** retains ownership information after an unacknowledged stop: reconnect the worker and retry Stop before starting another run. A disconnected worker expires its RPC ownership after 15 seconds and stops the owned process without restarting it.
 
 `RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN/WireGuard.
 

@@ -34,7 +34,7 @@ def test_runtime_setup_maps_install_errors_to_domain_exceptions():
         service.setup(LlamaSetupBody())
 
 
-def test_runtime_setup_restarts_worker_with_selected_devices_and_records_process():
+def test_installation_defers_start_until_a_master_command():
     state = ClusterState(
         node_id="worker-1",
         role="worker",
@@ -71,7 +71,10 @@ def test_runtime_setup_restarts_worker_with_selected_devices_and_records_process
     result = service.setup(LlamaSetupBody(tag="v1", backend="cuda", force=True))
 
     assert result.as_payload() == {"ok": True, "tag": "v1", "backend": "cuda", "force": True,
-                                   "relaunch": {"pid": 99}}
+                                   "relaunch": None}
+    assert calls == []
+    assert state.process_pid == 42
+    assert service.start_commanded_worker(state) == {"pid": 99}
     assert calls == [
         ("stop", 42, True),
         ("clear",),
@@ -95,7 +98,7 @@ def test_runtime_setup_restarts_worker_with_selected_devices_and_records_process
     ]
 
 
-def test_runtime_setup_returns_relaunch_failure_without_losing_install_result():
+def test_runtime_setup_does_not_try_to_spawn_when_install_succeeds():
     state = ClusterState(node_id="worker-1", role="worker")
     service = RuntimeSetupService(
         lambda: state,
@@ -114,7 +117,7 @@ def test_runtime_setup_returns_relaunch_failure_without_losing_install_result():
 
     assert service.setup(LlamaSetupBody()).as_payload() == {
         "ok": True,
-        "relaunch": {"error": "spawn failed"},
+        "relaunch": None,
     }
 
 
@@ -156,17 +159,15 @@ def _service(state: ClusterState, calls: list[object], *, alive: bool | Callable
     )
 
 
-def test_ensure_worker_restarts_when_process_missing_and_clears_strays():
+def test_ensure_worker_leaves_idle_members_joined_without_spawning():
     state = _worker_state()
     calls: list[object] = []
 
     result = _service(state, calls).ensure_worker(state)
 
-    assert result is not None and result.get("pid") == 99
-    assert calls[0] == ("stray",)
-    assert ("register", 99, "rpc-server") in calls
-    assert (state.process_pid, state.process_role) == (99, "worker")
-    assert state.members[state.node_id]["rpc_devices"][0]["device"] == "GPU-2"
+    assert result is None
+    assert calls == []
+    assert (state.process_pid, state.process_role) == (None, None)
 
 
 def test_ensure_worker_skips_healthy_worker():
@@ -181,23 +182,23 @@ def test_ensure_worker_skips_healthy_worker():
     assert calls == []
 
 
-def test_ensure_worker_restarts_dead_tracked_process():
+def test_commanded_start_replaces_a_dead_tracked_process():
     state = _worker_state()
     state.process_pid = 42
     state.process_role = "worker"
     calls: list[object] = []
 
-    result = _service(state, calls, alive=lambda pid: pid == 99).ensure_worker(state)
+    result = _service(state, calls, alive=lambda pid: pid == 99).start_commanded_worker(state)
 
     assert result is not None and result.get("pid") == 99
     assert ("stop", 42, True) in calls
 
 
-def test_ensure_worker_clears_state_when_replacement_exits_immediately():
+def test_commanded_start_clears_state_when_replacement_exits_immediately():
     state = _worker_state()
     calls: list[object] = []
 
-    result = _service(state, calls, alive=False).ensure_worker(state)
+    result = _service(state, calls, alive=False).start_commanded_worker(state)
 
     assert result is not None and result.get("error")
     assert (state.process_pid, state.process_role) == (None, None)

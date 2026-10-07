@@ -192,6 +192,28 @@ class SignedCommand(Record):
     body: dict[str, Any]
 
 
+class SignedRuntimeCommand(Record):
+    """Runtime ownership commands share the channel fence, not network phases."""
+
+    _wire: str = PrivateAttr(default='')
+    cluster_binding_id: UUID
+    master_node_id: Identifier
+    master_key_id: Digest
+    master_term: Revision
+    master_session_id: UUID
+    version: Literal[1]
+    type: Literal['rpc_command', 'rpc_result']
+    channel_id: UUID
+    sender_node_id: Identifier
+    target_node_id: Identifier
+    sequence: Revision
+    request_id: UUID
+    run_id: UUID
+    action: Literal['start', 'stop', 'status', 'renew', 'prepare_runtime', 'runtime_status', 'cancel_runtime_build', 'runtime_build_logs']
+    ttl_ms: int = Field(strict=True, gt=0, le=60000)
+    body: dict[str, Any]
+
+
 class NonceRecord(Record):
     @field_validator('*')
     @classmethod
@@ -247,12 +269,13 @@ class ChannelFence:
             raise IdentityError('channel disconnected')
         self.store.check_channel(self.peer.node_id, self.authority)
 
-    def receive(self, wire: str) -> SignedCommand:
+    def receive(self, wire: str) -> SignedCommand | SignedRuntimeCommand:
         with self.lock:
             self.check_live()
             parsed = LocalIdentity.verify(wire, self.peer.public_key)
             try:
-                command = SignedCommand.model_validate(parsed)
+                schema = SignedRuntimeCommand if parsed.get('type') in ('rpc_command', 'rpc_result') else SignedCommand
+                command = schema.model_validate(parsed)
             except ValueError:
                 raise IdentityError('invalid command schema') from None
             actual = MasterAuthority(cluster_binding_id=command.cluster_binding_id, master_node_id=command.master_node_id, master_key_id=command.master_key_id, master_term=command.master_term, master_session_id=command.master_session_id, accepted_channel_id=command.channel_id)
@@ -263,5 +286,5 @@ class ChannelFence:
         return command
 
     @staticmethod
-    def deadline(command: SignedCommand) -> float:
+    def deadline(command: SignedCommand | SignedRuntimeCommand) -> float:
         return time.monotonic() + command.ttl_ms / 1000

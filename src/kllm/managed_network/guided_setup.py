@@ -14,8 +14,6 @@ from .allocation import OperationRequest, ParticipantSelection, StartRequest, pr
 from .helper import HelperClient
 from .models import Digest, Identifier, Record, Revision, private_subnet
 from .platform.base import PlatformRefusal
-from .transport import require_tcp_runtime
-from kllm import native
 
 if TYPE_CHECKING:
     from kllm.agent.services.managed_network import ManagedNetworkService
@@ -105,31 +103,6 @@ class GuidedSetup:
             code = "ADMIN_REQUIRED"
         elif status.get("cleanup_pending"):
             code, reason = "CLEANUP_PENDING", MESSAGES["CLEANUP_PENDING"]
-        else:
-            try:
-                repo = self.service.executor.repository()
-                if repo is None:
-                    raise PlatformRefusal(
-                        "RPC_PROTOCOL_UNSUPPORTED", MESSAGES["RPC_PROTOCOL_UNSUPPORTED"]
-                    )
-                from pathlib import Path
-
-                llama, rpc = (
-                    native.resolve_llama_server(str(repo)),
-                    native.resolve_rpc_server(str(repo)),
-                )
-                if not llama or not rpc:
-                    raise PlatformRefusal(
-                        "RPC_PROTOCOL_UNSUPPORTED", MESSAGES["RPC_PROTOCOL_UNSUPPORTED"]
-                    )
-                require_tcp_runtime(repo, Path(llama), Path(rpc))
-                if self.service.state().role == "worker":
-                    self.service.executor.rpc_child()
-            except (PlatformRefusal, OSError, RuntimeError) as error:
-                code = (
-                    error.code if isinstance(error, PlatformRefusal) else "UNSUPPORTED_CAPABILITY"
-                )
-                reason = MESSAGES.get(code, "Update this computer’s networking runtime.")
         return {
             "capability": "managed-network-v2",
             "administrator_enabled": bool(status.get("ready")),

@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 from kllm.managed_network.identity import (
     Challenge, ChannelFence, ChannelReply, IdentityError, LocalIdentity,
-    SessionAccept, SignedCommand, encode, validate_peer,
+    SessionAccept, SignedCommand, SignedRuntimeCommand, encode, validate_peer,
 )
 from kllm.managed_network.models import MasterAuthority, PeerIdentity
 from kllm.managed_network.store import NetworkStore, StoreConflict
@@ -40,7 +40,7 @@ class SocketWire:
 
 @dataclass
 class Pending:
-    command: SignedCommand
+    command: SignedCommand | SignedRuntimeCommand
     future: asyncio.Future[dict[str, Any]]
 
 
@@ -55,7 +55,7 @@ class ChannelSession:
         self.task: asyncio.Task | None = None
         self.closed = False
 
-    async def send(self, command: SignedCommand) -> None:
+    async def send(self, command: SignedCommand | SignedRuntimeCommand) -> None:
         async with self.send_lock:
             self.fence.check_live()
             self.out_sequence += 1
@@ -86,12 +86,52 @@ class ChannelSession:
         finally:
             self.pending.pop(key, None)
 
+    async def request_runtime(self, run_id: UUID, action: str, *, ttl_ms: int = 10000, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.closed or len(self.pending) >= 16:
+            raise IdentityError('node runtime command channel unavailable or full')
+        authority = self.fence.authority
+        command = SignedRuntimeCommand.model_validate({
+            **authority.model_dump(exclude={'accepted_channel_id'}),
+            'channel_id': authority.accepted_channel_id, 'version': 1,
+            'type': 'rpc_command', 'sender_node_id': self.identity.node_id,
+            'target_node_id': self.fence.peer.node_id, 'sequence': 1,
+            'request_id': uuid4(), 'run_id': run_id, 'action': action,
+            'ttl_ms': ttl_ms, 'body': body or {},
+        })
+        key = ('runtime', str(command.request_id), 0)
+        future = asyncio.get_running_loop().create_future()
+        self.pending[key] = Pending(command, future)
+        try:
+            await self.send(command)
+            return await asyncio.wait_for(future, ttl_ms / 1000)
+        finally:
+            self.pending.pop(key, None)
+
     async def pump(self) -> None:
         try:
             while not self.closed:
                 command = self.fence.receive(await self.wire.receive())
                 self.last_received = time.monotonic()
                 deadline = ChannelFence.deadline(command)
+                if isinstance(command, SignedRuntimeCommand):
+                    if self.master:
+                        if command.type != 'rpc_result':
+                            raise IdentityError('worker cannot send runtime commands')
+                        pending = self.pending.get(('runtime', str(command.request_id), 0))
+                        if pending is None:
+                            continue
+                        expected = pending.command
+                        if not isinstance(expected, SignedRuntimeCommand) or (command.run_id, command.action) != (expected.run_id, expected.action):
+                            raise IdentityError('runtime result does not match request')
+                        if not pending.future.done():
+                            pending.future.set_result(command.body)
+                    else:
+                        if command.type != 'rpc_command' or self.handler is None:
+                            raise IdentityError('unexpected runtime frame')
+                        result = await self.handler(command, deadline)
+                        response = command.model_copy(update={'type': 'rpc_result', 'sender_node_id': self.identity.node_id, 'target_node_id': self.fence.peer.node_id, 'body': result})
+                        await self.send(response)
+                    continue
                 if self.master:
                     if command.type not in ('result', 'ack'):
                         raise IdentityError('worker cannot send mutation commands')

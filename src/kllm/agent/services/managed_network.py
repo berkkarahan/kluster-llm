@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from kllm import native
 from kllm.managed_network.allocation import AdapterSelection, OperationRequest, StartRequest, assign, propose
 from kllm.managed_network.executor import LocalNetworkExecutor, platform_adapter
-from kllm.managed_network.identity import IdentityError, LocalIdentity, SignedCommand
+from kllm.managed_network.identity import IdentityError, LocalIdentity, SignedCommand, SignedRuntimeCommand
 from kllm.managed_network.models import (
     AdmissionLease, ManagedNetwork, MasterAuthority, NetworkOperation,
     NetworkState, Phase, NodeAssignment, ParticipantResult, RPCChildIdentity, VerificationEvidence, utc_now,
@@ -38,7 +38,12 @@ class ManagedNetworkService:
         if platform is None and not is_admin():
             from kllm.managed_network.helper_platform import HelperPlatform
             self.executor.platform = HelperPlatform(self.executor.platform, self.guided.helper, self.guided.grant)
-        self.channels = NetworkChannelHub(self.store, self.identity, state, master_base, self.executor.execute)
+        self.worker_rpc = None
+        self.runtimes = None
+        self.rpc_runs = None
+        self.rpc_monitor_task = None
+        self.worker_expiry_task = None
+        self.channels = NetworkChannelHub(self.store, self.identity, state, master_base, self.execute_command)
         self.channels.bootstrap = self.bootstrap.connect
         self.lock = asyncio.Lock()  # Shared by topology changes and run reservations.
         self.tasks: dict[str, asyncio.Task] = {}
@@ -60,7 +65,56 @@ class ManagedNetworkService:
         self.loop = asyncio.get_running_loop()
         self.store.recover()
         await self.channels.start()
+        if self.runtimes is not None:
+            self.runtimes.task = asyncio.create_task(self.runtimes.reconcile(), name='kllm-runtime-target')
         self.monitor_task = asyncio.create_task(self._monitor(), name='kllm-managed-network-health')
+        if self.worker_rpc is not None:
+            await asyncio.to_thread(self.worker_rpc.reconcile_startup)
+            self.worker_expiry_task = asyncio.create_task(self._expire_worker_rpc(), name='kllm-rpc-expiry')
+        if self.rpc_runs is not None:
+            await asyncio.to_thread(self.rpc_runs.reconcile_startup)
+            self.rpc_monitor_task = asyncio.create_task(self.rpc_runs.monitor(), name='kllm-rpc-run-health')
+
+    async def execute_command(self, command: SignedCommand | SignedRuntimeCommand, deadline: float) -> dict[str, Any]:
+        if isinstance(command, SignedCommand):
+            return await self.executor.execute(command, deadline)
+        if self.worker_rpc is None:
+            return {'status': 'failed', 'error_code': 'UNSUPPORTED_CAPABILITY', 'message': 'Upgrade this worker for RPC runtime control'}
+        try:
+            # The channel already verifies signatures, authority and sequence.
+            # Recheck its persisted fence immediately before local mutation.
+            def authorize() -> None:
+                self.store.check_channel(command.sender_node_id, MasterAuthority(
+                    cluster_binding_id=command.cluster_binding_id, master_node_id=command.master_node_id,
+                    master_key_id=command.master_key_id, master_term=command.master_term,
+                    master_session_id=command.master_session_id, accepted_channel_id=command.channel_id,
+                ))
+            if command.action in ('prepare_runtime', 'runtime_status', 'cancel_runtime_build', 'runtime_build_logs'):
+                if self.runtimes is None:
+                    raise ValueError('Upgrade this worker for runtime management')
+                if time.monotonic() >= deadline:
+                    raise ValueError('Runtime command expired')
+                return await self.runtimes.execute(command, authorize)
+            return await asyncio.to_thread(self.worker_rpc.execute, command, deadline, authorize)
+        except (PlatformRefusal, IdentityError, StoreConflict, OSError, RuntimeError, ValueError) as error:
+            return {'status': 'failed', 'error_code': getattr(error, 'code', 'RPC_START_FAILED'), 'message': str(error)[:512]}
+
+    async def _expire_worker_rpc(self) -> None:
+        while not self.closed:
+            await asyncio.sleep(1)
+            try:
+                await asyncio.to_thread(self.worker_rpc.expire)
+            except (PlatformRefusal, OSError, RuntimeError, ValueError):
+                pass  # Owned process and cleanup_pending remain available for retry.
+
+    def release_worker_bridges(self, pid: int) -> None:
+        for key, bridge in list(self.executor.bridges.items()):
+            status = native.network_bridge_status(bridge)
+            if status.get('child_pid') not in (None, pid):
+                continue
+            if not native.stop_network_bridge(bridge, status['instance_id'], terminate=True):
+                raise PlatformRefusal('CLEANUP_PENDING', 'Worker relay has not drained')
+            self.executor.bridges.pop(key, None)
 
     def _authority(self) -> MasterAuthority:
         authority = self.channels.master_authority()
@@ -175,7 +229,7 @@ class ManagedNetworkService:
                         current.message = result.get('message', '')
                     self.store.put_assignment(current, expected_revision=current.assignment_revision)
             if phase == 'verify' and result.get('status') != 'failed':
-                self.verified_results[key] = result
+                self.verified_results[key] = {**self.verified_results.get(key, {}), **result}
             participant = ParticipantResult(node_id=node_id, assignment_revision=assignment.assignment_revision, expected_local_revision=revision, stage=phase, phase_sequence=sequence, status=result['status'], signed_result_digest=digest(result), prepared_snapshot_digest=result.get('prepared_snapshot_digest'), ownership_journal_id=result.get('journal_id'), error_code=result.get('error_code'))
             self.store.result(operation.operation_id, participant)
             return result
@@ -291,25 +345,38 @@ class ManagedNetworkService:
         workers = [a for a in assignments if a.node_id != self.identity.node_id]
         verified = await self._phase(operation, workers, 'verify', {a.node_id: {'health_only': False} for a in workers}, 5)
         if any(result['status'] == 'failed' for result in verified.values()):
-            raise PlatformRefusal('TIMEOUT', 'Worker dedicated diagnostics or bridge verification failed')
+            raise PlatformRefusal('TIMEOUT', 'Worker dedicated diagnostics failed')
+        diagnostic = self.executor.diagnostics[str(network.network_id)]
+        for assignment in workers:
+            result = verified[assignment.node_id]
+            proof = await diagnostic.challenge(assignment.node_id, assignment.assignment_revision, result['diagnostic_port'])
+            assignment.logical_rpc_endpoint = f'{assignment.address}:{request.bridge_port}'
+            self.freshness.publish(network.network_id, assignment.node_id, {'assignment_revision': assignment.assignment_revision, 'dedicated_proof': proof})
+            self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
+        self.freshness.publish(network.network_id, self.identity.node_id, {'assignment_revision': master.assignment_revision})
+        self._publish(network, 'ready')
+        for assignment in assignments:
+            assignment.state = 'ready'
+            self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
+        return True
+
+    async def prepare_rpc(self, network: ManagedNetwork, operation: NetworkOperation, assignments: list[NodeAssignment]) -> None:
+        """Create relays and protocol evidence only for this run's workers."""
+        master = next(a for a in assignments if a.node_id == self.identity.node_id)
+        workers = [a for a in assignments if a.node_id != self.identity.node_id]
+        verified = await self._phase(operation, workers, 'verify', {a.node_id: {'health_only': False, 'runtime': True} for a in workers}, 5)
+        if any(result['status'] == 'failed' for result in verified.values()):
+            raise PlatformRefusal('RPC_PROTOCOL_UNSUPPORTED', 'Worker RPC runtime or relay verification failed')
         for assignment in workers:
             result = verified[assignment.node_id]
             assignment.rpc_child_identity = RPCChildIdentity.model_validate(result['child'])
             assignment.logical_rpc_endpoint = result['logical_endpoint']
             bridge = self.master_bridges.get((str(network.network_id), assignment.node_id))
             if bridge is None:
-                bridge = await asyncio.to_thread(native.start_network_bridge, {'role': 'master', 'instance_id': str(uuid4()), 'network_id': str(network.network_id), 'assignment_revision': assignment.assignment_revision, 'bind_host': '127.0.0.1', 'bind_port': 0, 'target_host': assignment.address, 'target_port': request.bridge_port, 'source_host': master.address, 'allowed_peer': '127.0.0.1', 'child_pid': None, 'child_start_token': None})
+                bridge = await asyncio.to_thread(native.start_network_bridge, {'role': 'master', 'instance_id': str(uuid4()), 'network_id': str(network.network_id), 'assignment_revision': assignment.assignment_revision, 'bind_host': '127.0.0.1', 'bind_port': 0, 'target_host': assignment.address, 'target_port': int(result['logical_endpoint'].rsplit(':', 1)[1]), 'source_host': master.address, 'allowed_peer': '127.0.0.1', 'child_pid': None, 'child_start_token': None})
             self.master_bridges[(str(network.network_id), assignment.node_id)] = bridge
             assignment.launch_rpc_endpoint = native.network_bridge_status(bridge)['listener']
             self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
-        self.freshness.publish(network.network_id, self.identity.node_id, {'assignment_revision': master.assignment_revision})
-        idle = await self.verify_idle(network, operation, assignments)
-        if idle:
-            self._publish(network, 'ready')
-            for assignment in assignments:
-                assignment.state = 'ready'
-                self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
-        return idle
 
     async def verify_idle(self, network: ManagedNetwork, operation: NetworkOperation, assignments: list[NodeAssignment]) -> bool:
         workers = [a for a in assignments if a.node_id != self.identity.node_id]
@@ -339,7 +406,9 @@ class ManagedNetworkService:
                 proof = await diagnostic.challenge(assignment.node_id, assignment.assignment_revision, self.executor.preparation[str(network.network_id)].diagnostic_port)
                 if assignment.launch_rpc_endpoint is None:
                     raise PlatformRefusal('STALE_REVISION', 'Master bridge endpoint disappeared')
-                result = await asyncio.to_thread(native.probe_network_rpc, assignment.launch_rpc_endpoint, '127.0.0.1', 'v0.5.0', 2000)
+                child = assignment.rpc_child_identity
+                installed_identity = child.llama_tag if child else 'v0.5.0'
+                result = await asyncio.to_thread(native.probe_network_rpc, assignment.launch_rpc_endpoint, '127.0.0.1', installed_identity, 2000)
                 self.freshness.publish(network.network_id, assignment.node_id, {'idle_probe_at': time.monotonic(), 'idle_observed_at': utc_now().isoformat(), 'rpc_released': False, 'rpc_result': result, 'dedicated_proof': proof, 'worker_bridge_id': self.verified_results[key]['bridge']['instance_id'], 'assignment_revision': assignment.assignment_revision, 'child': assignment.rpc_child_identity.model_dump(mode='json') if assignment.rpc_child_identity else None})
             await asyncio.gather(*(probe(a) for a in workers))
         finally:
@@ -519,17 +588,8 @@ class ManagedNetworkService:
                 raise PlatformRefusal(result.get('error_code', 'TIMEOUT'), 'Dedicated health failed')
             previous = self.freshness.live.get(key, {})
             if assignment.node_id != self.identity.node_id:
-                if result.get('child') != (assignment.rpc_child_identity.model_dump(mode='json') if assignment.rpc_child_identity else None):
-                    raise PlatformRefusal('STALE_REVISION', 'Worker child identity changed')
-                bridge = self.master_bridges.get(key)
-                if bridge is None:
-                    raise PlatformRefusal('STALE_REVISION', 'Master bridge disappeared')
-                status = native.network_bridge_status(bridge)
-                old_bridge = previous.get('worker_bridge_id')
-                if status['closed'] or status['last_error'] or (old_bridge and result['bridge']['instance_id'] != old_bridge):
-                    raise PlatformRefusal('STALE_REVISION', 'Relay identity changed')
                 proof = await diagnostic.challenge(assignment.node_id, assignment.assignment_revision, result['diagnostic_port'])
-                self.freshness.publish(network.network_id, assignment.node_id, {**previous, 'dedicated_proof': proof, 'worker_bridge_id': result['bridge']['instance_id']})
+                self.freshness.publish(network.network_id, assignment.node_id, {**previous, 'assignment_revision': assignment.assignment_revision, 'dedicated_proof': proof})
             else:
                 self.freshness.publish(network.network_id, assignment.node_id, {'assignment_revision': assignment.assignment_revision})
 
@@ -547,23 +607,24 @@ class ManagedNetworkService:
                     if operation is None:
                         continue
                     assignments = self.store.assignments(network.network_id)
+                    runtime_stage = False
                     try:
                         await asyncio.wait_for(self._health(network, operation, assignments), 2)
                         active = [run for run in self.store.runs(network.network_id) if run.state == 'active']
                         if not active and not any(run.state != 'released' for run in self.store.runs(network.network_id)) and not any(lease.state != 'released' for lease in self.store.leases(network.network_id)):
                             if network.observed_state == 'degraded':
                                 self._publish(network, 'verifying')
-                            idle = await self.verify_idle(network, operation, assignments)
-                            if idle and network.observed_state == 'verifying':
+                            if network.observed_state == 'verifying':
                                 self._publish(network, 'ready')
-                            elif not idle and network.observed_state == 'ready':
-                                self._publish(network, 'verifying')
+                        runtime_stage = True
                         for run in active:
                             if run.child_pid and (not native.process_alive(run.child_pid) or native._managed_native()._process_identity(run.child_pid)[0] != run.child_start_token):
                                 await self.admission.release(run)
                                 continue
                             for assignment in assignments:
                                 if assignment.node_id == self.identity.node_id:
+                                    continue
+                                if assignment.node_id not in run.assignment_revisions:
                                     continue
                                 key = (str(network.network_id), assignment.node_id)
                                 statuses = [native.network_bridge_status(self.master_bridges[key]), self.verified_results[key]['bridge']]
@@ -577,7 +638,11 @@ class ManagedNetworkService:
                                 if renewed[worker.node_id].get('grant_ack') is not True:
                                     raise PlatformRefusal('TIMEOUT', 'Run lease renewal was not acknowledged')
                                 self.master_bridges[(str(network.network_id), worker.node_id)].grant(lease.generation, 15000, True)
-                    except Exception:
+                    except Exception as error:
+                        if runtime_stage:
+                            if self.rpc_runs is not None:
+                                self.rpc_runs.runtime_error = str(error)
+                            continue
                         self.freshness.invalidate(network.network_id, 'Dedicated route, identity or admission health failed')
                         if network.observed_state != 'degraded':
                             self._publish(network, 'degraded')
@@ -593,6 +658,14 @@ class ManagedNetworkService:
         if self.closed:
             return
         self.closed = True
+        if self.runtimes is not None:
+            await self.runtimes.close()
+        if self.rpc_runs is not None:
+            await self.rpc_runs.close()
+        for task in (self.rpc_monitor_task, self.worker_expiry_task):
+            if task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         if self.monitor_task:
             self.monitor_task.cancel()
             await asyncio.gather(self.monitor_task, return_exceptions=True)

@@ -21,6 +21,8 @@ DEFAULT_RAM_PERCENT = 80
 MIN_MEMORY_PERCENT = 10
 MAX_MEMORY_PERCENT = 100
 
+FEATURE_FLAGS: tuple[str, ...] = ("private-network-setup",)
+
 
 def _normalize_device(value: Any) -> Device:
     if value is None:
@@ -90,6 +92,29 @@ def _normalize_gpu_ids(value: Any) -> list[int] | None:
     return out
 
 
+def default_flags() -> dict[str, bool]:
+    """Every known feature flag with its default (disabled) value."""
+    return {name: False for name in FEATURE_FLAGS}
+
+
+def _normalize_flags(raw: Any) -> dict[str, bool]:
+    if raw is None:
+        return default_flags()
+    if not isinstance(raw, dict):
+        raise ValueError(f"flags must be a TOML table of booleans, got {raw!r}")
+    unknown = sorted(set(raw) - set(FEATURE_FLAGS))
+    if unknown:
+        raise ValueError(
+            f"unknown feature flag(s): {', '.join(unknown)}; valid flags: {', '.join(FEATURE_FLAGS)}"
+        )
+    flags = default_flags()
+    for name, value in raw.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"feature flag {name!r} must be true or false, got {value!r}")
+        flags[name] = value
+    return flags
+
+
 def default_config() -> dict[str, Any]:
     return {
         "device": DEFAULT_DEVICE,
@@ -98,6 +123,7 @@ def default_config() -> dict[str, Any]:
         "ram_percent": DEFAULT_RAM_PERCENT,
         "accel_backend": None,
         "split_mode": DEFAULT_SPLIT_MODE,
+        "flags": default_flags(),
     }
 
 
@@ -115,6 +141,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         cfg["accel_backend"] = _normalize_accel_backend(raw["accel_backend"])
     if "split_mode" in raw:
         cfg["split_mode"] = _normalize_split_mode(raw["split_mode"])
+    if "flags" in raw:
+        cfg["flags"] = _normalize_flags(raw["flags"])
     return cfg
 
 
@@ -137,6 +165,12 @@ def _write_toml(cfg: dict[str, Any]) -> str:
     if accel is not None:
         lines.append(f'accel_backend = "{accel}"')
     lines.append(f'split_mode = "{cfg["split_mode"]}"')
+    enabled_flags = sorted(name for name, enabled in (cfg.get("flags") or {}).items() if enabled)
+    if enabled_flags:
+        lines.append("")
+        lines.append("[flags]")
+        for name in enabled_flags:
+            lines.append(f"{name} = true")
     return "\n".join(lines) + "\n"
 
 
@@ -163,7 +197,7 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
     # Merge with existing so partial updates (e.g. device-only) keep percents / gpu_ids.
     current = load_config()
     merged = {**current}
-    for key in ("device", "vram_percent", "ram_percent", "gpu_ids", "accel_backend", "split_mode"):
+    for key in ("device", "vram_percent", "ram_percent", "gpu_ids", "accel_backend", "split_mode", "flags"):
         if key in cfg:
             merged[key] = cfg[key]
     out = _normalize_config(merged)
@@ -186,6 +220,29 @@ def get_accel_backend() -> str | None:
 
 def get_split_mode() -> SplitMode:
     return _normalize_split_mode(load_config().get("split_mode"))
+
+
+def feature_flags() -> dict[str, bool]:
+    """All known feature flags with their persisted or default values."""
+    return dict(load_config().get("flags") or default_flags())
+
+
+def get_feature_flag(name: str) -> bool:
+    if name not in FEATURE_FLAGS:
+        raise ValueError(f"unknown feature flag {name!r}; valid flags: {', '.join(FEATURE_FLAGS)}")
+    return bool(feature_flags().get(name, False))
+
+
+def set_feature_flag(name: str, enabled: bool) -> bool:
+    """Persist one feature flag and return its new value."""
+    if name not in FEATURE_FLAGS:
+        raise ValueError(f"unknown feature flag {name!r}; valid flags: {', '.join(FEATURE_FLAGS)}")
+    if not isinstance(enabled, bool):
+        raise ValueError(f"feature flag {name!r} must be true or false, got {enabled!r}")
+    flags = feature_flags()
+    flags[name] = enabled
+    save_config({"flags": flags})
+    return enabled
 
 
 def resolve_device(override: str | None = None) -> Device:

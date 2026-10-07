@@ -155,6 +155,7 @@ export type Status = {
   runtimes?: import('./runtime-types').RuntimeLibrary;
   active_config?: EffectiveConfig | null;
   managed_networks?: ManagedNetwork[];
+  feature_flags?: Record<string, boolean>;
   logging?: LoggingStatus;
   role: string;
   node_id: string;

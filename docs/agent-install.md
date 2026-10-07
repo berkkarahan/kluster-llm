@@ -417,7 +417,7 @@ independent. CONNECT provisions copies automatically from this checkout through
 
 ## Guided private-network administrator helper
 
-The supported installer builds and copies `vendor/bin/kllm-network-helper` (`.exe` on Windows) independently of Python. No helper runs with elevated privileges during install/build. Home → Private 10GbE network displays the administrator notice; the local enable button requests OS approval and installs the protected helper for the original user's account and pinned cluster master.
+The supported installer builds and copies `vendor/bin/kllm-network-helper` (`.exe` on Windows) independently of Python. No helper runs with elevated privileges during install/build. The Home → Private 10GbE network panel is hidden until `kllm flags private-network-setup --enable`; once shown it displays the administrator notice, and the local enable button requests OS approval and installs the protected helper for the original user's account and pinned cluster master.
 
 macOS uses a protected `/Library/PrivilegedHelperTools/com.kllm.network` binary and system LaunchDaemon; Linux uses `/usr/local/libexec/kllm-network-helper`, `/etc/kllm-network` grants/journals and a systemd service, with `pkexec` for local authorization; Windows uses a protected Program Files helper and SYSTEM scheduled task. IPC is an account-restricted local socket or named pipe. The helper never imports Python or receives arbitrary executable paths or commands. Keep the ordinary agent under its existing account and credential directory.
 

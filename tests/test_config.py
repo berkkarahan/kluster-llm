@@ -27,6 +27,7 @@ def test_default_config(kllm_home):
         "ram_percent": 80,
         "accel_backend": None,
         "split_mode": "layer",
+        "flags": {"private-network-setup": False},
     }
     assert config.resolve_memory_fraction("gpu") == 0.80
     assert config.resolve_memory_fraction("cpu") == 0.80
@@ -132,3 +133,45 @@ def test_invalid_gpu_ids_rejected(kllm_home):
         config.save_config({"gpu_ids": []})
     with pytest.raises(ValueError):
         config.save_config({"gpu_ids": [-1]})
+
+
+def test_feature_flags_default_disabled(kllm_home):
+    _, config = kllm_home
+    assert config.feature_flags() == {"private-network-setup": False}
+    assert config.get_feature_flag("private-network-setup") is False
+    with pytest.raises(ValueError):
+        config.get_feature_flag("nope")
+
+
+def test_set_feature_flag_roundtrip_and_toml(kllm_home):
+    home, config = kllm_home
+    assert config.set_feature_flag("private-network-setup", True) is True
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert "[flags]" in text
+    assert "private-network-setup = true" in text
+    assert config.get_feature_flag("private-network-setup") is True
+    config.set_feature_flag("private-network-setup", False)
+    text2 = (home / "config.toml").read_text(encoding="utf-8")
+    assert "[flags]" not in text2
+    assert config.get_feature_flag("private-network-setup") is False
+
+
+def test_feature_flag_survives_other_config_saves(kllm_home):
+    _, config = kllm_home
+    config.set_feature_flag("private-network-setup", True)
+    config.save_config({"device": "cpu"})
+    assert config.load_config()["device"] == "cpu"
+    assert config.get_feature_flag("private-network-setup") is True
+
+
+def test_invalid_feature_flags_rejected(kllm_home):
+    _, config = kllm_home
+    with pytest.raises(ValueError):
+        config.set_feature_flag("nope", True)
+    with pytest.raises(ValueError):
+        config.set_feature_flag("private-network-setup", "yes")
+    with pytest.raises(ValueError):
+        config.save_config({"flags": {"nope": True}})
+    with pytest.raises(ValueError):
+        config.save_config({"flags": {"private-network-setup": "yes"}})
+    assert config.feature_flags() == {"private-network-setup": False}

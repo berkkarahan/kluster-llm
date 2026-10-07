@@ -25,6 +25,7 @@ export type RuntimeLibrary = {
   legacy?: { label: string; phase: string; message: string };
   reconcile_error?: string | null;
   bootstrap?: {repository: string; ref: string};
+  control?: {available: boolean; message?: string | null};
 };
 export type RuntimeSources = {
   repository: string; releases: {tag: string; name: string; prerelease: boolean}[];

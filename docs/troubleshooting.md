@@ -389,6 +389,8 @@ A connected worker showing **Joined · idle** has no running RPC process by desi
 
 After an abrupt agent restart, prior address observations and readiness are invalid. Present addresses with lost ownership remain untouched. Open that node's local cleanup review: inspect the current exact address and adapter snapshot, then either keep the address and release app ownership or explicitly confirm that exact delta for removal. A changed snapshot refuses removal and requires another review. Never delete all addresses from an adapter to resolve one journal. Graceful shutdown stops a matching dependent managed inference before closing bridges; unrelated legacy inference is identified separately.
 
+A local node-label change (for example, `cluster.json` was reset or restored while `managed-network.sqlite` kept its pairing) is recoverable: the agent keeps the pinned signing key and adopts the current label, clearing superseded authority and channel fences, so rejoin the cluster to pair again. A genuinely changed private key is still refused (`local identity key changed; explicit re-pairing required`), because that is an identity swap rather than a label rotation. While signed cluster control is unavailable, Settings → **llama.cpp** still lists, saves, builds and locally selects versions; setting or enforcing a cluster target and starting managed inference require the recovered agent.
+
 Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.
 
 ### Guided setup and administrator support

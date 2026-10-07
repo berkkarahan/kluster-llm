@@ -297,8 +297,10 @@ async def _start_managed_network(app: FastAPI) -> None:
         if not STATE.process_pid and registry.data.get('running'):
             registry.running(None)
         app.state.managed_network = service
-    except (OSError, ValueError, RuntimeError, sqlite3.Error):
-        app.state.managed_network_error = "Managed network identity/store is unavailable; local recovery required"
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        app.state.managed_network_error = (
+            f'Signed node runtime control is unavailable ({str(error)[:200]}); '
+            'restart or recover the local agent')
 
 
 async def _stop_managed_network(app: FastAPI) -> None:
@@ -492,14 +494,23 @@ def _runtime_control():
     service = getattr(app.state, 'managed_network', None)
     control = getattr(service, 'runtimes', None)
     if control is None:
-        raise HTTPException(503, 'Signed node runtime control is unavailable; restart or recover the local agent')
+        message = getattr(app.state, 'managed_network_error', None) or (
+            'Signed node runtime control is unavailable; restart or recover the local agent')
+        raise HTTPException(503, detail={'code': 'RUNTIME_CONTROL_UNAVAILABLE', 'message': message})
     return control
 
 
 def _runtime_status():
     service = getattr(app.state, 'managed_network', None)
     control = getattr(service, 'runtimes', None)
-    return control.status() if control is not None else _runtime_registry().snapshot()
+    if control is not None:
+        value = control.status()
+        value.setdefault('control', {'available': True})
+        return value
+    snapshot = _runtime_registry().snapshot()
+    message = getattr(app.state, 'managed_network_error', None)
+    snapshot['control'] = {'available': False, **({'message': message} if message else {})}
+    return snapshot
 
 
 def _heartbeat_payload() -> dict[str, Any]:

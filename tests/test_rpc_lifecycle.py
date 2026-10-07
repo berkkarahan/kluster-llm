@@ -328,7 +328,10 @@ async def test_real_signed_websocket_commands_control_an_owned_child(tmp_path, m
     children = []
 
     def start(_):
-        child = subprocess.Popen([sys.executable, '-c', 'import socket,time,sys;s=socket.socket();s.bind(("127.0.0.1",int(sys.argv[1])));s.listen();time.sleep(60)', str(state.rpc_port)])
+        # The venv launcher may be a trampoline process; the listening socket
+        # belongs to the base interpreter it execs, so spawn that directly.
+        interpreter = getattr(sys, '_base_executable', None) or sys.executable
+        child = subprocess.Popen([interpreter, '-c', 'import socket,time,sys;s=socket.socket();s.bind(("127.0.0.1",int(sys.argv[1])));s.listen();time.sleep(60)', str(state.rpc_port)])
         children.append(child)
         state.process_pid, state.process_role = child.pid, 'worker'
         state.members['worker']['rpc_devices'] = CPU

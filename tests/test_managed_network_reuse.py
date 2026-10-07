@@ -56,15 +56,26 @@ SETUP = {'capability': 'managed-network-v2', 'administrator_enabled': True, 'err
 
 def test_propose_prefers_ten_and_reuses_an_exact_static_address():
     clean = ranges()
-    assert propose([clean, clean], 2) == ORDER
+    assert propose([(clean, []), (clean, [])], 2) == ORDER
     reusable = ranges(addresses=['10.10.10.5/24'], routes=['10.10.10.0/24', '10.10.10.5/32', '10.10.10.255/32'])
     assert reusable_addresses(reusable, PREFERRED) == ['10.10.10.5']
-    assert propose([reusable, clean], 2)[0] == '10.10.10.0/24'
-    assert propose([ranges(routes=['10.10.10.0/24'])], 2)[0] == '10.10.10.0/24'
+    assert propose([(reusable, []), (clean, [])], 2)[0] == '10.10.10.0/24'
     assert reusable_addresses(ranges(dhcp=True, addresses=['10.10.10.5/24']), PREFERRED) == []
     assert reusable_addresses(ranges(addresses=['10.10.10.5/16']), PREFERRED) == []
     assert reusable_addresses(ranges(addresses=['10.10.10.0/24']), PREFERRED) == []
     assert reusable_addresses(ranges(addresses=['10.10.10.255/24']), PREFERRED) == []
+
+
+def test_system_wide_route_tables_do_not_defeat_reuse():
+    # Every platform reports the whole route table per adapter, so the chosen
+    # adapter's connected route reappears under the same computer's other
+    # adapters. That alone must not disqualify reuse.
+    reusable = ranges(addresses=['10.10.10.5/24'], routes=['10.10.10.0/24', '10.10.10.5/32'])
+    management = ranges(addresses=['192.168.68.1/24'], routes=['192.168.68.0/24', '10.10.10.0/24', '10.10.10.5/32'])
+    assert propose([(reusable, [management])], 2)[0] == '10.10.10.0/24'
+    # A genuine in-subnet address on another interface still blocks reuse.
+    conflicting = ranges(addresses=['10.10.10.9/24'])
+    assert propose([(reusable, [conflicting])], 2) == ORDER[1:]
 
 
 @pytest.mark.parametrize(
@@ -76,10 +87,12 @@ def test_propose_prefers_ten_and_reuses_an_exact_static_address():
         ranges(addresses=['10.10.10.0/24']),
         ranges(addresses=['10.10.10.255/24']),
         ranges(addresses=['10.10.10.5/24', '10.10.10.6/25']),
+        ranges(routes=['10.10.10.0/24']),
+        ranges(addresses=['10.10.10.5/24'], routes=['10.10.10.0/24', '10.10.10.128/25']),
     ],
 )
 def test_propose_falls_back_when_ten_is_unusable(inventory):
-    assert propose([inventory], 2) == ORDER[1:]
+    assert propose([(inventory, [])], 2) == ORDER[1:]
 
 
 @pytest.mark.parametrize(
@@ -90,18 +103,19 @@ def test_propose_falls_back_when_ten_is_unusable(inventory):
     ],
 )
 def test_propose_treats_other_visible_adapters_strictly(other):
-    assert propose([ranges()], 2, strict=[other]) == ORDER[1:]
+    assert propose([(ranges(), [other])], 2) == ORDER[1:]
 
 
 @pytest.mark.asyncio
-async def test_guided_explicit_ten_accepts_a_reusable_static_address(tmp_path, monkeypatch):
+async def test_guided_reuses_ten_despite_system_wide_management_routes(tmp_path, monkeypatch):
     master = service(tmp_path)
     ten = snapshot('eth-ten', dhcp=False, addresses=['10.10.10.5/24'], routes=['10.10.10.0/24', '10.10.10.5/32', '10.10.10.255/32']).public()
+    management = snapshot('eth-mgmt', dhcp=True, addresses=['192.168.68.1/24'], routes=['192.168.68.0/24', '10.10.10.0/24']).public()
     worker = snapshot('eth-worker').public()
 
     async def inventories():
         return {
-            'master': {'adapters': [ten], 'setup': SETUP},
+            'master': {'adapters': [ten, management], 'setup': SETUP},
             'worker': {'adapters': [worker], 'setup': SETUP},
         }
 
@@ -126,6 +140,14 @@ async def test_guided_explicit_ten_accepts_a_reusable_static_address(tmp_path, m
             )
         )
         assert accepted[0].subnet == '10.10.10.0/24'
+        await master.guided.start(
+            GuidedRequest(
+                request_id=uuid4(),
+                nodes=['master', 'worker'],
+                assessment_revision=assessment['assessment_revision'],
+            )
+        )
+        assert accepted[1].subnet == '10.10.10.0/24'
     finally:
         master.store.close()
 

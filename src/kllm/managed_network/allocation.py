@@ -65,30 +65,43 @@ def reusable_addresses(inventory: dict, subnet: ipaddress.IPv4Network) -> list[s
     return [str(parsed.ip) for value in inventory.get('addresses', []) if (parsed := ipaddress.IPv4Interface(value)).network == subnet and parsed.network.prefixlen == subnet.prefixlen and parsed.ip not in (subnet.network_address, subnet.broadcast_address)]
 
 
-def _accepts(inventory: dict, subnet: ipaddress.IPv4Network, *, strict: bool = False) -> bool:
-    reusable = reusable_addresses(inventory, subnet)
-    allowed = () if strict else (subnet, ipaddress.IPv4Network(f'{subnet.broadcast_address}/32'), *(ipaddress.IPv4Network(f'{value}/32') for value in reusable))
-    for value in inventory.get('addresses', []):
-        observed = ipaddress.IPv4Interface(value)
-        if observed.network.overlaps(subnet) and (strict or str(observed.ip) not in reusable):
-            return False
-    for value in inventory.get('routes', []):
-        route = ipaddress.IPv4Network(value)
-        if route.prefixlen and route.overlaps(subnet) and route not in allowed:
-            return False
+def _implied_routes(subnet: ipaddress.IPv4Network, reusable: list[str]) -> tuple[ipaddress.IPv4Network, ...]:
+    """Routes produced by reusing an adapter's exact static in-subnet addresses."""
+    return () if not reusable else (subnet, ipaddress.IPv4Network(f'{subnet.broadcast_address}/32'), *(ipaddress.IPv4Network(f'{value}/32') for value in reusable))
+
+
+def node_acceptable(chosen: dict, subnet: ipaddress.IPv4Network, others: list[dict] | None = None) -> bool:
+    """One computer's adapters: reuse its exact static addresses; other interfaces must not overlap.
+
+    Route tables are system-wide on every platform, so the chosen adapter's connected
+    routes may also appear under this computer's other adapters; a genuine in-subnet
+    address on another interface always blocks reuse.
+    """
+    reusable = reusable_addresses(chosen, subnet)
+    implied = _implied_routes(subnet, reusable)
+    for inventory in (chosen, *(others or [])):
+        for value in inventory.get('addresses', []):
+            observed = ipaddress.IPv4Interface(value)
+            if observed.network.overlaps(subnet) and (inventory is not chosen or str(observed.ip) not in reusable):
+                return False
+        for value in inventory.get('routes', []):
+            route = ipaddress.IPv4Network(value)
+            if route.prefixlen and route.overlaps(subnet) and route not in implied:
+                return False
     return True
 
 
-def acceptable(inventories: list[dict], subnet: ipaddress.IPv4Network, count: int, *, strict: list[dict] | None = None) -> bool:
-    """Chosen adapters may reuse their exact static addresses; other visible adapters must never overlap."""
-    return count <= subnet.num_addresses - 2 and all(_accepts(inventory, subnet) for inventory in inventories) and all(_accepts(inventory, subnet, strict=True) for inventory in strict or [])
+def acceptable(nodes: list[tuple[dict, list[dict]]], subnet: ipaddress.IPv4Network, count: int) -> bool:
+    """Every selected computer accepts the subnet and it holds the requested participants."""
+    return count <= subnet.num_addresses - 2 and all(node_acceptable(chosen, subnet, others) for chosen, others in nodes)
 
 
-def propose(inventories: list[dict], count: int, *, strict: list[dict] | None = None) -> list[str]:
+def propose(nodes: list[tuple[dict, list[dict]]], count: int) -> list[str]:
+    """Acceptable candidates in preference order; each node is (chosen adapter, other adapters)."""
     result = []
     for candidate in CANDIDATES:
         subnet = ipaddress.IPv4Network(candidate)
-        if acceptable(inventories, subnet, count, strict=strict):
+        if acceptable(nodes, subnet, count):
             result.append(candidate)
     return result
 

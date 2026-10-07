@@ -276,7 +276,7 @@ class GuidedSetup:
         if request.assessment_revision != assessment["assessment_revision"]:
             raise PlatformRefusal("STALE_REVISION", MESSAGES["STALE_REVISION"])
         computers = {c["node_id"]: c for c in assessment["computers"]}
-        selections, chosen, others = [], [], []
+        selections, groups = [], []
         for node_id in request.nodes:
             computer = computers.get(node_id)
             if computer is None:
@@ -307,12 +307,11 @@ class GuidedSetup:
                     inventory_revision=adapter["inventory_revision"],
                 )
             )
-            chosen.append(adapter)
-            others.extend(a for a in computer["adapters"] if a is not adapter)
+            groups.append((adapter, [a for a in computer["adapters"] if a is not adapter]))
         if request.action == "start":
-            proposals = propose(chosen, len(request.nodes), strict=others)
+            proposals = propose(groups, len(request.nodes))
             subnet = request.subnet or (proposals[0] if proposals else None)
-            if subnet is None or not acceptable(chosen, ipaddress.IPv4Network(subnet), len(request.nodes), strict=others):
+            if subnet is None or not acceptable(groups, ipaddress.IPv4Network(subnet), len(request.nodes)):
                 raise PlatformRefusal("SUBNET_CONFLICT", MESSAGES["SUBNET_CONFLICT"])
             if request.network_id is not None:
                 raise PlatformRefusal(

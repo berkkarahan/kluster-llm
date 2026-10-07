@@ -96,6 +96,20 @@ def test_status_then_live_status_counts_hardware_discovery(client, native_invent
     assert native_inventory_counts == {"list_gpus": 0, "binary_capabilities": 1}
 
 
+def test_status_exposes_feature_flags(client):
+    c, agent, _ = client
+    from kllm import config as kllm_config
+
+    body = c.get("/v1/status").json()
+    assert body["feature_flags"] == {"private-network-setup": False}
+    assert agent._live_status()["feature_flags"] == {"private-network-setup": False}
+
+    assert kllm_config.set_feature_flag("private-network-setup", True) is True
+    body = c.get("/v1/status").json()
+    assert body["feature_flags"] == {"private-network-setup": True}
+    assert agent._live_status()["feature_flags"] == {"private-network-setup": True}
+
+
 def test_list_models_empty(client):
     c, _, _ = client
     r = c.get("/v1/models")

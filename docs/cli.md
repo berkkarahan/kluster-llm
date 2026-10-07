@@ -34,6 +34,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm config [--split-mode layer\|row\|tensor]` | Show local system settings or set the persistent split-mode default |
+| `kllm flags [<name>] [--enable\|--disable]` | Show or change local dashboard feature flags. `private-network-setup` gates the Home → Private 10GbE network panel (disabled by default); omit `<name>` to list all flags |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
@@ -314,7 +315,7 @@ kllm cluster update
 
 ### App-managed dedicated Ethernet
 
-Home → Private 10GbE network guides setup from the master. First install/update Kluster and join the intended cluster on every computer. Connect a dedicated Ethernet adapter with a negotiated link of at least 10 Gbps, keeping ordinary cluster management on a separate adapter.
+Home → Private 10GbE network guides setup from the master. The panel is hidden by default; show it with `kllm flags private-network-setup --enable` (hide it again with `--disable`). First install/update Kluster and join the intended cluster on every computer. Connect a dedicated Ethernet adapter with a negotiated link of at least 10 Gbps, keeping ordinary cluster management on a separate adapter.
 
 The panel explains administrator access before requesting permission. On each computer, acknowledge that notice and click **Enable administrator access on this computer**. Approve the operating system prompt once. Kluster installs a protected networking helper; the agent and its credentials stay under your original account. The master can then handle the dedicated adapter settings for all authorized computers.
 

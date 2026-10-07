@@ -44,6 +44,10 @@ from kllm.commands.configuration import (
     config_cmd as config_cmd,
     register as register_configuration_commands,
 )
+from kllm.commands.flags import (
+    flags_cmd as flags_cmd,
+    register as register_flags_commands,
+)
 from kllm.commands.misc import (
     connect_cmd as connect_cmd,
     register as register_misc_commands,
@@ -63,6 +67,7 @@ app.add_typer(model_app, name="model")
 app.add_typer(cluster_app, name="cluster")
 register_cluster_commands(app, cluster_app)
 register_configuration_commands(app)
+register_flags_commands(app)
 register_inference_commands(app)
 register_misc_commands(app)
 register_model_commands(model_app)

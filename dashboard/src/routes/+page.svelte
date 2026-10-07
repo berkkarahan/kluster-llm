@@ -331,7 +331,7 @@
     <p class="notice">Waiting for measured nodes…</p>
   {/if}
 
-  {#if appStore.status?.managed_networks !== undefined && !idle}
+  {#if appStore.status?.feature_flags?.['private-network-setup'] && !idle}
     <ManagedNetwork />
   {/if}
 

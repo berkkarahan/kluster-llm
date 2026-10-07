@@ -1129,6 +1129,7 @@ def _dashboard_status_service() -> DashboardStatusService:
         software_identity=cluster_update.software_identity,
         default_device=kllm_config.DEFAULT_DEVICE,
         managed_networks=_managed_network_summaries,
+        feature_flags=kllm_config.feature_flags,
         rpc_lifecycle=_rpc_lifecycle_status,
         runtimes=_runtime_status,
     )

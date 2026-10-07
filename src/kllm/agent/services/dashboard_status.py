@@ -30,6 +30,7 @@ class DashboardStatusService:
         software_identity: Callable[[], dict[str, Any]],
         default_device: str,
         managed_networks: Callable[[], list[dict[str, Any]]] | None = None,
+        feature_flags: Callable[[], dict[str, bool]] | None = None,
         rpc_lifecycle: Callable[[], dict[str, Any]] | None = None,
         runtimes: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
@@ -44,6 +45,7 @@ class DashboardStatusService:
         self._software_identity = software_identity
         self._default_device = default_device
         self._managed_networks = managed_networks
+        self._feature_flags = feature_flags
         self._rpc_lifecycle = rpc_lifecycle
         self._runtimes = runtimes
 
@@ -78,6 +80,7 @@ class DashboardStatusService:
             **self._common_state_fields(state),
             **({"rpc_lifecycle": self._rpc_lifecycle()} if self._rpc_lifecycle else {}),
             **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
+            **({"feature_flags": self._feature_flags()} if self._feature_flags else {}),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
             "device": config.get("device", self._default_device),
@@ -129,6 +132,7 @@ class DashboardStatusService:
             **self._common_state_fields(state),
             **({"rpc_lifecycle": self._rpc_lifecycle()} if self._rpc_lifecycle else {}),
             **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
+            **({"feature_flags": self._feature_flags()} if self._feature_flags else {}),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
             "device": config.get("device", self._default_device),

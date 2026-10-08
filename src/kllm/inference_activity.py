@@ -7,7 +7,9 @@ from typing import Any
 import httpx
 
 
-def _fetch_slots(client: httpx.Client, base: str, server_ready: bool, *, timeout: float | None) -> tuple[bool, Any]:
+def _fetch_slots(
+    client: httpx.Client, base: str, server_ready: bool, *, timeout: float | None
+) -> tuple[bool, Any]:
     def get(path: str) -> httpx.Response:
         if timeout is None:
             return client.get(f"{base}{path}")
@@ -64,7 +66,9 @@ def sample(
     try:
         if client is None:
             with httpx.Client(timeout=0.35, trust_env=False) as owned_client:
-                server_ready, slots_raw = _fetch_slots(owned_client, base, server_ready, timeout=None)
+                server_ready, slots_raw = _fetch_slots(
+                    owned_client, base, server_ready, timeout=None
+                )
         else:
             server_ready, slots_raw = _fetch_slots(client, base, server_ready, timeout=0.35)
         if slots_raw is None:
@@ -74,10 +78,16 @@ def sample(
             **idle(),
             "phase": "ready" if server_ready else "starting",
             "server_ready": server_ready,
-            "detail": "slots endpoint unavailable" if server_ready else "waiting for inference server",
+            "detail": "slots endpoint unavailable"
+            if server_ready
+            else "waiting for inference server",
         }
 
-    slots = [slot for slot in slots_raw if isinstance(slot, dict)] if isinstance(slots_raw, list) else []
+    slots = (
+        [slot for slot in slots_raw if isinstance(slot, dict)]
+        if isinstance(slots_raw, list)
+        else []
+    )
     busy = [slot for slot in slots if slot.get("is_processing")]
     prompt_total = sum(int(slot.get("n_prompt_tokens") or 0) for slot in busy)
     prompt_done = sum(int(slot.get("n_prompt_tokens_processed") or 0) for slot in busy)

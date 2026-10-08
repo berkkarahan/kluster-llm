@@ -6,6 +6,7 @@ the re-assert bootstrap must adopt the current identity instead of looping on
 a refusal. A changed signing key remains an identity swap that requires
 explicit local re-pairing.
 """
+
 from __future__ import annotations
 
 import asyncio

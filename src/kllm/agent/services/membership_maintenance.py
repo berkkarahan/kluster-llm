@@ -109,8 +109,7 @@ class MembershipMaintenance:
                         continue
                     current.save()
                     if any(
-                        pending[(id(state), node_id)][0]
-                        and node_id not in current.members
+                        pending[(id(state), node_id)][0] and node_id not in current.members
                         for node_id in removed
                     ):
                         self._shrink_cluster(current)

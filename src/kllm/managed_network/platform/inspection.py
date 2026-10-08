@@ -1,4 +1,5 @@
 """Shared read-only adapter inspection used by the manual CLI and managed policy."""
+
 from __future__ import annotations
 import ipaddress
 import json
@@ -9,8 +10,10 @@ from typing import Sequence
 
 INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 
+
 class NetworkError(Exception):
     """Bounded platform operation failure."""
+
 
 @dataclass(frozen=True)
 class InterfaceState:
@@ -22,6 +25,7 @@ class InterfaceState:
     routes: tuple[ipaddress.IPv4Network, ...]
     physical_ethernet: bool = True
     default_route: bool = False
+
 
 def parse_speed_mbps(value: str | int | None) -> int | None:
     if value is None:
@@ -48,11 +52,11 @@ def _v4_routes(values: Sequence[str]) -> tuple[ipaddress.IPv4Network, ...]:
         try:
             # BSD netstat abbreviates connected networks (e.g. 192.168.68).
             if re.fullmatch(r"\d+(?:\.\d+){0,3}(?:/\d+)?", value):
-                address, _, prefix = value.partition('/')
-                parts = address.split('.')
+                address, _, prefix = value.partition("/")
+                parts = address.split(".")
                 if len(parts) < 4:
                     prefix = prefix or str(len(parts) * 8)
-                    value = '.'.join(parts + ['0'] * (4-len(parts))) + '/' + prefix
+                    value = ".".join(parts + ["0"] * (4 - len(parts))) + "/" + prefix
             route = ipaddress.ip_network(value, strict=False)
         except ValueError:
             continue
@@ -83,11 +87,18 @@ $routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorActi
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise NetworkError(f"could not read Windows adapter state: {exc}") from exc
     description = data.get("Description", "")
-    physical = data.get("Hardware", False) and not re.search(r"wi-?fi|wireless|802\.11", description, re.I)
+    physical = data.get("Hardware", False) and not re.search(
+        r"wi-?fi|wireless|802\.11", description, re.I
+    )
     return InterfaceState(
-        data.get("Name", interface), data.get("Status") == "Up",
-        parse_speed_mbps(data.get("LinkSpeed")), data.get("Dhcp"), addresses,
-        routes, bool(physical), bool(data.get("Default", False)),
+        data.get("Name", interface),
+        data.get("Status") == "Up",
+        parse_speed_mbps(data.get("LinkSpeed")),
+        data.get("Dhcp"),
+        addresses,
+        routes,
+        bool(physical),
+        bool(data.get("Default", False)),
     )
 
 
@@ -124,7 +135,9 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
     active = re.search(r"^Active:\s*(.+)$", media, re.MULTILINE | re.IGNORECASE)
     addresses = []
     for line in output.splitlines():
-        match = re.search(r"\binet\s+(\d+(?:\.\d+){3})\s+netmask\s+(0x[0-9a-f]+|\d+(?:\.\d+){3})", line)
+        match = re.search(
+            r"\binet\s+(\d+(?:\.\d+){3})\s+netmask\s+(0x[0-9a-f]+|\d+(?:\.\d+){3})", line
+        )
         if match:
             mask = match.group(2)
             if mask.startswith("0x"):
@@ -132,7 +145,13 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
             addresses.append(ipaddress.IPv4Interface(f"{match.group(1)}/{mask}"))
     routes_out = run(["netstat", "-rn", "-f", "inet"])
     routes = _v4_routes(_macos_route_destinations(routes_out))
-    dhcp = True if "DHCP Configuration" in info or "BOOTP Configuration" in info else False if "Manual Configuration" in info or "off" in info.lower() else None
+    dhcp = (
+        True
+        if "DHCP Configuration" in info or "BOOTP Configuration" in info
+        else False
+        if "Manual Configuration" in info or "off" in info.lower()
+        else None
+    )
     return InterfaceState(
         interface,
         bool(re.search(r"^\s*status:\s*active$", output, re.MULTILINE | re.IGNORECASE)),
@@ -141,7 +160,11 @@ def _inspect_macos(interface: str, run) -> InterfaceState:
         tuple(addresses),
         routes,
         not re.search(r"wi-?fi|wireless|airport|thunderbolt bridge", hardware, re.I),
-        any(parts[0] in {"default", "0.0.0.0/0"} and interface in parts for line in routes_out.splitlines() if (parts := line.split())),
+        any(
+            parts[0] in {"default", "0.0.0.0/0"} and interface in parts
+            for line in routes_out.splitlines()
+            if (parts := line.split())
+        ),
     )
 
 
@@ -151,7 +174,11 @@ def _linux_dhcp(interface: str, run, which) -> bool | None:
         try:
             connection = run([nmcli, "-g", "GENERAL.CON-UUID", "device", "show", interface]).strip()
             if re.fullmatch(r"[0-9a-fA-F-]{36}", connection):
-                method = run([nmcli, "-g", "ipv4.method", "connection", "show", "uuid", connection]).strip().lower()
+                method = (
+                    run([nmcli, "-g", "ipv4.method", "connection", "show", "uuid", connection])
+                    .strip()
+                    .lower()
+                )
                 if method in {"auto", "dhcp"}:
                     return True
                 if method in {"manual", "disabled", "link-local"}:
@@ -166,21 +193,21 @@ def _linux_dhcp(interface: str, run, which) -> bool | None:
         if match:
             return match.group(1).lower() == "yes"
         try:
-            configuration = run([networkctl, 'cat', '--no-pager', interface])
+            configuration = run([networkctl, "cat", "--no-pager", interface])
         except NetworkError:
             return None
-        section, method = '', 'no'
+        section, method = "", "no"
         for line in configuration.splitlines():
             line = line.strip()
-            if line.startswith('['):
+            if line.startswith("["):
                 section = line
-            if section == '[Network]' and '=' in line:
-                key, value = line.split('=', 1)
-                if key.strip() == 'DHCP':
+            if section == "[Network]" and "=" in line:
+                key, value = line.split("=", 1)
+                if key.strip() == "DHCP":
                     method = value.strip().lower()
-        if method in {'yes', 'true', 'ipv4'}:
+        if method in {"yes", "true", "ipv4"}:
             return True
-        if method in {'no', 'false', 'ipv6'}:
+        if method in {"no", "false", "ipv6"}:
             return False
     return None
 

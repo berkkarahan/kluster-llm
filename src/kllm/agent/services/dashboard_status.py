@@ -62,8 +62,8 @@ class DashboardStatusService:
         activity = self._inference_activity()
         return {
             "role": state.role,
-            **({'runtimes': self._runtimes()} if self._runtimes else {}),
-            **({'network_directory': self._network_directory()} if self._network_directory else {}),
+            **({"runtimes": self._runtimes()} if self._runtimes else {}),
+            **({"network_directory": self._network_directory()} if self._network_directory else {}),
             "node_id": state.node_id,
             "join_key": state.join_key if state.role == "master" else None,
             "master_host": state.master_host,
@@ -112,8 +112,8 @@ class DashboardStatusService:
         capacity = {key: member[key] for key in capacity_fields if key in member}
         activity = self._inference_activity()
         return {
-            **({'runtimes': self._runtimes()} if self._runtimes else {}),
-            **({'network_directory': self._network_directory()} if self._network_directory else {}),
+            **({"runtimes": self._runtimes()} if self._runtimes else {}),
+            **({"network_directory": self._network_directory()} if self._network_directory else {}),
             "role": state.role,
             "node_id": state.node_id,
             "join_key": state.join_key if state.role == "master" else None,
@@ -151,8 +151,11 @@ class DashboardStatusService:
     @staticmethod
     def _common_state_fields(state: ClusterState) -> StatusPayload:
         return {
-            "active_config": state.active_config if state.process_pid and state.process_role == "master"
-                and (state.active_config or {}).get("process_pid") == state.process_pid else None,
+            "active_config": state.active_config
+            if state.process_pid
+            and state.process_role == "master"
+            and (state.active_config or {}).get("process_pid") == state.process_pid
+            else None,
             "logging": logging_overview(state),
             "control_port": state.control_port,
             "rpc_port": state.rpc_port,

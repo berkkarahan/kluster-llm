@@ -104,7 +104,9 @@ def test_windows_vulkan_provisions_sdk_via_winget(tmp_path, install, monkeypatch
     monkeypatch.setattr(install, "_is_windows", lambda: True)
     monkeypatch.setattr(install, "_VULKAN_SDK_WINDOWS_ROOT", tmp_path / "VulkanSDK")
     monkeypatch.delenv("VULKAN_SDK", raising=False)
-    monkeypatch.setattr(install, "_which", lambda cmd: r"C:\fake\winget.exe" if cmd == "winget" else None)
+    monkeypatch.setattr(
+        install, "_which", lambda cmd: r"C:\fake\winget.exe" if cmd == "winget" else None
+    )
     root = tmp_path / "VulkanSDK" / "1.4.363.0"
     commands = []
 
@@ -662,7 +664,9 @@ def test_https_fallback_is_not_latched_from_cache(install, tmp_path, monkeypatch
     monkeypatch.setattr(install, "clone_or_update_llama", lambda tag=None: None)
     monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
     monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal", "vulkan"])
-    monkeypatch.setattr(install, "_find_build_tree_binary", lambda name: build / "bin" / "llama-server")
+    monkeypatch.setattr(
+        install, "_find_build_tree_binary", lambda name: build / "bin" / "llama-server"
+    )
 
     calls: list[list[str]] = []
 
@@ -783,9 +787,7 @@ def test_install_llama_gates_on_runtime_binary_backends(install, tmp_path, monke
     staged.write_bytes(b"x")
     monkeypatch.setattr(install, "_resolve_runtime_binary", lambda name: staged)
     monkeypatch.setattr(install, "_probe_llama_backends", lambda binary: ["metal"])
-    monkeypatch.setattr(
-        install, "build_llama_from_source", lambda backend, tag=None: (True, "on")
-    )
+    monkeypatch.setattr(install, "build_llama_from_source", lambda backend, tag=None: (True, "on"))
 
     with pytest.raises(SystemExit, match="macOS must provide Metal and Vulkan"):
         install.install_llama("metal", prefer_prebuilt=False, force=True)
@@ -884,7 +886,9 @@ def test_main_sync_runs_stages_in_order_without_process_pool(
     assert "Install complete." not in output.out
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows refuses to delete a running executable")
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows refuses to delete a running executable"
+)
 def test_park_windows_launchers_renames_running_exe(install, tmp_path):
     """A running launcher can be renamed aside so the original path is reusable."""
     scripts = tmp_path / "Scripts"
@@ -971,9 +975,7 @@ def test_busy_windows_launcher_is_omitted_from_reinstall(install, tmp_path):
 def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(install, "BIN_DIR", tmp_path)
     monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
-    install.write_install_stamp(
-        tag="v0.5.0", backend="metal+vulkan", asset="source", https="off"
-    )
+    install.write_install_stamp(tag="v0.5.0", backend="metal+vulkan", asset="source", https="off")
     llama = tmp_path / "llama-server"
     rpc = tmp_path / "rpc-server"
     llama.write_bytes(b"x")
@@ -1082,10 +1084,13 @@ def test_pick_release_asset_macos_cpu_rejects_metal_pack(install, monkeypatch):
     picked = install.pick_release_asset(assets, "cpu")
     assert picked is not None
     assert "cpu" in picked["name"]
-    assert install.pick_release_asset(
-        [{"name": "llama-b100-bin-macos-arm64.tar.gz", "browser_download_url": "u1"}],
-        "cpu",
-    ) is None
+    assert (
+        install.pick_release_asset(
+            [{"name": "llama-b100-bin-macos-arm64.tar.gz", "browser_download_url": "u1"}],
+            "cpu",
+        )
+        is None
+    )
 
 
 def test_stamp_backend_helpers(install, monkeypatch):

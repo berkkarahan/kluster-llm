@@ -34,15 +34,20 @@ def test_listeners_run_in_subscription_order_until_one_fails():
 def test_unsubscribe_and_isolated_failures_do_not_stop_later_listeners():
     bus = LifecycleBus()
     calls: list[str] = []
+
     def fail(_notice: LifecycleNotice) -> None:
         raise RuntimeError("observer failed")
 
-    remove_first = bus.subscribe(LifecycleEvent.REQUEST_RECEIVED, lambda _notice: calls.append("first"))
+    remove_first = bus.subscribe(
+        LifecycleEvent.REQUEST_RECEIVED, lambda _notice: calls.append("first")
+    )
     bus.subscribe(LifecycleEvent.REQUEST_RECEIVED, fail)
     bus.subscribe(LifecycleEvent.REQUEST_RECEIVED, lambda _notice: calls.append("third"))
     remove_first()
 
-    bus.publish(LifecycleNotice(LifecycleEvent.REQUEST_RECEIVED, "/v1/chat/completions"), isolate=True)
+    bus.publish(
+        LifecycleNotice(LifecycleEvent.REQUEST_RECEIVED, "/v1/chat/completions"), isolate=True
+    )
 
     assert calls == ["third"]
 

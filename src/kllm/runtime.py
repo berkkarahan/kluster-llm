@@ -32,7 +32,9 @@ class RuntimeInfo:
             "agent_pid": self.agent_pid,
             "control_port": self.control_port,
             "agent_log_sink_pid": self.agent_log_sink_pid,
-            "children": [{k: v for k, v in asdict(c).items() if v is not None} for c in self.children],
+            "children": [
+                {k: v for k, v in asdict(c).items() if v is not None} for c in self.children
+            ],
         }
 
     @classmethod
@@ -45,15 +47,27 @@ class RuntimeInfo:
             pid = row.get("pid")
             kind = row.get("kind") or "child"
             if isinstance(pid, int) and pid > 0:
-                children.append(ChildProc(pid=pid, kind=str(kind),
-                                          start_token=row.get("start_token"), started_at=row.get("started_at"), log_sink_pid=row.get("log_sink_pid")))
+                children.append(
+                    ChildProc(
+                        pid=pid,
+                        kind=str(kind),
+                        start_token=row.get("start_token"),
+                        started_at=row.get("started_at"),
+                        log_sink_pid=row.get("log_sink_pid"),
+                    )
+                )
         agent_pid = data.get("agent_pid")
         if not isinstance(agent_pid, int) or agent_pid <= 0:
             agent_pid = None
         port = data.get("control_port", DEFAULT_CONTROL_PORT)
         if not isinstance(port, int):
             port = DEFAULT_CONTROL_PORT
-        return cls(agent_pid=agent_pid, control_port=port, children=children, agent_log_sink_pid=data.get("agent_log_sink_pid"))
+        return cls(
+            agent_pid=agent_pid,
+            control_port=port,
+            children=children,
+            agent_log_sink_pid=data.get("agent_log_sink_pid"),
+        )
 
 
 def load() -> RuntimeInfo:
@@ -98,7 +112,9 @@ def clear_agent_if_matches(pid: int) -> bool:
     return True
 
 
-def register_agent(pid: int, control_port: int = DEFAULT_CONTROL_PORT, log_sink_pid: int | None = None) -> None:
+def register_agent(
+    pid: int, control_port: int = DEFAULT_CONTROL_PORT, log_sink_pid: int | None = None
+) -> None:
     info = load()
     if info.agent_pid != pid or log_sink_pid is not None:
         info.agent_log_sink_pid = log_sink_pid
@@ -111,8 +127,15 @@ def register_child(pid: int, kind: str) -> None:
     info = load()
     # Local node runs at most one llama/rpc child at a time.
     identity = native.registered_process_identity(pid) or {}
-    info.children = [ChildProc(pid=pid, kind=kind, start_token=identity.get("start_token"),
-                               started_at=identity.get("started_at"), log_sink_pid=identity.get("log_sink_pid"))]
+    info.children = [
+        ChildProc(
+            pid=pid,
+            kind=kind,
+            start_token=identity.get("start_token"),
+            started_at=identity.get("started_at"),
+            log_sink_pid=identity.get("log_sink_pid"),
+        )
+    ]
     save(info)
 
 
@@ -128,7 +151,9 @@ def adopt_child_identity(pid: int | None, expected_started_at: str | None) -> bo
         token, started = native.require_native()._process_identity(pid)
     except (RuntimeError, ValueError, OSError):
         return False
-    if started != expected_started_at or (child.start_token is not None and child.start_token != token):
+    if started != expected_started_at or (
+        child.start_token is not None and child.start_token != token
+    ):
         return False
     child.start_token, child.started_at = token, started
     save(info)

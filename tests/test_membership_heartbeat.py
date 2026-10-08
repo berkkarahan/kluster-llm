@@ -13,7 +13,10 @@ from kllm.state import ClusterState
 def _worker(tmp_path, monkeypatch) -> ClusterState:
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     state = ClusterState(
-        role="worker", node_id="worker", master_host="10.0.0.1", join_key="test",
+        role="worker",
+        node_id="worker",
+        master_host="10.0.0.1",
+        join_key="test",
     )
     state.save = lambda: None  # type: ignore[method-assign]
     return state
@@ -39,7 +42,9 @@ def _service(state_box: dict, client):
 
 def test_one_missed_heartbeat_does_not_mark_the_master_down(tmp_path, monkeypatch):
     state = _worker(tmp_path, monkeypatch)
-    client = SimpleNamespace(post=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("timed out")))
+    client = SimpleNamespace(
+        post=lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("timed out"))
+    )
     service, marks, clears = _service({"state": state}, client)
 
     service.post_heartbeat()
@@ -74,7 +79,9 @@ def test_replaced_cluster_state_starts_a_new_failure_streak(tmp_path, monkeypatc
     first = _worker(tmp_path, monkeypatch)
     second = _worker(tmp_path, monkeypatch)
     box = {"state": first}
-    client = SimpleNamespace(post=lambda *_args, **_kwargs: (_ for _ in ()).throw(HTTPException(503)))
+    client = SimpleNamespace(
+        post=lambda *_args, **_kwargs: (_ for _ in ()).throw(HTTPException(503))
+    )
     service, marks, _clears = _service(box, client)
 
     service.post_heartbeat()

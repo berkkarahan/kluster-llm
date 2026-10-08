@@ -1,4 +1,5 @@
 """Measure uncached live-log result preparation with a deterministic synthetic batch."""
+
 from __future__ import annotations
 
 import argparse
@@ -20,14 +21,17 @@ BUDGET = 256 * 1024
 
 
 def measure(rows: list[dict]) -> tuple[float, dict]:
-    feed = LiveFeed({}, lambda _after: {
-        "lines": rows,
-        "cursor": "00000000-0000-4000-8000-000000000001:500",
-        "reset": None,
-        "gap": False,
-        "gap_reason": None,
-        "source": "cluster",
-    })
+    feed = LiveFeed(
+        {},
+        lambda _after: {
+            "lines": rows,
+            "cursor": "00000000-0000-4000-8000-000000000001:500",
+            "reset": None,
+            "gap": False,
+            "gap_reason": None,
+            "source": "cluster",
+        },
+    )
     try:
         began = time.perf_counter()
         result = feed._log_result(None, None)
@@ -35,7 +39,7 @@ def measure(rows: list[dict]) -> tuple[float, dict]:
         snapshot = result["snapshot"]
         assert result["availability"] == "available"
         assert len(_encoded(result)) <= BUDGET
-        assert snapshot["lines"] == rows[-len(snapshot["lines"]):]
+        assert snapshot["lines"] == rows[-len(snapshot["lines"]) :]
         assert snapshot["gap"] and snapshot["gap_reason"] == "batch_limit"
         return elapsed, result
     finally:
@@ -66,12 +70,20 @@ def main() -> int:
             retained = len(result["snapshot"]["lines"])
             result_bytes = len(_encoded(result))
         batch_medians.append(statistics.median(current))
-        print(json.dumps({"batch": batch + 1, "median_seconds": batch_medians[-1],
-                          "samples": current}), flush=True)
+        print(
+            json.dumps(
+                {"batch": batch + 1, "median_seconds": batch_medians[-1], "samples": current}
+            ),
+            flush=True,
+        )
     ordered = sorted(samples)
     summary = {
-        "workload": {"events": len(rows), "message_chars": 1024, "batches": args.batches,
-                     "calls_per_batch": args.per_batch},
+        "workload": {
+            "events": len(rows),
+            "message_chars": 1024,
+            "batches": args.batches,
+            "calls_per_batch": args.per_batch,
+        },
         "median_seconds": statistics.median(samples),
         "p95_seconds": ordered[math.ceil(0.95 * len(ordered)) - 1],
         "batch_medians_seconds": batch_medians,

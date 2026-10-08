@@ -214,12 +214,12 @@ def test_join_uses_proxy_base(client, monkeypatch):
     monkeypatch.setattr(
         agent,
         "_resolve_gpu_selection",
-        lambda gpu_ids, listed=None: ResolvedGpuSelection(
-            GpuSelection((), "cpu", 0), ()
-        ),
+        lambda gpu_ids, listed=None: ResolvedGpuSelection(GpuSelection((), "cpu", 0), ()),
     )
     monkeypatch.setattr(agent.netsec, "ensure_rpc_firewall", lambda *a, **k: {})
-    monkeypatch.setattr(agent.netsec, "pick_rpc_bind_host", lambda preferred, toward=None: "10.0.0.2")
+    monkeypatch.setattr(
+        agent.netsec, "pick_rpc_bind_host", lambda preferred, toward=None: "10.0.0.2"
+    )
     monkeypatch.setattr(agent.native, "start_worker", lambda **kw: {"pid": None})
 
     try:

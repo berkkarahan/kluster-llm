@@ -126,9 +126,7 @@ class ClusterJoinService:
         rpc_bind_host = self._correct_rpc_bind(overlay, body, registration, lan_host, state)
         if overlay == netsec.OVERLAY_WIREGUARD:
             try:
-                rpc_bind_host = self._deps.worker_bring_up_wireguard(
-                    body.key, registration
-                )
+                rpc_bind_host = self._deps.worker_bring_up_wireguard(body.key, registration)
             except Exception as exc:
                 raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
 
@@ -153,7 +151,7 @@ class ClusterJoinService:
         local["rpc_capabilities"] = worker_rpc_devices(gpu.devices, backend)
         local["rpc_devices"] = []
         local["rpc_control_version"] = 1
-        local['runtime_management_version'] = 1
+        local["runtime_management_version"] = 1
         local["rpc_status"] = "idle"
         local.pop("rpc_owner", None)
         state.save()

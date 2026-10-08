@@ -13,14 +13,23 @@ class ContiguousAllocation:
     allocations: tuple[DeviceAllocation, ...]
 
 
-def allocation_rank(solution: ContiguousAllocation, costs: Sequence[int], node_priority: Sequence[str] = (), master_node_id: str = "") -> tuple[int, tuple[int, ...], int, float, int]:
+def allocation_rank(
+    solution: ContiguousAllocation,
+    costs: Sequence[int],
+    node_priority: Sequence[str] = (),
+    master_node_id: str = "",
+) -> tuple[int, tuple[int, ...], int, float, int]:
     """Minimize CPU use, maximize ordered node workloads, then favor locality and score."""
     allocations = solution.allocations
     return (
         solution.cpu_bytes + sum(a.estimated_bytes for a in allocations if a.memory_kind == "ram"),
-        tuple(-(sum(costs[:solution.cpu_layers]) if nid == master_node_id else 0) - sum(sum(costs[a.layer_start:a.layer_end]) for a in allocations if a.node_id == nid) for nid in node_priority),
+        tuple(
+            -(sum(costs[: solution.cpu_layers]) if nid == master_node_id else 0)
+            - sum(sum(costs[a.layer_start : a.layer_end]) for a in allocations if a.node_id == nid)
+            for nid in node_priority
+        ),
         len({a.rpc_endpoint for a in allocations if a.rpc_endpoint}),
-        -sum(a.score * sum(costs[a.layer_start:a.layer_end]) for a in allocations),
+        -sum(a.score * sum(costs[a.layer_start : a.layer_end]) for a in allocations),
         len(allocations),
     )
 
@@ -79,7 +88,9 @@ def allocate_contiguous(
         # Different required-node coverage, RPC endpoint sets and shared-pool use
         # must survive at the same layer boundary. A boundary alone is not a state.
         states: dict[tuple[int, int, frozenset[str]], list[_State]] = {
-            (cpu_count, covered, frozenset()): [_State((), initial_used, priority_bytes=tuple(0 for _ in node_priority))]
+            (cpu_count, covered, frozenset()): [
+                _State((), initial_used, priority_bytes=tuple(0 for _ in node_priority))
+            ]
         }
         for index, d in enumerate(devices):
             next_states = {key: list(value) for key, value in states.items()}
@@ -96,24 +107,64 @@ def allocate_contiguous(
                         shared = list(state.shared_used)
                         if pool is not None:
                             shared[pool] += used
-                        allocation = d.allocate(layer_start=start, layer_end=end, estimated_bytes=used, total_layers=count)
+                        allocation = d.allocate(
+                            layer_start=start,
+                            layer_end=end,
+                            estimated_bytes=used,
+                            total_layers=count,
+                        )
                         candidate = _State(
-                            state.allocations + (allocation,), tuple(shared),
+                            state.allocations + (allocation,),
+                            tuple(shared),
                             state.cpu_bytes + (used if d.memory_kind == "ram" else 0),
                             state.score + d.score * (prefix[end] - prefix[start]),
-                            tuple(value - (prefix[end] - prefix[start] if nid == d.node_id else 0) for nid, value in zip(node_priority, state.priority_bytes, strict=True)),
+                            tuple(
+                                value - (prefix[end] - prefix[start] if nid == d.node_id else 0)
+                                for nid, value in zip(
+                                    node_priority, state.priority_bytes, strict=True
+                                )
+                            ),
                         )
-                        new_mask = mask | (required_bits.get(d.node_id, 0) if start < count - 1 else 0)
-                        new_endpoints = endpoints | {d.rpc_endpoint} if d.rpc_endpoint else endpoints
+                        new_mask = mask | (
+                            required_bits.get(d.node_id, 0) if start < count - 1 else 0
+                        )
+                        new_endpoints = (
+                            endpoints | {d.rpc_endpoint} if d.rpc_endpoint else endpoints
+                        )
                         key = (end, new_mask, frozenset(new_endpoints))
                         bucket = next_states.setdefault(key, [])
-                        if any(other.rank <= candidate.rank and all(a <= b for a, b in zip(other.shared_used, candidate.shared_used, strict=True)) for other in bucket):
+                        if any(
+                            other.rank <= candidate.rank
+                            and all(
+                                a <= b
+                                for a, b in zip(
+                                    other.shared_used, candidate.shared_used, strict=True
+                                )
+                            )
+                            for other in bucket
+                        ):
                             continue
-                        bucket[:] = [other for other in bucket if not (candidate.rank <= other.rank and all(a <= b for a, b in zip(candidate.shared_used, other.shared_used, strict=True)))]
+                        bucket[:] = [
+                            other
+                            for other in bucket
+                            if not (
+                                candidate.rank <= other.rank
+                                and all(
+                                    a <= b
+                                    for a, b in zip(
+                                        candidate.shared_used, other.shared_used, strict=True
+                                    )
+                                )
+                            )
+                        ]
                         bucket.append(candidate)
             states = {
-                key: value for key, value in next_states.items()
-                if all(key[1] & bit or last_device.get(nid, -1) > index for nid, bit in required_bits.items())
+                key: value
+                for key, value in next_states.items()
+                if all(
+                    key[1] & bit or last_device.get(nid, -1) > index
+                    for nid, bit in required_bits.items()
+                )
             }
         for (end, mask, _), alternatives in states.items():
             if end != count or mask != full_mask:

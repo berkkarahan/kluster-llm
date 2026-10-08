@@ -62,7 +62,9 @@ class LoggingAcknowledgement(BaseModel):
 class RegisterBody(BaseModel):
     node_id: str
     host: str
-    hostname: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    hostname: str | None = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
     control_port: int = DEFAULT_CONTROL_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     total_ram_bytes: int = 0
@@ -79,7 +81,9 @@ class RegisterBody(BaseModel):
     rpc_control_version: int = Field(default=0, ge=0, le=1)
     runtime_management_version: int = Field(default=0, ge=0, le=1)
     runtime: dict[str, Any] = Field(default_factory=dict)
-    rpc_status: Literal["idle", "starting", "serving", "recovering", "failed", "cleanup_pending"] = "idle"
+    rpc_status: Literal[
+        "idle", "starting", "serving", "recovering", "failed", "cleanup_pending"
+    ] = "idle"
     rpc_error: str | None = Field(default=None, max_length=512)
 
     unified_memory: bool = False
@@ -104,6 +108,7 @@ class RegisterBody(BaseModel):
     def validate_rpc_devices(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
         RpcDeviceInput.parse_inventory(value)
         return value
+
 
 class LoggingBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -185,6 +190,7 @@ class ModelSettingsBody(BaseModel):
 
 class LegacyModelSettingsBody(ModelSettingsBody):
     model_config = ConfigDict(extra="ignore")
+
 
 # Additive managed-network schemas retain their strict feature contracts.
 ManagedNetworkAdapterSelection = network_allocation.AdapterSelection

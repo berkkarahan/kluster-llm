@@ -494,9 +494,9 @@ def test_worker_detects_old_master_missing_initial_cursor(client, monkeypatch):
     agent.STATE.role = "worker"
     agent.STATE.master_host = "master"
     agent.STATE.join_key = "secret-key"
-    monkeypatch.setattr(agent, "_try_proxy_master_logs", lambda *args: {
-        "lines": [], "source": "cluster"
-    })
+    monkeypatch.setattr(
+        agent, "_try_proxy_master_logs", lambda *args: {"lines": [], "source": "cluster"}
+    )
     response = c.get("/v1/logs")
     assert response.status_code == 502
     assert "incremental log" in response.json()["detail"]
@@ -564,15 +564,23 @@ def test_producer_tag_follows_source_and_legacy_journal(tmp_path, monkeypatch):
 
     reset_for_tests()
     hub = LogHub()
-    assert hub.ingest(
-        [
-            {"node_id": "n", "source": "agent", "line": "starting inference", "tag": "inference"},
-            {"node_id": "n", "line": "missing"},
-            {"node_id": "n", "source": "", "line": "empty"},
-            {"node_id": "n", "source": "bogus", "line": "bogus", "tag": "ui"},
-        ],
-        persist=True,
-    ) == 4
+    assert (
+        hub.ingest(
+            [
+                {
+                    "node_id": "n",
+                    "source": "agent",
+                    "line": "starting inference",
+                    "tag": "inference",
+                },
+                {"node_id": "n", "line": "missing"},
+                {"node_id": "n", "source": "", "line": "empty"},
+                {"node_id": "n", "source": "bogus", "line": "bogus", "tag": "ui"},
+            ],
+            persist=True,
+        )
+        == 4
+    )
     by_line = {event["line"]: event for event in hub.recent(10)}
     assert by_line["starting inference"]["source"] == "agent"
     assert by_line["starting inference"]["tag"] == "ui"
@@ -596,7 +604,15 @@ def test_producer_tag_follows_source_and_legacy_journal(tmp_path, monkeypatch):
     journal.write_text(
         "\n".join(
             [
-                json.dumps({"event_id": legacy_id, "ts": 1, "node_id": "n", "source": "agent", "line": "legacy"}),
+                json.dumps(
+                    {
+                        "event_id": legacy_id,
+                        "ts": 1,
+                        "node_id": "n",
+                        "source": "agent",
+                        "line": "legacy",
+                    }
+                ),
                 json.dumps({"event_id": missing_id, "ts": 2, "node_id": "n", "line": "nosource"}),
             ]
         )

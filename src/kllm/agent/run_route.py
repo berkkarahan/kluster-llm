@@ -8,7 +8,9 @@ from typing import Any
 from fastapi import HTTPException
 
 
-def stop_previous_master(state: Any, native: Any, runtime: Any, load_progress: Any, inference_activity: Any) -> None:
+def stop_previous_master(
+    state: Any, native: Any, runtime: Any, load_progress: Any, inference_activity: Any
+) -> None:
     """Stop a llama-server this master already started."""
     if not state.process_pid:
         return
@@ -59,7 +61,9 @@ def finish_master_launch(
     state.model_name = path.name
     state.last_plan = plan_result
     state.apply_error = None
-    state.apply_warning = plan_result.get("warning") if plan_result.get("fit_status") == "tight" else None
+    state.apply_warning = (
+        plan_result.get("warning") if plan_result.get("fit_status") == "tight" else None
+    )
     persist_settings()
     if launched.get("pid"):
         runtime.register_child(int(launched["pid"]), "llama-server")

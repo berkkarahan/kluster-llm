@@ -43,9 +43,7 @@ class LogRelayService:
             try:
                 self.tick()
             except Exception as exc:
-                logging.getLogger(__name__).debug(
-                    "log relay tick failed (%s)", type(exc).__name__
-                )
+                logging.getLogger(__name__).debug("log relay tick failed (%s)", type(exc).__name__)
 
     def tick(self) -> None:
         """Perform one role-aware log relay iteration."""
@@ -54,9 +52,7 @@ class LogRelayService:
         if state.role == "master":
             self._hub.ensure_journal_loaded()
         master_base = (
-            self._master_control_base()
-            if state.role == "worker" and state.master_host
-            else None
+            self._master_control_base() if state.role == "worker" and state.master_host else None
         )
         self._hub.relay_tick(
             node_id=state.node_id or "unknown",

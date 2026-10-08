@@ -1,4 +1,5 @@
 """Skill library and real filesystem/standalone installer contracts."""
+
 import json
 import re
 import subprocess
@@ -17,26 +18,37 @@ SCRIPT = ROOT / "scripts/install_skills.py"
 @pytest.fixture
 def library(tmp_path):
     root = tmp_path / "library"
-    for category, names in (("operations", ["kllm-ops", "kllm-net"]),
-                            ("development", ["kllm-dev"])):
+    for category, names in (
+        ("operations", ["kllm-ops", "kllm-net"]),
+        ("development", ["kllm-dev"]),
+    ):
         for name in names:
             folder = root / category / name
             (folder / "references").mkdir(parents=True)
             (folder / "SKILL.md").write_text(
                 f'---\nname: {name}\ndescription: "Run {name} tasks."\n---\n\n# Instructions\n'
-                '\nRead [notes](references/notes.md).\n')
+                "\nRead [notes](references/notes.md).\n"
+            )
             (folder / "references/notes.md").write_text("Original notes\n")
     return root
 
 
 def snapshot(root):
-    return {p.relative_to(root).as_posix(): p.read_bytes()
-            for p in root.rglob("*") if p.is_file() and not p.is_symlink()}
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file() and not p.is_symlink()
+    }
 
 
 def run_installer(tmp_path, *args):
-    return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=tmp_path,
-                          capture_output=True, text=True, timeout=30)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def test_shipped_library_metadata_and_portable_references():
@@ -58,7 +70,10 @@ def test_shipped_library_metadata_and_portable_references():
                 assert resolved.is_file()
     network = next(s for s in catalog if s.name == "kllm-10gbe")
     assert {p.name for p in (network.path / "references").iterdir()} == {
-        "windows.md", "macos.md", "linux.md"}
+        "windows.md",
+        "macos.md",
+        "linux.md",
+    }
 
 
 def test_all_agent_locations_deduplicate_shared_root(tmp_path):
@@ -68,30 +83,46 @@ def test_all_agent_locations_deduplicate_shared_root(tmp_path):
     assert {a for group in project.values() for a in group} == set(skills.AGENTS)
     user = skills.agent_destinations(["all"], "user", tmp_path, user_home=tmp_path / "user", env={})
     expected = {
-        "codex": ".agents/skills", "claude": ".claude/skills", "cursor": ".cursor/skills",
-        "opencode": ".config/opencode/skills", "hermes": ".hermes/skills",
-        "openclaw": ".openclaw/skills", "pi": ".pi/agent/skills",
+        "codex": ".agents/skills",
+        "claude": ".claude/skills",
+        "cursor": ".cursor/skills",
+        "opencode": ".config/opencode/skills",
+        "hermes": ".hermes/skills",
+        "openclaw": ".openclaw/skills",
+        "pi": ".pi/agent/skills",
     }
     assert len(user) == 7
     for agent, relative in expected.items():
         assert user[(tmp_path / "user" / relative).resolve()] == [agent]
 
 
-@pytest.mark.parametrize("agent,key", [
-    ("codex", "CODEX_HOME"), ("claude", "CLAUDE_CONFIG_DIR"),
-    ("opencode", "OPENCODE_CONFIG_DIR"), ("hermes", "HERMES_HOME"),
-    ("openclaw", "OPENCLAW_STATE_DIR"), ("pi", "PI_CODING_AGENT_DIR"),
-])
+@pytest.mark.parametrize(
+    "agent,key",
+    [
+        ("codex", "CODEX_HOME"),
+        ("claude", "CLAUDE_CONFIG_DIR"),
+        ("opencode", "OPENCODE_CONFIG_DIR"),
+        ("hermes", "HERMES_HOME"),
+        ("openclaw", "OPENCLAW_STATE_DIR"),
+        ("pi", "PI_CODING_AGENT_DIR"),
+    ],
+)
 def test_user_home_override(tmp_path, agent, key):
     custom = tmp_path / "custom home"
-    destinations = skills.agent_destinations([agent], "user", tmp_path,
-        user_home=tmp_path / "user", env={key: str(custom)})
+    destinations = skills.agent_destinations(
+        [agent], "user", tmp_path, user_home=tmp_path / "user", env={key: str(custom)}
+    )
     assert destinations == {(custom / "skills").resolve(): [agent]}
 
 
 def test_xdg_and_hermes_suffix(tmp_path):
-    destinations = skills.agent_destinations(["opencode", "hermes"], "user", tmp_path,
-        user_home=tmp_path / "user", env={"XDG_CONFIG_HOME": str(tmp_path / "xdg"), "HERMES_DATA_DIR_SUFFIX": "-test"})
+    destinations = skills.agent_destinations(
+        ["opencode", "hermes"],
+        "user",
+        tmp_path,
+        user_home=tmp_path / "user",
+        env={"XDG_CONFIG_HOME": str(tmp_path / "xdg"), "HERMES_DATA_DIR_SUFFIX": "-test"},
+    )
     assert destinations[(tmp_path / "xdg/opencode/skills").resolve()] == ["opencode"]
     assert destinations[(tmp_path / "user/.hermes-test/skills").resolve()] == ["hermes"]
 
@@ -154,7 +185,9 @@ def test_prune_local_edits_are_not_deleted(library, tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["folder", "manifest", "interrupt", "after-publish-interrupt"])
-def test_replacement_failure_rolls_back_all_folders_and_manifest(library, tmp_path, monkeypatch, failure):
+def test_replacement_failure_rolls_back_all_folders_and_manifest(
+    library, tmp_path, monkeypatch, failure
+):
     root = tmp_path / "installed"
     catalog = skills.discover_skills(library)
     skills.install_skills(catalog, root)
@@ -171,8 +204,13 @@ def test_replacement_failure_rolls_back_all_folders_and_manifest(library, tmp_pa
             raise KeyboardInterrupt()
         if failure == "interrupt" and source.parent.name == "new" and target.name == "kllm-ops":
             raise KeyboardInterrupt()
-        if (failure == "folder" and source.parent.name == "new" and target.name == "kllm-ops"
-                or failure == "manifest" and target.name == skills.MANIFEST):
+        if (
+            failure == "folder"
+            and source.parent.name == "new"
+            and target.name == "kllm-ops"
+            or failure == "manifest"
+            and target.name == skills.MANIFEST
+        ):
             raise OSError("injected replacement failure")
         return original(source, target)
 
@@ -211,7 +249,9 @@ def test_destination_mutation_after_preflight_is_refused(library, tmp_path):
     catalog = skills.discover_skills(library)
     root = tmp_path / "installed"
     skills.install_skills(catalog, root)
-    (catalog[0].path / "SKILL.md").write_text((catalog[0].path / "SKILL.md").read_text() + "New instructions")
+    (catalog[0].path / "SKILL.md").write_text(
+        (catalog[0].path / "SKILL.md").read_text() + "New instructions"
+    )
     plan = skills.prepare_install(catalog, root)
     target = root / catalog[0].name / "SKILL.md"
     target.write_text("Concurrent local edit")
@@ -232,7 +272,9 @@ def test_symlink_conflict_force_backs_up_link_without_touching_target(library, t
         pytest.skip("This OS/account cannot create symlinks")
     with pytest.raises(skills.SkillError, match="Conflicting"):
         skills.prepare_install(skills.discover_skills(library), root)
-    messages = skills.apply_install(skills.prepare_install(skills.discover_skills(library), root, force=True))
+    messages = skills.apply_install(
+        skills.prepare_install(skills.discover_skills(library), root, force=True)
+    )
     backup = Path(messages[0].removeprefix("Backup: "))
     assert backup.is_symlink() and backup.resolve() == outside
     assert (outside / "secret.txt").read_text() == "Do not change"
@@ -251,8 +293,9 @@ def test_source_symlink_rejected(library, tmp_path):
 def test_invalid_manifest_cannot_escape_install_root(library, tmp_path):
     root = tmp_path / "installed"
     root.mkdir()
-    (root / skills.MANIFEST).write_text(json.dumps({"version": 1, "skills": {
-        "../victim": {"files": {"SKILL.md": "0" * 64}}}}))
+    (root / skills.MANIFEST).write_text(
+        json.dumps({"version": 1, "skills": {"../victim": {"files": {"SKILL.md": "0" * 64}}}})
+    )
     with pytest.raises(skills.SkillError, match="Invalid ownership manifest"):
         skills.prepare_install(skills.discover_skills(library), root, prune=True)
     assert list(root.iterdir()) == [root / skills.MANIFEST]
@@ -304,6 +347,8 @@ def test_cli_preflights_every_destination_before_writing(tmp_path):
 @pytest.mark.parametrize("field,value", [("name", "wrong-name"), ("description", '""')])
 def test_invalid_frontmatter_rejected(library, field, value):
     file = library / "operations/kllm-ops/SKILL.md"
-    file.write_text(re.sub(rf"^{field}:.*$", f"{field}: {value}", file.read_text(), flags=re.MULTILINE))
+    file.write_text(
+        re.sub(rf"^{field}:.*$", f"{field}: {value}", file.read_text(), flags=re.MULTILINE)
+    )
     with pytest.raises(skills.SkillError, match="Invalid skill"):
         skills.discover_skills(library)

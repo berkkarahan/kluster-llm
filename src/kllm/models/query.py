@@ -133,9 +133,7 @@ def _encoded_segments(path: str) -> EncodedPathSegments:
         pieces = pieces[:-1]
     if any(piece == "" for piece in pieces):
         raise ModelLookupError(_UNSUPPORTED_LINK)
-    return EncodedPathSegments(
-        tuple(_decode_segment(piece) for piece in pieces), trailing
-    )
+    return EncodedPathSegments(tuple(_decode_segment(piece) for piece in pieces), trailing)
 
 
 def _has_controls(text: str) -> bool:

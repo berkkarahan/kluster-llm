@@ -146,7 +146,9 @@ def mark_master_unreachable(state: ClusterState) -> None:
 
 
 def clear_master_unreachable(state: ClusterState) -> None:
-    warnings = [warning for warning in (state.netsec_warnings or []) if warning != _UNREACHABLE_WARNING]
+    warnings = [
+        warning for warning in (state.netsec_warnings or []) if warning != _UNREACHABLE_WARNING
+    ]
     if warnings == list(state.netsec_warnings or []):
         return
     state.netsec_warnings = warnings

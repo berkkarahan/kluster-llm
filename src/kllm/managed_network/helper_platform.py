@@ -57,7 +57,8 @@ class HelperPlatform(PlatformAdapter):
             )
         if state.speed_mbps < MIN_DEDICATED_LINK_SPEED_MBPS:
             raise PlatformRefusal(
-                "LINK_TOO_SLOW", "The Ethernet connection must negotiate at least 1 Gbps (1000 Mbps)"
+                "LINK_TOO_SLOW",
+                "The Ethernet connection must negotiate at least 1 Gbps (1000 Mbps)",
             )
         if state.dhcp is None:
             raise PlatformRefusal("UNKNOWN_DHCP", "The adapter’s configuration could not be read")

@@ -24,7 +24,9 @@ def test_profile_maps_coordinator_and_worker_to_first_two_hosts():
     assert worker.peer == coordinator.local
 
 
-@pytest.mark.parametrize("subnet", ["192.168.10.1/24", "8.8.8.0/24", "10.0.0.1/32", "2001:db8::/64"])
+@pytest.mark.parametrize(
+    "subnet", ["192.168.10.1/24", "8.8.8.0/24", "10.0.0.1/32", "2001:db8::/64"]
+)
 def test_profile_rejects_invalid_nonprivate_or_too_small_subnet(subnet):
     with pytest.raises(net.NetworkError):
         net.make_profile("coordinator", subnet)
@@ -37,7 +39,13 @@ def test_profile_rejects_unknown_role():
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [("10 Gbps", 10_000), ("10Gbase-T <full-duplex>", 10_000), ("2500 Mbps", 2500), ("10000", 10_000), ("unknown", None)],
+    [
+        ("10 Gbps", 10_000),
+        ("10Gbase-T <full-duplex>", 10_000),
+        ("2500 Mbps", 2500),
+        ("10000", 10_000),
+        ("unknown", None),
+    ],
 )
 def test_parse_link_speed(value, expected):
     assert net.parse_speed_mbps(value) == expected
@@ -67,7 +75,9 @@ def test_configure_applies_address_only_after_safe_preflight(monkeypatch):
     calls = []
     monkeypatch.setattr(net, "is_admin", lambda: True)
     monkeypatch.setattr(net, "inspect_interface", lambda _interface: state())
-    monkeypatch.setattr(net, "_apply_address", lambda interface, profile: calls.append((interface, profile)))
+    monkeypatch.setattr(
+        net, "_apply_address", lambda interface, profile: calls.append((interface, profile))
+    )
     assert net.configure("eth-test", "coordinator") is True
     assert calls[0][0] == "eth-test"
     assert calls[0][1].local == ipaddress.ip_address("192.168.10.1")
@@ -130,7 +140,9 @@ def test_configure_is_idempotent_for_existing_assignment(monkeypatch):
 def test_apply_address_uses_temporary_windows_store(monkeypatch):
     calls = []
     monkeypatch.setattr(net.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(net, "_powershell", lambda script, values: calls.append((script, values)) or "")
+    monkeypatch.setattr(
+        net, "_powershell", lambda script, values: calls.append((script, values)) or ""
+    )
     profile = net.make_profile("coordinator")
     net._apply_address("12", profile)
     assert "-PolicyStore ActiveStore" in calls[0][0]
@@ -141,9 +153,11 @@ def test_apply_address_uses_temporary_windows_store(monkeypatch):
 
 def test_native_command_errors_keep_diagnostics_and_do_not_use_a_shell(monkeypatch):
     observed = []
+
     def fail(args, **kwargs):
         observed.append((args, kwargs))
         return net.subprocess.CompletedProcess(args, 1, stdout="", stderr="access denied")
+
     monkeypatch.setattr(net.subprocess, "run", fail)
     with pytest.raises(net.NetworkError, match="access denied"):
         net._run(["ip", "address", "add", "192.168.10.1/24", "dev", "eth0"])
@@ -155,7 +169,10 @@ def test_native_command_errors_keep_diagnostics_and_do_not_use_a_shell(monkeypat
 @pytest.mark.parametrize(
     ("system", "expected"),
     [
-        ("Darwin", ["ifconfig", "en3", "inet", "192.168.10.1", "netmask", "255.255.255.0", "alias"]),
+        (
+            "Darwin",
+            ["ifconfig", "en3", "inet", "192.168.10.1", "netmask", "255.255.255.0", "alias"],
+        ),
         ("Linux", ["ip", "address", "add", "192.168.10.1/24", "dev", "eth-test"]),
     ],
 )
@@ -189,10 +206,24 @@ def test_windows_inspection_reads_dhcp_link_speed_and_routes(monkeypatch):
 
 def test_macos_inspection_maps_service_and_parses_media(monkeypatch):
     outputs = {
-        ("networksetup", "-listnetworkserviceorder"): "(1) 10Gb Ethernet\n(Hardware Port: Ethernet, Device: en3)",
-        ("ifconfig", "en3"): "en3: flags=8863<UP>\n\tinet 192.168.10.1 netmask 0xffffff00\n\tstatus: active",
-        ("networksetup", "-getinfo", "10Gb Ethernet"): "Manual Configuration\nIP address: 192.168.10.1",
-        ("networksetup", "-getmedia", "10Gb Ethernet"): "Current: autoselect\nActive: 10Gbase-T <full-duplex>",
+        (
+            "networksetup",
+            "-listnetworkserviceorder",
+        ): "(1) 10Gb Ethernet\n(Hardware Port: Ethernet, Device: en3)",
+        (
+            "ifconfig",
+            "en3",
+        ): "en3: flags=8863<UP>\n\tinet 192.168.10.1 netmask 0xffffff00\n\tstatus: active",
+        (
+            "networksetup",
+            "-getinfo",
+            "10Gb Ethernet",
+        ): "Manual Configuration\nIP address: 192.168.10.1",
+        (
+            "networksetup",
+            "-getmedia",
+            "10Gb Ethernet",
+        ): "Current: autoselect\nActive: 10Gbase-T <full-duplex>",
         ("netstat", "-rn", "-f", "inet"): (
             "Routing tables\nInternet:\nDestination Gateway Flags Netif\n"
             "172.16.0.0/16 link#1 UCS en2\n"
@@ -241,8 +272,12 @@ def test_linux_inspection_reads_speed_and_address(monkeypatch, tmp_path):
 )
 def test_verify_reports_distinct_probe_outcomes(monkeypatch, result, expected):
     calls = []
-    monkeypatch.setattr(net, "_ping", lambda interface, peer: calls.append((interface, peer)) or result)
-    monkeypatch.setattr(net, "_apply_address", lambda *_args: pytest.fail("verification mutated network state"))
+    monkeypatch.setattr(
+        net, "_ping", lambda interface, peer: calls.append((interface, peer)) or result
+    )
+    monkeypatch.setattr(
+        net, "_apply_address", lambda *_args: pytest.fail("verification mutated network state")
+    )
     assert net.verify("eth-test", "192.168.10.2") == expected
     assert calls == [("eth-test", "192.168.10.2")]
 
@@ -272,7 +307,9 @@ def test_linux_inspection_without_dhcp_detector_fails_closed(monkeypatch, tmp_pa
     (iface / "device").mkdir()
     monkeypatch.setattr(net, "SYS_CLASS_NET", tmp_path)
     monkeypatch.setattr(net, "_linux_dhcp", lambda _interface: None)
-    monkeypatch.setattr(net, "_run", lambda args, **_kwargs: "[]" if args[:3] == ["ip", "-j", "-4"] else "")
+    monkeypatch.setattr(
+        net, "_run", lambda args, **_kwargs: "[]" if args[:3] == ["ip", "-j", "-4"] else ""
+    )
     # The missing routes and addresses return empty data; configure must still
     # refuse because DHCP state cannot be established.
     inspected = net._inspect_linux("eth-test")
@@ -334,10 +371,22 @@ def test_verify_rejects_unsupported_os(monkeypatch):
 def test_linux_dhcp_reads_active_connection_profile(monkeypatch):
     calls = []
     connection = "12345678-1234-1234-1234-123456789abc"
-    monkeypatch.setattr(net.shutil, "which", lambda name: "/usr/bin/nmcli" if name == "nmcli" else None)
+    monkeypatch.setattr(
+        net.shutil, "which", lambda name: "/usr/bin/nmcli" if name == "nmcli" else None
+    )
+
     def run(args, **kwargs):
         calls.append(args)
         return connection if "GENERAL.CON-UUID" in args else "manual"
+
     monkeypatch.setattr(net, "_run", run)
     assert net._linux_dhcp("eth0") is False
-    assert calls[-1] == ["/usr/bin/nmcli", "-g", "ipv4.method", "connection", "show", "uuid", connection]
+    assert calls[-1] == [
+        "/usr/bin/nmcli",
+        "-g",
+        "ipv4.method",
+        "connection",
+        "show",
+        "uuid",
+        connection,
+    ]

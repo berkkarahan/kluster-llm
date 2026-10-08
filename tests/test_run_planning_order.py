@@ -32,7 +32,9 @@ def test_ordered_members_workers_then_master():
 
 
 def test_member_rpc_host_prefers_rpc_bind():
-    assert member_rpc_host({"rpc_bind": "192.168.68.63", "host": "192.168.68.62"}) == "192.168.68.63"
+    assert (
+        member_rpc_host({"rpc_bind": "192.168.68.63", "host": "192.168.68.62"}) == "192.168.68.63"
+    )
     assert member_rpc_host({"host": "10.8.0.2", "lan_host": "192.168.1.5"}) == "10.8.0.2"
     assert member_rpc_host({"lan_host": "192.168.1.5"}) == "192.168.1.5"
     assert member_rpc_host({}) == "127.0.0.1"
@@ -128,7 +130,9 @@ def test_ensure_rpc_peers_reachable_fails_closed_port():
 def test_ensure_rpc_peers_reachable_uses_control_plane(monkeypatch):
     from kllm import http_clients
     import httpx
+
     calls = []
+
     def handle(request):
         calls.append(str(request.url))
         return httpx.Response(
@@ -140,6 +144,7 @@ def test_ensure_rpc_peers_reachable_uses_control_plane(monkeypatch):
                 "rpc_port": 50052,
             },
         )
+
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
         monkeypatch.setattr(http_clients, "control_client", lambda: client)
         ensure_rpc_peers_reachable(["127.0.0.1:50052"])
@@ -225,6 +230,7 @@ def test_native_knapsack_exposes_placement_fields():
     assert "node_alloc_bytes" in plan
     assert "node_scores" in plan
     assert plan["vram_alloc_bytes"] > 0
-    assert plan["node_scores"][0] != plan["node_scores"][1] or plan["node_latency_ms"][0] != plan[
-        "node_latency_ms"
-    ][1]
+    assert (
+        plan["node_scores"][0] != plan["node_scores"][1]
+        or plan["node_latency_ms"][0] != plan["node_latency_ms"][1]
+    )

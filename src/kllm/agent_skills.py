@@ -3,6 +3,7 @@
 This module deliberately uses only the standard library: the standalone
 installer imports it from the checkout before kllm has been bootstrapped.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -113,9 +114,13 @@ def discover_skills(library: Path, category: str = "all") -> list[Skill]:
                 name = _scalar(parts[1], "name")
                 description = _scalar(parts[1], "description")
                 if not NAME.fullmatch(name) or len(name) > 64 or name != entry.name:
-                    raise SkillError("Skill name must match its kebab-case folder (maximum 64 characters)")
+                    raise SkillError(
+                        "Skill name must match its kebab-case folder (maximum 64 characters)"
+                    )
                 if len(description) > 1024 or name in names:
-                    raise SkillError("Duplicate skill name or description longer than 1024 characters")
+                    raise SkillError(
+                        "Duplicate skill name or description longer than 1024 characters"
+                    )
                 fingerprint(entry)
             except (OSError, UnicodeError, SkillError) as error:
                 raise SkillError(f"Invalid skill {entry}: {error}") from error
@@ -127,9 +132,14 @@ def discover_skills(library: Path, category: str = "all") -> list[Skill]:
     return skills
 
 
-def agent_destinations(agents: Sequence[str], scope: str, project: Path,
-                       *, user_home: Path | None = None,
-                       env: Mapping[str, str] | None = None) -> dict[Path, list[str]]:
+def agent_destinations(
+    agents: Sequence[str],
+    scope: str,
+    project: Path,
+    *,
+    user_home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[Path, list[str]]:
     env = os.environ if env is None else env
     home = Path.home() if user_home is None else user_home
     if scope not in ("project", "user"):
@@ -139,9 +149,13 @@ def agent_destinations(agents: Sequence[str], scope: str, project: Path,
     if invalid:
         raise SkillError(f"Unknown agents: {', '.join(sorted(invalid))}")
     project_paths = {
-        "codex": ".agents/skills", "claude": ".claude/skills", "cursor": ".cursor/skills",
-        "opencode": ".opencode/skills", "hermes": ".hermes/skills",
-        "openclaw": ".agents/skills", "pi": ".pi/skills",
+        "codex": ".agents/skills",
+        "claude": ".claude/skills",
+        "cursor": ".cursor/skills",
+        "opencode": ".opencode/skills",
+        "hermes": ".hermes/skills",
+        "openclaw": ".agents/skills",
+        "pi": ".pi/skills",
     }
 
     def configured(key: str, fallback: Path) -> Path:
@@ -151,14 +165,22 @@ def agent_destinations(agents: Sequence[str], scope: str, project: Path,
         "codex": configured("CODEX_HOME", home / ".agents") / "skills",
         "claude": configured("CLAUDE_CONFIG_DIR", home / ".claude") / "skills",
         "cursor": home / ".cursor/skills",
-        "opencode": configured("OPENCODE_CONFIG_DIR", configured("XDG_CONFIG_HOME", home / ".config") / "opencode") / "skills",
-        "hermes": configured("HERMES_HOME", home / (".hermes" + env.get("HERMES_DATA_DIR_SUFFIX", ""))) / "skills",
+        "opencode": configured(
+            "OPENCODE_CONFIG_DIR", configured("XDG_CONFIG_HOME", home / ".config") / "opencode"
+        )
+        / "skills",
+        "hermes": configured(
+            "HERMES_HOME", home / (".hermes" + env.get("HERMES_DATA_DIR_SUFFIX", ""))
+        )
+        / "skills",
         "openclaw": configured("OPENCLAW_STATE_DIR", home / ".openclaw") / "skills",
         "pi": configured("PI_CODING_AGENT_DIR", home / ".pi/agent") / "skills",
     }
     result: dict[Path, list[str]] = {}
     for agent in dict.fromkeys(requested):
-        root = (project / project_paths[agent] if scope == "project" else user_paths[agent]).resolve()
+        root = (
+            project / project_paths[agent] if scope == "project" else user_paths[agent]
+        ).resolve()
         result.setdefault(root, []).append(agent)
     return result
 
@@ -175,21 +197,33 @@ def _manifest(root: Path) -> tuple[dict, bytes | None]:
         if data.get("version") != 1 or not isinstance(data.get("skills"), dict):
             raise ValueError("unsupported manifest structure")
         for name, entry in data["skills"].items():
-            if not NAME.fullmatch(name) or not isinstance(entry, dict) or not isinstance(entry.get("files"), dict):
+            if (
+                not NAME.fullmatch(name)
+                or not isinstance(entry, dict)
+                or not isinstance(entry.get("files"), dict)
+            ):
                 raise ValueError("invalid ownership entry")
             for relative, digest in entry["files"].items():
                 parts = relative.rstrip("/").split("/")
-                if not relative or any(p in ("", ".", "..") for p in parts) or "\\" in relative or ":" in relative:
+                if (
+                    not relative
+                    or any(p in ("", ".", "..") for p in parts)
+                    or "\\" in relative
+                    or ":" in relative
+                ):
                     raise ValueError("unsafe resource path")
-                if not isinstance(digest, str) or not (digest == "directory" or re.fullmatch(r"[0-9a-f]{64}", digest)):
+                if not isinstance(digest, str) or not (
+                    digest == "directory" or re.fullmatch(r"[0-9a-f]{64}", digest)
+                ):
                     raise ValueError("invalid resource digest")
     except (ValueError, AttributeError, TypeError) as error:
         raise SkillError(f"Invalid ownership manifest {path}: {error}") from error
     return data, raw
 
 
-def prepare_install(skills: Sequence[Skill], root: Path, *, force: bool = False,
-                    prune: bool = False) -> Installation:
+def prepare_install(
+    skills: Sequence[Skill], root: Path, *, force: bool = False, prune: bool = False
+) -> Installation:
     root = root.resolve()
     if root.exists() and not root.is_dir():
         raise SkillError(f"Skill root is not a directory: {root}")
@@ -212,9 +246,13 @@ def prepare_install(skills: Sequence[Skill], root: Path, *, force: bool = False,
             except SkillError:
                 unsafe = True
         exists = target.exists() or target.is_symlink()
-        conflict = exists and (unsafe or (before != after and (not entry or before != entry["files"])))
+        conflict = exists and (
+            unsafe or (before != after and (not entry or before != entry["files"]))
+        )
         if conflict and not force:
-            raise SkillError(f"Conflicting or locally edited skill: {target}; back it up or rerun with --force")
+            raise SkillError(
+                f"Conflicting or locally edited skill: {target}; back it up or rerun with --force"
+            )
         if before != after or unsafe:
             changes.append(Change(skill.name, skill.path, before, after, conflict))
         manifest["skills"][skill.name] = {"source": str(skill.path.resolve()), "files": after}
@@ -226,7 +264,9 @@ def prepare_install(skills: Sequence[Skill], root: Path, *, force: bool = False,
             if target.exists() or target.is_symlink():
                 before = fingerprint(target)
                 if before != manifest["skills"][name]["files"]:
-                    raise SkillError(f"Locally edited session skill: {target}; restore or move it before changing --kllm-skills")
+                    raise SkillError(
+                        f"Locally edited session skill: {target}; restore or move it before changing --kllm-skills"
+                    )
                 changes.append(Change(name, None, before, None))
             del manifest["skills"][name]
     return Installation(root, changes, manifest, previous)
@@ -250,7 +290,9 @@ def apply_install(installation: Installation) -> list[str]:
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError as error:
-        raise SkillError(f"Installation lock exists: {lock}; check for another installer or an interrupted install") from error
+        raise SkillError(
+            f"Installation lock exists: {lock}; check for another installer or an interrupted install"
+        ) from error
     work = None
     applied: list[tuple[Change, Path]] = []
     committed = False
@@ -325,10 +367,16 @@ def apply_install(installation: Installation) -> list[str]:
         except (OSError, SkillError):
             rollback_failed = True
         if rollback_failed:
-            raise SkillError(f"Installation failed and needs recovery; preserved backups at {work}") from error
+            raise SkillError(
+                f"Installation failed and needs recovery; preserved backups at {work}"
+            ) from error
         raise
     finally:
-        if work is not None and not rollback_failed and (not committed or not any(c.backup for c in installation.changes)):
+        if (
+            work is not None
+            and not rollback_failed
+            and (not committed or not any(c.backup for c in installation.changes))
+        ):
             shutil.rmtree(work, ignore_errors=True)
         lock.unlink(missing_ok=True)
 

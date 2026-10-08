@@ -10,7 +10,11 @@ from kllm.commands.inference import (
     _validate_run_payload,
 )
 from kllm.cli_payload import build_plan_run_payload
-from kllm.model_defaults import ModelDefaults, merge_defaults_into_extra_args, overlay_user_inference
+from kllm.model_defaults import (
+    ModelDefaults,
+    merge_defaults_into_extra_args,
+    overlay_user_inference,
+)
 from kllm.run_settings import RunSettingsFields
 
 
@@ -35,25 +39,28 @@ def test_run_settings_inference_round_trip():
     assert snap["repeat_penalty"] == 1.1
     assert snap["enable_thinking"] is False
 
-    restored = RunSettingsFields(model="toy.gguf", **{
-        k: snap[k]
-        for k in (
-            "temperature",
-            "top_p",
-            "top_k",
-            "min_p",
-            "presence_penalty",
-            "repeat_penalty",
-            "enable_thinking",
-            "context",
-            "threads",
-            "extra_args",
-            "cache_type_k",
-            "cache_type_v",
-            "vram_weight",
-            "latency_weight",
-        )
-    })
+    restored = RunSettingsFields(
+        model="toy.gguf",
+        **{
+            k: snap[k]
+            for k in (
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "presence_penalty",
+                "repeat_penalty",
+                "enable_thinking",
+                "context",
+                "threads",
+                "extra_args",
+                "cache_type_k",
+                "cache_type_v",
+                "vram_weight",
+                "latency_weight",
+            )
+        },
+    )
     assert restored.temperature == 0.4
     assert restored.enable_thinking is False
 
@@ -192,9 +199,10 @@ def test_custom_chat_template_file_is_read_at_cli_boundary(tmp_path):
     text = _read_chat_template_file(str(template_path))
     assert text == "{{ messages }}"
     assert _read_chat_template_file(None) is None
-    assert build_plan_run_payload(
-        model="m.gguf", chat_template_text=text
-    )["chat_template_text"] == text
+    assert (
+        build_plan_run_payload(model="m.gguf", chat_template_text=text)["chat_template_text"]
+        == text
+    )
 
 
 def test_missing_custom_chat_template_is_a_cli_input_error(tmp_path):

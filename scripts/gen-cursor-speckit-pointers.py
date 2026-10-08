@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate .cursor/skills pointer wrappers for .opencode/commands/speckit*.md."""
+
 from __future__ import annotations
 
 import re

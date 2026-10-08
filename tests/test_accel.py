@@ -222,10 +222,7 @@ def test_llama_device_for_backend_names():
 def test_parse_devices_mtl0_prefix():
     from kllm.accel import parse_devices
 
-    text = (
-        "Available devices:\n"
-        "  MTL0: Apple M1 Pro (25559 MiB, 25558 MiB free)\n"
-    )
+    text = "Available devices:\n  MTL0: Apple M1 Pro (25559 MiB, 25558 MiB free)\n"
     devices = parse_devices(text)
     assert len(devices) == 1
     assert devices[0]["device"] == "MTL0"
@@ -236,10 +233,7 @@ def test_parse_devices_mtl0_prefix():
 def test_parse_devices_mtl0_m5_pro():
     from kllm.accel import parse_devices
 
-    text = (
-        "Available devices:\n"
-        "  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
-    )
+    text = "Available devices:\n  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
     devices = parse_devices(text)
     assert len(devices) == 1
     assert devices[0]["backend"] == "metal"
@@ -304,9 +298,7 @@ def test_metal_device_init_failed_detects_zombie_line():
     from kllm.accel import metal_device_init_failed, parse_devices
 
     zombie = (
-        "Available devices:\n"
-        "  :  (0 MiB, 0 MiB free)\n"
-        "  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
+        "Available devices:\n  :  (0 MiB, 0 MiB free)\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
     )
     assert metal_device_init_failed(zombie)
     assert parse_devices(zombie) == []

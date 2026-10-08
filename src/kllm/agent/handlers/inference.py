@@ -77,8 +77,12 @@ class InferenceDependencies:
     network_stop: Callable[[], ContextManager[None]] | None = None
     resolve_settings: Callable[[PlanBody | RunBody], PlanBody | RunBody] | None = None
     preflight: Callable[[RunSettingsFields, Path], None] | None = None
-    rpc_context: Callable[[RunBody, dict[str, Any], dict[str, Any]], ContextManager[None]] | None = None
-    network_run_selected: Callable[[str | None, list[str]], ContextManager[dict[str, Any]]] | None = None
+    rpc_context: (
+        Callable[[RunBody, dict[str, Any], dict[str, Any]], ContextManager[None]] | None
+    ) = None
+    network_run_selected: (
+        Callable[[str | None, list[str]], ContextManager[dict[str, Any]]] | None
+    ) = None
     runtime_context: Callable[[], ContextManager[dict[str, Any]]] | None = None
     lifecycle_publisher: Callable[[LifecycleEvent, str | None], None] | None = None
 
@@ -120,8 +124,8 @@ class InferenceHandlers:
         result = self._deps.execute_plan(body, members)
         runtime_snapshot = snapshot()
         if runtime_snapshot:
-            result['runtime_id'] = runtime_snapshot['runtime_id']
-            result['runtime_required_nodes'] = [state.node_id, *selected_workers(result, members)]
+            result["runtime_id"] = runtime_snapshot["runtime_id"]
+            result["runtime_required_nodes"] = [state.node_id, *selected_workers(result, members)]
         result["effective_config"] = effective_configuration(body, result, path)
         if body.network_id and self._deps.network_diagnostics:
             result.update(self._deps.network_diagnostics(body.network_id))
@@ -172,20 +176,38 @@ class InferenceHandlers:
         self._deps.validate_vision(body)
         if body.network_id and self._deps.network_run is None:
             raise HTTPException(409, detail={"code": "UNSUPPORTED_CAPABILITY"})
-        members = self._deps.network_members(body.network_id) if body.network_id and self._deps.network_members else state.members
+        members = (
+            self._deps.network_members(body.network_id)
+            if body.network_id and self._deps.network_members
+            else state.members
+        )
         plan_result = self._deps.execute_plan(body, members)
         if plan_result.get("fit_status") == "overflow":
-            raise HTTPException(400, plan_result.get("hint") or "model and context exceed cluster budget (overflow)")
-        rpc_context = self._deps.rpc_context(body, plan_result, members) if self._deps.rpc_context else nullcontext()
+            raise HTTPException(
+                400, plan_result.get("hint") or "model and context exceed cluster budget (overflow)"
+            )
+        rpc_context = (
+            self._deps.rpc_context(body, plan_result, members)
+            if self._deps.rpc_context
+            else nullcontext()
+        )
         with rpc_context:
             return self._launch(body, path, plan_result, members)
 
-    def _launch(self, body: RunBody, path: Path, plan_result: dict[str, Any], members: dict[str, Any]) -> dict[str, Any]:
+    def _launch(
+        self, body: RunBody, path: Path, plan_result: dict[str, Any], members: dict[str, Any]
+    ) -> dict[str, Any]:
         state = self._deps.state
         if self._deps.network_run_selected:
-            context = self._deps.network_run_selected(body.network_id, selected_workers(plan_result, members))
+            context = self._deps.network_run_selected(
+                body.network_id, selected_workers(plan_result, members)
+            )
         else:
-            context = self._deps.network_run(body.network_id) if self._deps.network_run else nullcontext(members)
+            context = (
+                self._deps.network_run(body.network_id)
+                if self._deps.network_run
+                else nullcontext(members)
+            )
         with context as launch_members:
             plan_result = remap_rpc_plan(plan_result, members, launch_members)
             if body.network_id and self._deps.network_diagnostics:
@@ -217,7 +239,10 @@ class InferenceHandlers:
             effective = effective_configuration(body, plan_result, path)
             selected_runtime = snapshot()
             if selected_runtime:
-                effective['runtime'] = {key: selected_runtime[key] for key in ('runtime_id', 'build_id', 'repository', 'commit', 'ref')}
+                effective["runtime"] = {
+                    key: selected_runtime[key]
+                    for key in ("runtime_id", "build_id", "repository", "commit", "ref")
+                }
             self._deps.stop_previous_master()
             state.active_config = None
             state.process_pid = None

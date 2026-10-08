@@ -33,7 +33,9 @@ def ssl_contexts() -> list[ssl.SSLContext]:
     return ctxs
 
 
-def curl_bytes(url: str, *, which: Callable[[str], str | None], user_agent: str, accept: str) -> bytes:
+def curl_bytes(
+    url: str, *, which: Callable[[str], str | None], user_agent: str, accept: str
+) -> bytes:
     curl = which("curl")
     if not curl:
         raise RuntimeError("curl not found")
@@ -45,7 +47,9 @@ def curl_bytes(url: str, *, which: Callable[[str], str | None], user_agent: str,
     return result.stdout
 
 
-def curl_download(url: str, dest: Path, *, which: Callable[[str], str | None], user_agent: str, accept: str) -> None:
+def curl_download(
+    url: str, dest: Path, *, which: Callable[[str], str | None], user_agent: str, accept: str
+) -> None:
     curl = which("curl")
     if not curl:
         raise RuntimeError("curl not found")
@@ -89,7 +93,10 @@ def sniff_archive_kind(path: Path) -> str | None:
         return "zip"
     if head.startswith(_GZIP_MAGIC):
         return "gzip"
-    if len(head) > _TAR_MAGIC_OFFSET + 5 and head[_TAR_MAGIC_OFFSET : _TAR_MAGIC_OFFSET + 5] == _TAR_MAGIC:
+    if (
+        len(head) > _TAR_MAGIC_OFFSET + 5
+        and head[_TAR_MAGIC_OFFSET : _TAR_MAGIC_OFFSET + 5] == _TAR_MAGIC
+    ):
         return "tar"
     return None
 
@@ -123,17 +130,14 @@ def validate_downloaded_file(
             f"download truncated: got {size} bytes, Content-Length was {content_length}"
         )
     if expected_size is not None and expected_size > 0 and size != expected_size:
-        raise RuntimeError(
-            f"download size mismatch: got {size} bytes, expected {expected_size}"
-        )
+        raise RuntimeError(f"download size mismatch: got {size} bytes, expected {expected_size}")
     if expected_kind is None:
         return
     kind = sniff(dest)
     if kind != expected_kind:
         preview = dest.read_bytes()[:120]
         raise RuntimeError(
-            f"download is not a valid {expected_kind} archive "
-            f"(got {size} bytes, magic={preview!r})"
+            f"download is not a valid {expected_kind} archive (got {size} bytes, magic={preview!r})"
         )
 
 
@@ -153,7 +157,10 @@ def download_once(
     errors: list[BaseException] = []
     for ctx in contexts():
         try:
-            with urllib.request.urlopen(req, context=ctx, timeout=600) as resp, dest.open("wb") as out:
+            with (
+                urllib.request.urlopen(req, context=ctx, timeout=600) as resp,
+                dest.open("wb") as out,
+            ):
                 cl_raw = resp.headers.get("Content-Length")
                 content_length = int(cl_raw) if cl_raw and cl_raw.isdigit() else None
                 shutil.copyfileobj(resp, out)

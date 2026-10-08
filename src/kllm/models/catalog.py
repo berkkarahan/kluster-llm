@@ -38,6 +38,7 @@ SEARCH_FILE_CAP = 40
 _METADATA_TIMEOUT = 15.0
 HubUrlFactory = Callable[..., str]
 
+
 def _quant_label(filename: str, suffix: str | None) -> str | None:
     tokens = quant_tokens_in_name(filename)
     if suffix and looks_like_quant_tag(suffix):
@@ -346,9 +347,11 @@ def search_hub_ggufs(
     kind = parsed.kind
     if kind == "url" and not parsed.repo_id:
         assert parsed.url is not None
-        results = [_synthetic_url_hit(
-            parsed.url, token=token, parsed=parsed, url_size_client=url_size_client
-        )]
+        results = [
+            _synthetic_url_hit(
+                parsed.url, token=token, parsed=parsed, url_size_client=url_size_client
+            )
+        ]
     elif kind in {"url", "repo"}:
         assert parsed.repo_id is not None
         revision = parsed.revision or "main"
@@ -377,7 +380,10 @@ def search_hub_ggufs(
         for repo_id in repo_ids[:SEARCH_REPO_CAP]:
             try:
                 rows = _inspect_repo_ggufs(
-                    repo_id, suffix=parsed.suffix, token=token, revision="main",
+                    repo_id,
+                    suffix=parsed.suffix,
+                    token=token,
+                    revision="main",
                     model_info_client=model_info_client,
                     hub_url_client=hub_url_client,
                 )

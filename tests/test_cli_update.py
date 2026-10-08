@@ -16,8 +16,7 @@ def _install_script(tmp_path: Path, marker: Path) -> Path:
     script = tmp_path / "scripts" / "install.py"
     script.parent.mkdir(parents=True)
     script.write_text(
-        "from pathlib import Path\n"
-        f"Path({marker.as_posix()!r}).write_text('ok')\n",
+        f"from pathlib import Path\nPath({marker.as_posix()!r}).write_text('ok')\n",
         encoding="utf-8",
     )
     return script
@@ -30,9 +29,7 @@ def test_update_stops_pulls_and_rebuilds(monkeypatch, tmp_path):
     notes: list[object] = []
     monkeypatch.setattr(update, "repo_root", lambda: root)
     monkeypatch.setattr(update, "_git_ensure_clean", lambda _root: notes.append("clean"))
-    monkeypatch.setattr(
-        update, "_stop_local", lambda port: notes.append(("stop", port)) or True
-    )
+    monkeypatch.setattr(update, "_stop_local", lambda port: notes.append(("stop", port)) or True)
     monkeypatch.setattr(update, "_git_pull_ff_only", lambda _root: notes.append("pull"))
 
     assert main(["update"]) == 0

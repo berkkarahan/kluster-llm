@@ -150,10 +150,17 @@ def project_resource_devices(
         row = dict(
             device_id=device_id,
             scope="device",
-            utilization_percent=(device.get("utilization") or {}).get("value", optional.get("utilization_percent")),
+            utilization_percent=(device.get("utilization") or {}).get(
+                "value", optional.get("utilization_percent")
+            ),
             temperature_c=optional.get("temperature_c"),
             power_w=optional.get("power_w"),
-            used_bytes=dedicated["used"]["value"] if dedicated else next((view["used"]["value"] for view in device["memory"] if view["kind"] == "shared"), None),
+            used_bytes=dedicated["used"]["value"]
+            if dedicated
+            else next(
+                (view["used"]["value"] for view in device["memory"] if view["kind"] == "shared"),
+                None,
+            ),
             total_bytes=dedicated["total"]["value"] if dedicated else None,
         )
         row["unavailable_reason"] = (

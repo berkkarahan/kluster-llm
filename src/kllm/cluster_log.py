@@ -168,9 +168,7 @@ class LogHub:
         self._seq_counter = 0
         self._epoch = str(uuid.uuid4())
         self._subs: list[queue.Queue[dict[str, Any] | None]] = []
-        self.forwarder = forwarder or WorkerLogForwarder(
-            lambda: http_clients.control_client()
-        )
+        self.forwarder = forwarder or WorkerLogForwarder(lambda: http_clients.control_client())
         self._journal_loaded = False
         self.enabled = True
         self.tailer = tailer or LocalLogTailer(_log_file, LOCAL_SOURCES, make_event)
@@ -423,6 +421,7 @@ class LogHub:
 
     def _append_journal_locked(self, events: list[dict[str, Any]]) -> None:
         self.journal.append(events)
+
 
 HUB = LogHub()
 

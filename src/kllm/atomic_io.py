@@ -9,6 +9,7 @@ Those collisions are transient, so retry briefly rather than failing the
 request; a read-only destination is the one persistent cause of the same error,
 so clear that attribute once before retrying.
 """
+
 from __future__ import annotations
 
 import os

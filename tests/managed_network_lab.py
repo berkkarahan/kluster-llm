@@ -311,7 +311,7 @@ class NativeAgentLab:
                         str(node.rpc_events),
                     ],
                     stdout=subprocess.DEVNULL,
-                    stderr=(home / f'{name}-rpc-error').open('w'),
+                    stderr=(home / f"{name}-rpc-error").open("w"),
                 )
                 self.children.append(child)
                 state.process_pid, state.process_role = child.pid, "worker"
@@ -329,7 +329,7 @@ class NativeAgentLab:
     async def start(self, *, automatic_pairing=False):
         if automatic_pairing:
             for node in self.nodes:
-                node.state.join_key = 'isolated-native-lab-join-key'
+                node.state.join_key = "isolated-native-lab-join-key"
         for node in self.nodes[1:]:
             await self.wait(lambda node=node: Path(str(node.rpc_events) + ".ready").exists())
         for index, node in enumerate(self.nodes):
@@ -373,7 +373,7 @@ class NativeAgentLab:
             (await self.request(i, "GET", "/v2/node/network-identity")).json() for i in range(3)
         ]
         binding = identities[0]["cluster_binding_id"]
-        for index in (() if automatic_pairing else (1, 2)):
+        for index in () if automatic_pairing else (1, 2):
             for local, peer, role in ((0, index, "worker"), (index, 0, "master")):
                 identity = identities[peer]
                 paired = await self.request(
@@ -385,7 +385,7 @@ class NativeAgentLab:
                 )
                 assert paired.status_code == 200, paired.text
         await self.wait(lambda: len(self.nodes[0].service.channels.sessions) == 2)
-        for index in (() if automatic_pairing else (1, 2)):
+        for index in () if automatic_pairing else (1, 2):
             snapshot = self.nodes[index].adapter.inspect("ethernet").public()
             selected = await self.request(
                 index,
@@ -513,7 +513,9 @@ class NativeAgentLab:
         await self.wait(
             lambda: (
                 node.name in self.nodes[0].service.channels.sessions
-                and self.nodes[0].service.channels.sessions[node.name].fence.authority.accepted_channel_id
+                and self.nodes[0]
+                .service.channels.sessions[node.name]
+                .fence.authority.accepted_channel_id
                 == node.service.channels.sessions["master"].fence.authority.accepted_channel_id
                 if "master" in node.service.channels.sessions
                 else False
@@ -525,7 +527,9 @@ class NativeAgentLab:
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=3)
-        operations = [task for node in self.nodes for task in node.service.tasks.values() if not task.done()]
+        operations = [
+            task for node in self.nodes for task in node.service.tasks.values() if not task.done()
+        ]
         for task in operations:
             task.cancel()
         if operations:

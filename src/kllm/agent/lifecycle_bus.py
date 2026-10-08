@@ -85,7 +85,9 @@ class LifecycleBus:
                     notice.event.value,
                 )
                 continue
-            raise TypeError(f"{notice.event.value} listener returned an awaitable; use emit() instead")
+            raise TypeError(
+                f"{notice.event.value} listener returned an awaitable; use emit() instead"
+            )
 
     async def emit(self, notice: LifecycleNotice, *, isolate: bool = False) -> None:
         """Run listeners in order, awaiting any coroutine a listener returns."""
@@ -107,7 +109,9 @@ class LifecycleBus:
             _LOG.exception("lifecycle listener failed for %s", notice.event.value)
             return None
 
-    async def _await(self, result: Awaitable[Any], notice: LifecycleNotice, *, isolate: bool) -> None:
+    async def _await(
+        self, result: Awaitable[Any], notice: LifecycleNotice, *, isolate: bool
+    ) -> None:
         try:
             await result
         except Exception:

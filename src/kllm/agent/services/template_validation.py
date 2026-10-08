@@ -40,8 +40,10 @@ class TemplateValidationService:
         self._run_process = run_process
         self._temporary_directory = temporary_directory
         self._creation_flags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        ) if creation_flags is None else creation_flags
+            (getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
+            if creation_flags is None
+            else creation_flags
+        )
 
     def validate(self, text: str) -> TemplateValidationResult:
         """Ask llama.cpp to parse a draft template and return a safe outcome."""

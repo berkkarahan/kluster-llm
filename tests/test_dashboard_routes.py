@@ -38,6 +38,4 @@ def test_mount_dashboard_without_index_returns_build_hint(tmp_path):
 
     response = TestClient(app).get("/settings")
     assert response.status_code == 404
-    assert response.json() == {
-        "detail": "dashboard not built — run: cd dashboard && npm run build"
-    }
+    assert response.json() == {"detail": "dashboard not built — run: cd dashboard && npm run build"}

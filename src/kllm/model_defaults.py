@@ -107,7 +107,9 @@ class ModelDefaults:
 
 def _cache_result(key: tuple[str, int, int, int], result: ModelDefaults) -> None:
     with _cache_lock:
-        for old_key in [candidate for candidate in _cache if candidate[0] == key[0] and candidate != key]:
+        for old_key in [
+            candidate for candidate in _cache if candidate[0] == key[0] and candidate != key
+        ]:
             del _cache[old_key]
         while len(_cache) >= _CACHE_LIMIT:
             _cache.pop(next(iter(_cache)))
@@ -201,9 +203,7 @@ def _flag_present(argv: list[str], flag: str) -> bool:
     return flag in argv
 
 
-def merge_defaults_into_extra_args(
-    extra_args: list[str], defaults: ModelDefaults
-) -> list[str]:
+def merge_defaults_into_extra_args(extra_args: list[str], defaults: ModelDefaults) -> list[str]:
     """Prepend default sampling / jinja / kwargs flags not already in extra_args."""
     prefix: list[str] = []
     for field_name, flag in _LAUNCH_FLAG_MAP:
@@ -216,25 +216,19 @@ def merge_defaults_into_extra_args(
         _flag_present(extra_args, "--jinja") or _flag_present(extra_args, "--no-jinja")
     ):
         prefix.append("--jinja")
-    if defaults.chat_template_kwargs and not _flag_present(
-        extra_args, "--chat-template-kwargs"
-    ):
+    if defaults.chat_template_kwargs and not _flag_present(extra_args, "--chat-template-kwargs"):
         prefix.extend(
             [
                 "--chat-template-kwargs",
                 json.dumps(defaults.chat_template_kwargs, separators=(",", ":")),
             ]
         )
-    if defaults.reasoning_format and not _flag_present(
-        extra_args, "--reasoning-format"
-    ):
+    if defaults.reasoning_format and not _flag_present(extra_args, "--reasoning-format"):
         prefix.extend(["--reasoning-format", defaults.reasoning_format])
     return prefix + list(extra_args)
 
 
-def apply_defaults_to_chat_body(
-    body: dict[str, Any], defaults: ModelDefaults
-) -> dict[str, Any]:
+def apply_defaults_to_chat_body(body: dict[str, Any], defaults: ModelDefaults) -> dict[str, Any]:
     """Fill missing sampling / chat_template_kwargs on an OpenAI-style chat body."""
     # Promote top-level enable_thinking into chat_template_kwargs before merge.
     out = dict(body)

@@ -244,11 +244,18 @@ class ModelLayout:
         try:
             normalized_expert = tuple(int(weight) for weight in raw_expert)
         except (TypeError, ValueError) as exc:
-            raise ValidationError("model layout expert_layers contains invalid byte estimates") from exc
+            raise ValidationError(
+                "model layout expert_layers contains invalid byte estimates"
+            ) from exc
         if normalized_expert and len(normalized_expert) != len(normalized_layers):
             raise ValidationError("model layout expert_layers must match layer count")
-        if any(weight < 0 or weight > total for weight, total in zip(normalized_expert, normalized_layers)):
-            raise ValidationError("model layout expert bytes must be non-negative and within layer totals")
+        if any(
+            weight < 0 or weight > total
+            for weight, total in zip(normalized_expert, normalized_layers)
+        ):
+            raise ValidationError(
+                "model layout expert bytes must be non-negative and within layer totals"
+            )
         return cls(
             architecture=architecture,
             metadata=_freeze(metadata),
@@ -333,7 +340,9 @@ class RpcDeviceInput:
         if not isinstance(value, (list, tuple)) or any(not isinstance(d, Mapping) for d in value):
             raise ValidationError("RPC inventory must be a list of devices")
         devices = tuple(cls.from_mapping(d) for d in value)
-        if [d.index for d in devices] != list(range(len(devices))) or len({d.device for d in devices}) != len(devices):
+        if [d.index for d in devices] != list(range(len(devices))) or len(
+            {d.device for d in devices}
+        ) != len(devices):
             raise ValidationError("RPC inventory must have unique devices in runtime order")
         return devices
 
@@ -544,9 +553,7 @@ class DevicePlacementPlan:
             "node_alloc_bytes": list(self.node_alloc_bytes),
             "distributable_bytes": self.distributable_bytes,
             "node_workload_bytes": {row.node_id: row.value for row in self.node_workload_bytes},
-            "node_gpu_budget_bytes": {
-                row.node_id: row.value for row in self.node_gpu_budget_bytes
-            },
+            "node_gpu_budget_bytes": {row.node_id: row.value for row in self.node_gpu_budget_bytes},
             "node_target_bytes": (
                 {row.node_id: row.value for row in self.node_target_bytes}
                 if self.node_target_bytes is not None

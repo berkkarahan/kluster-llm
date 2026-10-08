@@ -27,7 +27,10 @@ def settings(**kwargs):
 
 def test_installed_device_names_include_unnumbered_metal():
     from kllm.accel import parse_devices
-    devices = parse_devices("Available devices:\n  Metal: Apple M5 Pro (49152 MiB, 40000 MiB free)\n  Vulkan0: AMD GPU (16304 MiB, 15000 MiB free)\n")
+
+    devices = parse_devices(
+        "Available devices:\n  Metal: Apple M5 Pro (49152 MiB, 40000 MiB free)\n  Vulkan0: AMD GPU (16304 MiB, 15000 MiB free)\n"
+    )
     assert [d["device"] for d in devices] == ["Metal", "Vulkan0"]
     assert devices[0]["backend"] == "metal"
 
@@ -49,19 +52,27 @@ async def test_upstream_reachability_reuses_injected_client():
 @pytest.mark.asyncio
 async def test_cancellation_closes_upstream():
     entered = asyncio.Event()
+
     class Stream(httpx.AsyncByteStream):
         closed = False
+
         async def __aiter__(self):
             entered.set()
             await asyncio.Event().wait()
             yield b"never"
+
         async def aclose(self):
             self.closed = True
+
     stream = Stream()
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream))
+    ) as client:
         app = FastAPI()
         app.state.inference_client = client
-        response = await gateway._proxy(Request({"type": "http", "app": app}), 8080, "/v1/chat/completions", {"stream": True})
+        response = await gateway._proxy(
+            Request({"type": "http", "app": app}), 8080, "/v1/chat/completions", {"stream": True}
+        )
         task = asyncio.create_task(anext(response.body_iterator))
         await entered.wait()
         task.cancel()
@@ -71,59 +82,106 @@ async def test_cancellation_closes_upstream():
 
 
 def layout(layers=4, weight=100 * MIB):
-    return dict(architecture="llama", metadata={"llama.attention.head_count_kv": 1},
-                layers=[weight] * layers, output_bytes=weight, input_bytes=10 * MIB,
-                confidence="metadata")
+    return dict(
+        architecture="llama",
+        metadata={"llama.attention.head_count_kv": 1},
+        layers=[weight] * layers,
+        output_bytes=weight,
+        input_bytes=10 * MIB,
+        confidence="metadata",
+    )
 
 
 def node(nid, memory, *, master=False, backend="vulkan", gpus=1, unified=False):
-    return dict(node_id=nid, is_master=master, backend=backend,
-                total_ram_bytes=8*1024*MIB, available_ram_bytes=8*1024*MIB,
-                unified_memory=unified, rpc_endpoint=f"{nid}:50052", latency_ms=0 if master else 2,
-                devices=[dict(index=i, device=f"{backend.title()}{i}", backend=backend,
-                              vram_bytes=memory, free_bytes=memory) for i in range(gpus)])
+    return dict(
+        node_id=nid,
+        is_master=master,
+        backend=backend,
+        total_ram_bytes=8 * 1024 * MIB,
+        available_ram_bytes=8 * 1024 * MIB,
+        unified_memory=unified,
+        rpc_endpoint=f"{nid}:50052",
+        latency_ms=0 if master else 2,
+        devices=[
+            dict(
+                index=i,
+                device=f"{backend.title()}{i}",
+                backend=backend,
+                vram_bytes=memory,
+                free_bytes=memory,
+            )
+            for i in range(gpus)
+        ],
+    )
 
 
 def plan(nodes, model=None, **kw):
     typed_nodes = tuple(PlacementNodeInput.from_mapping(value) for value in nodes)
-    return plan_devices(typed_nodes, 500*MIB, ModelLayout.from_mapping(model or layout()), PlacementSettings.from_mapping(settings()), context=512,
-                        headroom=1, device="gpu", vram_weight=.6, latency_weight=.4, **kw).to_payload()
+    return plan_devices(
+        typed_nodes,
+        500 * MIB,
+        ModelLayout.from_mapping(model or layout()),
+        PlacementSettings.from_mapping(settings()),
+        context=512,
+        headroom=1,
+        device="gpu",
+        vram_weight=0.6,
+        latency_weight=0.4,
+        **kw,
+    ).to_payload()
 
 
 def test_manual_node_shares_resolve_to_contiguous_layers_and_launch():
-    nodes = [node("worker", 4000*MIB), node("master", 4000*MIB, master=True)]
-    result = plan(nodes, node_shares={"worker": .4, "master": .6})
+    nodes = [node("worker", 4000 * MIB), node("master", 4000 * MIB, master=True)]
+    result = plan(nodes, node_shares={"worker": 0.4, "master": 0.6})
     assert result["routing_mode"] == "manual"
     assert result["fit_status"] != "overflow"
     assert result["cpu_layers"] == 0
     assert result["device_order"] == ["RPC0", "Vulkan0"]
     assert result["rpc_endpoints"] == ["worker:50052"]
     assert sum(a["layers"] for a in result["device_allocations"]) == result["ngl"]
-    assert result["device_allocations"][0]["layer_end"] == result["device_allocations"][1]["layer_start"]
+    assert (
+        result["device_allocations"][0]["layer_end"]
+        == result["device_allocations"][1]["layer_start"]
+    )
     assert sum(result["node_target_bytes"].values()) == result["distributable_bytes"]
-    launch = build_master_launch(RunBody(model="test.gguf"), result, model_path=Path("missing.gguf"),
-                                 rpc_servers=[], infer_port=8080, repo_root=None, gpu_env={}, extra_args=[])
+    launch = build_master_launch(
+        RunBody(model="test.gguf"),
+        result,
+        model_path=Path("missing.gguf"),
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
     assert launch["rpc_servers"] == result["rpc_endpoints"]
     assert launch["tensor_split"] == result["tensor_split_csv"]
 
 
 def test_manual_share_rejects_over_capacity_without_cpu_spill():
-    nodes = [node("worker", 100*MIB), node("master", 4000*MIB, master=True)]
-    result = plan(nodes, node_shares={"worker": .8, "master": .2})
+    nodes = [node("worker", 100 * MIB), node("master", 4000 * MIB, master=True)]
+    result = plan(nodes, node_shares={"worker": 0.8, "master": 0.2})
     assert result["fit_status"] == "overflow"
     assert "worker" in result["hint"]
     assert not result["device_allocations"]
     with pytest.raises(ValueError, match="members"):
-        plan(nodes, node_shares={"former-worker": .5, "master": .5})
-    joined = [node("new", 4000*MIB), node("worker", 4000*MIB), node("master", 4000*MIB, master=True)]
-    added = plan(joined, node_shares={"worker": .4, "master": .6})
+        plan(nodes, node_shares={"former-worker": 0.5, "master": 0.5})
+    joined = [
+        node("new", 4000 * MIB),
+        node("worker", 4000 * MIB),
+        node("master", 4000 * MIB, master=True),
+    ]
+    added = plan(joined, node_shares={"worker": 0.4, "master": 0.6})
     assert added["fit_status"] != "overflow"
     assert added["node_target_bytes"]["new"] == 0
     assert not any(a["node_id"] == "new" for a in added["device_allocations"])
 
 
 def test_fitting_local_device_avoids_rpc_and_offloads_output():
-    result = plan([node("remote", 4000*MIB, backend="metal"), node("master", 2000*MIB, master=True)])
+    result = plan(
+        [node("remote", 4000 * MIB, backend="metal"), node("master", 2000 * MIB, master=True)]
+    )
     assert result["device_order"] == ["Vulkan0"]
     assert result["rpc_endpoints"] == []
     assert result["routing_mode"] == "local"
@@ -205,42 +263,55 @@ def test_heterogeneous_multiple_devices_match_runtime_boundaries():
         cumulative.append(value + (cumulative[-1] if cumulative else 0))
     for layer in range(result["cpu_layers"], 5):
         fraction = (layer - result["cpu_layers"]) / result["ngl"]
-        device = next(i for i, boundary in enumerate(cumulative) if fraction < boundary / cumulative[-1])
+        device = next(
+            i for i, boundary in enumerate(cumulative) if fraction < boundary / cumulative[-1]
+        )
         assert allocations[device]["layer_start"] <= layer < allocations[device]["layer_end"]
 
 
 def test_cpu_spill_is_master_prefix_and_excluded_from_device_split():
-    result = plan([node("master", 510*MIB, master=True)])
+    result = plan([node("master", 510 * MIB, master=True)])
     assert result["cpu_layers"] == 3
     assert result["ngl"] == 2
     assert result["device_allocations"][0]["layer_start"] == 3
-    assert result["ram_alloc_bytes"] > 300*MIB
+    assert result["ram_alloc_bytes"] > 300 * MIB
 
 
 def test_unified_memory_cannot_be_added_again_as_cpu_capacity():
-    n = node("master", 510*MIB, master=True, unified=True, backend="metal")
-    n["total_ram_bytes"] = n["available_ram_bytes"] = 510*MIB
+    n = node("master", 510 * MIB, master=True, unified=True, backend="metal")
+    n["total_ram_bytes"] = n["available_ram_bytes"] = 510 * MIB
     result = plan([n])
     assert result["fit_status"] == "overflow"
-    assert result["budget_bytes"] == 510*MIB
+    assert result["budget_bytes"] == 510 * MIB
 
 
 def test_unrelated_usage_not_reclaimed():
-    n = node("master", 4000*MIB, master=True)
+    n = node("master", 4000 * MIB, master=True)
     n["available_ram_bytes"] = 0
     assert plan([n])["fit_status"] == "overflow"
-    n["reclaimable_ram_bytes"] = 500*MIB
+    n["reclaimable_ram_bytes"] = 500 * MIB
     assert plan([n])["fit_status"] != "overflow"
 
 
 def test_qwen_hybrid_kv_and_state_memory():
     m = layout()
     m["architecture"] = "qwen35moe"
-    m["metadata"] = {f"qwen35moe.{k}": v for k,v in {
-        "embedding_length": 3072, "attention.head_count": 32, "attention.head_count_kv": 2,
-        "attention.key_length": 256, "attention.value_length": 256,
-        "ssm.inner_size": 8192, "ssm.state_size": 128, "ssm.group_count": 16,
-        "ssm.time_step_rank": 64, "ssm.conv_kernel": 4, "full_attention_interval": 4}.items()}
+    m["metadata"] = {
+        f"qwen35moe.{k}": v
+        for k, v in {
+            "embedding_length": 3072,
+            "attention.head_count": 32,
+            "attention.head_count_kv": 2,
+            "attention.key_length": 256,
+            "attention.value_length": 256,
+            "ssm.inner_size": 8192,
+            "ssm.state_size": 128,
+            "ssm.group_count": 16,
+            "ssm.time_step_rank": 64,
+            "ssm.conv_kernel": 4,
+            "full_attention_interval": 4,
+        }.items()
+    }
     costs = memory_costs(
         ModelLayout.from_mapping(m),
         500 * MIB,
@@ -250,7 +321,7 @@ def test_qwen_hybrid_kv_and_state_memory():
         ),
     )
     assert costs.kv_bytes == 1024 * 2 * 512 * 18 // 32
-    assert costs.state_bytes == 3 * 4 * (128*8192 + 3*(8192+2*16*128))
+    assert costs.state_bytes == 3 * 4 * (128 * 8192 + 3 * (8192 + 2 * 16 * 128))
     two = memory_costs(
         ModelLayout.from_mapping(m),
         500 * MIB,
@@ -264,12 +335,27 @@ def test_qwen_hybrid_kv_and_state_memory():
 
 
 def test_explicit_launch_settings_and_overlapping_args():
-    body = RunBody(model="test.gguf", context=99840, cache_type_k="q4_0", cache_type_v="q4_0",
-                   batch_size=512, micro_batch=512, enable_thinking=True,
-                   extra_args=["--flash-attn=on", "--parallel", "2"])
+    body = RunBody(
+        model="test.gguf",
+        context=99840,
+        cache_type_k="q4_0",
+        cache_type_v="q4_0",
+        batch_size=512,
+        micro_batch=512,
+        enable_thinking=True,
+        extra_args=["--flash-attn=on", "--parallel", "2"],
+    )
     resolved = resolve_launch_settings(body).to_mapping()
-    launch = build_master_launch(body, {"ngl": 5, "tensor_split_csv": "5", "resolved_launch_settings": resolved},
-                                 model_path=Path("missing.gguf"), rpc_servers=[], infer_port=8080, repo_root=None, gpu_env={}, extra_args=[])
+    launch = build_master_launch(
+        body,
+        {"ngl": 5, "tensor_split_csv": "5", "resolved_launch_settings": resolved},
+        model_path=Path("missing.gguf"),
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
     assert launch["micro_batch"] == 512
     assert launch["parallel"] == "2"
     assert launch["context"] == 99840
@@ -282,16 +368,24 @@ def test_explicit_launch_settings_and_overlapping_args():
     assert settings(extra_args=["-cram", "1024"])["cache_ram"] == 1024
 
 
-@pytest.mark.parametrize("flag", ["--device", "-ngl", "--tensor-split", "--split-mode", "--override-tensor"])
+@pytest.mark.parametrize(
+    "flag", ["--device", "-ngl", "--tensor-split", "--split-mode", "--override-tensor"]
+)
 def test_managed_placement_cannot_be_overridden(flag):
     with pytest.raises((HTTPException, ValueError)):
         settings(extra_args=[flag, "1"])
 
 
 def test_moe_expert_offload_to_remote_nodes():
-    m = dict(architecture="qwen2moe", metadata={"qwen2moe.attention.head_count_kv": 1},
-             layers=[1000 * MIB] * 4, expert_layers=[800 * MIB] * 4,
-             output_bytes=1000 * MIB, input_bytes=10 * MIB, confidence="metadata")
+    m = dict(
+        architecture="qwen2moe",
+        metadata={"qwen2moe.attention.head_count_kv": 1},
+        layers=[1000 * MIB] * 4,
+        expert_layers=[800 * MIB] * 4,
+        output_bytes=1000 * MIB,
+        input_bytes=10 * MIB,
+        confidence="metadata",
+    )
     master = node("master", 3000 * MIB, master=True)
     worker = node("worker", 100 * MIB)
     worker["rpc_devices"] = [
@@ -309,11 +403,17 @@ def test_moe_expert_offload_to_remote_nodes():
 
 
 def test_moe_expert_offload_in_manual_node_shares():
-    m = dict(architecture="qwen2moe", metadata={"qwen2moe.attention.head_count_kv": 1},
-             layers=[2000 * MIB] * 2, expert_layers=[1600 * MIB] * 2,
-             output_bytes=2000 * MIB, input_bytes=10 * MIB, confidence="metadata")
+    m = dict(
+        architecture="qwen2moe",
+        metadata={"qwen2moe.attention.head_count_kv": 1},
+        layers=[2000 * MIB] * 2,
+        expert_layers=[1600 * MIB] * 2,
+        output_bytes=2000 * MIB,
+        input_bytes=10 * MIB,
+        confidence="metadata",
+    )
     nodes = [node("worker", 4000 * MIB), node("master", 4000 * MIB, master=True)]
-    result = plan(nodes, model=m, node_shares={"worker": .5, "master": .5})
+    result = plan(nodes, model=m, node_shares={"worker": 0.5, "master": 0.5})
     assert result["expert_offloaded"] is True
     assert result["expert_strategy"] == "experts"
     assert result["expert_offload_count"] == 2
@@ -331,8 +431,16 @@ def test_moe_offload_resolution_and_launch_args():
         "tensor_overrides": ["blk.0.ffn_*=RPC[worker:50052]"],
         "n_cpu_moe": 2,
     }
-    launch = build_master_launch(RunBody(model="test.gguf"), plan_result, model_path=Path("missing.gguf"),
-                                 rpc_servers=[], infer_port=8080, repo_root=None, gpu_env={}, extra_args=[])
+    launch = build_master_launch(
+        RunBody(model="test.gguf"),
+        plan_result,
+        model_path=Path("missing.gguf"),
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
     assert "blk.0.ffn_*=RPC[worker:50052]" in launch["extra_args"]
     assert launch["extra_args"].count("--override-tensor") == 1
     assert "--n-cpu-moe" in launch["extra_args"]

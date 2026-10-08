@@ -24,9 +24,15 @@ def available_threads() -> int:
     """Logical CPUs available to the master process, respecting affinity."""
     try:
         import psutil
+
         return max(1, len(psutil.Process().cpu_affinity()))
     except (AttributeError, OSError, ValueError):
-        return max(1, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1))
+        return max(
+            1,
+            len(os.sched_getaffinity(0))
+            if hasattr(os, "sched_getaffinity")
+            else (os.cpu_count() or 1),
+        )
 
 
 def cpu_batch_threads() -> int:
@@ -41,6 +47,7 @@ def cpu_batch_threads() -> int:
     physical: int | None
     try:
         import psutil
+
         counted = psutil.cpu_count(logical=False)
         physical = int(counted) if counted else None
     except (ImportError, OSError, ValueError):
@@ -114,8 +121,11 @@ class RunSettingsFields(BaseModel):
     @classmethod
     def canonical_parameters(cls, value: Any) -> Any:
         from kllm.parameter_catalog import canonicalize_parameters
+
         if isinstance(value, dict):
-            values = canonicalize_parameters(value, legacy=cls.model_config.get("extra") == "ignore")
+            values = canonicalize_parameters(
+                value, legacy=cls.model_config.get("extra") == "ignore"
+            )
             if values.get("mmproj") and "vision" not in values:
                 values["vision"] = True
             if values.get("draft_model") and "speculative" not in values:
@@ -124,13 +134,18 @@ class RunSettingsFields(BaseModel):
         return value
 
     def draft_enabled(self) -> bool:
-        return bool(self.draft_model and (self.speculative == "auto" or self.speculative.startswith("draft")))
+        return bool(
+            self.draft_model
+            and (self.speculative == "auto" or self.speculative.startswith("draft"))
+        )
 
     @field_validator("max_output_tokens")
     @classmethod
     def output_limit(cls, value: int | None) -> int | None:
         if value == 0:
-            raise ValueError("max_output_tokens must be positive, -1 (unlimited), or null (inherit)")
+            raise ValueError(
+                "max_output_tokens must be positive, -1 (unlimited), or null (inherit)"
+            )
         return value
 
     @field_validator("stop")
@@ -160,11 +175,19 @@ class RunSettingsFields(BaseModel):
             raise ValueError("required_nodes must contain nonempty node IDs without whitespace")
         if len(set(self.required_nodes)) != len(self.required_nodes):
             raise ValueError("required_nodes must contain unique node IDs")
-        if self.required_nodes and (self.node_shares is not None or self.split_mode not in (None, "layer")):
+        if self.required_nodes and (
+            self.node_shares is not None or self.split_mode not in (None, "layer")
+        ):
             raise ValueError("required_nodes require automatic layer placement")
-        if any(not node.strip() or node != node.strip() for node in self.node_priority) or len(set(self.node_priority)) != len(self.node_priority):
-            raise ValueError("node_priority must contain unique nonempty node IDs without whitespace")
-        if self.node_priority and (self.node_shares is not None or self.split_mode not in (None, "layer")):
+        if any(not node.strip() or node != node.strip() for node in self.node_priority) or len(
+            set(self.node_priority)
+        ) != len(self.node_priority):
+            raise ValueError(
+                "node_priority must contain unique nonempty node IDs without whitespace"
+            )
+        if self.node_priority and (
+            self.node_shares is not None or self.split_mode not in (None, "layer")
+        ):
             raise ValueError("node_priority requires automatic layer placement")
         if self.tensor_split is not None:
             raise ValueError(
@@ -177,13 +200,19 @@ class RunSettingsFields(BaseModel):
         if self.node_shares is not None:
             if self.device == "cpu" or self.split_mode not in (None, "layer"):
                 raise ValueError("manual node shares require GPU layer placement")
-            if not self.node_shares or any(not math.isfinite(v) or v < 0 for v in self.node_shares.values()):
+            if not self.node_shares or any(
+                not math.isfinite(v) or v < 0 for v in self.node_shares.values()
+            ):
                 raise ValueError("node shares must be finite nonnegative numbers")
             if abs(sum(self.node_shares.values()) - 1) > 0.001:
                 raise ValueError("node shares must total 1")
         from kllm.chat_templates import validate_selection
+
         validate_selection(self.chat_template, self.chat_template_text)
-        if self.chat_template in ("llama3", "phi3", "gemma", "mistral-v3-tekken") and self.enable_thinking is not None:
+        if (
+            self.chat_template in ("llama3", "phi3", "gemma", "mistral-v3-tekken")
+            and self.enable_thinking is not None
+        ):
             raise ValueError("legacy chat templates do not support thinking overrides")
         return self
 
@@ -267,6 +296,7 @@ class NetworkRequestFields(RunSettingsFields):
     @classmethod
     def canonical_network_id(cls, value: str | None) -> str | None:
         from uuid import UUID
+
         if value is not None and str(UUID(value)) != value:
             raise ValueError("network_id must be a canonical UUID")
         return value

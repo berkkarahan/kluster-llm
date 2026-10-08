@@ -116,10 +116,17 @@ def build_plan_run_payload(
         payload["split_mode"] = split_mode
     payload["settings_source"] = settings_source
     for key, value in {
-        "threads_batch": threads_batch, "draft_max": draft_max, "seed": seed,
-        "max_output_tokens": max_output_tokens, "frequency_penalty": frequency_penalty,
-        "stop": stop, "reasoning_effort": reasoning_effort, "reasoning_budget": reasoning_budget,
-        "reasoning_format": reasoning_format, "gpu_ids": gpu_ids, "node_priority": node_priority,
+        "threads_batch": threads_batch,
+        "draft_max": draft_max,
+        "seed": seed,
+        "max_output_tokens": max_output_tokens,
+        "frequency_penalty": frequency_penalty,
+        "stop": stop,
+        "reasoning_effort": reasoning_effort,
+        "reasoning_budget": reasoning_budget,
+        "reasoning_format": reasoning_format,
+        "gpu_ids": gpu_ids,
+        "node_priority": node_priority,
         "network_id": network_id,
     }.items():
         if value is not None:

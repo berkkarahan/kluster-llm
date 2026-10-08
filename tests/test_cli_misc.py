@@ -54,8 +54,7 @@ def test_rebuild_runs_install_script(monkeypatch, tmp_path):
     script = tmp_path / "scripts" / "install.py"
     script.parent.mkdir(parents=True)
     script.write_text(
-        "from pathlib import Path\n"
-        f"Path({marker.as_posix()!r}).write_text('ok')\n",
+        f"from pathlib import Path\nPath({marker.as_posix()!r}).write_text('ok')\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(rebuild, "repo_root", lambda: tmp_path)
@@ -105,9 +104,7 @@ def test_dashboard_command_opens_browser_after_agent_is_ready(monkeypatch):
     ]
 
 
-def test_agent_start_rejects_corrupt_state_with_recovery_guidance(
-    monkeypatch, tmp_path, capsys
-):
+def test_agent_start_rejects_corrupt_state_with_recovery_guidance(monkeypatch, tmp_path, capsys):
     state_path = tmp_path / "cluster.json"
     error = agent_runtime.ClusterStateLoadError(state_path, "invalid JSON at line 1, column 1")
 
@@ -160,9 +157,7 @@ def _prepare_failed_agent_start(monkeypatch, tmp_path, proc, sink):
     return registrations, cleared
 
 
-def test_agent_start_reports_early_exit_and_cleans_owned_processes(
-    monkeypatch, tmp_path, capsys
-):
+def test_agent_start_reports_early_exit_and_cleans_owned_processes(monkeypatch, tmp_path, capsys):
     sink = FakeProcess(71, None, exits_on_wait=True)
     proc = FakeProcess(72, 3)
     registrations, cleared = _prepare_failed_agent_start(monkeypatch, tmp_path, proc, sink)

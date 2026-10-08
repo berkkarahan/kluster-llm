@@ -9,6 +9,8 @@ import typer
 from kllm.commands.agent_runtime import _client
 from kllm.commands.ui import console
 from kllm.state import DEFAULT_CONTROL_PORT
+
+
 def model_templates(
     model: Optional[str] = typer.Option(None, "--model"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),

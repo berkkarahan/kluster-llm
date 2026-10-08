@@ -1,4 +1,5 @@
 """Application-owned connection pools (sync clients are safe across worker threads)."""
+
 import httpx
 import threading
 

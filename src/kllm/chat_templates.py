@@ -39,12 +39,17 @@ def validate_selection(name: str, text: str | None) -> None:
 def template_launch(name: str, text: str | None, model: str) -> dict[str, object]:
     validate_selection(name, text)
     if name in PRESETS:
-        return {"chat_template_file": str(Path(__file__).parent / "templates" / PRESETS[name][1]), "jinja": True}
+        return {
+            "chat_template_file": str(Path(__file__).parent / "templates" / PRESETS[name][1]),
+            "jinja": True,
+        }
     if text:
         from kllm.state import ensure_home
         import hashlib
 
-        path = ensure_home() / f"chat-template-{hashlib.sha256(model.encode()).hexdigest()[:16]}.jinja"
+        path = (
+            ensure_home() / f"chat-template-{hashlib.sha256(model.encode()).hexdigest()[:16]}.jinja"
+        )
         path.write_text(text, encoding="utf-8")
         return {"chat_template_file": str(path), "jinja": True}
     if name == "chatml":

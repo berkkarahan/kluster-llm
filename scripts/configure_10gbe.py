@@ -18,8 +18,7 @@ from typing import Sequence
 
 DEFAULT_SUBNET = "192.168.10.0/24"
 PRIVATE_NETWORKS = tuple(
-    ipaddress.ip_network(value)
-    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
 SYS_CLASS_NET = Path("/sys/class/net")
 INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
@@ -89,7 +88,15 @@ def _powershell(script: str, values: dict[str, str]) -> str:
     env = os.environ.copy()
     env.update({f"KLLM_10GBE_{key.upper()}": value for key, value in values.items()})
     return _run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
         env=env,
     )
 
@@ -150,11 +157,37 @@ $ipif = Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction S
 if ($ipif.Dhcp -ne 'Disabled') { throw 'DHCP must remain disabled' }
 New-NetIPAddress -InterfaceIndex ([int]$env:KLLM_10GBE_INTERFACE) -IPAddress $env:KLLM_10GBE_ADDRESS -PrefixLength ([int]$env:KLLM_10GBE_PREFIX) -PolicyStore ActiveStore -SkipAsSource $true -ErrorAction Stop | Out-Null
 """
-        _powershell(script, {"interface": interface, "address": str(profile.local), "prefix": str(profile.subnet.prefixlen)})
+        _powershell(
+            script,
+            {
+                "interface": interface,
+                "address": str(profile.local),
+                "prefix": str(profile.subnet.prefixlen),
+            },
+        )
     elif system == "Darwin":
-        _run(["ifconfig", interface, "inet", str(profile.local), "netmask", str(profile.subnet.netmask), "alias"])
+        _run(
+            [
+                "ifconfig",
+                interface,
+                "inet",
+                str(profile.local),
+                "netmask",
+                str(profile.subnet.netmask),
+                "alias",
+            ]
+        )
     elif system == "Linux":
-        _run(["ip", "address", "add", f"{profile.local}/{profile.subnet.prefixlen}", "dev", interface])
+        _run(
+            [
+                "ip",
+                "address",
+                "add",
+                f"{profile.local}/{profile.subnet.prefixlen}",
+                "dev",
+                interface,
+            ]
+        )
     else:
         raise NetworkError(f"unsupported operating system: {system}")
 
@@ -173,11 +206,15 @@ def configure(interface: str, role: str, subnet: str = DEFAULT_SUBNET) -> bool:
     if state.speed_mbps is None:
         raise NetworkError("negotiated link speed could not be verified; no changes were made")
     if state.speed_mbps < 10_000:
-        raise NetworkError(f"negotiated link speed is {state.speed_mbps} Mbps; at least 10000 Mbps is required")
+        raise NetworkError(
+            f"negotiated link speed is {state.speed_mbps} Mbps; at least 10000 Mbps is required"
+        )
     if state.dhcp is None:
         raise NetworkError("could not verify DHCP is disabled on the selected interface")
     if state.dhcp:
-        raise NetworkError("selected interface uses DHCP; configure a dedicated non-DHCP adapter first")
+        raise NetworkError(
+            "selected interface uses DHCP; configure a dedicated non-DHCP adapter first"
+        )
     matching = [address for address in state.addresses if address.ip == profile.local]
     if matching:
         if any(address.network == profile.subnet for address in matching):
@@ -186,7 +223,9 @@ def configure(interface: str, role: str, subnet: str = DEFAULT_SUBNET) -> bool:
     if routes_overlap(profile.subnet, state.routes):
         raise NetworkError(f"subnet {profile.subnet} overlaps an existing route")
     if any(address.network.overlaps(profile.subnet) for address in state.addresses):
-        raise NetworkError("selected interface has an IPv4 address overlapping the requested subnet")
+        raise NetworkError(
+            "selected interface has an IPv4 address overlapping the requested subnet"
+        )
     _apply_address(interface, profile)
     return True
 
@@ -223,7 +262,10 @@ if (-not $source) { throw 'No usable IPv4 source address on selected interface' 
     if result.returncode == 0:
         return True
     output = f"{result.stdout}\n{result.stderr}".lower()
-    if any(token in output for token in ("network is unreachable", "no route to host", "destination unreachable")):
+    if any(
+        token in output
+        for token in ("network is unreachable", "no route to host", "destination unreachable")
+    ):
         return False
     return None
 
@@ -233,7 +275,9 @@ def _interface_local_address(interface: str, peer: str) -> str:
     for address in state.addresses:
         if ipaddress.ip_address(peer) in address.network:
             return str(address.ip)
-    raise NetworkError("selected interface has no address in the peer subnet for source-bound verification")
+    raise NetworkError(
+        "selected interface has no address in the peer subnet for source-bound verification"
+    )
 
 
 def verify(interface: str, peer: str) -> str:
@@ -243,7 +287,13 @@ def verify(interface: str, peer: str) -> str:
         address = ipaddress.ip_address(peer)
     except ValueError as exc:
         raise NetworkError(f"invalid peer address {peer!r}") from exc
-    if not isinstance(address, ipaddress.IPv4Address) or address.is_unspecified or address.is_multicast or address.is_loopback or address.is_link_local:
+    if (
+        not isinstance(address, ipaddress.IPv4Address)
+        or address.is_unspecified
+        or address.is_multicast
+        or address.is_loopback
+        or address.is_link_local
+    ):
         raise NetworkError("peer must be a usable unicast IPv4 address")
     result = _ping(interface, str(address))
     if result is True:
@@ -257,11 +307,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
     configure_parser = subparsers.add_parser("configure", help="assign a temporary link address")
-    configure_parser.add_argument("--interface", required=True, help="explicit adapter ID (Windows index, macOS/Linux device)")
+    configure_parser.add_argument(
+        "--interface", required=True, help="explicit adapter ID (Windows index, macOS/Linux device)"
+    )
     configure_parser.add_argument("--role", choices=("coordinator", "worker"), required=True)
-    configure_parser.add_argument("--subnet", default=DEFAULT_SUBNET, help=f"private IPv4 CIDR (default: {DEFAULT_SUBNET})")
-    verify_parser = subparsers.add_parser("verify", help="verify a peer without changing network settings")
-    verify_parser.add_argument("--interface", required=True, help="explicit adapter ID (Windows index, macOS/Linux device)")
+    configure_parser.add_argument(
+        "--subnet", default=DEFAULT_SUBNET, help=f"private IPv4 CIDR (default: {DEFAULT_SUBNET})"
+    )
+    verify_parser = subparsers.add_parser(
+        "verify", help="verify a peer without changing network settings"
+    )
+    verify_parser.add_argument(
+        "--interface", required=True, help="explicit adapter ID (Windows index, macOS/Linux device)"
+    )
     verify_parser.add_argument("--peer", required=True, help="peer IPv4 address")
     return parser
 
@@ -273,12 +331,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             changed = configure(args.interface, args.role, args.subnet)
             profile = make_profile(args.role, args.subnet)
             verb = "Configured" if changed else "Already configured"
-            print(f"{verb} {args.role} on {args.interface}: {profile.local}/{profile.subnet.prefixlen}; peer {profile.peer} (temporary until reboot).")
+            print(
+                f"{verb} {args.role} on {args.interface}: {profile.local}/{profile.subnet.prefixlen}; peer {profile.peer} (temporary until reboot)."
+            )
             return 0
         outcome = verify(args.interface, args.peer)
         print(f"Peer {args.peer} via {args.interface}: {outcome}.")
         if outcome != "reachable":
-            print("Check link state, negotiated speed, interface selection, routes, and ICMP firewall policy.", file=sys.stderr)
+            print(
+                "Check link state, negotiated speed, interface selection, routes, and ICMP firewall policy.",
+                file=sys.stderr,
+            )
             return 1
         return 0
     except NetworkError as exc:

@@ -77,9 +77,7 @@ class ResolvedLaunchSettings:
                 draft_max=int(values["draft_max"]),
                 draft_cache_type_k=str(values["draft_cache_type_k"]),
                 draft_cache_type_v=str(values["draft_cache_type_v"]),
-                requested_batch_size=int(
-                    values.get("requested_batch_size", values["batch_size"])
-                ),
+                requested_batch_size=int(values.get("requested_batch_size", values["batch_size"])),
                 requested_micro_batch=int(
                     values.get("requested_micro_batch", values["micro_batch"])
                 ),

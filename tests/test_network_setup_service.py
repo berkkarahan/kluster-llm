@@ -38,8 +38,9 @@ def test_master_overlay_service_builds_config_and_records_tunnel_identity():
         lambda: state,
         tooling_available=lambda: True,
         load_keypair=lambda: ("private", "public"),
-        next_address=lambda members, *, master: calls.append(("address", members, master))
-        or "10.44.0.1",
+        next_address=lambda members, *, master: (
+            calls.append(("address", members, master)) or "10.44.0.1"
+        ),
         derive_psk=lambda key: f"psk:{key}",
         build_config=build_config,
         bring_up=lambda config: calls.append(("up", config)),
@@ -88,7 +89,10 @@ def test_master_overlay_service_reports_missing_wireguard_tooling():
 
     with pytest.raises(ResourceUnavailableError) as error:
         service.setup("secret", "192.168.1.5")
-    assert str(error.value) == "WireGuard tooling not found (wg). Install WireGuard or use overlay=none"
+    assert (
+        str(error.value)
+        == "WireGuard tooling not found (wg). Install WireGuard or use overlay=none"
+    )
 
 
 def test_master_overlay_service_wraps_tunnel_start_failure():
@@ -139,9 +143,7 @@ def test_worker_overlay_service_uses_assigned_address_and_peer_set():
                 "address": "10.44.0.2",
                 "listen_port": 51820,
                 "psk": "psk:join-key",
-                "peers": [
-                    {"public_key": "master-public", "allowed_ips": "10.44.0.1/32"}
-                ],
+                "peers": [{"public_key": "master-public", "allowed_ips": "10.44.0.1/32"}],
             },
         ),
         ("up", "worker config"),

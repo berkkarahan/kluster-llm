@@ -35,6 +35,7 @@ from .query import (
     resolve_hf_filename as _resolve_hf_filename,
 )
 
+
 def _basename(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
@@ -55,6 +56,7 @@ _RATE_WINDOW = 10.0
 _TERMINAL_DOWNLOAD_PHASES = frozenset({"complete", "error", "cancelled"})
 
 _PROGRESS_MIN_INTERVAL = 0.1
+
 
 def _safe_name(name: str) -> str:
     return re.sub(r"[^\w.\-]+", "_", name)[:180]
@@ -78,10 +80,7 @@ def _timestamp() -> str:
 def begin_download(source: str, dest_name: str | None = None) -> dict[str, Any]:
     """Reserve a download operation before its background runner starts."""
     global _DOWNLOAD_PROGRESS, _DOWNLOAD_CANCEL
-    if (
-        _DOWNLOAD_PROGRESS is not None
-        and _DOWNLOAD_PROGRESS.phase not in _TERMINAL_DOWNLOAD_PHASES
-    ):
+    if _DOWNLOAD_PROGRESS is not None and _DOWNLOAD_PROGRESS.phase not in _TERMINAL_DOWNLOAD_PHASES:
         raise DownloadInProgressError("a download is already in progress")
     if not _DOWNLOAD_LOCK.acquire(blocking=False):
         raise DownloadInProgressError("a download is already in progress")
@@ -106,10 +105,7 @@ def begin_download(source: str, dest_name: str | None = None) -> dict[str, Any]:
 
 def _reset_download_state() -> None:
     global _DOWNLOAD_PROGRESS, _DOWNLOAD_CANCEL, _DOWNLOAD_LAST_TERMINAL
-    if (
-        _DOWNLOAD_PROGRESS is not None
-        and _DOWNLOAD_PROGRESS.phase in _TERMINAL_DOWNLOAD_PHASES
-    ):
+    if _DOWNLOAD_PROGRESS is not None and _DOWNLOAD_PROGRESS.phase in _TERMINAL_DOWNLOAD_PHASES:
         _DOWNLOAD_LAST_TERMINAL = _DOWNLOAD_PROGRESS
     _DOWNLOAD_PROGRESS = None
     _DOWNLOAD_CANCEL = None
@@ -263,15 +259,13 @@ def set_download_terminal(
     """
     global _DOWNLOAD_PROGRESS, _DOWNLOAD_LAST_TERMINAL
     previous = _DOWNLOAD_PROGRESS
-    if (
-        operation_id is not None
-        and previous is not None
-        and previous.operation_id != operation_id
-    ):
+    if operation_id is not None and previous is not None and previous.operation_id != operation_id:
         return
     stamp = _timestamp()
     snap = DownloadProgress(
-        operation_id=(operation_id or (previous.operation_id if previous else None) or str(uuid.uuid4())),
+        operation_id=(
+            operation_id or (previous.operation_id if previous else None) or str(uuid.uuid4())
+        ),
         filename=filename,
         bytes=total if total and phase == "complete" else 0,
         total=total,
@@ -290,8 +284,6 @@ def set_download_terminal(
 
 def _hub_headers(token: str | None) -> dict[str, str]:
     return build_hf_headers(token=token if token else False)
-
-
 
 
 def _stream_to_models(

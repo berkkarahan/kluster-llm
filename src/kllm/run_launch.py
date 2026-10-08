@@ -69,16 +69,18 @@ def build_master_launch(
     )
     merged_extra = merge_defaults_into_extra_args(list(settings.extra_args), defaults)
     for name, flag in (
-        ("threads_batch", "--threads-batch"), ("seed", "--seed"),
+        ("threads_batch", "--threads-batch"),
+        ("seed", "--seed"),
         ("max_output_tokens", "--n-predict"),
-        ("reasoning_effort", "--reasoning-effort"), ("reasoning_budget", "--reasoning-budget"),
+        ("reasoning_effort", "--reasoning-effort"),
+        ("reasoning_budget", "--reasoning-budget"),
         ("reasoning_format", "--reasoning-format"),
     ):
         value = getattr(body, name)
         if value is not None:
             if flag in merged_extra:
                 index = merged_extra.index(flag)
-                del merged_extra[index:index + 2]
+                del merged_extra[index : index + 2]
             merged_extra += [flag, str(value)]
     if body.threads_batch is None and "--threads-batch" not in merged_extra:
         # Unset means "same as --threads" in llama-server, which keeps prefill
@@ -143,9 +145,9 @@ def build_master_launch(
             launch["extra_args"] = [arg for arg in launch["extra_args"] if arg != "--no-jinja"]
         else:
             launch["jinja"] = False
-            launch["extra_args"] = [
-                arg for arg in launch["extra_args"] if arg != "--jinja"
-            ] + ["--no-jinja"]
+            launch["extra_args"] = [arg for arg in launch["extra_args"] if arg != "--jinja"] + [
+                "--no-jinja"
+            ]
     for pattern in plan_result.get("tensor_overrides") or []:
         launch["extra_args"] += ["--override-tensor", pattern]
     if plan_result.get("n_cpu_moe") is not None:

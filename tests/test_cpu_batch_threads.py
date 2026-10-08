@@ -35,8 +35,14 @@ def test_unset_threads_batch_is_what_launch_and_the_snapshot_use(monkeypatch):
     body = RunBody(model="toy.gguf")
     plan = _fake_plan()
     launch = build_master_launch(
-        body, plan, model_path=Path("/tmp/toy.gguf"), rpc_servers=[],
-        infer_port=8080, repo_root=None, gpu_env={}, extra_args=[],
+        body,
+        plan,
+        model_path=Path("/tmp/toy.gguf"),
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
     )
     args = launch["extra_args"]
     assert args[args.index("--threads-batch") + 1] == "12"
@@ -48,8 +54,14 @@ def test_explicit_threads_batch_is_not_replaced(monkeypatch):
     monkeypatch.setattr("kllm.run_launch.cpu_batch_threads", lambda: 12)
     body = RunBody(model="toy.gguf", threads_batch=3)
     launch = build_master_launch(
-        body, _fake_plan(), model_path=Path("/tmp/toy.gguf"), rpc_servers=[],
-        infer_port=8080, repo_root=None, gpu_env={}, extra_args=[],
+        body,
+        _fake_plan(),
+        model_path=Path("/tmp/toy.gguf"),
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
     )
     args = launch["extra_args"]
     assert args[args.index("--threads-batch") + 1] == "3"

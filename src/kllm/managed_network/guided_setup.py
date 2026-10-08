@@ -10,7 +10,15 @@ from uuid import UUID
 
 from pydantic import Field, field_validator
 
-from .allocation import CANDIDATES, OperationRequest, ParticipantSelection, StartRequest, acceptable, propose, reusable_addresses
+from .allocation import (
+    CANDIDATES,
+    OperationRequest,
+    ParticipantSelection,
+    StartRequest,
+    acceptable,
+    propose,
+    reusable_addresses,
+)
 from .helper import HelperClient
 from .models import Digest, Identifier, Record, Revision, private_subnet
 from .platform.base import PlatformRefusal
@@ -174,9 +182,7 @@ class GuidedSetup:
         if speed is None or speed <= 0:
             return "The connection speed could not be verified."
         if speed < MIN_DEDICATED_LINK_SPEED_MBPS:
-            return (
-                f"This connection is {speed} Mbps; at least 1000 Mbps (1 Gbps) is required."
-            )
+            return f"This connection is {speed} Mbps; at least 1000 Mbps (1 Gbps) is required."
         if adapter.get("facts", {}).get("default_route"):
             return "This adapter carries the computer’s internet connection."
         if any(
@@ -215,7 +221,11 @@ class GuidedSetup:
                 error_code = error_code or "NO_ADAPTER"
             selected = candidates[0]["adapter_id"] if len(candidates) == 1 else ""
             if len(candidates) > 1 and not error_code:
-                preferred = [a for a in candidates if reusable_addresses(a, ipaddress.IPv4Network(CANDIDATES[0]))]
+                preferred = [
+                    a
+                    for a in candidates
+                    if reusable_addresses(a, ipaddress.IPv4Network(CANDIDATES[0]))
+                ]
                 if len(preferred) == 1:
                     selected = preferred[0]["adapter_id"]
                 else:
@@ -223,8 +233,13 @@ class GuidedSetup:
             computers.append(
                 {
                     "node_id": node_id,
-                    "name": identity.get("hostname") or member.get("hostname") or member.get("host") or node_id,
-                    "host": identity.get("private_address") or identity.get("rpc_bind") or member.get("host"),
+                    "name": identity.get("hostname")
+                    or member.get("hostname")
+                    or member.get("host")
+                    or node_id,
+                    "host": identity.get("private_address")
+                    or identity.get("rpc_bind")
+                    or member.get("host"),
                     "master": node_id == service.identity.node_id,
                     "administrator_enabled": setup.get("administrator_enabled", False),
                     "adapters": adapters,
@@ -313,7 +328,9 @@ class GuidedSetup:
         if request.action == "start":
             proposals = propose(groups, len(request.nodes))
             subnet = request.subnet or (proposals[0] if proposals else None)
-            if subnet is None or not acceptable(groups, ipaddress.IPv4Network(subnet), len(request.nodes)):
+            if subnet is None or not acceptable(
+                groups, ipaddress.IPv4Network(subnet), len(request.nodes)
+            ):
                 raise PlatformRefusal("SUBNET_CONFLICT", MESSAGES["SUBNET_CONFLICT"])
             if request.network_id is not None:
                 raise PlatformRefusal(

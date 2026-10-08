@@ -160,9 +160,7 @@ class NetworkStateService:
         bind = state.rpc_bind
         if bind:
             warnings.extend(
-                self._refresh_firewall_warnings(
-                    state.rpc_port or self._default_rpc_port, bind
-                )
+                self._refresh_firewall_warnings(state.rpc_port or self._default_rpc_port, bind)
             )
 
         peer = state.master_host if state.role == "worker" else None

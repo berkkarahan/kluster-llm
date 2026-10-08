@@ -76,9 +76,7 @@ def layer_counts_from_weights(weights: list[float], n_layers: int) -> list[int]:
     return counts
 
 
-def device_can_hold(
-    device: PlacementDeviceCandidate, *, model_bytes: int, overhead: int
-) -> bool:
+def device_can_hold(device: PlacementDeviceCandidate, *, model_bytes: int, overhead: int) -> bool:
     """True if one accelerator's budget covers all layer costs plus overhead."""
     return device.budget_bytes >= model_bytes + overhead
 
@@ -121,7 +119,5 @@ def select_routing_devices(
             return DeviceRoutingSelection("single_remote", (fitting_remote,))
 
     # Pool: keep score order (caller already sorted); break ties by larger budget first.
-    pooled = sorted(
-        devices, key=lambda d: (-d.score, -d.budget_bytes)
-    )
+    pooled = sorted(devices, key=lambda d: (-d.score, -d.budget_bytes))
     return DeviceRoutingSelection("pool", tuple(pooled))

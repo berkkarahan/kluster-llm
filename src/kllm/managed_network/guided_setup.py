@@ -191,8 +191,10 @@ class GuidedSetup:
         service = self.service
         inventories = await service.inventories()
         management = set(await asyncio.to_thread(service._management_hosts))
+        directory = service.directory_view()
         computers = []
         for node_id, member in service.state().members.items():
+            identity = directory.get(node_id, {})
             inventory = inventories.get(node_id, {})
             setup = inventory.get("setup", {})
             adapters = [
@@ -221,8 +223,8 @@ class GuidedSetup:
             computers.append(
                 {
                     "node_id": node_id,
-                    "name": member.get("hostname") or member.get("host") or node_id,
-                    "host": member.get("host"),
+                    "name": identity.get("hostname") or member.get("hostname") or member.get("host") or node_id,
+                    "host": identity.get("private_address") or identity.get("rpc_bind") or member.get("host"),
                     "master": node_id == service.identity.node_id,
                     "administrator_enabled": setup.get("administrator_enabled", False),
                     "adapters": adapters,

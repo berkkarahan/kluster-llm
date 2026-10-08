@@ -343,6 +343,31 @@ def _managed_network_summaries() -> list[dict[str, Any]]:
     return service.summaries() if service is not None else []
 
 
+def _network_directory_sync() -> None:
+    service = getattr(app.state, 'managed_network', None)
+    if service is not None:
+        service.sync_directory()
+
+
+def _network_directory() -> list[dict[str, Any]]:
+    service = getattr(app.state, 'managed_network', None)
+    if service is None:
+        return []
+    # Refresh before serving so a fresh master without worker heartbeats still
+    # lists its own identity; a worker sync is a no-op and reads its mirror.
+    try:
+        service.sync_directory()
+    except sqlite3.Error:
+        pass
+    return service.directory_payload()
+
+
+def _network_directory_remove(node_id: str) -> None:
+    service = getattr(app.state, 'managed_network', None)
+    if service is not None:
+        service.remove_directory(node_id)
+
+
 def _rpc_lifecycle_status() -> dict[str, Any]:
     service = getattr(app.state, 'managed_network', None)
     coordinator = service.rpc_runs if service is not None else None
@@ -547,6 +572,25 @@ def _tracked_process_token() -> str | None:
     )
 
 
+def _apply_directory_snapshot(value: Any) -> None:
+    if not isinstance(value, list):
+        return
+    service = getattr(app.state, 'managed_network', None)
+    if service is None:
+        return
+    from kllm.managed_network.models import NodeNetworkIdentity
+    items = []
+    for entry in value[:256]:
+        try:
+            items.append(NodeNetworkIdentity.model_validate(entry))
+        except ValueError:
+            continue  # The master is trusted, but the boundary stays validated.
+    try:
+        service.store.put_directory_many(items, replace=True)
+    except sqlite3.Error:
+        pass  # The local identity mirror must not break membership heartbeats.
+
+
 def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
     if isinstance(data.get("logging"), dict):
         logging_control.apply(STATE, data["logging"])
@@ -562,6 +606,7 @@ def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
                 for key in ('rpc_owner', 'rpc_status', 'rpc_error', 'rpc_devices', 'rpc_capabilities', 'rpc_control_version'):
                     if key in local:
                         STATE.members[STATE.node_id][key] = local[key]
+    _apply_directory_snapshot(data.get("node_directory"))
     if "last_plan" in data:
         STATE.last_plan = data.get("last_plan")
     if "apply_error" in data:
@@ -1143,6 +1188,7 @@ def _dashboard_status_service() -> DashboardStatusService:
         feature_flags=kllm_config.feature_flags,
         rpc_lifecycle=_rpc_lifecycle_status,
         runtimes=_runtime_status,
+        network_directory=_network_directory,
     )
 
 
@@ -1360,6 +1406,9 @@ def _membership_handlers() -> MembershipHandlers:
         master_lan_host=_master_lan_host,
         inference_activity=_inference_activity,
         shrink_cluster=_relaunch_after_membership_change,
+        directory_sync=_network_directory_sync,
+        directory_snapshot=_network_directory,
+        directory_remove=_network_directory_remove,
     )
 
 

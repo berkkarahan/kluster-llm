@@ -33,6 +33,7 @@ class DashboardStatusService:
         feature_flags: Callable[[], dict[str, bool]] | None = None,
         rpc_lifecycle: Callable[[], dict[str, Any]] | None = None,
         runtimes: Callable[[], dict[str, Any]] | None = None,
+        network_directory: Callable[[], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._state = state
         self._load_config = load_config
@@ -48,6 +49,7 @@ class DashboardStatusService:
         self._feature_flags = feature_flags
         self._rpc_lifecycle = rpc_lifecycle
         self._runtimes = runtimes
+        self._network_directory = network_directory
 
     def status(self) -> StatusPayload:
         """Build the full status response, including a fresh local capacity probe."""
@@ -61,6 +63,7 @@ class DashboardStatusService:
         return {
             "role": state.role,
             **({'runtimes': self._runtimes()} if self._runtimes else {}),
+            **({'network_directory': self._network_directory()} if self._network_directory else {}),
             "node_id": state.node_id,
             "join_key": state.join_key if state.role == "master" else None,
             "master_host": state.master_host,
@@ -110,6 +113,7 @@ class DashboardStatusService:
         activity = self._inference_activity()
         return {
             **({'runtimes': self._runtimes()} if self._runtimes else {}),
+            **({'network_directory': self._network_directory()} if self._network_directory else {}),
             "role": state.role,
             "node_id": state.node_id,
             "join_key": state.join_key if state.role == "master" else None,

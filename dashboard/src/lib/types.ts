@@ -151,8 +151,23 @@ export type HfTokenStatus = {
   source: HfTokenSource;
 };
 
+export type NodeNetworkIdentity = {
+  node_id: string;
+  hostname?: string;
+  role: 'master' | 'worker';
+  lan_host?: string;
+  rpc_bind?: string;
+  private_address?: string | null;
+  private_prefix_length?: number | null;
+  network_id?: string | null;
+  assignment_state?: string | null;
+  link_speed_mbps?: number | null;
+  updated_at?: string;
+};
+
 export type Status = {
   runtimes?: import('./runtime-types').RuntimeLibrary;
+  network_directory?: NodeNetworkIdentity[];
   active_config?: EffectiveConfig | null;
   managed_networks?: ManagedNetwork[];
   feature_flags?: Record<string, boolean>;
@@ -301,6 +316,7 @@ export type LoggingStatus = {
 export type UsageNode = {
   node_id: string;
   host: string;
+  address?: string | null;
   role: 'master' | 'worker';
   rpc_status?: RpcStatus;
   backend?: string | null;

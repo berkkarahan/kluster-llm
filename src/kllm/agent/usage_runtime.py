@@ -65,7 +65,11 @@ class UsageRuntime:
         self._worker_error: str | None = None
         self._worker_last_save: str | None = None
         self._worker_last_success_at: str | None = None
-        self.overview = UsageOverviewService(self.resources, self.assignment)
+        self.overview = UsageOverviewService(self.resources, self.assignment, self._directory_view)
+
+    def _directory_view(self) -> dict[str, dict[str, Any]]:
+        service = getattr(self._app_state(), 'managed_network', None)
+        return service.directory_view() if service is not None else {}
 
     @property
     def worker_error(self) -> str | None:

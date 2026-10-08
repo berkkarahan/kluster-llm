@@ -1101,6 +1101,65 @@ def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
     assert state.members["w1"]["rpc_bind"] == "192.168.68.63"
 
 
+def test_heartbeat_response_carries_the_shared_node_directory():
+    from types import SimpleNamespace
+
+    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.agent.schemas import RegisterBody
+
+    state = ClusterState(role="master", node_id="master", overlay="none")
+    state.save = lambda: None  # noqa: SLF001
+    state.members["w1"] = {**REGISTER_BODY, "role": "worker", "last_seen": 0.0}
+    synced: list[bool] = []
+    row = {"node_id": "w1", "hostname": "gpu-box", "role": "worker"}
+    handlers = MembershipHandlers(
+        lambda: state,
+        sync_liveness=lambda **_: [],
+        resources=SimpleNamespace(prune=lambda _: None),
+        resource_probe_available=lambda: False,
+        store=lambda: SimpleNamespace(end_node=lambda _: None),
+        master_lan_host=lambda: "192.168.68.1",
+        inference_activity=lambda: {},
+        directory_sync=lambda: synced.append(True),
+        directory_snapshot=lambda: [row],
+        directory_remove=lambda _: None,
+    )
+    body = RegisterBody(node_id="w1", host="192.168.68.63")
+    request = SimpleNamespace(client=SimpleNamespace(host="192.168.68.62"))
+    out = handlers.heartbeat(body, request)
+
+    assert synced == [True]
+    assert out["node_directory"] == [row]
+
+
+def test_unregister_removes_the_directory_row():
+    from types import SimpleNamespace
+
+    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.agent.schemas import UnregisterBody
+
+    state = ClusterState(role="master", node_id="master", overlay="none")
+    state.save = lambda: None  # noqa: SLF001
+    state.members["w1"] = {**REGISTER_BODY, "role": "worker", "last_seen": 0.0}
+    removed: list[str] = []
+    handlers = MembershipHandlers(
+        lambda: state,
+        sync_liveness=lambda **_: [],
+        resources=SimpleNamespace(prune=lambda _: None),
+        resource_probe_available=lambda: False,
+        store=lambda: SimpleNamespace(end_node=lambda _: None),
+        master_lan_host=lambda: "192.168.68.1",
+        inference_activity=lambda: {},
+        shrink_cluster=lambda _: None,
+        directory_remove=removed.append,
+    )
+
+    assert handlers.unregister(UnregisterBody(node_id="w1")) == {"ok": True}
+
+    assert removed == ["w1"]
+    assert "w1" not in state.members
+
+
 def test_worker_runtime_reconciler_does_not_restart_unhealthy_worker(client, monkeypatch):
     _, agent = client
     state = agent.STATE

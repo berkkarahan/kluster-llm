@@ -27,6 +27,9 @@ class MembershipHandlers:
         master_lan_host: Callable[[], str],
         inference_activity: Callable[[], dict[str, Any]],
         shrink_cluster: Callable[[ClusterState], None] | None = None,
+        directory_sync: Callable[[], None] | None = None,
+        directory_snapshot: Callable[[], list[dict[str, Any]]] | None = None,
+        directory_remove: Callable[[str], None] | None = None,
     ) -> None:
         self._state = state
         self._sync_liveness = sync_liveness
@@ -36,6 +39,25 @@ class MembershipHandlers:
         self._master_lan_host = master_lan_host
         self._inference_activity = inference_activity
         self._shrink_cluster = shrink_cluster or membership.on_membership_shrink
+        self._directory_sync = directory_sync
+        self._directory_snapshot = directory_snapshot
+        self._directory_remove = directory_remove
+
+    def _refresh_directory(self) -> None:
+        if self._directory_sync is None:
+            return
+        try:
+            self._directory_sync()
+        except sqlite3.Error:
+            pass  # Liveness stays independent of the identity read model.
+
+    def _with_directory(self, response: dict[str, Any]) -> dict[str, Any]:
+        if self._directory_snapshot is not None:
+            try:
+                response['node_directory'] = self._directory_snapshot()
+            except sqlite3.Error:
+                response['node_directory'] = []
+        return response
 
     def register(self, body: RegisterBody, request: Request) -> dict[str, Any]:
         state = self._state()
@@ -118,9 +140,10 @@ class MembershipHandlers:
         state.members[body.node_id] = member
         state.save()
         membership.on_membership_grow(state)
+        self._refresh_directory()
         response["members"] = len(state.members)
         response.update(membership.snapshot_payload(state, self._inference_activity()))
-        return response
+        return self._with_directory(response)
 
     def rewrite_master_wg_peers(self) -> None:
         """Rewrite the live WireGuard config with every registered worker peer."""
@@ -167,6 +190,8 @@ class MembershipHandlers:
         if node_id and node_id != state.node_id and node_id in state.members:
             state.members.pop(node_id, None)
             self._resources.prune(state.members)
+            if self._directory_remove is not None:
+                self._directory_remove(node_id)
             self._shrink_cluster(state)
         else:
             state.save()
@@ -186,8 +211,10 @@ class MembershipHandlers:
             state.members[body.node_id].update(update)
             state.members[body.node_id]["last_seen"] = time.time()
             state.save()
-        return {
+            self._refresh_directory()
+        response = {
             "ok": True,
             "accepted": accepted,
             **membership.snapshot_payload(state, self._inference_activity()),
         }
+        return self._with_directory(response)

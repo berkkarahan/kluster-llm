@@ -19,17 +19,24 @@
   const startJoinDisabled = $derived(!idle || !!appStore.busy);
   const inferenceActivity = $derived(appStore.status?.inference_activity);
   const memberIds = $derived(new Set(Object.keys(appStore.status?.members ?? {})));
+  const networkDirectory = $derived(Object.fromEntries(
+    (appStore.status?.network_directory ?? []).map((entry) => [entry.node_id, entry])));
   const displayNodes = $derived.by(() => {
     const usage = appStore.liveUsage?.nodes ?? {};
     if (view !== 'live' && view !== 'offline') return {};
     const members = appStore.status?.members ?? {};
     const current = Object.fromEntries(Object.entries(members).map(([id, member]) => {
       const existing = usage[id];
+      const identity = networkDirectory[id];
       const rpc_status = member.role === 'master' ? appStore.status?.rpc_lifecycle?.status : member.rpc_status;
-      if (existing) return [id, { ...existing, rpc_status }];
+      const identityFields = {
+        host: identity?.hostname || existing?.host || member.host || id,
+        address: identity?.private_address || identity?.rpc_bind || existing?.address || member.host || null,
+      };
+      if (existing) return [id, { ...existing, ...identityFields, rpc_status }];
       return [id, {
         node_id: id,
-        host: member.host || id,
+        ...identityFields,
         role: member.role === 'worker' ? 'worker' as const : 'master' as const,
         rpc_status,
         backend: member.actual_backend ?? member.backend ?? null,

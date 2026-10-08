@@ -100,23 +100,52 @@ def test_changed_master_key_still_requires_explicit_pairing(tmp_path, monkeypatc
         replacement.store.close()
 
 
-def test_unsettled_networking_reports_actionable_guidance(tmp_path, monkeypatch):
+def test_same_key_rotation_adopts_with_live_managed_network(tmp_path, monkeypatch):
     master, worker = service(tmp_path), service(tmp_path, "worker", "worker")
     try:
         stale = pinned_master(master)
+        worker.store.pair(stale)
+        network = ManagedNetwork(
+            network_id=uuid4(),
+            cluster_binding_id=master.store.cluster_binding(),
+            master_node_id="master",
+            master_key_id=master.identity.key_id,
+            subnet="10.10.10.0/24",
+        )
+        worker.store.put_network(network)
+        master_transport(monkeypatch, master)
+
+        asyncio.run(worker.bootstrap.connect())
+
+        adopted = worker.store.peer("master")
+        assert adopted is not None
+        assert adopted.cluster_binding_id == master.store.cluster_binding()
+        # A same-key rotation must not discard owned network state.
+        assert worker.store.network(network.network_id) is not None
+        assert master.store.peer("worker") is not None
+    finally:
+        master.store.close()
+        worker.store.close()
+
+
+def test_changed_master_key_with_live_network_still_refused(tmp_path, monkeypatch):
+    master, worker = service(tmp_path), service(tmp_path, "worker", "worker")
+    replacement = service(tmp_path / "replacement", "master", "master")
+    try:
+        stale = pinned_master(master, key_from=replacement.identity)
         worker.store.pair(stale)
         worker.store.put_network(
             ManagedNetwork(
                 network_id=uuid4(),
                 cluster_binding_id=master.store.cluster_binding(),
                 master_node_id="master",
-                master_key_id=master.identity.key_id,
+                master_key_id=replacement.identity.key_id,
                 subnet="10.10.10.0/24",
             )
         )
         master_transport(monkeypatch, master)
 
-        with pytest.raises(IdentityError, match="not settled"):
+        with pytest.raises(IdentityError, match="key changed"):
             asyncio.run(worker.bootstrap.connect())
 
         assert worker.store.peer("master") == stale
@@ -124,3 +153,4 @@ def test_unsettled_networking_reports_actionable_guidance(tmp_path, monkeypatch)
     finally:
         master.store.close()
         worker.store.close()
+        replacement.store.close()

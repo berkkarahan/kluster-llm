@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from kllm import discovery, netsec
 from kllm.config import CONTROL_PROTOCOL_VERSION
 from kllm.state import DEFAULT_CONTROL_PORT
+from .services.heartbeat_payload import local_hostname
 
 
 def require_join_overlay(overlay_raw: str) -> str:
@@ -71,6 +72,7 @@ def build_register_payload(
     return {
         "node_id": node_id,
         "host": lan_host,
+        "hostname": local_hostname(),
         "lan_host": lan_host,
         "control_port": control_port,
         "rpc_port": rpc_port,

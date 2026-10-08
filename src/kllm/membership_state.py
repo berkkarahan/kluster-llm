@@ -30,6 +30,7 @@ _SNAPSHOT_OPTIONAL = (
     "vram_bytes",
     "control_port",
     "rpc_port",
+    "hostname",
     "lan_host",
     "last_seen",
     "latency_ms",

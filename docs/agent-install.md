@@ -186,8 +186,11 @@ isolated downloads/builds on the master; children receive it over the paired sig
 channel, and a per-node **Sync** (or Retry) forces that worker immediately. Joining and
 reconnecting children prepare that target automatically. A worker whose pinned pairing diverges
 from the master (for example after a restored `cluster.json`) re-asserts it automatically; a
-worker that still has no paired channel shows *Runtime control channel not connected … re-pair
-it* rather than waiting silently, and forcing it returns an actionable `CHANNEL_UNAVAILABLE`.
+master label or cluster-binding rotation that kept the signing key is adopted, replacing the
+superseded pin and clearing stale authority once local networking is settled, while a changed
+signing key or unsettled networking needs explicit local re-pairing. A worker that still has no
+paired channel shows *Runtime control channel not connected … re-pair it* rather than waiting
+silently, and forcing it returns an actionable `CHANNEL_UNAVAILABLE`.
 Failed or cancelled builds remain visible until Retry or a new target.
 The local library stays usable when signed cluster control is unavailable; setting and enforcing
 the cluster target requires the recovered agent.

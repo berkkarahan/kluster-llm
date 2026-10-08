@@ -15,6 +15,7 @@ from pydantic import Field
 
 from .identity import IdentityError, LocalIdentity
 from .models import NodeIdentity, PeerIdentity, Record
+from .store import NetworkStore, StoreConflict
 
 DOMAIN = b"kllm-network-bootstrap-v2\0"
 
@@ -39,6 +40,28 @@ def proof(key: str, stage: str, payload: dict[str, Any]) -> str:
     return hmac.new(
         key.encode(), DOMAIN + stage.encode() + b"\0" + encoded, hashlib.sha256
     ).hexdigest()
+
+
+def adopt_rotated_master(store: NetworkStore, prior: PeerIdentity, peer: PeerIdentity) -> None:
+    """Adopt a rebuilt master's label/binding when its signing key is unchanged.
+
+    The Ed25519 key is the cryptographic identity. A node label or cluster
+    binding changes when the master's own network state is rebuilt or restored
+    (for example a restored ``cluster.json``). Refusing then leaves every
+    signed feature stuck with no supported recovery, so the current identity
+    replaces the pin exactly like the local label-rotation policy in
+    ``NetworkStore.pin_identity``. A changed key is an identity swap and stays
+    refused until the operator re-pairs locally.
+    """
+    if (prior.key_id, prior.public_key) != (peer.key_id, peer.public_key):
+        raise IdentityError("Master identity key changed; explicit re-pairing required")
+    try:
+        store.pair(peer, replace=True)
+    except StoreConflict as error:
+        raise IdentityError(
+            "Master identity changed and local networking is not settled; "
+            f"resolve Kluster network state on this node before re-pairing ({error})"
+        ) from None
 
 
 class IdentityBootstrap:
@@ -161,10 +184,10 @@ class IdentityBootstrap:
                 prior = next(
                     (p for p in service.store.peers() if p.expected_role == "master"), None
                 )
-                if prior is not None and prior != peer:
-                    raise IdentityError("Master identity changed; review pairing locally")
                 if service.state().role != "worker" or service.channels.master_base() != base:
                     raise IdentityError("Cluster changed during pairing")
+                if prior is not None and prior != peer:
+                    adopt_rotated_master(service.store, prior, peer)
                 response = await client.post(
                     base + "/v2/node/network-bootstrap/commit",
                     json={
@@ -175,4 +198,4 @@ class IdentityBootstrap:
                     },
                 )
                 response.raise_for_status()
-                service.store.pair(peer)
+                service.store.pair(peer, replace=prior is not None)

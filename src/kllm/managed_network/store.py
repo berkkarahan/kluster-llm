@@ -170,11 +170,18 @@ class NetworkStore:
         validate_peer(peer)
         with self.execution(), self.transaction() as db:
             row = db.execute('SELECT body FROM peers WHERE node_id=?', (peer.node_id,)).fetchone()
-            if row and row[0] != peer.model_dump_json():
+            # A worker pins exactly one master, so a rebuilt or restored master
+            # presenting a new label or binding must supersede the old pin; two
+            # master rows would stall the signed channel loop.
+            superseded = peer.expected_role == 'master' and bool(db.execute(
+                'SELECT 1 FROM peers WHERE role=? AND node_id!=?', (peer.expected_role, peer.node_id)).fetchone())
+            if (row and row[0] != peer.model_dump_json()) or superseded:
                 if not replace:
                     raise StoreConflict('explicit peer replacement required')
                 if db.execute("SELECT 1 FROM networks WHERE state!='stopped'").fetchone() or db.execute("SELECT 1 FROM journals WHERE phase!='removed_observed'").fetchone():
                     raise StoreConflict('peer replacement requires settled local networking')
+                if superseded:
+                    db.execute('DELETE FROM peers WHERE role=? AND node_id!=?', (peer.expected_role, peer.node_id))
                 db.execute('DELETE FROM authority')
                 db.execute('DELETE FROM channels')
             db.execute('INSERT INTO peers VALUES (?,?,?) ON CONFLICT(node_id) DO UPDATE SET role=excluded.role,body=excluded.body', (peer.node_id, peer.expected_role, peer.model_dump_json()))

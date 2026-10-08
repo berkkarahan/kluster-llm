@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import typer
 
 from kllm.state import repo_root
+
+
+def run_full_install(root: Path) -> int:
+    """Run scripts/install.py --sync under *root*; return the process exit code."""
+    script = root / "scripts" / "install.py"
+    if not script.is_file():
+        typer.secho(f"Missing installer: {script}", err=True)
+        raise typer.Exit(1)
+    proc = subprocess.run([sys.executable, str(script), "--sync"], cwd=str(root))
+    return proc.returncode or 0
 
 
 def rebuild_cmd() -> None:
@@ -19,9 +30,4 @@ def rebuild_cmd() -> None:
             err=True,
         )
         raise typer.Exit(1)
-    script = root / "scripts" / "install.py"
-    if not script.is_file():
-        typer.secho(f"Missing installer: {script}", err=True)
-        raise typer.Exit(1)
-    proc = subprocess.run([sys.executable, str(script), "--sync"], cwd=str(root))
-    raise typer.Exit(proc.returncode or 0)
+    raise typer.Exit(run_full_install(root))

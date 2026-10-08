@@ -48,15 +48,88 @@ def accel_backend_from_config() -> str | None:
     return s
 
 
-def _gpu_names(gpus: Sequence[dict[str, Any]] | None) -> str:
+# Planning VRAM for unified-memory nodes, as a share of total RAM.
+# Reported macOS VRAM stays at the native 80% probe; this share is planning-only.
+UNIFIED_VRAM_FRACTION_DEFAULT = 0.65
+UNIFIED_VRAM_FRACTION_MIN = 0.10
+UNIFIED_VRAM_FRACTION_MAX = 0.95
+
+# Substrings of GPU names that share host RAM (AMD APUs such as Strix Halo, Intel iGPU).
+# Apple Silicon is detected from the metal backend, not from these names.
+_UNIFIED_GPU_NAME_MARKERS: tuple[str, ...] = (
+    "radeon(tm) graphics",
+    "radeon 780m",
+    "radeon 880m",
+    "radeon 890m",
+    "radeon 8040s",
+    "radeon 8050s",
+    "radeon 8060s",
+    "strix",
+    "iris xe",
+    "uhd graphics",
+)
+
+
+def unified_vram_fraction() -> float:
+    """Share of total RAM treated as effective VRAM on unified-memory nodes.
+
+    ``KLLM_UNIFIED_VRAM_FRACTION`` overrides the 0.65 default. Values outside
+    0.10–0.95 are clamped; missing or unparsable values keep the default.
+    """
+    raw = os.environ.get("KLLM_UNIFIED_VRAM_FRACTION", "").strip()
+    if not raw:
+        return UNIFIED_VRAM_FRACTION_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return UNIFIED_VRAM_FRACTION_DEFAULT
+    if value != value:  # NaN
+        return UNIFIED_VRAM_FRACTION_DEFAULT
+    return min(UNIFIED_VRAM_FRACTION_MAX, max(UNIFIED_VRAM_FRACTION_MIN, value))
+
+
+def _gpu_names(gpus: Sequence[Any] | None) -> str:
     if not gpus:
         return ""
     parts: list[str] = []
-    for g in gpus:
-        name = g.get("name") if isinstance(g, dict) else None
+    for gpu in gpus:
+        name = gpu.get("name") if isinstance(gpu, dict) else getattr(gpu, "name", None)
         if name:
             parts.append(str(name).lower())
     return " ".join(parts)
+
+
+def unified_memory_override() -> bool | None:
+    """Local ``unified_memory`` config override, or None when unset."""
+    try:
+        from kllm import config as kllm_config
+
+        raw = kllm_config.load_config().get("unified_memory")
+    except Exception:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    return None
+
+
+def detect_unified_memory(backend: str | None, gpus: Sequence[Any] | None = None) -> bool:
+    """True for Metal, or for known unified-memory GPU names. Ignores config."""
+    if str(backend or "").strip().lower() == "metal":
+        return True
+    names = _gpu_names(gpus)
+    return any(marker in names for marker in _UNIFIED_GPU_NAME_MARKERS)
+
+
+def is_unified_memory(backend: str | None, gpus: Sequence[Any] | None = None) -> bool:
+    """Whether this machine's memory is one shared RAM/GPU pool.
+
+    A ``unified_memory`` boolean in ``~/.kllm/config.toml`` wins when set.
+    Otherwise Metal is unified, then the GPU-name heuristic.
+    """
+    override = unified_memory_override()
+    if override is not None:
+        return override
+    return detect_unified_memory(backend, gpus)
 
 
 def selectable_accel_backends() -> list[str]:

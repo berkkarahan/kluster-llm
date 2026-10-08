@@ -9,6 +9,7 @@ from typing import Any
 from kllm.accel import (
     binary_capabilities,
     devices_for_backend,
+    is_unified_memory,
     requested_backend,
     resolve_effective_backend,
     selectable_accel_backends,
@@ -126,16 +127,18 @@ def _inventory_vram_bytes(devices: dict[str, Any], fallback: int | None) -> int 
 
 def probe_capacity() -> dict[str, Any]:
     n = require_native()
+    hardware_devices: Any = []
     if hasattr(n, "_probe_capacity_and_gpus"):
-        snap, raw_devices, probed = n._probe_capacity_and_gpus()
-        devices = _list_gpus_from_probe(raw_devices, probed)
+        snap, hardware_devices, probed = n._probe_capacity_and_gpus()
+        devices = _list_gpus_from_probe(hardware_devices, probed)
     else:
         # Compatibility with an older installed extension during source upgrades.
         snap = n.probe_capacity()
         devices = list_gpus()
+    listed = devices.get("gpus") or hardware_devices
     return {
         **devices,
-        "unified_memory": snap.backend == "metal",
+        "unified_memory": is_unified_memory(snap.backend, listed),
         "total_ram_bytes": snap.total_ram_bytes,
         "available_ram_bytes": snap.available_ram_bytes,
         "vram_bytes": _inventory_vram_bytes(devices, snap.vram_bytes),
@@ -188,7 +191,7 @@ def _list_gpus_from_probe(devices: Any, backend: Any) -> dict[str, Any]:
             "probed_backend": probed,
             "gpus": selected,
             "devices": selected,
-            "unified_memory": probed == "metal",
+            "unified_memory": is_unified_memory(probed, selected or devices),
             "binary_version": capabilities["binary_version"],
             "allowed_backends": selectable_accel_backends(),
             "installed_backends": supported,
@@ -207,7 +210,7 @@ def _list_gpus_from_probe(devices: Any, backend: Any) -> dict[str, Any]:
             "probed_backend": probed,
             "gpus": [],
             "devices": [],
-            "unified_memory": probed == "metal",
+            "unified_memory": is_unified_memory(probed, devices),
             "binary_version": None,
             "allowed_backends": selectable_accel_backends(),
             "installed_backends": [],

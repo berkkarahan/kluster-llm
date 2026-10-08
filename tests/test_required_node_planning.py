@@ -107,8 +107,11 @@ def test_manual_unified_devices_use_host_pool_and_individual_device_limits():
     master["devices"].append(master["devices"][0] | {"index": 1, "device": "Vulkan1"})
     p = plan([master], node_shares={"master": 1.0})
     assert p["fit_status"] != "overflow"
-    assert len(p["device_allocations"]) == 2
-    assert p["node_gpu_budget_bytes"]["master"] == 1800*MIB
+    # Reported 900+900 MiB is replaced by one 65% RAM pool, split across devices.
+    from kllm.accel import UNIFIED_VRAM_FRACTION_DEFAULT
+    pool = int(master["total_ram_bytes"] * UNIFIED_VRAM_FRACTION_DEFAULT)
+    assert p["node_gpu_budget_bytes"]["master"] == (pool // 2) * 2
+    assert all(a["estimated_bytes"] <= a["budget_bytes"] for a in p["device_allocations"])
     assert_accounting(p)
 
 

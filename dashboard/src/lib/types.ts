@@ -232,6 +232,7 @@ export type PlacementPlan = {
   node_ram_alloc_bytes?: Record<string, number>;
   node_vram_alloc_bytes?: Record<string, number>;
   device_allocations?: DeviceAllocation[];
+  node_gpu_names?: Record<string, string[]>;
   device_order?: string[];
   estimate_confidence?: string;
   resolved_launch_settings?: Record<string, unknown>;

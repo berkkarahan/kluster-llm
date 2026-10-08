@@ -84,7 +84,7 @@ kllm start --gpus 0,1
 kllm join --key <key> --gpus 0
 ```
 
-- **Default:** all discovered GPUs (summed VRAM for planning). On Apple Silicon, reported GPU VRAM is **80% of unified memory** (fixed convention; independent of the VRAM budget slider).
+- **Default:** all discovered GPUs (summed VRAM for planning). On Apple Silicon, **reported** GPU VRAM is **80% of unified memory** (fixed probe convention; independent of the VRAM budget slider). Planning treats unified-memory nodes — Apple Silicon, and detected unified APUs such as AMD Strix Halo — as having **65% of total RAM** as effective VRAM before `vram_percent` / headroom. Override that share with `KLLM_UNIFIED_VRAM_FRACTION` (clamped to 0.10–0.95). Set `unified_memory = true` or `false` in `~/.kllm/config.toml` to force this node's classification.
 - **Interactive:** if multiple GPUs are present, `--gpus` is omitted, and stdin is a TTY, the CLI prompts for a comma-separated list (Enter = all).
 - **Dashboard:** Cluster and Plan & Run checkboxes share the same selection; Plan & Run also persists `gpu_ids` / percents via `PUT /v1/config`.
 - Selection sets `CUDA_VISIBLE_DEVICES` (CUDA) or `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (ROCm) when launching `llama-server` / `rpc-server`. Metal has a single logical device and needs no env remap.

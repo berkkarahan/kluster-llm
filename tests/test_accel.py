@@ -250,3 +250,41 @@ def test_list_gpus_respects_accel_override(monkeypatch):
     data = native.list_gpus()
     assert data["requested_backend"] == "vulkan"
     assert "probed_backend" in data
+
+
+def test_unified_memory_heuristic_matches_known_shared_pools(monkeypatch):
+    from kllm.accel import detect_unified_memory, is_unified_memory
+
+    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": None})
+    assert detect_unified_memory("metal") is True
+    assert detect_unified_memory("vulkan", [{"name": "AMD Radeon RX 9070 XT"}]) is False
+    assert detect_unified_memory("vulkan", [{"name": "AMD Radeon 8060S Graphics"}]) is True
+    assert detect_unified_memory("rocm", [{"name": "AMD Radeon(TM) Graphics"}]) is True
+    assert detect_unified_memory("vulkan", [{"name": "AMD Radeon 890M"}]) is True
+    assert detect_unified_memory("vulkan", [{"name": "Intel Iris Xe Graphics"}]) is True
+    assert detect_unified_memory("vulkan", [{"name": "Intel(R) UHD Graphics"}]) is True
+    assert is_unified_memory("cuda", [{"name": "NVIDIA GeForce RTX 4090"}]) is False
+
+
+def test_unified_memory_config_override_beats_heuristic(monkeypatch):
+    from kllm.accel import is_unified_memory
+
+    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": False})
+    assert is_unified_memory("metal", [{"name": "Apple M4"}]) is False
+    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": True})
+    assert is_unified_memory("cuda", [{"name": "NVIDIA GeForce RTX 4090"}]) is True
+
+
+def test_unified_vram_fraction_env(monkeypatch):
+    from kllm.accel import UNIFIED_VRAM_FRACTION_DEFAULT, unified_vram_fraction
+
+    monkeypatch.delenv("KLLM_UNIFIED_VRAM_FRACTION", raising=False)
+    assert unified_vram_fraction() == UNIFIED_VRAM_FRACTION_DEFAULT
+    monkeypatch.setenv("KLLM_UNIFIED_VRAM_FRACTION", "0.5")
+    assert unified_vram_fraction() == 0.5
+    monkeypatch.setenv("KLLM_UNIFIED_VRAM_FRACTION", "nope")
+    assert unified_vram_fraction() == UNIFIED_VRAM_FRACTION_DEFAULT
+    monkeypatch.setenv("KLLM_UNIFIED_VRAM_FRACTION", "0.01")
+    assert unified_vram_fraction() == 0.10
+    monkeypatch.setenv("KLLM_UNIFIED_VRAM_FRACTION", "1.5")
+    assert unified_vram_fraction() == 0.95

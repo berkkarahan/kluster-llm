@@ -16,6 +16,13 @@ CLUSTER_STATE_SCHEMA_VERSION = 2
 SERVICE_TYPE = "_kllm._tcp.local."
 
 
+def _node_unified_memory(backend: str) -> bool:
+    """Classify this node's memory pool, including a local config override."""
+    from kllm.accel import is_unified_memory
+
+    return is_unified_memory(backend)
+
+
 class ClusterStateLoadError(ValueError):
     """Persisted cluster state cannot be read safely."""
 
@@ -139,7 +146,7 @@ class NodeInfo:
             "available_ram_bytes": self.available_ram_bytes,
             "vram_bytes": self.vram_bytes,
             "backend": self.backend,
-            "unified_memory": self.backend == "metal",
+            "unified_memory": _node_unified_memory(self.backend),
         }
 
 

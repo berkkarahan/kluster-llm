@@ -22,6 +22,16 @@
   const nodeIds = $derived([...new Set([...(appStore.nodePriority ?? []), ...Object.keys(appStore.status?.members ?? {}), ...appStore.requiredNodes])]);
   const effective = $derived(appStore.effectiveConfig());
   const allocations = $derived((appStore.planResult?.device_allocations as DeviceAllocation[] | undefined) ?? []);
+
+  function gpuNamesFor(node: string): string[] {
+    const member = appStore.status?.members[node];
+    const fromMember = (member?.devices ?? [])
+      .map((device) => device.name)
+      .filter((name): name is string => Boolean(name));
+    if (fromMember.length) return fromMember;
+    const planned = (appStore.planResult?.node_gpu_names as Record<string, unknown> | undefined)?.[node];
+    return Array.isArray(planned) ? planned.filter((name): name is string => typeof name === 'string' && Boolean(name)) : [];
+  }
   const fit = $derived(String(appStore.planResult?.fit_status ?? ''));
   const ready = $derived(!blocked && !runtimeBlocked && !!appStore.planResult && !appStore.estimating && !appStore.estimateError && ['fits', 'tight'].includes(fit));
   const estimateReady = $derived(appStore.status?.role === 'master' && !!appStore.selectedModel && !appStore.settingsLoading);
@@ -124,10 +134,11 @@
             {/if}
             {#each nodeIds as node, index (node)}
               {@const member = appStore.status?.members[node]}
+              {@const gpuNames = gpuNamesFor(node)}
               <div class="node-option">
                 <label for={'required-' + node}><input id={'required-' + node} type="checkbox" checked={appStore.requiredNodes.includes(node)}
                   disabled={!member && !appStore.requiredNodes.includes(node)} onchange={(e) => appStore.setNodeRequired(node, e.currentTarget.checked)} />
-                  Must use this node · {member?.role === 'master' || node === appStore.status?.node_id ? 'Master' : 'Worker'} · {node}{!member ? ' · unavailable' : ''}</label>
+                  Must use this node · {member?.role === 'master' || node === appStore.status?.node_id ? 'Master' : 'Worker'} · {node}{gpuNames.length ? ` · ${gpuNames.join(', ')}` : ''}{!member ? ' · unavailable' : ''}</label>
                 {#if appStore.nodePriority}
                   <div class="actions"><span class="small">Priority {index + 1}</span>
                     <button class="btn" aria-label={'Move ' + node + ' up'} disabled={index === 0} onclick={() => appStore.moveNodePriority(node, -1)}>↑</button>

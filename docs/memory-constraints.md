@@ -164,16 +164,20 @@ and launches.
 # Get unified memory in GB
 TOTAL_MEM_GB=$(sysctl -n hw.memsize | awk '{printf "%.0f", $1/1024/1024/1024}')
 
-# Budget: 80% for model + KV cache
-BUDGET_GB=$(( TOTAL_MEM_GB * 80 / 100 ))
+# Planning effective VRAM is 65% of unified memory (KLLM_UNIFIED_VRAM_FRACTION).
+EFFECTIVE_VRAM_GB=$(( TOTAL_MEM_GB * 65 / 100 ))
 
 echo "Total unified memory: ${TOTAL_MEM_GB} GB"
-echo "Model + KV budget: ${BUDGET_GB} GB"
+echo "Effective planning VRAM: ${EFFECTIVE_VRAM_GB} GB"
 ```
+
+The `vram_percent` slider (default 80%) then scales that effective pool. Reported
+macOS GPU memory stays at 80% of RAM and is not the planning input.
 
 **Example: M2 Pro with 24 GB:**
 ```
-Budget: 24 * 0.8 = 19.2 GB
+Effective VRAM: 24 * 0.65 = 15.6 GB
+Default slider: 15.6 * 0.8 = 12.5 GB budgeted
 Can run: 70B Q4_K_M (48 GB) → NO (exceeds budget)
 Can run: 13B Q5_K_M (10.3 GB) → YES (fits with room for KV cache)
 ```

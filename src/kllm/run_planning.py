@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from kllm import config as kllm_config
 from kllm import models as model_ops
 from kllm import native, http_clients
-from kllm.accel import llama_device_for_backend
+from kllm.accel import detect_unified_memory, llama_device_for_backend, unified_vram_fraction
 from kllm.gguf_meta import read_model_layout
 from kllm.run_settings import RunBody, RunSettingsFields
 from kllm.core.placement_models import PlacementNodeInput
@@ -148,7 +148,13 @@ def _member_devices(member: dict[str, Any]) -> list[dict[str, Any]]:
         return devices
     if not member.get("unified_memory"):
         return devices
-    vram = int(member.get("vram_bytes") or 0)
+    total_ram = int(member.get("total_ram_bytes") or 0)
+    # Known host RAM is the planning pool. Incomplete records keep reported VRAM.
+    vram = (
+        int(total_ram * unified_vram_fraction())
+        if total_ram > 0
+        else int(member.get("vram_bytes") or 0)
+    )
     if vram <= 0:
         return devices
     pref = member.get("requested_backend") or member.get("actual_backend") or member.get("backend")
@@ -163,6 +169,36 @@ def _member_devices(member: dict[str, Any]) -> list[dict[str, Any]]:
             "free_bytes": vram,
         }
     ]
+
+
+def _member_unified_memory(member: dict[str, Any]) -> bool:
+    """Trust an explicit membership flag; otherwise detect from backend and GPU names.
+
+    Detection does not read this machine's config override, so a master's
+    ``unified_memory`` setting cannot relabel other nodes.
+    """
+    stored = member.get("unified_memory")
+    if isinstance(stored, bool):
+        return stored
+    return detect_unified_memory(str(member.get("backend") or ""), member.get("devices"))
+
+
+def _node_gpu_names(members: dict[str, Any]) -> dict[str, list[str]]:
+    """Human GPU names for plan output, falling back to the llama.cpp device id."""
+    names: dict[str, list[str]] = {}
+    for member in ordered_members(members):
+        node_id = str(member.get("node_id") or "")
+        if not node_id:
+            continue
+        labels: list[str] = []
+        for device in member.get("devices") or []:
+            if not isinstance(device, dict):
+                continue
+            label = device.get("name") or device.get("device")
+            if label:
+                labels.append(str(label))
+        names[node_id] = labels
+    return names
 
 
 def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
@@ -181,7 +217,7 @@ def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
                 "available_ram_bytes": m.get("available_ram_bytes", 0),
                 "vram_bytes": m.get("vram_bytes"),
                 "backend": m.get("backend", "unknown"),
-                "unified_memory": m.get("unified_memory", m.get("backend") == "metal"),
+                "unified_memory": _member_unified_memory(m),
                 "devices": devices,
                 "rpc_devices": m.get("rpc_devices", []),
                 "rpc_capabilities": m.get("rpc_capabilities", []),
@@ -291,6 +327,7 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
     if result.get("fit_status") == "tight":
         warning = result.get("hint") or "Plan is tight against cluster budget"
     result["warning"] = warning
+    result["node_gpu_names"] = _node_gpu_names(members)
     result["effective_memory_limits"] = limits
     # Deferred import: placement normalization belongs to the planning path.
     from kllm.placement import PlacementSettings, effective_launch_settings

@@ -127,6 +127,7 @@ The Makefile is a small convenience wrapper around the maintained workflows:
 make install
 make build
 make test
+make hooks
 ```
 
 Equivalent direct commands are preferred on systems without Make:
@@ -145,6 +146,13 @@ SvelteKit state; compare the full suite serially with `npm --prefix dashboard ru
 `make test` runs the test suites sequentially before the Rust suite and dashboard check.
 
 Python is managed with uv. After packaging changes, rebuild with `uv run python scripts/build.py` or the full installer rather than relying on `pip install -e .` alone.
+
+`git push` runs Ruff through pre-commit on the Python files in the commits being pushed. Install that hook once per clone:
+
+```bash
+uv sync
+uv run pre-commit install
+```
 
 ## Documentation
 

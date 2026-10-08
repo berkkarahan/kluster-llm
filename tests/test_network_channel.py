@@ -18,7 +18,6 @@ from kllm.agent.services import network_channel
 from kllm.agent.services.network_channel import (
     ChannelSession, NetworkChannelHub, _handshake_refused, reconnect_delay,
 )
-from kllm.managed_network.identity import IdentityError
 
 
 class _Scheduler:

@@ -296,6 +296,34 @@ def test_fresh_worker_observation_reports_prepared_target_and_lag_blocks(registr
     assert row['prepared']['runtime_id'] == selected.runtime_id
 
 
+def test_master_view_reports_per_node_sync_failure_instead_of_silence(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    manager.change_target(TargetRequest(runtime_id=selected.runtime_id, expected_revision=0, request_id=str(uuid4())))
+    # A live session whose preparation keeps failing is surfaced by reason, not
+    # hidden behind a nameless wait.
+    manager.service.channels.sessions['worker'] = SimpleNamespace()
+    manager.node_errors['worker'] = 'node runtime command channel unavailable or full'
+    row = {node['node_id']: node for node in manager.status()['nodes']}['worker']
+    assert row['phase'] == 'waiting_for_target'
+    assert row['error'] == 'the master could not sync this worker: node runtime command channel unavailable or full'
+
+
+def test_retry_without_a_paired_channel_is_actionable(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    manager.change_target(TargetRequest(runtime_id=selected.runtime_id, expected_revision=0, request_id=str(uuid4())))
+    app = FastAPI()
+    app.include_router(build_router(lambda: registry, lambda: manager, manager.service.state,
+                                    token_verifier=lambda value: value == 'test'))
+    client = TestClient(app, client=('127.0.0.1', 9999))
+    response = client.post('/v2/cluster/runtime-target/nodes/worker/retry', headers={'x-api-key': 'test'})
+    assert response.status_code == 409
+    assert response.json()['detail']['code'] == 'CHANNEL_UNAVAILABLE'
+
+
 def test_fast_failed_installer_keeps_logs_and_releases_process_tracking(tmp_path, monkeypatch):
     import psutil
     from kllm.runtimes import registry as module

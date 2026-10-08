@@ -182,8 +182,13 @@ If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cl
 Settings → **llama.cpp** stores multiple upstream versions and public HTTPS Git forks.
 Choose a release/tag, branch, or full commit; the selecting node resolves it to an immutable
 repository/commit identity. **Set target & sync** persists the master's target and starts
-isolated downloads/builds on the master and children. Joining and reconnecting children prepare
-that target automatically. Failed or cancelled builds remain visible until Retry or a new target.
+isolated downloads/builds on the master; children receive it over the paired signed control
+channel, and a per-node **Sync** (or Retry) forces that worker immediately. Joining and
+reconnecting children prepare that target automatically. A worker whose pinned pairing diverges
+from the master (for example after a restored `cluster.json`) re-asserts it automatically; a
+worker that still has no paired channel shows *Runtime control channel not connected … re-pair
+it* rather than waiting silently, and forcing it returns an actionable `CHANNEL_UNAVAILABLE`.
+Failed or cancelled builds remain visible until Retry or a new target.
 The local library stays usable when signed cluster control is unavailable; setting and enforcing
 the cluster target requires the recovered agent.
 

@@ -1,6 +1,103 @@
 from __future__ import annotations
 
+import subprocess
+import threading
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_probe_cache():
+    from kllm import accel
+
+    accel._probe_cache.clear()
+    yield
+    accel._probe_cache.clear()
+
+
+def _fake_probe(monkeypatch, calls, *, fail_first=False, delay=0.0):
+    output = "Available devices:\n  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
+
+    class Result:
+        def __init__(self, text):
+            self.stdout, self.stderr, self.returncode = text, "", 0
+
+        def check_returncode(self):
+            pass
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if fail_first and len(calls) == 1:
+            raise subprocess.TimeoutExpired(argv, 15)
+        if delay:
+            import time
+
+            time.sleep(delay)
+        return Result(output if "--list-devices" in argv else "version 0.5.0")
+
+    monkeypatch.setattr("subprocess.run", run)
+
+
+def test_binary_capabilities_reuses_fresh_probe(monkeypatch):
+    from kllm.accel import binary_capabilities
+
+    calls = []
+    _fake_probe(monkeypatch, calls)
+    first = binary_capabilities("probe-a", 1, 0)
+    second = binary_capabilities("probe-a", 1, 1)
+    assert first is second
+    assert [c[0] for c in calls] == ["probe-a", "probe-a"]
+    assert first["devices"][0]["name"] == "Apple M5 Pro"
+
+
+def test_binary_capabilities_reprobes_after_ttl(monkeypatch):
+    from kllm.accel import binary_capabilities
+
+    calls = []
+    _fake_probe(monkeypatch, calls)
+    monkeypatch.setattr("kllm.accel._PROBE_TTL_S", 0.0)
+    binary_capabilities("probe-b", 1, 0)
+    binary_capabilities("probe-b", 1, 1)
+    assert len(calls) == 4
+
+
+def test_binary_capabilities_mtime_change_invalidates(monkeypatch):
+    from kllm.accel import binary_capabilities
+
+    calls = []
+    _fake_probe(monkeypatch, calls)
+    binary_capabilities("probe-c", 1, 0)
+    binary_capabilities("probe-c", 2, 0)
+    assert len(calls) == 4
+
+
+def test_binary_capabilities_serializes_concurrent_probes(monkeypatch):
+    from kllm.accel import binary_capabilities
+
+    calls = []
+    _fake_probe(monkeypatch, calls, delay=0.1)
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(binary_capabilities("probe-d", 1, 0)))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(results) == 2
+    assert len(calls) == 2  # one --list-devices + one --version, no duplicate probe
+
+
+def test_binary_capabilities_does_not_cache_failures(monkeypatch):
+    from kllm.accel import binary_capabilities
+
+    calls = []
+    _fake_probe(monkeypatch, calls, fail_first=True)
+    with pytest.raises(subprocess.TimeoutExpired):
+        binary_capabilities("probe-e", 1, 0)
+    assert binary_capabilities("probe-e", 1, 0)["devices"]
+    assert len(calls) == 3
 
 
 def test_effective_accel_backend_override(monkeypatch):

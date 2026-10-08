@@ -23,6 +23,15 @@ from kllm.runtimes.selection import use_runtime
 
 LEASE_SECONDS = 15.0
 
+# A freshly built runtime can need longer than one probe or spawn window on
+# macOS (Metal/MoltenVK cold start). Retry the whole start a bounded number of
+# times, but never begin an attempt that cannot finish before the signed
+# deadline: the master waits for this command, so a late result is dropped.
+START_ATTEMPTS = 3
+START_BACKOFF_S = (1.0, 2.0)
+START_MIN_ATTEMPT_S = 25.0
+_LISTEN_TIMEOUT_S = 6.0
+
 
 def process_token(pid: int) -> str:
     token, _ = native.require_native()._process_identity(pid)
@@ -57,6 +66,7 @@ class WorkerRpcService:
         token: Callable[[int], str] = process_token,
         stop: Callable[..., Any] = native.stop_process,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
         before_stop: Callable[[int], None] = lambda _pid: None,
         listener: Callable[[int, str, int], bool] = listener_ready,
         registry: Any = None,
@@ -64,6 +74,7 @@ class WorkerRpcService:
         self.state, self.setup = state, setup
         self.lock = lock or threading.RLock()
         self.alive, self.token, self.stop, self.clock = alive, token, stop, clock
+        self.sleep = sleep
         self.before_stop = before_stop
         self.listener = listener
         self.deadline = 0.0
@@ -127,7 +138,7 @@ class WorkerRpcService:
                 self._release(owner)
 
     def _await_listener(self, pid: int) -> None:
-        until = self.clock() + 6.0
+        until = self.clock() + _LISTEN_TIMEOUT_S
         state = self.state()
         while self.clock() < until:
             if not self.alive(pid):
@@ -136,7 +147,7 @@ class WorkerRpcService:
             # handshake can consume or tear down the upstream serial listener.
             if self.listener(pid, state.rpc_bind, state.rpc_port):
                 return
-            time.sleep(0.05)
+            self.sleep(0.05)
         raise PlatformRefusal('RPC_START_FAILED', 'rpc-server did not bind its configured private endpoint')
 
     def execute(self, command: SignedRuntimeCommand, deadline: float, authorize: Callable[[], None] = lambda: None) -> dict[str, Any]:
@@ -199,40 +210,91 @@ class WorkerRpcService:
                 state.netsec_warnings = [*state.netsec_warnings, str(firewall['warning'])]
             member['rpc_status'] = 'starting'
             state.save()
-            authorize()
+            return self._start_with_retry(context, runtime_snapshot, member, state, deadline, authorize)
+
+    def _start_with_retry(
+        self,
+        context: dict[str, Any],
+        runtime_snapshot: dict | None,
+        member: dict[str, Any],
+        state: ClusterState,
+        deadline: float,
+        authorize: Callable[[], None],
+    ) -> dict[str, Any]:
+        attempts = 0
+        last: PlatformRefusal | None = None
+        while attempts < START_ATTEMPTS:
             if self.clock() >= deadline:
-                raise PlatformRefusal('TIMEOUT', 'RPC command expired before startup')
-            launched = self.setup().start_commanded_worker(state)
-            if launched.get('error') or not launched.get('pid'):
-                member['rpc_status'] = 'failed'
-                member['rpc_error'] = str(launched.get('error') or 'RPC did not start')[:512]
-                state.save()
-                raise PlatformRefusal('RPC_START_FAILED', member['rpc_error'])
+                break
+            if attempts:
+                if deadline - self.clock() < START_MIN_ATTEMPT_S:
+                    break
+                self.sleep(START_BACKOFF_S[min(attempts - 1, len(START_BACKOFF_S) - 1)])
+                if self.clock() >= deadline:
+                    break
+            attempts += 1
             try:
-                owner = {**context, 'pid': launched['pid'], 'start_token': self.token(launched['pid'])}
-            except BaseException:
-                # This child was just created in this serialized command; do not
-                # leave it unowned if process-identity acquisition fails.
-                self.stop(launched['pid'], force=True)
-                state.process_pid = state.process_role = None
-                member['rpc_devices'] = []
-                member['rpc_status'] = 'failed'
+                return self._start_once(context, runtime_snapshot, member, state, deadline, authorize)
+            except PlatformRefusal as error:
+                if error.code != 'RPC_START_FAILED':
+                    raise
+                # _start_once always releases its own partial ownership, so the
+                # next attempt starts clean; keep the retry visible as starting.
+                last = error
+                member['rpc_status'] = 'starting'
                 state.save()
-                raise
-            member['rpc_owner'] = owner
-            if self.registry is not None and runtime_snapshot is not None:
-                self.registry.running({**runtime_snapshot, 'pid': owner['pid']})
-            self.deadline = self.clock() + LEASE_SECONDS
+        if last is None:
+            raise PlatformRefusal('TIMEOUT', 'RPC command expired before startup')
+        member['rpc_status'] = 'failed'
+        member['rpc_error'] = (
+            f'rpc-server startup failed after {attempts} attempt(s): {last}'
+        )[:512]
+        state.save()
+        raise PlatformRefusal('RPC_START_FAILED', member['rpc_error'])
+
+    def _start_once(
+        self,
+        context: dict[str, Any],
+        runtime_snapshot: dict | None,
+        member: dict[str, Any],
+        state: ClusterState,
+        deadline: float,
+        authorize: Callable[[], None],
+    ) -> dict[str, Any]:
+        authorize()
+        if self.clock() >= deadline:
+            raise PlatformRefusal('TIMEOUT', 'RPC command expired before startup')
+        launched = self.setup().start_commanded_worker(state)
+        if launched.get('error') or not launched.get('pid'):
+            member['rpc_status'] = 'failed'
+            member['rpc_error'] = str(launched.get('error') or 'RPC did not start')[:512]
             state.save()
-            try:
-                self._await_listener(owner['pid'])
-            except BaseException:
-                self._release(owner)
-                raise
-            member['rpc_status'] = 'serving'
-            member.pop('rpc_error', None)
+            raise PlatformRefusal('RPC_START_FAILED', member['rpc_error'])
+        try:
+            owner = {**context, 'pid': launched['pid'], 'start_token': self.token(launched['pid'])}
+        except BaseException:
+            # This child was just created in this serialized command; do not
+            # leave it unowned if process-identity acquisition fails.
+            self.stop(launched['pid'], force=True)
+            state.process_pid = state.process_role = None
+            member['rpc_devices'] = []
+            member['rpc_status'] = 'failed'
             state.save()
-            return self._status(owner)
+            raise
+        member['rpc_owner'] = owner
+        if self.registry is not None and runtime_snapshot is not None:
+            self.registry.running({**runtime_snapshot, 'pid': owner['pid']})
+        self.deadline = self.clock() + LEASE_SECONDS
+        state.save()
+        try:
+            self._await_listener(owner['pid'])
+        except BaseException:
+            self._release(owner)
+            raise
+        member['rpc_status'] = 'serving'
+        member.pop('rpc_error', None)
+        state.save()
+        return self._status(owner)
 
     def _status(self, owner: dict[str, Any]) -> dict[str, Any]:
         state = self.state()

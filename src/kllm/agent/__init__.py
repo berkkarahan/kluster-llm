@@ -290,7 +290,8 @@ async def _start_managed_network(app: FastAPI) -> None:
         registry = _runtime_registry()
         service.runtimes = RuntimeControlService(service, registry,
             lambda: kllm_config.load_config().get('accel_backend') or 'auto',
-            native_supported=lambda: native.native_available() and getattr(native.require_native(), 'RUNTIME_SELECTION_VERSION', 0) == 1)
+            native_supported=lambda: native.native_available() and getattr(native.require_native(), 'RUNTIME_SELECTION_VERSION', 0) == 1,
+            warm_capabilities=_schedule_local_capacity_refresh)
         service.worker_rpc = WorkerRpcService(lambda: STATE, _runtime_setup_service, lock=_worker_launch_lock, before_stop=service.release_worker_bridges, registry=registry)
         service.rpc_runs = RpcRunCoordinator(service, lambda body: _inference_handlers().run(body), lambda: membership_mod._stop_inference(STATE))
         await service.start()

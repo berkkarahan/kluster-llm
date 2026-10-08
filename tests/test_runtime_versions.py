@@ -55,7 +55,7 @@ def prepared(registry, selected):
     return registry.capture(selected.runtime_id)
 
 
-def control(registry, role='master', node_id='master'):
+def control(registry, role='master', node_id='master', warm=None):
     state = ClusterState(role=role, node_id=node_id)
     state.members = {
         'master': {'role': 'master'},
@@ -65,7 +65,43 @@ def control(registry, role='master', node_id='master'):
     }
     authority = SimpleNamespace(cluster_binding_id=uuid4())
     service = SimpleNamespace(state=lambda: state, channels=SimpleNamespace(master_authority=lambda: authority, sessions={}), rpc_runs=None, directory_view=lambda: {})
-    return RuntimeControlService(service, registry, lambda: 'cpu')
+    return RuntimeControlService(service, registry, lambda: 'cpu', warm_capabilities=warm or (lambda: None))
+
+
+def test_prepared_runtime_warmup_runs_once_per_identity(registry):
+    calls = []
+    manager = control(registry, warm=lambda: calls.append('warm'))
+    manager._warm_prepared({'phase': 'prepared', 'prepared': {'runtime_id': 'one'}})
+    manager._warm_prepared({'phase': 'prepared', 'prepared': {'runtime_id': 'one'}})
+    manager._warm_prepared({'phase': 'building', 'prepared': None})
+    manager._warm_prepared({'phase': 'prepared', 'prepared': {'runtime_id': 'two'}})
+    assert calls == ['warm', 'warm']
+
+
+@pytest.mark.asyncio
+async def test_prepare_command_warms_the_prepared_runtime(tmp_path):
+    from kllm.managed_network.identity import SignedRuntimeCommand
+
+    registry = RuntimeRegistry(tmp_path / 'worker', lambda: tmp_path)
+    try:
+        calls = []
+        manager = control(registry, role='worker', node_id='worker', warm=lambda: calls.append('warm'))
+        selected = version()
+        prepared(registry, selected)
+        binding = manager.service.channels.master_authority().cluster_binding_id
+        target = RuntimeTarget(version=selected, revision=1, cluster_binding_id=str(binding), master_node_id='master')
+        command = SignedRuntimeCommand(
+            cluster_binding_id=binding, master_node_id='master', master_key_id='a' * 64,
+            master_term=1, master_session_id=uuid4(), version=1, type='rpc_command',
+            channel_id=uuid4(), sender_node_id='master', target_node_id='worker',
+            sequence=1, request_id=uuid4(), run_id=uuid4(), action='prepare_runtime',
+            ttl_ms=10000, body={'target': target.model_dump()},
+        )
+        result = await manager.execute(command, lambda: None)
+        assert result['phase'] == 'prepared'
+        assert calls == ['warm']
+    finally:
+        registry.close()
 
 
 @pytest.mark.parametrize('url', ['http://github.com/a/b', 'file:///tmp/repo', 'https://user:secret@github.com/a/b', 'https://github.com/a/b?token=secret'])

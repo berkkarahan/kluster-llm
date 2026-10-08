@@ -14,10 +14,12 @@
   const target = $derived(library?.target);
   const running = $derived(library?.running);
   const nodes = $derived(library?.nodes ?? []);
-  const requiredNodes = $derived((appStore.planResult?.runtime_required_nodes as string[] | undefined) ?? [target?.master_node_id ?? appStore.status?.node_id ?? '']);
+  const requiredNodes = $derived((appStore.planResult?.runtime_required_nodes as string[] | undefined) ?? [target?.master_node_id ?? (worker ? '' : appStore.status?.node_id ?? '')]);
   const readyNodes = $derived(nodes.filter(n => n.phase === 'prepared' && n.prepared?.runtime_id === target?.version.runtime_id));
   const preparing = $derived(nodes.filter(n => ['queued', 'downloading', 'building', 'verifying'].includes(n.phase)).length);
   const waiting = $derived(nodes.filter(n => n.phase === 'waiting_for_target').length);
+  const localPhase = $derived(nodes.find(n => n.node_id === appStore.status?.node_id)?.phase?.replaceAll('_', ' ') ?? 'unknown');
+  const offlineNodes = $derived(nodes.filter(n => n.phase === 'offline').length);
   let draft = $state('');
   let busy = $state(false);
   let error = $state('');
@@ -232,8 +234,8 @@
   </section>
 
   <section class="panel" aria-labelledby="readiness-heading">
-    <div class="runtime-panel-head"><div><h3 id="readiness-heading">Node readiness</h3><p>{worker ? 'Preparation status for this node.' : 'Source revision is shared. Each node builds for its local backend.'}</p></div><span class="runtime-badge">{appStore.planResult?.runtime_required_nodes ? `${requiredNodes.length} required by current plan` : 'Choose run participants in Deploy'}</span></div>
-    <div class="readiness-summary"><strong>{target ? `${readyNodes.length} of ${nodes.length} nodes prepared` : 'Select a target to prepare the cluster'}</strong><span class="mono small muted">{preparing} preparing · {nodes.filter(n => n.phase === 'offline').length} offline{#if waiting} · {waiting} waiting{/if}</span></div>
+    <div class="runtime-panel-head"><div><h3 id="readiness-heading">Node readiness</h3><p>{worker ? 'Cluster nodes; this node builds locally and the master owns preparation.' : 'Source revision is shared. Each node builds for its local backend.'}</p></div><span class="runtime-badge">{appStore.planResult?.runtime_required_nodes ? `${requiredNodes.length} required by current plan` : 'Choose run participants in Deploy'}</span></div>
+    <div class="readiness-summary"><strong>{worker ? `This node: ${localPhase} · ${nodes.length} cluster ${nodes.length === 1 ? 'node' : 'nodes'}` : target ? `${readyNodes.length} of ${nodes.length} nodes prepared` : 'Select a target to prepare the cluster'}</strong><span class="mono small muted">{preparing} preparing · {offlineNodes} offline{#if waiting} · {waiting} waiting{/if}</span></div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users must be able to scroll the wide table.) -->
     <div class="runtime-table-scroll" tabindex="0" role="region" aria-label="Node readiness table, scroll for all columns"><table><thead><tr><th>Node</th><th>Backend</th><th>Running SHA</th><th>Target SHA</th><th>Preparation</th><th>Actions</th></tr></thead><tbody>
       {#each nodes as node (node.node_id)}<tr><td><strong>{node.name ?? node.node_id}</strong><small>{node.role.toUpperCase()}{node.node_id === appStore.status?.node_id ? ' · THIS NODE' : ''}{requiredNodes.includes(node.node_id) ? ' · REQUIRED' : ''}</small></td><td class="mono">{node.prepared?.backend ?? node.job?.backend ?? '—'}</td><td class="mono">{short(node.running?.commit)}</td><td class="mono">{short(target?.version.commit)}</td><td><span class="state-label" class:green={node.phase === 'prepared'} class:warning={['failed','offline','interrupted','cancelled'].includes(node.phase)}>{node.phase.replaceAll('_', ' ')}</span>{#if isPreparing(node.job)}<progress aria-label={`${node.name ?? node.node_id} ${node.phase}`}></progress>{/if}{#if node.error}<div class="node-error"><ErrorMessage source={`runtime-node:${node.node_id}`} message={node.error} /></div>{/if}</td>

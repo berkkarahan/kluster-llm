@@ -363,6 +363,8 @@ Target requests carry an expected revision and request ID; failures remain visib
 Build / Verify build acts on this node's configured backend; Logs opens output with an explicit Refresh log button.
 Readiness columns are Node, Backend, Running SHA, Target SHA, Preparation and Actions.
 Rows identify MASTER/WORKER, THIS NODE and REQUIRED where applicable.
+Every node lists the full cluster from the membership store, so worker and master readiness match the cluster view.
+A worker reports its own preparation locally; peer rows come from the store's liveness and capability, never a signed observation.
 Preparation phases include queued, downloading, building, verifying, prepared, failed, cancelled and interrupted.
 Additional reported phases include not_installed, waiting_for_target, offline and upgrade_required.
 The UI displays underscores as spaces; “upgrade required” is the current capability-mismatch state, not a fabricated “incompatible” enum.

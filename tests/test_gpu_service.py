@@ -49,6 +49,21 @@ def test_resolve_empty_inventory_reports_install_recovery_command() -> None:
         service.resolve([0])
 
 
+def test_resolve_probe_timeout_hints_at_a_manual_first_launch() -> None:
+    service = make_service(
+        {
+            "gpus": [],
+            "error": "Command '['llama-server', '--list-devices']' timed out after 15 seconds",
+        }
+    )
+
+    with pytest.raises(ResourceUnavailableError, match="once manually") as caught:
+        service.resolve([0])
+
+    assert "kllm install --native" not in str(caught.value)
+    assert "timed out after 15 seconds" in str(caught.value)
+
+
 def test_resolve_rejects_unknown_ids_as_domain_validation_error() -> None:
     service = make_service({"gpus": [{"index": 0}]})
 

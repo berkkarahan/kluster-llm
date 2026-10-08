@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from kllm.accel import allowed_accel_backends
+from kllm.accel import PROBE_TIMEOUT_HINT, allowed_accel_backends
 from kllm.core.gpu_selection import GpuDeviceInput, GpuSelection, select_gpu_devices
 from kllm.exceptions import ValidationError
 
@@ -134,6 +134,23 @@ class GpuSelectionService:
             return body_gpu_ids
         return None
 
+    def _unavailable_detail(self, gpu_ids: list[int], probe_error: object) -> str:
+        """Tell the operator how to recover an empty inventory.
+
+        A probe timeout is a cold first launch of an installed binary, not a
+        missing install. Point at one manual ``--list-devices`` run instead of
+        only the generic reinstall command.
+        """
+        detail = f"no GPUs available; cannot select {gpu_ids}"
+        text = str(probe_error or "")
+        if text:
+            detail += f" ({text})"
+        if "once manually" in text:
+            return detail
+        if "timed out" in text.lower():
+            return f"{detail}. {PROBE_TIMEOUT_HINT}"
+        return f"{detail}. On this machine run: {self._install_recovery_command()}"
+
     def resolve(
         self,
         gpu_ids: list[int] | None,
@@ -143,13 +160,7 @@ class GpuSelectionService:
         inventory = self.inventory(listed)
         unavailable_detail = None
         if gpu_ids and not inventory.devices:
-            detail = f"no GPUs available; cannot select {gpu_ids}"
-            probe_error = inventory.payload.get("error")
-            if probe_error:
-                detail += f" ({probe_error})"
-            unavailable_detail = (
-                f"{detail}. On this machine run: {self._install_recovery_command()}"
-            )
+            unavailable_detail = self._unavailable_detail(gpu_ids, inventory.payload.get("error"))
         selection = select_gpu_devices(
             gpu_ids,
             inventory.devices.values(),

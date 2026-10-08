@@ -279,6 +279,8 @@ vendor/bin/llama-server --list-devices
 
 On Windows use `vendor\bin\llama-server.exe`. A saved backend preference cannot add a backend that was not compiled into the binary. Reinstall with the required backend, then restart the node.
 
+If Run fails with `no GPUs available` and `timed out` just after a llama.cpp runtime install, the first `llama-server --list-devices` probe was killed before a cold launch (macOS Gatekeeper or Metal init) could finish. The agent gives that first probe a longer budget. If it still times out, run the `llama-server --list-devices` command from the error once on that machine, then Run again. A node that misses heartbeats during the failed start is dropped from the cluster and must rejoin.
+
 ### Slow inference
 
 - Run `kllm plan` and inspect CPU spill, selected devices, and warnings.

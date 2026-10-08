@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kllm.atomic_io import replace_file
+
 DEFAULT_CONTROL_PORT = 18765
 DEFAULT_RPC_PORT = 50052
 DEFAULT_INFER_PORT = 8080
@@ -199,7 +201,7 @@ class ClusterState:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(asdict(self), handle, indent=2)
-            os.replace(name, state_path())
+            replace_file(name, state_path())
         finally:
             if os.path.exists(name):
                 os.unlink(name)

@@ -553,3 +553,23 @@ def test_refresh_local_capacity_updates_member_vram(client):
     member = agent.STATE.members[agent.STATE.node_id]
     assert member["vram_bytes"] == LLAMA_VRAM
     assert member["devices"][0]["vram_bytes"] == LLAMA_VRAM
+    assert "capacity_probe_error" not in member
+
+
+def test_refresh_local_capacity_records_probe_failure(client):
+    from fastapi import HTTPException
+
+    _client, agent = client
+    node_id = agent.STATE.node_id
+    agent.STATE.role = "worker"
+    agent.STATE.members[node_id] = {"role": "worker", "node_id": node_id}
+    detail = (
+        "no GPUs available; cannot select [0] (timed out). "
+        "run `llama-server --list-devices` once manually"
+    )
+    with (
+        patch.object(agent.native, "probe_capacity", return_value={"error": "timed out"}),
+        patch.object(agent, "_resolve_gpu_selection", side_effect=HTTPException(503, detail)),
+    ):
+        agent._refresh_local_capacity()
+    assert agent.STATE.members[node_id]["capacity_probe_error"] == detail

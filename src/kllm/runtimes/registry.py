@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from .models import UPSTREAM, BuildRequest, RuntimeVersion, RuntimeTarget, body_digest
 from .source import git_environment
+from ..atomic_io import replace_file
 
 TERMINAL = ('prepared', 'failed', 'cancelled', 'interrupted')
 
@@ -28,7 +29,7 @@ def atomic_json(path: Path, value: dict) -> None:
     temporary = path.with_name(path.name + '.' + str(uuid4()) + '.tmp')
     try:
         temporary.write_text(json.dumps(value, sort_keys=True), encoding='utf-8')
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 

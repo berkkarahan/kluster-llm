@@ -90,14 +90,85 @@ def test_binary_capabilities_serializes_concurrent_probes(monkeypatch):
 
 
 def test_binary_capabilities_does_not_cache_failures(monkeypatch):
-    from kllm.accel import binary_capabilities
+    from kllm.accel import ProbeTimeoutError, binary_capabilities
 
     calls = []
     _fake_probe(monkeypatch, calls, fail_first=True)
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(ProbeTimeoutError, match="once manually"):
         binary_capabilities("probe-e", 1, 0)
     assert binary_capabilities("probe-e", 1, 0)["devices"]
     assert len(calls) == 3
+
+
+def test_binary_capabilities_uses_long_timeout_for_an_unknown_binary(monkeypatch):
+    from kllm.accel import _PROBE_FIRST_TIMEOUT_S, _PROBE_TIMEOUT_S, binary_capabilities
+
+    timeouts: list[float] = []
+
+    class Result:
+        def __init__(self, text: str):
+            self.stdout, self.stderr, self.returncode = text, "", 0
+
+        def check_returncode(self) -> None:
+            pass
+
+    def run(argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        text = "Available devices:\n  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
+        return Result(text if "--list-devices" in argv else "version 0.5.0")
+
+    monkeypatch.setattr("subprocess.run", run)
+    binary_capabilities("fresh-bin", 1, 0)
+    assert timeouts == [_PROBE_FIRST_TIMEOUT_S, _PROBE_FIRST_TIMEOUT_S]
+    # A warm result inside the TTL is reused; it must not start another probe.
+    binary_capabilities("fresh-bin", 1, 1)
+    assert len(timeouts) == 2
+    # Once the binary has completed a probe, a later re-probe stays on the short budget.
+    monkeypatch.setattr("kllm.accel._PROBE_TTL_S", 0.0)
+    binary_capabilities("fresh-bin", 1, 2)
+    assert timeouts[2:] == [_PROBE_TIMEOUT_S, _PROBE_TIMEOUT_S]
+
+
+def test_binary_capabilities_timeout_names_a_manual_first_launch(monkeypatch):
+    from kllm.accel import ProbeTimeoutError, binary_capabilities
+
+    def run(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(argv, 120)
+
+    monkeypatch.setattr("subprocess.run", run)
+    with pytest.raises(ProbeTimeoutError, match="once manually") as caught:
+        binary_capabilities("/tmp/llama-server", 1, 0)
+    message = str(caught.value)
+    assert "timed out after 120 seconds" in message
+    assert "run `/tmp/llama-server --list-devices` once manually" in message
+
+
+def test_failed_probe_keeps_the_long_budget(monkeypatch):
+    from kllm.accel import _PROBE_FIRST_TIMEOUT_S, ProbeTimeoutError, binary_capabilities
+
+    timeouts: list[float] = []
+    calls = {"n": 0}
+
+    class Result:
+        def __init__(self, text: str):
+            self.stdout, self.stderr, self.returncode = text, "", 0
+
+        def check_returncode(self) -> None:
+            pass
+
+    def run(argv, **kwargs):
+        calls["n"] += 1
+        timeouts.append(kwargs["timeout"])
+        if calls["n"] == 1:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        text = "Available devices:\n  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
+        return Result(text if "--list-devices" in argv else "version 0.5.0")
+
+    monkeypatch.setattr("subprocess.run", run)
+    with pytest.raises(ProbeTimeoutError):
+        binary_capabilities("probe-f", 1, 0)
+    assert binary_capabilities("probe-f", 1, 0)["devices"]
+    assert timeouts[:2] == [_PROBE_FIRST_TIMEOUT_S, _PROBE_FIRST_TIMEOUT_S]
 
 
 def test_effective_accel_backend_override(monkeypatch):

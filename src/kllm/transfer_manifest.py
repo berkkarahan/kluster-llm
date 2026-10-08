@@ -6,6 +6,8 @@ import os
 import threading
 from pathlib import Path
 
+from kllm.atomic_io import replace_file
+
 
 def identity(path: Path) -> dict:
     s = path.stat()
@@ -25,7 +27,7 @@ def atomic_json(path: Path, value: dict) -> None:
             json.dump(value, f, separators=(",", ":"))
             f.flush()
             os.fsync(f.fileno())
-        tmp.replace(path)
+        replace_file(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 

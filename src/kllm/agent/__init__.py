@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 import os
 import asyncio
 import sqlite3
@@ -161,6 +161,7 @@ from kllm.agent.services.network_setup import (
     WorkerOverlaySetupService,
 )
 from kllm.agent.application_lifecycle import AgentLifecycleDependencies, AgentLifespan
+from kllm.agent.lifecycle_bus import LifecycleEvent, publish_lifecycle
 from kllm.models.schemas import DownloadAccepted, ModelCatalog, ModelDeletion
 from kllm.run_planning import (
     ensure_master_alive_after_spawn,
@@ -1051,6 +1052,14 @@ def delete_model(body: DeleteBody) -> ModelDeletion:
     return _model_handlers().delete(body)
 
 
+async def _observed_inference(path: str, response: Awaitable[Any]) -> Any:
+    """Publish request boundaries without letting a subscriber fail inference."""
+    publish_lifecycle(LifecycleEvent.REQUEST_RECEIVED, path, isolate=True)
+    result = await response
+    publish_lifecycle(LifecycleEvent.RESPONSE_SENT, path, isolate=True)
+    return result
+
+
 async def chat_completions(
     request: Request,
     _: None = Depends(_require_api_token),
@@ -1061,8 +1070,12 @@ async def chat_completions(
             model_path = model_ops.resolve_local_model(STATE.model_name)
         except FileNotFoundError:
             model_path = None
-    return await gateway.proxy_chat_completions(STATE.infer_port, request, model_path=model_path,
-                                                active_config=_active_config())
+    return await _observed_inference(
+        "/v1/chat/completions",
+        gateway.proxy_chat_completions(
+            STATE.infer_port, request, model_path=model_path, active_config=_active_config()
+        ),
+    )
 
 
 async def anthropic_messages(
@@ -1075,12 +1088,19 @@ async def anthropic_messages(
             model_path = model_ops.resolve_local_model(STATE.model_name)
         except FileNotFoundError:
             model_path = None
-    return await gateway.proxy_anthropic_messages(STATE.infer_port, request, model_path=model_path,
-                                                  active_config=_active_config())
+    return await _observed_inference(
+        "/v1/messages",
+        gateway.proxy_anthropic_messages(
+            STATE.infer_port, request, model_path=model_path, active_config=_active_config()
+        ),
+    )
 
 
 async def responses(request: Request, _: None = Depends(_require_api_token)) -> Any:
-    return await gateway.proxy_responses(STATE.infer_port, request, active_config=_active_config())
+    return await _observed_inference(
+        "/v1/responses",
+        gateway.proxy_responses(STATE.infer_port, request, active_config=_active_config()),
+    )
 
 
 def _active_config() -> dict[str, Any] | None:
@@ -1091,7 +1111,10 @@ def _active_config() -> dict[str, Any] | None:
 
 
 async def response_tokens(request: Request, _: None = Depends(_require_api_token)) -> Any:
-    return await gateway.proxy_responses(STATE.infer_port, request, count_tokens=True)
+    return await _observed_inference(
+        "/v1/responses/input_tokens",
+        gateway.proxy_responses(STATE.infer_port, request, count_tokens=True),
+    )
 
 
 async def inference_models(request: Request, _: None = Depends(_require_api_token)) -> Any:
@@ -1277,7 +1300,9 @@ def _master_start_handler() -> MasterStartHandler:
 
 
 def start_master(body: StartBody) -> dict[str, Any]:
-    return _master_start_handler().start(body)
+    result = _master_start_handler().start(body)
+    publish_lifecycle(LifecycleEvent.CLUSTER_STARTED, STATE.node_id or None)
+    return result
 
 
 def _stop_advertiser() -> None:
@@ -1325,16 +1350,22 @@ def _cluster_lifecycle_handlers() -> ClusterLifecycleHandlers:
 
 
 def stop() -> dict[str, str]:
-    return _cluster_lifecycle_handlers().stop()
+    was_master = STATE.role == "master"
+    result = _cluster_lifecycle_handlers().stop()
+    if was_master:
+        publish_lifecycle(LifecycleEvent.CLUSTER_STOPPED, STATE.node_id or None)
+    return result
 
 
 def join_cluster(body: JoinBody) -> dict[str, Any]:
     try:
-        return _join_cluster(body)
+        result = _join_cluster(body)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(500, f"join failed: {exc}") from exc
+    publish_lifecycle(LifecycleEvent.WORKER_JOINED, STATE.node_id or None)
+    return result
 
 
 def _join_gpu_selection(body: JoinBody) -> ResolvedGpuSelection:
@@ -1401,7 +1432,11 @@ def _worker_overlay_setup_service() -> WorkerOverlaySetupService:
 
 
 def leave() -> dict[str, str]:
-    return _cluster_lifecycle_handlers().leave()
+    was_worker = STATE.role == "worker"
+    result = _cluster_lifecycle_handlers().leave()
+    if was_worker:
+        publish_lifecycle(LifecycleEvent.WORKER_LEFT, STATE.node_id or None)
+    return result
 
 
 def _membership_handlers() -> MembershipHandlers:
@@ -1417,6 +1452,7 @@ def _membership_handlers() -> MembershipHandlers:
         directory_sync=_network_directory_sync,
         directory_snapshot=_network_directory,
         directory_remove=_network_directory_remove,
+        lifecycle_publisher=publish_lifecycle,
     )
 
 
@@ -1803,6 +1839,7 @@ def _inference_handlers() -> InferenceHandlers:
             ),
             rpc_context=(service.rpc_runs.context if service is not None and service.rpc_runs is not None else None),
             network_run_selected=(service.admission.context if service is not None and service.rpc_runs is not None else None),
+            lifecycle_publisher=publish_lifecycle,
         )
     )
 
@@ -1822,7 +1859,15 @@ def run(body: RunBody) -> dict[str, Any]:
     service = getattr(app.state, 'managed_network', None)
     if service is None and getattr(app.state, 'managed_network_error', None):
         raise HTTPException(503, 'Recover signed node/runtime control before starting inference')
-    return service.rpc_runs.launch(body) if service is not None and service.rpc_runs is not None else _inference_handlers().run(body)
+    result = (
+        service.rpc_runs.launch(body)
+        if service is not None and service.rpc_runs is not None
+        else _inference_handlers().run(body)
+    )
+    # A successful run is both accepted and serving; listeners can use either event.
+    publish_lifecycle(LifecycleEvent.RUN_STARTED, STATE.model_name)
+    publish_lifecycle(LifecycleEvent.INFERENCE_STARTED, STATE.model_name)
+    return result
 
 
 def legacy_plan(body: LegacyPlanBody, preview: bool = False) -> dict[str, Any]:
@@ -1843,7 +1888,13 @@ def legacy_put_model_settings(model: str, body: LegacyModelSettingsBody) -> dict
 def stop_inference() -> dict[str, Any]:
     """Stop llama-server and drop the loaded model. The cluster stays up."""
     service = getattr(app.state, 'managed_network', None)
-    return service.rpc_runs.stop(lambda: _inference_handlers().stop()) if service is not None and service.rpc_runs is not None else _inference_handlers().stop()
+    result = (
+        service.rpc_runs.stop(lambda: _inference_handlers().stop())
+        if service is not None and service.rpc_runs is not None
+        else _inference_handlers().stop()
+    )
+    publish_lifecycle(LifecycleEvent.INFERENCE_STOPPED, STATE.node_id or None)
+    return result
 
 
 def _mount_dashboard() -> None:

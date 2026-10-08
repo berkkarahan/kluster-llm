@@ -2,9 +2,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use thiserror::Error;
 
-use crate::hw::METAL_VRAM_FRACTION;
-
 const DEFAULT_HEADROOM: f64 = 0.80;
+/// Planning VRAM for unified memory, as a share of total RAM. Reported macOS VRAM stays at 80%.
+const UNIFIED_VRAM_FRACTION_DEFAULT: f64 = 0.65;
 const DEFAULT_VRAM_WEIGHT: f64 = 0.6;
 const DEFAULT_LATENCY_WEIGHT: f64 = 0.4;
 /// When estimated need exceeds this fraction of budget (but not budget), status is `tight`.
@@ -368,14 +368,33 @@ fn master_ram_fallback_budget(node: &NodeCapacity, headroom: f64) -> u64 {
     (cap as f64 * headroom) as u64
 }
 
+fn parse_unified_vram_fraction(raw: Option<&str>) -> f64 {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return UNIFIED_VRAM_FRACTION_DEFAULT;
+    };
+    let Ok(value) = raw.parse::<f64>() else {
+        return UNIFIED_VRAM_FRACTION_DEFAULT;
+    };
+    if !value.is_finite() {
+        return UNIFIED_VRAM_FRACTION_DEFAULT;
+    }
+    value.clamp(0.10, 0.95)
+}
+
+fn unified_vram_fraction() -> f64 {
+    parse_unified_vram_fraction(std::env::var("KLLM_UNIFIED_VRAM_FRACTION").ok().as_deref())
+}
+
 pub fn effective_vram_bytes(node: &NodeCapacity) -> u64 {
+    // Unified pools ignore the reported carve-out (macOS probe is 80% of RAM;
+    // APUs often expose a few hundred megabytes).
+    if node.unified_memory || node.backend == "metal" {
+        return (node.total_ram_bytes as f64 * unified_vram_fraction()) as u64;
+    }
     if let Some(v) = node.vram_bytes {
         if v > 0 {
             return v;
         }
-    }
-    if node.unified_memory || node.backend == "metal" {
-        return (node.total_ram_bytes as f64 * METAL_VRAM_FRACTION) as u64;
     }
     0
 }
@@ -950,6 +969,20 @@ pub fn plan_split_entry(req: &PlanRequest) -> Result<PlanResult, PlanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn unified_vram_fraction_clamps_and_rejects_garbage() {
+        assert_eq!(parse_unified_vram_fraction(None), 0.65);
+        assert_eq!(parse_unified_vram_fraction(Some("  ")), 0.65);
+        assert_eq!(parse_unified_vram_fraction(Some("nope")), 0.65);
+        assert_eq!(parse_unified_vram_fraction(Some("nan")), 0.65);
+        assert_eq!(parse_unified_vram_fraction(Some("0.5")), 0.5);
+        assert_eq!(parse_unified_vram_fraction(Some("0.01")), 0.10);
+        assert_eq!(parse_unified_vram_fraction(Some("2")), 0.95);
+    }
 
     fn node(id: &str, ram_gb: u64, vram_gb: Option<u64>, metal: bool) -> NodeCapacity {
         node_with_latency(id, ram_gb, vram_gb, metal, None, false)
@@ -1113,10 +1146,28 @@ mod tests {
 
     #[test]
     fn metal_legacy_vram_budget() {
-        let n = node("m", 24, None, true);
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("KLLM_UNIFIED_VRAM_FRACTION");
+        let n = node("m", 24, Some(1), true);
         let vram = effective_vram_bytes(&n);
-        assert_eq!(vram, (24u64 * 1024 * 1024 * 1024 * 80) / 100);
+        let expected = (n.total_ram_bytes as f64 * UNIFIED_VRAM_FRACTION_DEFAULT) as u64;
+        assert_eq!(vram, expected);
+        assert_ne!(vram, 1u64 * 1024 * 1024 * 1024);
         assert_eq!(gpu_budget(&n, 0.80), (vram as f64 * 0.80) as u64);
+
+        std::env::set_var("KLLM_UNIFIED_VRAM_FRACTION", "0.50");
+        assert_eq!(
+            effective_vram_bytes(&n),
+            (n.total_ram_bytes as f64 * 0.50) as u64
+        );
+        std::env::set_var("KLLM_UNIFIED_VRAM_FRACTION", "nope");
+        assert_eq!(effective_vram_bytes(&n), expected);
+        std::env::set_var("KLLM_UNIFIED_VRAM_FRACTION", "1.5");
+        assert_eq!(
+            effective_vram_bytes(&n),
+            (n.total_ram_bytes as f64 * 0.95) as u64
+        );
+        std::env::remove_var("KLLM_UNIFIED_VRAM_FRACTION");
     }
 
     #[test]

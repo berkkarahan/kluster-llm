@@ -25,6 +25,7 @@ from kllm.core.placement_models import (
     PlacementDeviceCandidate,
     PlacementSettings,
 )
+from kllm.accel import unified_vram_fraction
 from kllm.exceptions import ValidationError
 
 
@@ -375,9 +376,22 @@ def plan_devices(
                 raise ValidationError(
                     f"{n.node_id}: device inventory missing; update/rejoin this node before planning"
                 )
+            # One machine-wide pool, split across this node's devices so two
+            # GPUs cannot each claim 65% of the same RAM.
+            unified_total = (
+                int(n.total_ram_bytes * unified_vram_fraction())
+                if n.unified_memory and n.total_ram_bytes > 0
+                else None
+            )
+            per_device = unified_total // len(inventory) if unified_total is not None and inventory else None
             for i, inventory_device in enumerate(inventory):
                 total = inventory_device.vram_bytes
                 free = inventory_device.free_bytes
+                if per_device is not None:
+                    # Effective VRAM is a fixed share of host RAM, not the
+                    # reported carve-out (macOS ~80%, Strix Halo often ~512MB).
+                    total = per_device
+                    free = per_device
                 budget = min(
                     int(total * min(headroom, n.vram_fraction)), free + inventory_device.reclaimable_bytes
                 )

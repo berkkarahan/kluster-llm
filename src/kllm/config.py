@@ -115,6 +115,15 @@ def _normalize_flags(raw: Any) -> dict[str, bool]:
     return flags
 
 
+def _normalize_unified_memory(value: Any) -> bool | None:
+    """None means auto-detect. An explicit boolean forces this node's classification."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"unified_memory must be true or false, got {value!r}")
+
+
 def default_config() -> dict[str, Any]:
     return {
         "device": DEFAULT_DEVICE,
@@ -123,6 +132,7 @@ def default_config() -> dict[str, Any]:
         "ram_percent": DEFAULT_RAM_PERCENT,
         "accel_backend": None,
         "split_mode": DEFAULT_SPLIT_MODE,
+        "unified_memory": None,
         "flags": default_flags(),
     }
 
@@ -141,6 +151,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         cfg["accel_backend"] = _normalize_accel_backend(raw["accel_backend"])
     if "split_mode" in raw:
         cfg["split_mode"] = _normalize_split_mode(raw["split_mode"])
+    if "unified_memory" in raw:
+        cfg["unified_memory"] = _normalize_unified_memory(raw["unified_memory"])
     if "flags" in raw:
         cfg["flags"] = _normalize_flags(raw["flags"])
     return cfg
@@ -165,6 +177,10 @@ def _write_toml(cfg: dict[str, Any]) -> str:
     if accel is not None:
         lines.append(f'accel_backend = "{accel}"')
     lines.append(f'split_mode = "{cfg["split_mode"]}"')
+    if cfg.get("unified_memory") is True:
+        lines.append("unified_memory = true")
+    elif cfg.get("unified_memory") is False:
+        lines.append("unified_memory = false")
     enabled_flags = sorted(name for name, enabled in (cfg.get("flags") or {}).items() if enabled)
     if enabled_flags:
         lines.append("")
@@ -197,7 +213,16 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
     # Merge with existing so partial updates (e.g. device-only) keep percents / gpu_ids.
     current = load_config()
     merged = {**current}
-    for key in ("device", "vram_percent", "ram_percent", "gpu_ids", "accel_backend", "split_mode", "flags"):
+    for key in (
+        "device",
+        "vram_percent",
+        "ram_percent",
+        "gpu_ids",
+        "accel_backend",
+        "split_mode",
+        "unified_memory",
+        "flags",
+    ):
         if key in cfg:
             merged[key] = cfg[key]
     out = _normalize_config(merged)

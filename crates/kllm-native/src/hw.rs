@@ -3,6 +3,9 @@ use std::process::Command;
 use sysinfo::System;
 
 /// Fixed share of unified memory reported as GPU VRAM on Apple Silicon (not the planner headroom slider).
+/// Planning budgets use 65% of total RAM (`KLLM_UNIFIED_VRAM_FRACTION`) instead of this reported figure.
+/// Unused on non-macOS builds, where the macOS probe that applies it is not compiled.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const METAL_VRAM_FRACTION: f64 = 0.80;
 
 /// Backend hint for inference offload.

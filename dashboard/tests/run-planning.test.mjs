@@ -96,8 +96,8 @@ test('run page cache dropdowns and required-node checkbox update the visible pla
         const { appStore } = await import('/src/lib/store.svelte.ts');
         appStore.stop();
         appStore.status = { role: 'master', node_id: 'master', members: {
-          master: { node_id: 'master', role: 'master', host: 'master' },
-          worker: { node_id: 'worker', role: 'worker', host: 'worker' }
+          master: { node_id: 'master', role: 'master', host: 'master', devices: [{ index: 0, name: 'Apple M4' }] },
+          worker: { node_id: 'worker', role: 'worker', host: 'worker', devices: [{ index: 0, name: 'AMD Radeon 8060S' }] }
         }};
         appStore.models = [{ id: 'fixture.gguf' }];
         appStore.selectedModel = 'fixture.gguf';
@@ -122,6 +122,8 @@ test('run page cache dropdowns and required-node checkbox update the visible pla
       await wait("document.querySelector('#required-worker').checked && document.body.innerText.includes('Preview recalculated.')");
       assert.deepEqual(requests.at(-1).required_nodes, ['worker']);
       const text = await evaluate('document.body.innerText');
+      assert.match(text, /Apple M4/);
+      assert.match(text, /AMD Radeon 8060S/);
       assert.match(text, /CPU RAM: 5\.0 GiB/);
       assert.match(text, /19 model layers/);
       await evaluate(`(() => {

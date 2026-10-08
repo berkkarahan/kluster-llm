@@ -27,6 +27,7 @@ def test_default_config(kllm_home):
         "ram_percent": 80,
         "accel_backend": None,
         "split_mode": "layer",
+        "unified_memory": None,
         "flags": {"private-network-setup": False},
     }
     assert config.resolve_memory_fraction("gpu") == 0.80
@@ -44,6 +45,22 @@ def test_save_and_load_accel_backend(kllm_home):
     assert config.get_accel_backend() is None
     text2 = (home / "config.toml").read_text(encoding="utf-8")
     assert "accel_backend" not in text2
+
+
+def test_save_and_load_unified_memory_override(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"unified_memory": True})
+    assert out["unified_memory"] is True
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert "unified_memory = true" in text
+    assert config.load_config()["unified_memory"] is True
+    config.save_config({"unified_memory": False})
+    assert "unified_memory = false" in (home / "config.toml").read_text(encoding="utf-8")
+    config.save_config({"unified_memory": None})
+    assert "unified_memory" not in (home / "config.toml").read_text(encoding="utf-8")
+    assert config.load_config()["unified_memory"] is None
+    with pytest.raises(ValueError):
+        config.save_config({"unified_memory": "yes"})
 
 
 def test_invalid_accel_backend_rejected(kllm_home):

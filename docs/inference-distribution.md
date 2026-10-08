@@ -39,7 +39,11 @@ each listed node must host at least one model layer. The planner chooses appropr
 shares; it never forces equal allocations or ignores an infeasible requirement.
 
 `--tensor-split` values are layer counts from that allocation (with a tiny boundary
-bias). Unified RAM is one shared pool on every Apple Silicon node, including Vulkan.
+bias). Unified RAM is one shared pool on Apple Silicon and on other detected
+unified-memory devices (for example AMD Strix Halo). Planning uses 65% of that
+node's total RAM as effective VRAM (`KLLM_UNIFIED_VRAM_FRACTION`), then applies
+the usual VRAM percent. Reported macOS VRAM remains 80% of RAM and is not the
+planning budget.
 Measured RSS of the tracked process
 may be reclaimed when replacing it. Discrete GPU memory without an attributable
 allocation measurement is conservatively treated as occupied. Execution buffers and

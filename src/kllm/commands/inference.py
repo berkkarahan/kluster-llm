@@ -195,9 +195,12 @@ def _print_plan_result(data: dict) -> None:
         f"split={data.get('tensor_split')}"
     )
     node_ids = data.get("node_ids") or []
+    gpu_names = data.get("node_gpu_names") or {}
     for i, nid in enumerate(node_ids):
+        labels = [str(name) for name in (gpu_names.get(nid) or []) if name]
+        suffix = f" [{', '.join(labels)}]" if labels else ""
         console.print(
-            f"  {nid}: alloc={data.get('node_alloc_bytes', [None] * len(node_ids))[i]} "
+            f"  {nid}{suffix}: alloc={data.get('node_alloc_bytes', [None] * len(node_ids))[i]} "
             f"score={data.get('node_scores', [None] * len(node_ids))[i]} "
             f"latency_ms={data.get('node_latency_ms', [None] * len(node_ids))[i]}"
         )

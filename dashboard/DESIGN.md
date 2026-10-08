@@ -280,6 +280,7 @@ Cancel download is an actual store action, and terminal state is tied to an oper
 [src/routes/run/+page.svelte](src/routes/run/+page.svelte) implements **Select → Configure → Review & deploy**.
 Select chooses a local model, inference network and Automatic/Priority placement.
 “Must use this node” means at least one model layer; unchecked nodes remain eligible.
+Each node row shows that node's GPU names beside the node id (membership device names, or the plan's `node_gpu_names` when membership has none).
 Priority has explicit up/down actions and removal for unavailable saved entries.
 Configure begins with context, concurrent slots, response limit and thinking controls.
 Disclosures group Capacity & performance, Memory & loading, Generation defaults,

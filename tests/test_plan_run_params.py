@@ -496,6 +496,30 @@ def test_model_settings_file_location(client, tmp_path):
     assert "toy.gguf" in data.get("models", {})
 
 
+def _moe_offload_descriptor(response):
+    return next(item for item in response.json()["parameters"] if item["id"] == "moe_offload")
+
+
+def test_moe_offload_follows_normalized_architecture(client):
+    from test_memory_estimation import synthetic_gguf
+
+    c, _, tmp = client
+    path = _model_file(tmp)
+    synthetic_gguf(path, arch="gpt-oss")
+    moe = c.get("/v1/run-capabilities", params={"model": "toy.gguf"})
+    assert moe.status_code == 200, moe.text
+    descriptor = _moe_offload_descriptor(moe)
+    assert descriptor["available"] is True
+    assert descriptor["unavailable_reason"] is None
+
+    synthetic_gguf(path, arch="llama")
+    dense = c.get("/v1/run-capabilities", params={"model": "toy.gguf"})
+    assert dense.status_code == 200, dense.text
+    descriptor = _moe_offload_descriptor(dense)
+    assert descriptor["available"] is False
+    assert descriptor["unavailable_reason"] == "This model does not declare a Mixture of Experts architecture"
+
+
 @pytest.mark.parametrize("route", ["/v1/plan", "/v2/inference/plans"])
 def test_priority_api_forwards_and_remembers_order(client, route):
     c, agent, tmp = client
@@ -506,3 +530,124 @@ def test_priority_api_forwards_and_remembers_order(client, route):
     assert planner.call_args.kwargs["node_priority"] == ["w1"]
     assert planner.call_args.kwargs["required_nodes"] == ["w1"]
     assert c.get("/v1/model-settings/toy.gguf").json()["parameter_set"]["node_priority"] == ["w1"]
+
+
+def _unified_plan(*, ram: int, reported: int, backend: str = "vulkan"):
+    from test_cluster_optimizations import layout, settings
+
+    from kllm.core.placement import plan_devices
+    from kllm.core.placement_models import ModelLayout, PlacementNodeInput, PlacementSettings
+
+    node = PlacementNodeInput.from_mapping({
+        "node_id": "box",
+        "is_master": True,
+        "backend": backend,
+        "total_ram_bytes": ram,
+        "available_ram_bytes": ram,
+        "unified_memory": True,
+        "devices": [{
+            "index": 0,
+            "device": "MTL0" if backend == "metal" else "Vulkan0",
+            "backend": backend,
+            "name": "Apple M4" if backend == "metal" else "AMD Radeon 8060S",
+            "vram_bytes": reported,
+            "free_bytes": reported,
+        }],
+    })
+    return plan_devices(
+        (node,),
+        500 * 1024**2,
+        ModelLayout.from_mapping(layout()),
+        PlacementSettings.from_mapping(settings()),
+        context=512,
+        headroom=1,
+        device="gpu",
+        vram_weight=0.6,
+        latency_weight=0.4,
+    )
+
+
+def test_unified_planning_vram_is_fraction_of_ram_not_reported_carveout(monkeypatch):
+    from kllm.accel import UNIFIED_VRAM_FRACTION_DEFAULT
+
+    monkeypatch.delenv("KLLM_UNIFIED_VRAM_FRACTION", raising=False)
+    ram = 32 * 1024**3
+    reported = 512 * 1024**2
+    plan = _unified_plan(ram=ram, reported=reported)
+    budget = next(row.value for row in plan.node_gpu_budget_bytes if row.node_id == "box")
+    expected = int(ram * UNIFIED_VRAM_FRACTION_DEFAULT)
+    assert budget == expected
+    assert budget > reported
+
+
+def test_unified_macos_planning_vram_is_65_percent_not_reported_80(monkeypatch):
+    monkeypatch.delenv("KLLM_UNIFIED_VRAM_FRACTION", raising=False)
+    ram = 24 * 1024**3
+    reported = int(ram * 0.80)
+    plan = _unified_plan(ram=ram, reported=reported, backend="metal")
+    budget = next(row.value for row in plan.node_gpu_budget_bytes if row.node_id == "box")
+    assert budget == int(ram * 0.65)
+    assert budget < reported
+
+
+def test_unified_vram_fraction_env_changes_planning_budget(monkeypatch):
+    ram = 32 * 1024**3
+    monkeypatch.setenv("KLLM_UNIFIED_VRAM_FRACTION", "0.50")
+    plan = _unified_plan(ram=ram, reported=512 * 1024**2)
+    budget = next(row.value for row in plan.node_gpu_budget_bytes if row.node_id == "box")
+    assert budget == int(ram * 0.50)
+
+
+def test_plan_result_prints_gpu_names_beside_nodes():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from kllm.commands import inference
+
+    buffer = StringIO()
+    previous = inference.console
+    inference.console = Console(file=buffer, force_terminal=False, no_color=True)
+    try:
+        inference._print_plan_result({
+            "fit_status": "fits",
+            "estimated_bytes": 1,
+            "budget_bytes": 2,
+            "device_requested": "gpu",
+            "device_effective": "gpu",
+            "tensor_split": [1.0],
+            "node_ids": ["box"],
+            "node_alloc_bytes": [10],
+            "node_scores": [0.5],
+            "node_latency_ms": [1.0],
+            "node_gpu_names": {"box": ["AMD Radeon 8060S"]},
+        })
+    finally:
+        inference.console = previous
+    assert "box [AMD Radeon 8060S]: alloc=10" in buffer.getvalue()
+
+
+def test_missing_unified_flag_detects_strix_from_device_name():
+    from kllm.run_planning import _node_gpu_names, cluster_nodes
+
+    members = {
+        "strix": {
+            "node_id": "strix",
+            "role": "master",
+            "host": "127.0.0.1",
+            "backend": "vulkan",
+            "total_ram_bytes": 32 * 1024**3,
+            "available_ram_bytes": 32 * 1024**3,
+            "devices": [{
+                "index": 0,
+                "device": "Vulkan0",
+                "name": "AMD Radeon 8060S Graphics",
+                "backend": "vulkan",
+                "vram_bytes": 512 * 1024**2,
+                "free_bytes": 512 * 1024**2,
+            }],
+        }
+    }
+    nodes = cluster_nodes(members)
+    assert nodes[0].unified_memory is True
+    assert _node_gpu_names(members)["strix"] == ["AMD Radeon 8060S Graphics"]

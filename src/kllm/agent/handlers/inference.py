@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from kllm.agent.lifecycle_bus import LifecycleEvent
 from kllm.agent.run_route import run_response
 from kllm.run_settings import PlanBody, RunBody, RunSettingsFields
 from kllm.state import ClusterState
@@ -79,6 +80,7 @@ class InferenceDependencies:
     rpc_context: Callable[[RunBody, dict[str, Any], dict[str, Any]], ContextManager[None]] | None = None
     network_run_selected: Callable[[str | None, list[str]], ContextManager[dict[str, Any]]] | None = None
     runtime_context: Callable[[], ContextManager[dict[str, Any]]] | None = None
+    lifecycle_publisher: Callable[[LifecycleEvent, str | None], None] | None = None
 
 
 class InferenceHandlers:
@@ -147,6 +149,8 @@ class InferenceHandlers:
         self._deps.persist_last_settings(body)
         state.save()
         self._deps.remember(body)
+        if self._deps.lifecycle_publisher is not None:
+            self._deps.lifecycle_publisher(LifecycleEvent.DEPLOY_PLANNED, body.model)
         return result
 
     def run(self, body: RunBody) -> dict[str, Any]:

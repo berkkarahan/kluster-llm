@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from kllm import membership, netsec, usage
+from kllm.agent.lifecycle_bus import LifecycleEvent
 from kllm.agent.schemas import RegisterBody, UnregisterBody
 from kllm.state import ClusterState
 
@@ -30,6 +31,7 @@ class MembershipHandlers:
         directory_sync: Callable[[], None] | None = None,
         directory_snapshot: Callable[[], list[dict[str, Any]]] | None = None,
         directory_remove: Callable[[str], None] | None = None,
+        lifecycle_publisher: Callable[[LifecycleEvent, str | None], None] | None = None,
     ) -> None:
         self._state = state
         self._sync_liveness = sync_liveness
@@ -42,6 +44,11 @@ class MembershipHandlers:
         self._directory_sync = directory_sync
         self._directory_snapshot = directory_snapshot
         self._directory_remove = directory_remove
+        self._lifecycle_publisher = lifecycle_publisher
+
+    def _emit(self, event: LifecycleEvent, subject: str | None) -> None:
+        if self._lifecycle_publisher is not None:
+            self._lifecycle_publisher(event, subject)
 
     def _refresh_directory(self) -> None:
         if self._directory_sync is None:
@@ -141,6 +148,7 @@ class MembershipHandlers:
         state.save()
         membership.on_membership_grow(state)
         self._refresh_directory()
+        self._emit(LifecycleEvent.WORKER_JOINED, body.node_id)
         response["members"] = len(state.members)
         response.update(membership.snapshot_payload(state, self._inference_activity()))
         return self._with_directory(response)
@@ -193,6 +201,7 @@ class MembershipHandlers:
             if self._directory_remove is not None:
                 self._directory_remove(node_id)
             self._shrink_cluster(state)
+            self._emit(LifecycleEvent.WORKER_LEFT, node_id)
         else:
             state.save()
         return {"ok": True}

@@ -136,12 +136,24 @@ class RpcRunCoordinator:
     def _release_workers(self) -> None:
         if self.run_id is None:
             return
+        members = self.service.state().members
+        sessions = self.service.channels.sessions
         results = self.service.admission.call(self._commands(self.run_id, list(self.workers), 'stop'))
-        for node, result in results.items():
-            member = self.service.state().members.get(node)
+        pending: list[str] = []
+        for node in self.workers:
+            result = results[node]
+            member = members.get(node)
             if member is not None and result.get('status') == 'idle':
                 member.update(process_pid=None, process_role=None, rpc_devices=[], rpc_status='idle')
-        self.workers = [node for node in self.workers if results[node].get('status') != 'idle']
+            if result.get('status') == 'idle':
+                continue
+            # A node that has left the cluster has no channel left to command.
+            # Its own agent expires the local RPC lease; retaining the id here
+            # blocks Stop after the worker is already gone.
+            if member is None and node not in sessions:
+                continue
+            pending.append(node)
+        self.workers = pending
         self.phase = 'cleanup_pending' if self.workers else 'idle'
         if not self.workers:
             self.run_id = None

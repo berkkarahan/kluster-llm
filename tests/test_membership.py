@@ -766,6 +766,10 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
     with patch("httpx.Client", side_effect=OSError("down")):
         agent._worker_post_heartbeat()
     assert agent.STATE.role == "worker"
+    assert "master heartbeat unreachable" not in (agent.STATE.netsec_warnings or [])
+    with patch("httpx.Client", side_effect=OSError("down")):
+        agent._worker_post_heartbeat()
+    assert agent.STATE.role == "worker"
     assert agent.STATE.node_id in agent.STATE.members
     assert any("unreachable" in w for w in (agent.STATE.netsec_warnings or []))
     assert "master heartbeat unreachable" in c.get("/v2/node").json()["netsec_warnings"]

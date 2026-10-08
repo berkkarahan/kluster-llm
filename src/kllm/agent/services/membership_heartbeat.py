@@ -11,6 +11,10 @@ from fastapi import HTTPException
 from kllm.state import DEFAULT_CONTROL_PORT, ClusterState
 
 _LATENCY_EMA_ALPHA = 0.3
+# Heartbeats are every 2s. One lost packet must not flip the dashboard warning
+# or rewrite cluster state; the second consecutive miss still lands well inside
+# the 20s membership timeout.
+_UNREACHABLE_AFTER = 2
 
 
 class MembershipHeartbeatService:
@@ -39,15 +43,34 @@ class MembershipHeartbeatService:
         self._worker_local_leave = worker_local_leave
         self._apply_snapshot = apply_snapshot
         self._member_rpc_host = member_rpc_host
+        self._contact_failures = 0
+        self._observed_state: ClusterState | None = None
+
+    def _bind_state(self, state: ClusterState) -> None:
+        """A replaced cluster state starts its own failure streak."""
+        if state is not self._observed_state:
+            self._observed_state = state
+            self._contact_failures = 0
+
+    def _note_contact_failure(self, state: ClusterState) -> None:
+        self._contact_failures += 1
+        if self._contact_failures >= _UNREACHABLE_AFTER:
+            self._mark_unreachable(state)
+
+    def _note_contact_success(self, state: ClusterState) -> None:
+        self._contact_failures = 0
+        self._clear_unreachable(state)
 
     def post_heartbeat(self) -> None:
         state = self._state()
         if state.role != "worker" or not state.master_host or not state.join_key:
+            self._contact_failures = 0
             return
+        self._bind_state(state)
         try:
             self._ensure_control_route(state.master_host, state.master_port)
         except HTTPException:
-            self._mark_unreachable(state)
+            self._note_contact_failure(state)
             return
         try:
             response = self._control_client().post(
@@ -57,14 +80,14 @@ class MembershipHeartbeatService:
                 timeout=5.0,
             )
             if response.status_code != 200:
-                self._mark_unreachable(state)
+                self._note_contact_failure(state)
                 return
             data = response.json()
         except Exception:
-            self._mark_unreachable(state)
+            self._note_contact_failure(state)
             return
 
-        self._clear_unreachable(state)
+        self._note_contact_success(state)
         snapshot = data.get("cluster_members")
         accepted = data.get("accepted")
         omitted = isinstance(snapshot, dict) and state.node_id not in snapshot

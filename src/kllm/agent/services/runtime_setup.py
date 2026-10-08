@@ -12,6 +12,7 @@ from kllm.agent.schemas import LlamaSetupBody
 from kllm.agent.services.gpus import ResolvedGpuSelection
 from kllm.agent.services.rpc_devices import worker_rpc_devices
 from kllm.exceptions import NotFoundError, ValidationError
+from kllm.run_settings import cpu_batch_threads
 from kllm.state import DEFAULT_RPC_PORT, ClusterState
 
 PackInstaller = Callable[[str | None, str, bool], dict[str, Any]]
@@ -120,6 +121,8 @@ class RuntimeSetupService:
                 repo_root=str(root) if root else None,
                 env=None,
                 devices=[device["device"] for device in rpc_devices],
+                # rpc-server's own default is 8 threads for the CPU device.
+                threads=cpu_batch_threads(),
                 log_path=str(self._rpc_log_path()),
             )
             pid = launched.get("pid")

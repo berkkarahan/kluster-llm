@@ -10,6 +10,7 @@ from kllm.agent.services.gpus import ResolvedGpuSelection
 from kllm.agent.services.runtime_setup import RuntimeSetupService
 from kllm.core.gpu_selection import GpuDeviceInput, GpuSelection
 from kllm.exceptions import NotFoundError
+from kllm.run_settings import cpu_batch_threads
 from kllm.state import ClusterState
 
 
@@ -83,10 +84,11 @@ def test_installation_defers_start_until_a_master_command():
             {
                 "host": "10.0.0.2",
                 "port": 50052,
-                "repo_root": "/repo",
+                "repo_root": str(Path("/repo")),
                 "env": None,
                 "devices": ["GPU-2", "CPU"],
-                "log_path": "/logs/rpc.log",
+                "threads": cpu_batch_threads(),
+                "log_path": str(Path("/logs/rpc.log")),
             },
         ),
         ("register", 99, "rpc-server"),

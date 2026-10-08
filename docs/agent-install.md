@@ -307,9 +307,18 @@ kllm ui
 
 Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay private (LAN or WireGuard). Upstream llama.cpp RPC has **no auth**.
 
-### 4.4 Updating worker software from the master
+### 4.4 Updating software
 
-After you `git pull` (and rebuild) on the **master**, fan out the same pull + smart rebuild to joined workers:
+Update any node's own checkout in one step — stop the local node, `git pull --ff-only`, full rebuild:
+
+```bash
+# On master (requires a clean checkout; honors KLLM_REPO_ROOT)
+kllm update
+# Node is left stopped; start or join again when the rebuild finishes:
+kllm start
+```
+
+Then fan out the same pull + smart rebuild to joined workers:
 
 ```bash
 # On master (workers must have a clean git checkout of this repo)

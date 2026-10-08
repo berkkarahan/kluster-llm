@@ -18,10 +18,12 @@ def client(tmp_path, monkeypatch):
 
     import kllm.agent as agent_mod
     import kllm.cluster_update as update_mod
+    import kllm.commands.update_worker as update_worker_mod
     import kllm.state as state_mod
 
     importlib.reload(state_mod)
     importlib.reload(update_mod)
+    importlib.reload(update_worker_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"

@@ -37,6 +37,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm flags [<name>] [--enable\|--disable]` | Show or change local dashboard feature flags. `private-network-setup` gates the Home → Private 10GbE network panel (disabled by default); omit `<name>` to list all flags |
 | `kllm leave` | Worker leaves the cluster |
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
+| `kllm update [--port PORT]` | Local maintenance: stop this node, `git pull --ff-only` (requires a clean checkout), then full rebuild (`scripts/install.py --sync`). Node stays stopped; start or join again when it finishes. |
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |

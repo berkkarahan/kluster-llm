@@ -68,6 +68,21 @@ def control(registry, role='master', node_id='master', warm=None):
     return RuntimeControlService(service, registry, lambda: 'cpu', warm_capabilities=warm or (lambda: None))
 
 
+def test_local_status_surfaces_capacity_probe_error(registry):
+    manager = control(registry, role='worker', node_id='worker')
+    manager.service.state().members['worker']['capacity_probe_error'] = (
+        'Command timed out after 120 seconds. run `llama-server --list-devices` once manually'
+    )
+    assert 'once manually' in manager.local_status()['error']
+
+
+def test_local_status_keeps_preparation_error_ahead_of_probe_error(registry):
+    manager = control(registry, role='worker', node_id='worker')
+    manager.native_supported = lambda: False
+    manager.service.state().members['worker']['capacity_probe_error'] = 'probe timed out once manually'
+    assert manager.local_status()['error'] == 'Rebuild the native extension for runtime selection'
+
+
 def test_prepared_runtime_warmup_runs_once_per_identity(registry):
     calls = []
     manager = control(registry, warm=lambda: calls.append('warm'))

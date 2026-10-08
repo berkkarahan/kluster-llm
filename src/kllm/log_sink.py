@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import threading
 
+from kllm.atomic_io import replace_file
 from kllm.state import home_dir, state_path
 
 
@@ -58,7 +59,7 @@ class OutputSink:
             temporary = self.status_path.with_suffix(".tmp")
             try:
                 temporary.write_text(json.dumps(status), encoding="utf-8")
-                os.replace(temporary, self.status_path)
+                replace_file(temporary, self.status_path)
                 self.last_status = status
             except OSError:
                 pass  # Always keep draining the producer; missing ack reports pending.

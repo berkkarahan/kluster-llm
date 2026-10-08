@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kllm.atomic_io import replace_file
 from kllm.state import ensure_home
 
 _store_lock = threading.RLock()
@@ -42,7 +43,7 @@ def _save_raw(data: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        os.replace(name, path)
+        replace_file(name, path)
     finally:
         if os.path.exists(name):
             os.unlink(name)

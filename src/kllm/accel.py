@@ -15,11 +15,20 @@ SELECTABLE_ACCEL_BACKENDS = frozenset({"metal", "cuda", "rocm", "vulkan"})
 # One accelerator init at a time: a cold Metal/Vulkan start can exceed the
 # probe timeout when it contends with a second probe (capacity refresh and RPC
 # startup both probe the same managed binary).
+# A binary that has never completed a probe gets the longer budget. Killing the
+# first exec (macOS Gatekeeper or Metal init) leaves every later probe cold.
 _PROBE_TIMEOUT_S = 15
+_PROBE_FIRST_TIMEOUT_S = 120
 _PROBE_TTL_S = 30.0
 _PROBE_CACHE_MAX = 4
 _probe_lock = threading.Lock()
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+
+# Shown when ``--list-devices`` is killed before a cold first launch finishes.
+PROBE_TIMEOUT_HINT = (
+    "First launch of a freshly installed runtime can exceed the probe timeout; "
+    "run `llama-server --list-devices` once manually"
+)
 
 
 def accel_backend_override() -> str | None:
@@ -283,13 +292,28 @@ def metal_device_init_failed(output: str) -> bool:
     return bool(re.search(r"^\s*:\s*\(\d+ MiB,", output, re.M))
 
 
+class ProbeTimeoutError(RuntimeError):
+    """``llama-server`` was killed before ``--list-devices`` could finish."""
+
+
+def probe_timeout_message(binary: str, timeout: float) -> str:
+    """Explain a killed capability probe, including the command to warm it."""
+    return (
+        f"Command {[binary, '--list-devices']!r} timed out after {timeout:g} seconds. "
+        "First launch of a freshly installed runtime can exceed the probe timeout; "
+        f"run `{binary} --list-devices` once manually"
+    )
+
+
 def binary_capabilities(binary: str, mtime_ns: int, epoch: int) -> dict[str, Any]:
     """Probe one binary's devices with a single-flight, short-TTL cache.
 
     ``epoch`` keeps the caller's periodic refresh intent; the lock and TTL also
     stop the capacity refresh and an RPC start from launching two accelerator
     probes at the same time. File identity (``mtime_ns``) still invalidates
-    after a runtime installation.
+    after a runtime installation. The first successful probe of a binary may
+    take much longer than a later one, so only an identity already in the cache
+    keeps the short timeout.
     """
     del epoch
     key = (binary, mtime_ns)
@@ -297,7 +321,8 @@ def binary_capabilities(binary: str, mtime_ns: int, epoch: int) -> dict[str, Any
         cached = _probe_cache.get(key)
         if cached is not None and time.monotonic() - cached[0] < _PROBE_TTL_S:
             return cached[1]
-        result = _run_capability_probe(binary)
+        timeout = _PROBE_TIMEOUT_S if key in _probe_cache else _PROBE_FIRST_TIMEOUT_S
+        result = _run_capability_probe(binary, timeout=timeout)
         _probe_cache[key] = (time.monotonic(), result)
         if len(_probe_cache) > _PROBE_CACHE_MAX:
             oldest = min(_probe_cache, key=lambda item: _probe_cache[item][0])
@@ -305,15 +330,18 @@ def binary_capabilities(binary: str, mtime_ns: int, epoch: int) -> dict[str, Any
         return result
 
 
-def _run_capability_probe(binary: str) -> dict[str, Any]:
+def _run_capability_probe(binary: str, *, timeout: float = _PROBE_TIMEOUT_S) -> dict[str, Any]:
     import subprocess
 
-    kwargs: dict[str, Any] = dict(capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    kwargs: dict[str, Any] = dict(capture_output=True, text=True, timeout=timeout)
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    devices = subprocess.run([binary, "--list-devices"], **kwargs)
-    devices.check_returncode()
-    version = subprocess.run([binary, "--version"], **kwargs)
+    try:
+        devices = subprocess.run([binary, "--list-devices"], **kwargs)
+        devices.check_returncode()
+        version = subprocess.run([binary, "--version"], **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise ProbeTimeoutError(probe_timeout_message(binary, timeout)) from exc
     text = devices.stdout + devices.stderr
     return {
         "devices": parse_devices(text),

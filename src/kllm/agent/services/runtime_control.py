@@ -20,6 +20,22 @@ _RETRY_MAX_ATTEMPTS = 5
 _RETRY_PHASES = ('failed', 'interrupted', 'cancelled')
 
 
+def _status_error(
+    selection_supported: bool,
+    job: dict | None,
+    preparing: bool,
+    capture_error: str | None,
+    probe_error: object,
+) -> str | None:
+    """Prefer a runtime-preparation failure, otherwise show a failed GPU warm-up."""
+    if not selection_supported:
+        return 'Rebuild the native extension for runtime selection'
+    reported = (job or {}).get('error') or (None if preparing else capture_error)
+    if reported or not probe_error:
+        return reported
+    return str(probe_error)[:512]
+
+
 class RuntimeControlService:
     def __init__(self, service, registry: RuntimeRegistry, backend, *, native_supported=lambda: True, warm_capabilities=lambda: None):
         self.service, self.registry, self.backend = service, registry, backend
@@ -168,7 +184,8 @@ class RuntimeControlService:
                 'running': {k: running[k] for k in ('runtime_id', 'build_id', 'commit')} if running else None,
                 'phase': 'upgrade_required' if not selection_supported else 'prepared' if prepared else (job or {}).get('phase', 'not_installed'),
                 **fields,
-                'job': job, 'error': 'Rebuild the native extension for runtime selection' if not selection_supported else (job or {}).get('error') or (None if preparing else error)}
+                'job': job, 'error': _status_error(
+                    selection_supported, job, preparing, error, member.get('capacity_probe_error'))}
 
     def status(self):
         data = self.registry.snapshot()

@@ -123,8 +123,18 @@ class CapacityService:
                 vram_bytes=selection.vram_bytes,
             )
             member["reclaimable_ram_bytes"] = self._reclaimable_ram(state.process_pid)
-        except Exception:
-            pass
+            probe_error = capacity.get("error")
+            if probe_error:
+                member["capacity_probe_error"] = str(probe_error)[:512]
+            else:
+                member.pop("capacity_probe_error", None)
+        except Exception as exc:
+            # A failed warm-up used to vanish here, so Run then failed with an
+            # empty inventory and no prior signal. Keep the membership tick
+            # alive, but leave the message where runtime status can show it.
+            detail = getattr(exc, "detail", None)
+            message = detail if isinstance(detail, str) and detail else str(exc)
+            member["capacity_probe_error"] = (message or "GPU capability probe failed")[:512]
 
     @staticmethod
     def _reclaimable_ram(pid: int | None) -> int:

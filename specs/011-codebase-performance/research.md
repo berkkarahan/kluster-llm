@@ -80,11 +80,17 @@ from kllm.cluster_log import make_event
 rows = [make_event("synthetic", "agent", "x" * 1024, ts=1.0) for _ in range(500)]
 durations = []
 for _ in range(5):
-    feed = LiveFeed({}, lambda after: {
-        "lines": rows,
-        "cursor": "00000000-0000-4000-8000-000000000001:500",
-        "reset": None, "gap": False, "gap_reason": None, "source": "cluster",
-    })
+    feed = LiveFeed(
+        {},
+        lambda after: {
+            "lines": rows,
+            "cursor": "00000000-0000-4000-8000-000000000001:500",
+            "reset": None,
+            "gap": False,
+            "gap_reason": None,
+            "source": "cluster",
+        },
+    )
     try:
         began = time.perf_counter()
         result = feed._log_result(None, None)

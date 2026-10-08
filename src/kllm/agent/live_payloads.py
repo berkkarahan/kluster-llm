@@ -43,7 +43,10 @@ def fit_log_suffix(
             }
         )
 
-    if len(envelope(original, snapshot.get("gap", False), snapshot.get("gap_reason"))) <= budget_bytes:
+    if (
+        len(envelope(original, snapshot.get("gap", False), snapshot.get("gap_reason")))
+        <= budget_bytes
+    ):
         return original, {
             "gap": snapshot.get("gap", False),
             "gap_reason": snapshot.get("gap_reason"),

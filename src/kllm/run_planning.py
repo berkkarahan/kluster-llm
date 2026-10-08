@@ -140,8 +140,6 @@ def resolve_headroom(body: RunSettingsFields) -> float:
     return kllm_config.resolve_memory_fraction(device)
 
 
-
-
 def _member_devices(member: dict[str, Any]) -> list[dict[str, Any]]:
     devices = list(member.get("devices") or [])
     if devices:
@@ -207,40 +205,31 @@ def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
         lat = m.get("latency_ms")
         devices = _member_devices(m)
         devices = [
-            {**device, "index": device.get("index", index)}
-            for index, device in enumerate(devices)
+            {**device, "index": device.get("index", index)} for index, device in enumerate(devices)
         ]
         nodes.append(
-            PlacementNodeInput.from_mapping({
-                "node_id": m["node_id"],
-                "total_ram_bytes": m.get("total_ram_bytes", 0),
-                "available_ram_bytes": m.get("available_ram_bytes", 0),
-                "vram_bytes": m.get("vram_bytes"),
-                "backend": m.get("backend", "unknown"),
-                "unified_memory": _member_unified_memory(m),
-                "devices": devices,
-                "rpc_devices": m.get("rpc_devices", []),
-                "rpc_capabilities": m.get("rpc_capabilities", []),
-                "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
-                "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
-                "latency_ms": float(lat) if lat is not None else None,
-                "role": m.get("role", "worker"),
-                "is_master": m.get("role") == "master",
-                "ram_fraction": float(m.get("ram_percent", 100)) / 100,
-                "vram_fraction": float(m.get("vram_percent", 100)) / 100,
-            })
+            PlacementNodeInput.from_mapping(
+                {
+                    "node_id": m["node_id"],
+                    "total_ram_bytes": m.get("total_ram_bytes", 0),
+                    "available_ram_bytes": m.get("available_ram_bytes", 0),
+                    "vram_bytes": m.get("vram_bytes"),
+                    "backend": m.get("backend", "unknown"),
+                    "unified_memory": _member_unified_memory(m),
+                    "devices": devices,
+                    "rpc_devices": m.get("rpc_devices", []),
+                    "rpc_capabilities": m.get("rpc_capabilities", []),
+                    "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
+                    "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
+                    "latency_ms": float(lat) if lat is not None else None,
+                    "role": m.get("role", "worker"),
+                    "is_master": m.get("role") == "master",
+                    "ram_fraction": float(m.get("ram_percent", 100)) / 100,
+                    "vram_fraction": float(m.get("vram_percent", 100)) / 100,
+                }
+            )
         )
     return nodes
-
-
-
-
-
-
-
-
-
-
 
 
 def validate_split_mode(settings: dict[str, Any], result: dict[str, Any]) -> None:
@@ -269,8 +258,10 @@ def validate_split_mode(settings: dict[str, Any], result: dict[str, Any]) -> Non
 
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
     path = model_ops.resolve_local_model(body.model)
-    nodes = [node if isinstance(node, PlacementNodeInput) else PlacementNodeInput.from_mapping(node)
-             for node in cluster_nodes(members)]
+    nodes = [
+        node if isinstance(node, PlacementNodeInput) else PlacementNodeInput.from_mapping(node)
+        for node in cluster_nodes(members)
+    ]
     if not nodes:
         raise HTTPException(400, "no cluster members")
     device = kllm_config.resolve_device(body.device)
@@ -285,7 +276,10 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
         ram_limit = min(local_ram, (body.ram_percent or 100) / 100)
         vram_limit = min(local_vram, (body.vram_percent or 100) / 100)
         nodes[index] = replace(node, ram_fraction=ram_limit, vram_fraction=vram_limit)
-        limits[node.node_id] = {"ram_percent": round(ram_limit * 100), "vram_percent": round(vram_limit * 100)}
+        limits[node.node_id] = {
+            "ram_percent": round(ram_limit * 100),
+            "vram_percent": round(vram_limit * 100),
+        }
     # Legacy headroom applies to both pools; new limits are independent.
     if body.model_config.get("extra") != "ignore":
         headroom = float(body.headroom) if body.headroom is not None else 1.0
@@ -315,7 +309,9 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             model_layout=layout,
             launch_settings=settings,
             mmproj_size_bytes=_file_size_bytes(body.mmproj) if body.vision else 0,
-            draft_model_size_bytes=_file_size_bytes(body.draft_model) if body.draft_enabled() else 0,
+            draft_model_size_bytes=_file_size_bytes(body.draft_model)
+            if body.draft_enabled()
+            else 0,
             vision=bool(body.vision),
             node_shares=body.node_shares,
             required_nodes=body.required_nodes,

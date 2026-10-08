@@ -782,7 +782,8 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
     with (
         patch.object(agent, "_ensure_master_control_route", return_value=[]),
         patch.object(
-            agent.http_clients, "control_client",
+            agent.http_clients,
+            "control_client",
             return_value=SimpleNamespace(post=lambda *a, **k: response),
         ),
     ):
@@ -1218,7 +1219,9 @@ def test_worker_runtime_reconciler_does_not_retry_without_master_command(client,
         agent,
         "_runtime_setup_service",
         lambda: type(
-            "S", (), {"ensure_worker": lambda self, _state: calls.append(True) or {"error": "bind failed"}}
+            "S",
+            (),
+            {"ensure_worker": lambda self, _state: calls.append(True) or {"error": "bind failed"}},
         )(),
     )
     agent._worker_runtime_retry["failures"] = 0

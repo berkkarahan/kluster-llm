@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 
-def gpu_visibility_environment(
-    backend: str, gpu_ids: list[int] | None
-) -> dict[str, str]:
+def gpu_visibility_environment(backend: str, gpu_ids: list[int] | None) -> dict[str, str]:
     """Return engine environment overrides for selected physical GPUs."""
     if not gpu_ids:
         return {}

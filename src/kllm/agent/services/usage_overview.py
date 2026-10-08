@@ -27,10 +27,17 @@ class UsageOverviewService:
         self._directory = directory
 
     @staticmethod
-    def _display_identity(identity: dict[str, Any], meta: dict[str, Any], node_id: str) -> dict[str, Any]:
-        address = identity.get('private_address') or identity.get('rpc_bind') or identity.get('lan_host') or meta.get('host')
+    def _display_identity(
+        identity: dict[str, Any], meta: dict[str, Any], node_id: str
+    ) -> dict[str, Any]:
+        address = (
+            identity.get("private_address")
+            or identity.get("rpc_bind")
+            or identity.get("lan_host")
+            or meta.get("host")
+        )
         return {
-            "host": identity.get('hostname') or meta.get('host') or node_id,
+            "host": identity.get("hostname") or meta.get("host") or node_id,
             "address": address or None,
         }
 
@@ -119,7 +126,9 @@ class UsageOverviewService:
                 "nodes": nodes,
                 "relationships": relationships,
                 "recording": recording,
-                "resource_schema_versions": native.resource_schema_versions() if resource_schema_supported else [],
+                "resource_schema_versions": native.resource_schema_versions()
+                if resource_schema_supported
+                else [],
             }
         except (OSError, sqlite3.Error) as exc:
             with self._resources.lock:

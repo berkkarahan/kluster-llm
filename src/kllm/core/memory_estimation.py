@@ -122,11 +122,7 @@ def _compute_buffers(layout: Layout, settings: Settings, dimensions: MetricDimen
             else 4
             * dimension.capacity
             * (
-                (
-                    dimension.key_width
-                    if settings.cache_type_k not in ("f32", "f16", "bf16")
-                    else 0
-                )
+                (dimension.key_width if settings.cache_type_k not in ("f32", "f16", "bf16") else 0)
                 + (
                     dimension.value_width
                     if settings.cache_type_v not in ("f32", "f16", "bf16")
@@ -329,9 +325,7 @@ def memory_costs(
                     + _cache_row_bytes(value, settings.cache_type_v)
                 )
             )
-            dimensions.append(
-                AttentionDimensions(heads, key, value, capacity * streams)
-            )
+            dimensions.append(AttentionDimensions(heads, key, value, capacity * streams))
             state.append(0)
         layers[i] = weight + kv[-1] + state[-1]
     compute = _compute_buffers(layout, settings, dimensions)

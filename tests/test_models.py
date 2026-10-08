@@ -217,9 +217,7 @@ def test_parse_search_query_repo_and_search():
 
 UNSLOTH_REPO = "unsloth/Qwen3.5-122B-A10B-GGUF"
 UNSLOTH_FILE = "Qwen3.5-122B-A10B-UD-IQ3_S.gguf"
-UNSLOTH_SHOW_FILE_INFO = (
-    f"https://huggingface.co/{UNSLOTH_REPO}?show_file_info={UNSLOTH_FILE}"
-)
+UNSLOTH_SHOW_FILE_INFO = f"https://huggingface.co/{UNSLOTH_REPO}?show_file_info={UNSLOTH_FILE}"
 
 
 def test_parse_search_query_show_file_info():
@@ -270,7 +268,10 @@ def test_vram_fit_and_sum():
     assert models.vram_fit(50_000_000_000, 48_000_000_000) == "overflow"
     assert models.vram_fit(16_800_000_000, None) == "unknown"
     assert models.vram_fit(0, 48_000_000_000) == "unknown"
-    assert models.sum_vram_bytes([{"vram_bytes": 24_000_000_000}, {"vram_bytes": 24_000_000_000}]) == 48_000_000_000
+    assert (
+        models.sum_vram_bytes([{"vram_bytes": 24_000_000_000}, {"vram_bytes": 24_000_000_000}])
+        == 48_000_000_000
+    )
     assert models.sum_vram_bytes([{"vram_bytes": None}, {"vram_bytes": 0}]) is None
 
 
@@ -437,8 +438,12 @@ def _hub_error(cls, status: int, message: str = "upstream"):
     import httpx
 
     request = httpx.Request("GET", "https://huggingface.co/api/models/demo/model-GGUF")
-    response = httpx.Response(status, request=request, headers={"X-Error-Message": "hf_SECRET signed"})
-    return cls(message + " https://huggingface.co/demo/model-GGUF?token=hf_SECRET", response=response)
+    response = httpx.Response(
+        status, request=request, headers={"X-Error-Message": "hf_SECRET signed"}
+    )
+    return cls(
+        message + " https://huggingface.co/demo/model-GGUF?token=hf_SECRET", response=response
+    )
 
 
 def _release_siblings() -> list[_FakeSibling]:
@@ -465,7 +470,12 @@ def _main_siblings() -> list[_FakeSibling]:
 
 
 def _install_demo_hub(monkeypatch, *, mode: str = "ok", calls: list | None = None):
-    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError, HfHubHTTPError
+    from huggingface_hub.errors import (
+        GatedRepoError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+        HfHubHTTPError,
+    )
     import httpx
 
     def fake_list(**_kwargs):
@@ -506,7 +516,10 @@ def test_parse_hf_url_grammar_and_rejections():
     tree = models.parse_model_search_query(
         "  https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf/?download=true#files  "
     )
-    assert tree.raw == "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf/?download=true#files"
+    assert (
+        tree.raw
+        == "https://huggingface.co/demo/model-GGUF/tree/release%2Fv2/gguf/?download=true#files"
+    )
     assert tree.kind == "url"
     assert tree.repo_id == DEMO_REPO
     assert tree.revision == "release/v2"
@@ -514,9 +527,7 @@ def test_parse_hf_url_grammar_and_rejections():
     assert tree.filename is None
     assert tree.suffix is None
 
-    unencoded = models.parse_model_search_query(
-        "https://hf.co/demo/model-GGUF/tree/release/v2"
-    )
+    unencoded = models.parse_model_search_query("https://hf.co/demo/model-GGUF/tree/release/v2")
     assert unencoded.revision == "release"
     assert unencoded.folder == "v2"
 
@@ -553,9 +564,7 @@ def test_parse_hf_url_grammar_and_rejections():
     )
     assert encoded_plus.filename == "a+b.Q6_K.gguf"
 
-    direct = models.parse_model_search_query(
-        "https://cdn.example/file.gguf?X-Amz-Signature=abc"
-    )
+    direct = models.parse_model_search_query("https://cdn.example/file.gguf?X-Amz-Signature=abc")
     assert direct.kind == "url"
     assert direct.repo_id is None
     assert direct.url == "https://cdn.example/file.gguf?X-Amz-Signature=abc"
@@ -641,7 +650,9 @@ def test_explicit_lookup_is_uncapped_and_empty_folder_differs_from_missing(monke
         return _FakeInfo(files)
 
     monkeypatch.setattr(models, "model_info", fake_info)
-    monkeypatch.setattr(models, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery")))
+    monkeypatch.setattr(
+        models, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery"))
+    )
     out = models.search_hub_ggufs("https://huggingface.co/demo/model-GGUF", token=False)
     assert len(out["results"]) == 41
 
@@ -733,10 +744,12 @@ def test_keyword_partial_warnings_and_legacy_caps(monkeypatch):
     def fake_info(repo_id, **kwargs):
         assert kwargs["timeout"] == 15.0
         if repo_id == "org/repo-0":
-            return _FakeInfo([
-                _FakeSibling("Q4_K_M.gguf", 10),
-                _FakeSibling("real.Q4_K_M.gguf", 20),
-            ])
+            return _FakeInfo(
+                [
+                    _FakeSibling("Q4_K_M.gguf", 10),
+                    _FakeSibling("real.Q4_K_M.gguf", 20),
+                ]
+            )
         if repo_id == "org/repo-1":
             raise OSError("boom hf_SUPERSECRET https://signed.example/x?sig=1")
         return _FakeInfo([])
@@ -745,7 +758,10 @@ def test_keyword_partial_warnings_and_legacy_caps(monkeypatch):
     monkeypatch.setattr(models, "model_info", fake_info)
     out = models.search_hub_ggufs("llama:Q4_K_M", token=False)
     assert out["results"]
-    assert any(row["source"].startswith("https://") and row["filename"] == "Q4_K_M.gguf" for row in out["results"])
+    assert any(
+        row["source"].startswith("https://") and row["filename"] == "Q4_K_M.gguf"
+        for row in out["results"]
+    )
     assert any(row["source"] == "org/repo-0:real.Q4_K_M.gguf" for row in out["results"])
     assert out["warnings"]
     blob = __import__("json").dumps(out)
@@ -782,7 +798,9 @@ def test_direct_signed_url_keeps_source_and_skips_hub_credentials(kllm_home, mon
     monkeypatch.setattr(models, "_url_size_bytes", fake_head)
     monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     monkeypatch.setattr(models, "resolve_hf_token", lambda: "hf_SUPERSECRET")
-    monkeypatch.setattr(models, "model_info", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no hub")))
+    monkeypatch.setattr(
+        models, "model_info", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no hub"))
+    )
     source = "https://cdn.example/file.gguf?X-Amz-Signature=abc"
     out = models.search_hub_ggufs(source, token="hf_SUPERSECRET")
     assert out["results"][0]["source"] == source
@@ -804,7 +822,11 @@ def test_download_hub_url_uses_revision_and_rejects_tree(kllm_home, monkeypatch)
         return _FakeResp(b"rev-bytes")
 
     monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
-    monkeypatch.setattr(models, "list_repo_files", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no listing")))
+    monkeypatch.setattr(
+        models,
+        "list_repo_files",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no listing")),
+    )
     source = models.hf_hub_url(DEMO_REPO, "gguf/model.Q4_K_M.gguf", revision="release/v2")
     path = models.download_model(source)
     assert path.name == "model.Q4_K_M.gguf"
@@ -817,10 +839,12 @@ def test_download_hub_url_uses_revision_and_rejects_tree(kllm_home, monkeypatch)
 
 def test_shorthand_exact_path_does_not_invent_files(monkeypatch):
     def fake_info(repo_id, **_kwargs):
-        return _FakeInfo([
-            _FakeSibling("other/missing.gguf", 5),
-            _FakeSibling("real.Q4_K_M.gguf", 5),
-        ])
+        return _FakeInfo(
+            [
+                _FakeSibling("other/missing.gguf", 5),
+                _FakeSibling("real.Q4_K_M.gguf", 5),
+            ]
+        )
 
     monkeypatch.setattr(models, "model_info", fake_info)
     out = models.search_hub_ggufs("demo/model-GGUF:real.Q4_K_M.gguf", token=False)

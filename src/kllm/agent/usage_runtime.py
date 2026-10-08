@@ -68,7 +68,7 @@ class UsageRuntime:
         self.overview = UsageOverviewService(self.resources, self.assignment, self._directory_view)
 
     def _directory_view(self) -> dict[str, dict[str, Any]]:
-        service = getattr(self._app_state(), 'managed_network', None)
+        service = getattr(self._app_state(), "managed_network", None)
         return service.directory_view() if service is not None else {}
 
     @property
@@ -117,9 +117,7 @@ class UsageRuntime:
             return state.model_name
         return None
 
-    def node_context(
-        self, member: dict[str, Any], model: str | None
-    ) -> dict[str, Any]:
+    def node_context(self, member: dict[str, Any], model: str | None) -> dict[str, Any]:
         devices: list[dict[str, Any]] = []
         for device in (member.get("devices") or [])[:32]:
             if isinstance(device, dict):

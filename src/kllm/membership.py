@@ -33,6 +33,8 @@ from kllm.membership_state import (
 )
 
 HEARTBEAT_INTERVAL_S = 2
+
+
 def _gpu_visibility_env(backend: str, gpu_ids: list[int] | None) -> dict[str, str]:
     if not gpu_ids:
         return {}
@@ -114,6 +116,7 @@ def _apply_serving(state: ClusterState, body: RunBody, plan_result: dict[str, An
     launched = native.start_master(**launch_cfg)
     from kllm.effective_config import effective_configuration
     from uuid import uuid4
+
     state.active_config = effective_configuration(body, plan_result, path)
     state.active_config.update({"process_pid": launched.get("pid"), "run_id": str(uuid4())})
     state.process_pid = launched.get("pid")
@@ -180,7 +183,14 @@ def on_membership_shrink(
     except Exception as exc:
         plan_error = _exc_text(exc)
         plan = dict(state.last_plan or {})
-        for key in ("device_allocations", "device_order", "rpc_endpoints", "node_alloc_bytes", "tensor_split", "tensor_split_csv"):
+        for key in (
+            "device_allocations",
+            "device_order",
+            "rpc_endpoints",
+            "node_alloc_bytes",
+            "tensor_split",
+            "tensor_split_csv",
+        ):
             plan.pop(key, None)
         plan["fit_status"] = "overflow"
         plan["hint"] = plan_error
@@ -224,7 +234,9 @@ def on_membership_shrink(
         try:
             apply_serving(state, _settings_body(state.last_settings), plan or {})
             state.apply_error = None
-            state.apply_warning = (plan or {}).get("warning") or (plan or {}).get("hint") or "tight fit"
+            state.apply_warning = (
+                (plan or {}).get("warning") or (plan or {}).get("hint") or "tight fit"
+            )
         except Exception as exc:
             stop_serving(state)
             state.apply_error = _does_not_fit_message(plan, _exc_text(exc))

@@ -324,7 +324,9 @@ def test_windows_vulkan_dedicated_memory_matches_adapter_not_gpu_order(monkeypat
     )
     assert usage_devices._devices(state)[0]["used_bytes"] is None
     monkeypatch.setattr(
-        usage_devices, "_windows_adapter_records", lambda: [("000000000000abcd", "AMD Radeon RX 9070 XT")]
+        usage_devices,
+        "_windows_adapter_records",
+        lambda: [("000000000000abcd", "AMD Radeon RX 9070 XT")],
     )
     monkeypatch.setattr(
         usage_devices.subprocess,
@@ -595,10 +597,20 @@ def test_usage_history_queries_match_retained_scale_and_record_plans(tmp_path):
 
         latest = store.latest("worker")
         assert latest == {**points[-1], "received_at": points[-1]["observed_at"]}
-        window_lengths = {"15m": timedelta(minutes=15), "1h": timedelta(hours=1), "24h": timedelta(hours=24)}
+        window_lengths = {
+            "15m": timedelta(minutes=15),
+            "1h": timedelta(hours=1),
+            "24h": timedelta(hours=24),
+        }
         for window, duration in window_lengths.items():
             lower = now - duration
-            expected = [point for point in points if lower <= datetime.fromisoformat(point["observed_at"].replace("Z", "+00:00")) <= now]
+            expected = [
+                point
+                for point in points
+                if lower
+                <= datetime.fromisoformat(point["observed_at"].replace("Z", "+00:00"))
+                <= now
+            ]
             readings = store.readings("worker", lifetime_id, window, limit=1000, now=now)
             assert [row["observed_at"] for row in readings["readings"]] == [
                 point["observed_at"] for point in expected[:1000]

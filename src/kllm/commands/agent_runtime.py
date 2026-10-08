@@ -20,7 +20,15 @@ from kllm.state import (
     home_dir,
 )
 
-__all__ = ["_agent_base", "_agent_healthy", "_client", "_ensure_agent", "_replace_tracked_instance", "_stop_local"]
+__all__ = [
+    "_agent_base",
+    "_agent_healthy",
+    "_client",
+    "_ensure_agent",
+    "_replace_tracked_instance",
+    "_stop_local",
+]
+
 
 def _agent_base(port: int = DEFAULT_CONTROL_PORT) -> str:
     return f"http://127.0.0.1:{port}"
@@ -102,9 +110,7 @@ def _terminate_spawned_process(proc: subprocess.Popen[Any]) -> None:
         pass
 
 
-def _cleanup_failed_start(
-    proc: subprocess.Popen[Any], sink: subprocess.Popen[Any]
-) -> None:
+def _cleanup_failed_start(proc: subprocess.Popen[Any], sink: subprocess.Popen[Any]) -> None:
     _terminate_spawned_process(proc)
     if sink.poll() is None:
         try:
@@ -142,8 +148,13 @@ def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
     console.print("[dim]Starting local kllm-agent…[/dim]")
     log = home_dir() / "logs" / "agent.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    sink = subprocess.Popen(log_sink.command(log), stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    sink = subprocess.Popen(
+        log_sink.command(log),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "kllm.agent", "--host", "0.0.0.0", "--port", str(port)],
@@ -164,8 +175,7 @@ def _ensure_agent(port: int = DEFAULT_CONTROL_PORT) -> None:
             return_code = proc.poll()
             if return_code is not None:
                 typer.echo(
-                    f"kllm-agent exited during startup with code {return_code}. "
-                    f"See {log}.",
+                    f"kllm-agent exited during startup with code {return_code}. See {log}.",
                     err=True,
                 )
                 raise typer.Exit(code=1)

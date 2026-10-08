@@ -412,7 +412,15 @@ def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monk
             return False
 
         def get(self, *a, **k):
-            return type("HealthResponse", (), {"status_code": 200, "raise_for_status": lambda self: None, "json": lambda self: {"control_protocol": 2}})()
+            return type(
+                "HealthResponse",
+                (),
+                {
+                    "status_code": 200,
+                    "raise_for_status": lambda self: None,
+                    "json": lambda self: {"control_protocol": 2},
+                },
+            )()
 
         def post(self, url, *a, **k):
             captured["payload"] = k.get("json")
@@ -430,9 +438,14 @@ def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monk
             "ensure_rpc_firewall",
             return_value={"ok": True, "applied": False, "warning": None},
         ),
-        patch.object(agent.native, "list_gpus", return_value={**FAKE_GPUS, "gpus": [
-            {**gpu, "device": f"CUDA{gpu['index']}"} for gpu in FAKE_GPUS["gpus"]
-        ]}),
+        patch.object(
+            agent.native,
+            "list_gpus",
+            return_value={
+                **FAKE_GPUS,
+                "gpus": [{**gpu, "device": f"CUDA{gpu['index']}"} for gpu in FAKE_GPUS["gpus"]],
+            },
+        ),
         patch.object(
             agent.native,
             "probe_capacity",
@@ -467,8 +480,11 @@ REGISTRY_VRAM = LLAMA_VRAM + 536_870_912
 
 def _snap():
     return SimpleNamespace(
-        backend="vulkan", total_ram_bytes=32 * 1024**3, available_ram_bytes=8 * 1024**3,
-        vram_bytes=REGISTRY_VRAM, hostname="box",
+        backend="vulkan",
+        total_ram_bytes=32 * 1024**3,
+        available_ram_bytes=8 * 1024**3,
+        vram_bytes=REGISTRY_VRAM,
+        hostname="box",
     )
 
 
@@ -476,11 +492,16 @@ def test_probe_capacity_vram_is_the_llama_device_total(monkeypatch):
     import kllm.native as native_mod
 
     monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
-    monkeypatch.setattr(native_mod, "list_gpus", lambda: {
-        "backend": "vulkan", "gpus": [
-            {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM},
-        ],
-    })
+    monkeypatch.setattr(
+        native_mod,
+        "list_gpus",
+        lambda: {
+            "backend": "vulkan",
+            "gpus": [
+                {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM},
+            ],
+        },
+    )
     assert native_mod.probe_capacity()["vram_bytes"] == LLAMA_VRAM
 
 
@@ -498,9 +519,14 @@ def test_probe_capacity_reuses_one_native_gpu_observation(monkeypatch):
             raise AssertionError("bundle must avoid a second native GPU probe")
 
     monkeypatch.setattr(native_mod, "require_native", lambda: Native())
-    monkeypatch.setattr(native_mod, "_list_gpus_from_probe", lambda devices, backend: {
-        "backend": backend, "gpus": [{"vram_bytes": LLAMA_VRAM}],
-    })
+    monkeypatch.setattr(
+        native_mod,
+        "_list_gpus_from_probe",
+        lambda devices, backend: {
+            "backend": backend,
+            "gpus": [{"vram_bytes": LLAMA_VRAM}],
+        },
+    )
     result = native_mod.probe_capacity()
     assert calls == ["bundle"]
     assert result["vram_bytes"] == LLAMA_VRAM
@@ -518,9 +544,15 @@ def test_probe_capacity_keeps_the_registry_sum_when_inventory_fails(monkeypatch)
     import kllm.native as native_mod
 
     monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
-    monkeypatch.setattr(native_mod, "list_gpus", lambda: {
-        "backend": "cpu", "gpus": [], "error": "llama-server is not installed",
-    })
+    monkeypatch.setattr(
+        native_mod,
+        "list_gpus",
+        lambda: {
+            "backend": "cpu",
+            "gpus": [],
+            "error": "llama-server is not installed",
+        },
+    )
     assert native_mod.probe_capacity()["vram_bytes"] == REGISTRY_VRAM
 
 
@@ -528,23 +560,29 @@ def test_refresh_local_capacity_updates_member_vram(client):
     c, agent = client
     agent.STATE.role = "master"
     agent.STATE.members[agent.STATE.node_id] = {
-        "role": "master", "node_id": agent.STATE.node_id, "vram_bytes": None, "devices": [],
+        "role": "master",
+        "node_id": agent.STATE.node_id,
+        "vram_bytes": None,
+        "devices": [],
     }
     with (
-        patch.object(agent.native, "probe_capacity", return_value={
-            "total_ram_bytes": 32 * 1024**3, "available_ram_bytes": 8 * 1024**3,
-            "requested_backend": None, "unified_memory": False, "binary_version": "v",
-        }),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 8 * 1024**3,
+                "requested_backend": None,
+                "unified_memory": False,
+                "binary_version": "v",
+            },
+        ),
         patch.object(
             agent,
             "_resolve_gpu_selection",
             return_value=ResolvedGpuSelection(
                 GpuSelection((0,), "vulkan", LLAMA_VRAM),
-                (
-                    GpuDeviceInput(
-                        index=0, name="AMD Radeon RX 9070 XT", vram_bytes=LLAMA_VRAM
-                    ),
-                ),
+                (GpuDeviceInput(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=LLAMA_VRAM),),
             ),
         ) as resolve,
     ):

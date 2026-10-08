@@ -24,9 +24,7 @@ def test_runtime_setup_maps_install_errors_to_domain_exceptions():
         stop_process=lambda *_args, **_kwargs: None,
         clear_children=lambda: None,
         start_worker=lambda **_kwargs: {},
-        resolve_gpu_selection=lambda _ids: ResolvedGpuSelection(
-            GpuSelection((), "cpu", None), ()
-        ),
+        resolve_gpu_selection=lambda _ids: ResolvedGpuSelection(GpuSelection((), "cpu", None), ()),
         register_child=lambda *_args: None,
         rpc_log_path=lambda: Path("rpc.log"),
     )
@@ -71,8 +69,13 @@ def test_installation_defers_start_until_a_master_command():
 
     result = service.setup(LlamaSetupBody(tag="v1", backend="cuda", force=True))
 
-    assert result.as_payload() == {"ok": True, "tag": "v1", "backend": "cuda", "force": True,
-                                   "relaunch": None}
+    assert result.as_payload() == {
+        "ok": True,
+        "tag": "v1",
+        "backend": "cuda",
+        "force": True,
+        "relaunch": None,
+    }
     assert calls == []
     assert state.process_pid == 42
     assert service.start_commanded_worker(state) == {"pid": 99}
@@ -110,9 +113,7 @@ def test_runtime_setup_does_not_try_to_spawn_when_install_succeeds():
         stop_process=lambda *_args, **_kwargs: None,
         clear_children=lambda: None,
         start_worker=lambda **_kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
-        resolve_gpu_selection=lambda _ids: ResolvedGpuSelection(
-            GpuSelection((), "cpu", None), ()
-        ),
+        resolve_gpu_selection=lambda _ids: ResolvedGpuSelection(GpuSelection((), "cpu", None), ()),
         register_child=lambda *_args: None,
         rpc_log_path=lambda: Path("rpc.log"),
     )
@@ -138,7 +139,9 @@ def _worker_state() -> ClusterState:
     return state
 
 
-def _service(state: ClusterState, calls: list[object], *, alive: bool | Callable[[int], bool] = True) -> RuntimeSetupService:
+def _service(
+    state: ClusterState, calls: list[object], *, alive: bool | Callable[[int], bool] = True
+) -> RuntimeSetupService:
     def process_alive(pid: int) -> bool:
         return alive(pid) if callable(alive) else bool(alive)
 

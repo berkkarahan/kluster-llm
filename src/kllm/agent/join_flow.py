@@ -33,7 +33,9 @@ def resolve_master_endpoint(master_host: str | None, master_port: int, key: str)
     if master_host:
         return master_host, master_port
     try:
-        found = discovery.browse_masters(timeout=2.5, key=key, port=master_port or DEFAULT_CONTROL_PORT)
+        found = discovery.browse_masters(
+            timeout=2.5, key=key, port=master_port or DEFAULT_CONTROL_PORT
+        )
     except Exception as exc:
         raise HTTPException(
             502,

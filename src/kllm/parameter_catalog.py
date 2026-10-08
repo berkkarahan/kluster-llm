@@ -17,11 +17,21 @@ PARAMETERS: dict[str, tuple[str, tuple[str, ...], str, bool]] = {
     "cache_type_v": ("--cache-type-v", ("--cache-type-v", "-ctv"), "memory", True),
     "flash_attention": ("--flash-attention", ("--flash-attn", "-fa"), "memory", True),
     "mmap_mlock": ("--load-mode", ("--load-mode", "-lm"), "memory", True),
-    "checkpoints": ("--ctx-checkpoints", ("--ctx-checkpoints", "-ctxcp", "--swa-checkpoints"), "memory", True),
+    "checkpoints": (
+        "--ctx-checkpoints",
+        ("--ctx-checkpoints", "-ctxcp", "--swa-checkpoints"),
+        "memory",
+        True,
+    ),
     "cache_ram": ("--cache-ram", ("--cache-ram", "-cram"), "memory", True),
     "speculative": ("--speculative", ("--spec-type",), "features", True),
     "draft_model": ("--draft-model", (), "features", True),
-    "draft_max": ("--draft-max", ("--spec-draft-n-max", "--draft-max", "--draft", "--draft-n"), "features", True),
+    "draft_max": (
+        "--draft-max",
+        ("--spec-draft-n-max", "--draft-max", "--draft", "--draft-n"),
+        "features",
+        True,
+    ),
     "moe_offload": ("--moe-offload", (), "features", True),
     "vision": ("--vision", (), "features", True),
     "mmproj": ("--mmproj", (), "features", True),
@@ -35,7 +45,12 @@ PARAMETERS: dict[str, tuple[str, tuple[str, ...], str, bool]] = {
     "repeat_penalty": ("--repeat-penalty", ("--repeat-penalty",), "generation", False),
     "frequency_penalty": ("--frequency-penalty", ("--frequency-penalty",), "generation", False),
     "seed": ("--seed", ("--seed", "-s"), "generation", False),
-    "max_output_tokens": ("--max-output-tokens", ("--predict", "--n-predict", "-n"), "generation", False),
+    "max_output_tokens": (
+        "--max-output-tokens",
+        ("--predict", "--n-predict", "-n"),
+        "generation",
+        False,
+    ),
     "stop": ("--stop", (), "generation", False),
     "enable_thinking": ("--enable-thinking", (), "features", False),
     "reasoning_effort": ("--reasoning-effort", ("--reasoning-effort",), "features", False),
@@ -55,12 +70,49 @@ PARAMETERS: dict[str, tuple[str, tuple[str, ...], str, bool]] = {
 }
 
 ALIASES = {alias: name for name, (_, aliases, _, _) in PARAMETERS.items() for alias in aliases}
-INTEGER_FIELDS = {"context", "parallel_slots", "batch_size", "micro_batch", "threads", "threads_batch", "checkpoints", "cache_ram", "draft_max", "top_k", "seed", "max_output_tokens", "reasoning_budget"}
-FLOAT_FIELDS = {"temperature", "top_p", "min_p", "presence_penalty", "repeat_penalty", "frequency_penalty"}
-GENERATION_FIELDS = {name for name, (_, _, group, _) in PARAMETERS.items() if group == "generation"} | {"enable_thinking", "reasoning_effort", "reasoning_budget", "reasoning_format"}
-CONTROL_FIELDS = {"model", "tensor_split", "network_id", "settings_source", "remember", "advanced_open"}
-SAMPLING_DEFAULTS = {"temperature": 0.7, "top_p": 0.95, "top_k": 40, "min_p": 0.05,
-                     "presence_penalty": 0.0, "repeat_penalty": 1.1, "frequency_penalty": 0.0}
+INTEGER_FIELDS = {
+    "context",
+    "parallel_slots",
+    "batch_size",
+    "micro_batch",
+    "threads",
+    "threads_batch",
+    "checkpoints",
+    "cache_ram",
+    "draft_max",
+    "top_k",
+    "seed",
+    "max_output_tokens",
+    "reasoning_budget",
+}
+FLOAT_FIELDS = {
+    "temperature",
+    "top_p",
+    "min_p",
+    "presence_penalty",
+    "repeat_penalty",
+    "frequency_penalty",
+}
+GENERATION_FIELDS = {
+    name for name, (_, _, group, _) in PARAMETERS.items() if group == "generation"
+} | {"enable_thinking", "reasoning_effort", "reasoning_budget", "reasoning_format"}
+CONTROL_FIELDS = {
+    "model",
+    "tensor_split",
+    "network_id",
+    "settings_source",
+    "remember",
+    "advanced_open",
+}
+SAMPLING_DEFAULTS = {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "min_p": 0.05,
+    "presence_penalty": 0.0,
+    "repeat_penalty": 1.1,
+    "frequency_penalty": 0.0,
+}
 
 
 def canonicalize_parameters(data: dict[str, Any], *, legacy: bool = False) -> dict[str, Any]:
@@ -85,11 +137,15 @@ def canonicalize_parameters(data: dict[str, Any], *, legacy: bool = False) -> di
             raise ValueError(f"extra_args: missing value for {flag}")
         raw = tokens[i + 1]
         try:
-            value = int(raw) if name in INTEGER_FIELDS else float(raw) if name in FLOAT_FIELDS else raw
+            value = (
+                int(raw) if name in INTEGER_FIELDS else float(raw) if name in FLOAT_FIELDS else raw
+            )
         except ValueError as exc:
             raise ValueError(f"extra_args: invalid value for {flag}") from exc
         if not legacy and name in result and result[name] != value:
-            raise ValueError(f"{name}: conflicting control and extra argument {flag}; use the configuration control")
+            raise ValueError(
+                f"{name}: conflicting control and extra argument {flag}; use the configuration control"
+            )
         if not legacy and name in seen and seen[name] != value:
             raise ValueError(f"{name}: conflicting extra arguments")
         seen[name] = value
@@ -103,9 +159,19 @@ def parameter_descriptors(schema: dict[str, Any], threads_max: int) -> list[dict
     descriptors = []
     for name, (cli, aliases, group, memory) in PARAMETERS.items():
         entry = dict(schema["properties"].get(name, {}))
-        entry.update({"id": name, "cli": cli, "engine_flags": list(aliases), "section": group,
-                      "scope": "generation_default" if name in GENERATION_FIELDS else "deployment",
-                      "memory_affecting": memory, "applies": "future requests in the next deployment" if name in GENERATION_FIELDS else "next deployment"})
+        entry.update(
+            {
+                "id": name,
+                "cli": cli,
+                "engine_flags": list(aliases),
+                "section": group,
+                "scope": "generation_default" if name in GENERATION_FIELDS else "deployment",
+                "memory_affecting": memory,
+                "applies": "future requests in the next deployment"
+                if name in GENERATION_FIELDS
+                else "next deployment",
+            }
+        )
         if name in {"threads", "threads_batch"}:
             entry["maximum"] = threads_max
         descriptors.append(entry)

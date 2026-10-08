@@ -15,7 +15,6 @@ from kllm.state import DEFAULT_CONTROL_PORT
 from kllm.agent_skills import SkillError, validate_selection
 
 
-
 def connect_cmd(
     ctx: typer.Context,
     agent: str = typer.Argument(..., help=f"Harness: {', '.join(AGENTS)}"),
@@ -29,7 +28,9 @@ def connect_cmd(
     context: int = typer.Option(4096, "--context"),
     url: Optional[str] = typer.Option(None, "--url", envvar="KLLM_URL"),
     timeout: float = typer.Option(600, "--timeout", min=1),
-    kllm_skills: str = typer.Option("all", "--kllm-skills", help="Kluster skill pack: all|operations|development|none"),
+    kllm_skills: str = typer.Option(
+        "all", "--kllm-skills", help="Kluster skill pack: all|operations|development|none"
+    ),
 ) -> None:
     """Launch a coding harness with the kllm API baked in (Unsloth-style)."""
     if isinstance(kllm_skills, str):
@@ -51,9 +52,14 @@ def connect_cmd(
         context=context,
         extra=list(ctx.args),
         **({"kllm_skills": kllm_skills} if isinstance(kllm_skills, str) else {}),
-        **({"url": url if isinstance(url, str) else None,
-            "timeout": timeout if isinstance(timeout, (int, float)) else 600}
-           if isinstance(url, str) or isinstance(timeout, (int, float)) else {}),
+        **(
+            {
+                "url": url if isinstance(url, str) else None,
+                "timeout": timeout if isinstance(timeout, (int, float)) else 600,
+            }
+            if isinstance(url, str) or isinstance(timeout, (int, float))
+            else {}
+        ),
     )
     if not launch:
         try:

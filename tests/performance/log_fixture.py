@@ -1,4 +1,5 @@
 """Deterministic synthetic live-log batch used by the preparation benchmark."""
+
 from uuid import UUID
 
 from kllm.cluster_log import make_event

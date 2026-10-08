@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 @contextmanager
 def mock_async_client(handler):
     import httpx
+
     target = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         yield target
@@ -112,7 +113,9 @@ def test_status_exposes_feature_flags(client):
 
 def test_status_exposes_the_shared_node_directory(client, monkeypatch):
     c, agent, _ = client
-    rows = [{"node_id": "box", "hostname": "gpu-box", "role": "worker", "private_address": "10.10.10.4"}]
+    rows = [
+        {"node_id": "box", "hostname": "gpu-box", "role": "worker", "private_address": "10.10.10.4"}
+    ]
     monkeypatch.setattr(agent, "_network_directory", lambda: rows)
 
     body = c.get("/v1/status").json()
@@ -145,9 +148,18 @@ def test_served_models_and_responses_are_authenticated_native_passthrough(client
         if request.url.path.endswith("input_tokens"):
             return httpx.Response(200, json={"input_tokens": 17})
         if body.get("stream"):
-            return httpx.Response(200, content=b'event: response.completed\ndata: {"type":"response.completed"}\n\n',
-                headers={"content-type": "text/event-stream"})
-        return httpx.Response(200, json={"id": "resp_1", "output": [{"type": "function_call", "name": "read", "arguments": "{}"}]})
+            return httpx.Response(
+                200,
+                content=b'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "output": [{"type": "function_call", "name": "read", "arguments": "{}"}],
+            },
+        )
 
     with mock_async_client(upstream) as target:
         previous = agent.app.state.inference_client
@@ -158,12 +170,20 @@ def test_served_models_and_responses_are_authenticated_native_passthrough(client
             assert calls == []
             headers = {"Authorization": f"Bearer {token}"}
             assert c.get("/v2/inference/models", headers=headers).json()["data"][0]["id"] == served
-            payload = {"model": served, "input": [{"role": "user", "content": "hello"}],
-                "tools": [{"type": "function", "name": "read", "parameters": {"type": "object"}}]}
-            assert c.post("/v1/responses", json=payload, headers=headers).json()["output"][0]["type"] == "function_call"
+            payload = {
+                "model": served,
+                "input": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function", "name": "read", "parameters": {"type": "object"}}],
+            }
+            assert (
+                c.post("/v1/responses", json=payload, headers=headers).json()["output"][0]["type"]
+                == "function_call"
+            )
             streamed = c.post("/v1/responses", json={**payload, "stream": True}, headers=headers)
             assert "response.completed" in streamed.text
-            assert c.post("/v1/responses/input_tokens", json=payload, headers=headers).json() == {"input_tokens": 17}
+            assert c.post("/v1/responses/input_tokens", json=payload, headers=headers).json() == {
+                "input_tokens": 17
+            }
             assert json.loads(calls[-1].content) == payload
         finally:
             agent.app.state.inference_client = previous
@@ -189,14 +209,20 @@ def test_logging_control_auth_persistence_partial_and_worker_ack(client, monkeyp
         try:
             assert c.put("/v2/cluster/logging", json={"enabled": False}).status_code == 401
             headers = {"Authorization": f"Bearer {token}"}
-            assert c.put("/v2/cluster/logging", json={"enabled": "false"}, headers=headers).status_code == 422
+            assert (
+                c.put("/v2/cluster/logging", json={"enabled": "false"}, headers=headers).status_code
+                == 422
+            )
             stopped = c.put("/v2/cluster/logging", json={"enabled": False}, headers=headers).json()
             assert stopped["enabled"] is False
             assert stopped["status"] == "partial"
             assert stopped["nodes"]["old"]["status"] == "unsupported"
             assert agent.ClusterState.load().logging_enabled is False
             agent.STATE.role = "worker"
-            assert c.put("/v2/cluster/logging", json={"enabled": True}, headers=headers).status_code == 409
+            assert (
+                c.put("/v2/cluster/logging", json={"enabled": True}, headers=headers).status_code
+                == 409
+            )
             policy = {"enabled": True, "generation": "9" * 32}
             assert c.put("/v2/node/logging", json=policy).status_code == 401
             ack = c.put("/v2/node/logging", json=policy, headers={"X-Kllm-Key": "cluster-key"})
@@ -310,7 +336,13 @@ def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, m
     monkeypatch.setattr(
         agent.http_clients, "control_client", lambda: SimpleNamespace(get=get, post=post)
     )
-    original = dict(schema_version=2, devices=[{"device_key": "gpu", "utilization": {"value": 0}}], generation="a" * 32, sequence=1, snapshot_id="a" * 32 + ":1")
+    original = dict(
+        schema_version=2,
+        devices=[{"device_key": "gpu", "utilization": {"value": 0}}],
+        generation="a" * 32,
+        sequence=1,
+        snapshot_id="a" * 32 + ":1",
+    )
     agent._publish_resources(original)
     assert posted == []
     supported[0] = True
@@ -724,6 +756,7 @@ def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
         "devices": [],
         "availability": {"process_cpu": "initializing", "process_rss": "measured"},
     }
+
     class PrivateControl:
         def post(self, url, **kwargs):
             assert kwargs["headers"] == {"X-Kllm-Key": "secret"}

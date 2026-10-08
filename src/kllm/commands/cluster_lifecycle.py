@@ -160,7 +160,9 @@ def join(
     if data.get("launch", {}).get("error"):
         console.print(f"[yellow]RPC launch warning:[/yellow] {data['launch']['error']}")
     elif data.get("launch", {}).get("deferred"):
-        console.print("Joined and idle. The master starts RPC when this worker is selected for a model run.")
+        console.print(
+            "Joined and idle. The master starts RPC when this worker is selected for a model run."
+        )
 
 
 def leave(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:

@@ -8,6 +8,7 @@ binaries come from a different commit, which would break the provenance
 equality the runtime registry enforces. The bootstrap installer keeps its own
 tag-based resolution because its pin is not commit-exact.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,8 +17,8 @@ from urllib.request import Request, urlopen
 
 from .source import refs
 
-_API = 'https://api.github.com/repos/{repo}/releases?per_page=30'
-_HEADERS = {'User-Agent': 'kluster-llm', 'Accept': 'application/vnd.github+json'}
+_API = "https://api.github.com/repos/{repo}/releases?per_page=30"
+_HEADERS = {"User-Agent": "kluster-llm", "Accept": "application/vnd.github+json"}
 
 
 class PrebuiltIneligible(RuntimeError):
@@ -27,9 +28,9 @@ class PrebuiltIneligible(RuntimeError):
 def github_repo(repository: str) -> str | None:
     """Return ``owner/name`` for a public GitHub repository, else ``None``."""
     parsed = urlsplit(repository)
-    if parsed.hostname != 'github.com':
+    if parsed.hostname != "github.com":
         return None
-    path = parsed.path.removesuffix('.git').strip('/')
+    path = parsed.path.removesuffix(".git").strip("/")
     return path or None
 
 
@@ -43,7 +44,7 @@ def list_releases(repository: str) -> list[dict]:
         data = json.loads(response.read(4 * 1024 * 1024))
     if not isinstance(data, list):
         return []
-    return [item for item in data if isinstance(item, dict) and not item.get('draft')]
+    return [item for item in data if isinstance(item, dict) and not item.get("draft")]
 
 
 def tags_for_commit(values: dict[str, str], commit: str) -> set[str]:
@@ -51,10 +52,10 @@ def tags_for_commit(values: dict[str, str], commit: str) -> set[str]:
     target = commit.lower()
     tags: set[str] = set()
     for name, sha in values.items():
-        if not name.startswith('refs/tags/'):
+        if not name.startswith("refs/tags/"):
             continue
-        base = name[len('refs/tags/'):]
-        if base.endswith('^{}'):
+        base = name[len("refs/tags/") :]
+        if base.endswith("^{}"):
             base = base[:-3]
         if sha.lower() == target:
             tags.add(base)
@@ -81,6 +82,6 @@ def release_for_commit(
         return None
     candidates = releases if releases is not None else list_releases(repository)
     return next(
-        (release for release in candidates if release.get('tag_name') in tags),
+        (release for release in candidates if release.get("tag_name") in tags),
         None,
     )

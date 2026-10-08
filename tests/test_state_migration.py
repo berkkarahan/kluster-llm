@@ -8,7 +8,9 @@ import pytest
 from kllm import runtime, state
 
 
-def test_legacy_cluster_state_resets_transient_data_and_keeps_settings(tmp_path, monkeypatch) -> None:
+def test_legacy_cluster_state_resets_transient_data_and_keeps_settings(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     path = tmp_path / "cluster.json"
     monkeypatch.setattr(state, "state_path", lambda: path)

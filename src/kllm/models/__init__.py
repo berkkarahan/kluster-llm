@@ -91,12 +91,14 @@ def download_model(
         token_resolver=resolve_hf_token,
     )
 
+
 def resolve_hf_filename(repo_id: str, suffix: str, *, token: str | None = None) -> str:
     """Resolve a Hub file while keeping the client replaceable at this boundary."""
     return _resolve_hf_filename(repo_id, suffix, token=token, list_files=list_repo_files)
 
 
 # Distinct tokens like .Q4_K_M. / -Q4_K_M / _Q4_K_M
+
 
 def _url_size_bytes(url: str, *, headers: dict[str, str] | None = None) -> int | None:
     """Replaceable boundary for obtaining the size of a direct model URL."""

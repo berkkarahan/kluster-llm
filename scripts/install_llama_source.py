@@ -226,6 +226,7 @@ def compile_configured_tree(
     """Configure, build, and probe. Returns ``(ok, https)``."""
     https = "on"
     try:
+
         def configure(extra: list[str]) -> subprocess.CompletedProcess[str]:
             return run(
                 ["cmake", "-B", str(build_dir), *flags, *extra],
@@ -262,7 +263,17 @@ def compile_configured_tree(
             if target in rpc_names and rpc_target_ok:
                 continue
             result = run(
-                ["cmake", "--build", str(build_dir), "--config", "Release", "--target", target, "-j", job_count],
+                [
+                    "cmake",
+                    "--build",
+                    str(build_dir),
+                    "--config",
+                    "Release",
+                    "--target",
+                    target,
+                    "-j",
+                    job_count,
+                ],
                 cwd=vendor,
                 check=False,
                 env=cmake_env,

@@ -140,7 +140,11 @@ def _venv_ok(python: Path) -> bool:
         return False
     try:
         subprocess.run(
-            [str(python), "-c", "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)"],
+            [
+                str(python),
+                "-c",
+                "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)",
+            ],
             check=True,
             capture_output=True,
         )
@@ -232,7 +236,9 @@ def _curl_download(url: str, dest: Path) -> None:
 
 
 def _http_json(url: str) -> Any:
-    return install_http.http_json(url, headers=GITHUB_HEADERS, contexts=_ssl_contexts, curl=_curl_bytes)
+    return install_http.http_json(
+        url, headers=GITHUB_HEADERS, contexts=_ssl_contexts, curl=_curl_bytes
+    )
 
 
 def _sniff_archive_kind(path: Path) -> str | None:
@@ -520,7 +526,15 @@ def _sync_python_deps(python: Path) -> None:
         return
     _run([str(python), "-m", "pip", "install", "--upgrade", "pip"], env=env)
     _run(
-        [str(python), "-m", "pip", "install", "maturin>=1.7,<2.0", "pytest>=8.0", "pytest-asyncio>=0.24"],
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "maturin>=1.7,<2.0",
+            "pytest>=8.0",
+            "pytest-asyncio>=0.24",
+        ],
         env=env,
     )
 
@@ -533,7 +547,10 @@ def ensure_rust() -> None:
     if _is_windows():
         with tempfile.TemporaryDirectory() as td:
             installer = Path(td) / "rustup-init.exe"
-            _download("https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe", installer)
+            _download(
+                "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe",
+                installer,
+            )
             _run([str(installer), "-y", "--default-toolchain", "stable"])
     else:
         script = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
@@ -555,7 +572,17 @@ def ensure_node() -> None:
             winget = _which("winget")
             if not winget:
                 raise RuntimeError("winget not found")
-            _run([winget, "install", "-e", "--id", "OpenJS.NodeJS.LTS", "--accept-package-agreements", "--accept-source-agreements"])
+            _run(
+                [
+                    winget,
+                    "install",
+                    "-e",
+                    "--id",
+                    "OpenJS.NodeJS.LTS",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+            )
         elif _is_macos():
             brew = _which("brew")
             if not brew:
@@ -577,7 +604,9 @@ def ensure_node() -> None:
             f"error: could not install Node.js ({exc}). Install from https://nodejs.org/ and re-run."
         ) from exc
     if not _which("npm"):
-        raise SystemExit("error: Node.js installed but npm not on PATH — open a new shell and re-run.")
+        raise SystemExit(
+            "error: Node.js installed but npm not on PATH — open a new shell and re-run."
+        )
 
 
 def ensure_git() -> None:
@@ -587,7 +616,17 @@ def ensure_git() -> None:
     if _is_windows():
         winget = _which("winget")
         if winget:
-            _run([winget, "install", "-e", "--id", "Git.Git", "--accept-package-agreements", "--accept-source-agreements"])
+            _run(
+                [
+                    winget,
+                    "install",
+                    "-e",
+                    "--id",
+                    "Git.Git",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+            )
         else:
             raise SystemExit("error: git not found; install Git for Windows")
     elif _is_macos():
@@ -606,7 +645,17 @@ def ensure_cmake() -> bool:
         if _is_windows():
             winget = _which("winget")
             if winget:
-                _run([winget, "install", "-e", "--id", "Kitware.CMake", "--accept-package-agreements", "--accept-source-agreements"])
+                _run(
+                    [
+                        winget,
+                        "install",
+                        "-e",
+                        "--id",
+                        "Kitware.CMake",
+                        "--accept-package-agreements",
+                        "--accept-source-agreements",
+                    ]
+                )
         elif _is_macos():
             brew = _which("brew")
             if brew:
@@ -739,7 +788,8 @@ def ensure_vulkan_macos() -> dict[str, str]:
             raise SystemExit(
                 "error: Vulkan build deps still missing after install: "
                 + ", ".join(missing)
-                + ". Install " + " ".join(_BREW_VULKAN_PACKAGES)
+                + ". Install "
+                + " ".join(_BREW_VULKAN_PACKAGES)
                 + " (brew) or set VULKAN_SDK to a LunarG Vulkan SDK."
             )
 
@@ -783,7 +833,11 @@ def _windows_vulkan_sdk_root() -> Path | None:
 def _windows_vulkan_missing(root: Path | None) -> list[str]:
     """Names the pieces a Windows ``GGML_VULKAN=ON`` cmake configure still needs."""
     if root is None:
-        return [] if _which("glslc") else ["the LunarG Vulkan SDK (glslc, vulkan-1.lib, Vulkan headers)"]
+        return (
+            []
+            if _which("glslc")
+            else ["the LunarG Vulkan SDK (glslc, vulkan-1.lib, Vulkan headers)"]
+        )
     missing: list[str] = []
     if not (root / "Bin" / "glslc.exe").is_file() and not _which("glslc"):
         missing.append("glslc")
@@ -997,9 +1051,13 @@ def _stage_editable_extension(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         for name in archive.namelist():
             path = Path(name)
-            if path.parent.as_posix() == 'kllm' and path.name.startswith('_native.') and path.suffix in ('.so', '.pyd'):
-                destination = ROOT / 'src' / 'kllm' / path.name
-                temporary = destination.with_name(destination.name + '.new')
+            if (
+                path.parent.as_posix() == "kllm"
+                and path.name.startswith("_native.")
+                and path.suffix in (".so", ".pyd")
+            ):
+                destination = ROOT / "src" / "kllm" / path.name
+                temporary = destination.with_name(destination.name + ".new")
                 temporary.write_bytes(archive.read(name))
                 os.replace(temporary, destination)
 
@@ -1015,7 +1073,9 @@ def build_rust(python: Path, *, release: bool) -> None:
         old.unlink(missing_ok=True)
 
     uv = _find_uv()
-    maturin_prefix = [uv, "run", "--python", str(python), "maturin"] if uv else [str(python), "-m", "maturin"]
+    maturin_prefix = (
+        [uv, "run", "--python", str(python), "maturin"] if uv else [str(python), "-m", "maturin"]
+    )
     maturin_cmd = [
         *maturin_prefix,
         "build",
@@ -1060,9 +1120,17 @@ def build_rust(python: Path, *, release: bool) -> None:
     # runtime. Build it independently of the extension's PyO3 features.
     helper_target = ROOT / "target" / "network-helper"
     helper_command = [
-        "cargo", "build", "--manifest-path", str(ROOT / "crates" / "kllm-native" / "Cargo.toml"),
-        "--no-default-features", "--features", "network-helper", "--bin", "kllm-network-helper",
-        "--target-dir", str(helper_target),
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(ROOT / "crates" / "kllm-native" / "Cargo.toml"),
+        "--no-default-features",
+        "--features",
+        "network-helper",
+        "--bin",
+        "kllm-network-helper",
+        "--target-dir",
+        str(helper_target),
     ]
     if release:
         helper_command.append("--release")
@@ -1145,7 +1213,7 @@ def _any_shell_profile_has_path_shim_marker() -> bool:
 def _write_kllm_shim_unix(shim: Path, *, uv: str, repo_root: Path) -> None:
     uv_q = shlex.quote(str(Path(uv).resolve()))
     root_q = shlex.quote(str(repo_root.resolve()))
-    body = f"#!/usr/bin/env sh\nexec {uv_q} run --project {root_q} kllm \"$@\"\n"
+    body = f'#!/usr/bin/env sh\nexec {uv_q} run --project {root_q} kllm "$@"\n'
     shim.write_text(body, encoding="utf-8", newline="\n")
     _mark_executable(shim)
 
@@ -1192,8 +1260,7 @@ def _ensure_windows_user_path(bin_dir: Path) -> bool:
         return False
     if result.returncode != 0:
         _warn(
-            "Could not update Windows User PATH; add "
-            f"{directory} manually to use `kllm` globally."
+            f"Could not update Windows User PATH; add {directory} manually to use `kllm` globally."
         )
         return False
     return True
@@ -1345,7 +1412,10 @@ def clone_or_update_llama(tag: str | None = None) -> None:
         )
         result = _run(["git", "-C", str(VENDOR_LLAMA), "checkout", "--force", tag], check=False)
         if result.returncode != 0:
-            _run(["git", "-C", str(VENDOR_LLAMA), "fetch", "--depth", "1", "origin", tag], check=False)
+            _run(
+                ["git", "-C", str(VENDOR_LLAMA), "fetch", "--depth", "1", "origin", tag],
+                check=False,
+            )
             _run(["git", "-C", str(VENDOR_LLAMA), "checkout", "--force", "FETCH_HEAD"])
     elif VENDOR_LLAMA.is_dir() and any(VENDOR_LLAMA.iterdir()):
         print(f"Using existing llama.cpp tree at {VENDOR_LLAMA} (expected tag {tag})")
@@ -1406,7 +1476,9 @@ def _discard_stale_cmake_build(
     install_llama_source.discard_stale_cmake_build(source_dir, build_dir, signature)
 
 
-def build_llama_from_source(backend: str, tag: str | None = None, *, rpc_tcp_only: bool = False) -> tuple[bool, str]:
+def build_llama_from_source(
+    backend: str, tag: str | None = None, *, rpc_tcp_only: bool = False
+) -> tuple[bool, str]:
     """Compile the pinned llama.cpp.
 
     Returns ``(ok, https)`` where ``https`` is ``"on"`` normally and ``"off"``
@@ -1671,9 +1743,7 @@ def install_llama_prebuilt(
     tag = tag or read_pinned_release()
     local = _cached_llama_archive(tag, backend)
     if local is not None:
-        return _install_llama_archive(
-            local, tag=tag, backend=backend, stamp_backend=stamp_backend
-        )
+        return _install_llama_archive(local, tag=tag, backend=backend, stamp_backend=stamp_backend)
 
     rel = fetch_release_by_tag(tag)
     if not rel:
@@ -1883,7 +1953,9 @@ def install_llama(
     if macos_multi:
         # macOS must ship Metal + Vulkan in one binary, so there is no prebuilt
         # path: --prefer-prebuilt is rejected before reaching here.
-        ok, https_state = build_llama_from_source(backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {}))
+        ok, https_state = build_llama_from_source(
+            backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {})
+        )
         built_from_source = ok
         if not ok:
             # Never downgrade the advertised Metal+Vulkan contract to a
@@ -1896,16 +1968,22 @@ def install_llama(
     elif prefer_prebuilt:
         ok = install_llama_prebuilt(backend, tag=tag, stamp_backend=stamp_be)
         if not ok:
-            ok, https_state = build_llama_from_source(backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {}))
+            ok, https_state = build_llama_from_source(
+                backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {})
+            )
             built_from_source = ok
     else:
-        ok, https_state = build_llama_from_source(backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {}))
+        ok, https_state = build_llama_from_source(
+            backend, tag=tag, **({"rpc_tcp_only": True} if rpc_tcp_only else {})
+        )
         built_from_source = ok
         if not ok and not rpc_tcp_only:
             ok = install_llama_prebuilt(backend, tag=tag, stamp_backend=stamp_be)
 
     if rpc_tcp_only and not built_from_source:
-        raise SystemExit("error: TCP-only RPC source build failed; no prebuilt fallback is eligible")
+        raise SystemExit(
+            "error: TCP-only RPC source build failed; no prebuilt fallback is eligible"
+        )
     stage_built_binaries()
     llama = _resolve_runtime_binary("llama-server")
     rpc = _resolve_runtime_binary("rpc-server")
@@ -1944,33 +2022,48 @@ def _write_rpc_transport_evidence(tag: str) -> None:
     """Bind CMake transport flags to the exact staged binaries and shared libs."""
     import hashlib
     import json
+
     def sha(path: Path) -> str:
         result = hashlib.sha256()
-        with path.open('rb') as source:
+        with path.open("rb") as source:
             while chunk := source.read(1024 * 1024):
                 result.update(chunk)
         return result.hexdigest()
-    cache_path = VENDOR_LLAMA / 'build' / 'CMakeCache.txt'
+
+    cache_path = VENDOR_LLAMA / "build" / "CMakeCache.txt"
     if not cache_path.is_file():
         return
-    text = cache_path.read_text(encoding='utf-8')
-    rpc_flag = re.search(r'^GGML_RPC:BOOL=(ON|OFF)$', text, re.M)
-    rdma_flag = re.search(r'^GGML_RPC_RDMA:BOOL=(ON|OFF)$', text, re.M)
+    text = cache_path.read_text(encoding="utf-8")
+    rpc_flag = re.search(r"^GGML_RPC:BOOL=(ON|OFF)$", text, re.M)
+    rdma_flag = re.search(r"^GGML_RPC_RDMA:BOOL=(ON|OFF)$", text, re.M)
     artifacts = {}
-    for name in ('llama-server', 'rpc-server'):
+    for name in ("llama-server", "rpc-server"):
         built = _find_build_tree_binary(name)
-        staged = BIN_DIR / (name + ('.exe' if _is_windows() else ''))
+        staged = BIN_DIR / (name + (".exe" if _is_windows() else ""))
         if built is None or not staged.is_file() or sha(built) != sha(staged):
             return
         artifacts[staged.name] = sha(staged)
     for path in BIN_DIR.iterdir():
-        if path.is_file() and ('ggml' in path.name or 'llama' in path.name) and path.suffix in ('.dll', '.so', '.dylib'):
+        if (
+            path.is_file()
+            and ("ggml" in path.name or "llama" in path.name)
+            and path.suffix in (".dll", ".so", ".dylib")
+        ):
             artifacts[path.name] = sha(path)
     import time
-    evidence = {'installed_at': time.time(), 'schema': 1, 'tag': tag, 'source_build': True, 'ggml_rpc': rpc_flag.group(1) if rpc_flag else 'unknown', 'ggml_rpc_rdma': rdma_flag.group(1) if rdma_flag else 'unknown', 'artifacts': artifacts}
-    destination = BIN_DIR / 'rpc-transport.json'
-    temporary = destination.with_suffix('.tmp')
-    temporary.write_text(json.dumps(evidence, sort_keys=True), encoding='utf-8')
+
+    evidence = {
+        "installed_at": time.time(),
+        "schema": 1,
+        "tag": tag,
+        "source_build": True,
+        "ggml_rpc": rpc_flag.group(1) if rpc_flag else "unknown",
+        "ggml_rpc_rdma": rdma_flag.group(1) if rdma_flag else "unknown",
+        "artifacts": artifacts,
+    }
+    destination = BIN_DIR / "rpc-transport.json"
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
     os.replace(temporary, destination)
 
 
@@ -2065,16 +2158,26 @@ def verify_llama_installed(tag: str, *, expected: str | None = None) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
-    p.add_argument('--source-repo', help='Public HTTPS Git source for an isolated managed runtime')
-    p.add_argument('--revision', help='Full immutable Git commit for --source-repo')
-    p.add_argument('--runtime-dir', type=Path, help='Isolated destination; never replaces vendor/bin')
+    p.add_argument("--source-repo", help="Public HTTPS Git source for an isolated managed runtime")
+    p.add_argument("--revision", help="Full immutable Git commit for --source-repo")
+    p.add_argument(
+        "--runtime-dir", type=Path, help="Isolated destination; never replaces vendor/bin"
+    )
     p.add_argument("--skip-ui", action="store_true", help="Skip dashboard npm build")
-    p.add_argument("--rpc-tcp-only", action="store_true", help="Source-build RPC with RDMA disabled for managed private networks")
+    p.add_argument(
+        "--rpc-tcp-only",
+        action="store_true",
+        help="Source-build RPC with RDMA disabled for managed private networks",
+    )
     p.add_argument("--skip-rust", action="store_true", help="Skip maturin / Python package build")
-    p.add_argument("--skip-npm-install", action="store_true", help="Skip `npm install` (build only)")
+    p.add_argument(
+        "--skip-npm-install", action="store_true", help="Skip `npm install` (build only)"
+    )
     p.add_argument("--skip-llama", action="store_true", help="Skip llama-server / rpc-server")
     p.add_argument("--skip-wireguard", action="store_true", help="Skip WireGuard install")
-    p.add_argument("--skip-toolchains", action="store_true", help="Do not auto-install Rust/Node/git/cmake")
+    p.add_argument(
+        "--skip-toolchains", action="store_true", help="Do not auto-install Rust/Node/git/cmake"
+    )
     p.add_argument("--release", action="store_true", help="Build Rust extension in release mode")
     p.add_argument(
         "--backend",
@@ -2194,9 +2297,7 @@ def _run_stages(
                 errors.append(_record_stage_error(name, exc))
         return errors
     with ProcessPoolExecutor(max_workers=4) as pool:
-        futures = {
-            pool.submit(fn, *args, **kwargs): name for name, fn, args, kwargs in jobs
-        }
+        futures = {pool.submit(fn, *args, **kwargs): name for name, fn, args, kwargs in jobs}
         for future in as_completed(futures):
             name = futures[future]
             try:
@@ -2209,34 +2310,54 @@ def _run_stages(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if any((args.source_repo, args.revision, args.runtime_dir)):
-        if not all((args.source_repo, args.revision, args.runtime_dir)) or not args.llama_only or args.check:
-            raise SystemExit('Managed builds require --llama-only, --source-repo, --revision and --runtime-dir')
+        if (
+            not all((args.source_repo, args.revision, args.runtime_dir))
+            or not args.llama_only
+            or args.check
+        ):
+            raise SystemExit(
+                "Managed builds require --llama-only, --source-repo, --revision and --runtime-dir"
+            )
         if args.prebuilt and args.from_source:
-            raise SystemExit('error: choose either --prebuilt or --from-source, not both')
+            raise SystemExit("error: choose either --prebuilt or --from-source, not both")
         if args.prebuilt and args.rpc_tcp_only:
             raise SystemExit(
-                'error: --rpc-tcp-only requires a source build; prebuilt packs carry no '
-                'TCP-only RPC evidence'
+                "error: --rpc-tcp-only requires a source build; prebuilt packs carry no "
+                "TCP-only RPC evidence"
             )
-        sys.path.insert(0, str(ROOT / 'src'))
+        sys.path.insert(0, str(ROOT / "src"))
         if args.prebuilt:
             from kllm.runtimes.build import PrebuiltIneligible, managed_prebuilt
+
             try:
-                managed_prebuilt(sys.modules[__name__], args.source_repo, args.revision, args.runtime_dir, args.backend)
+                managed_prebuilt(
+                    sys.modules[__name__],
+                    args.source_repo,
+                    args.revision,
+                    args.runtime_dir,
+                    args.backend,
+                )
             except PrebuiltIneligible as error:
                 # The registry treats any nonzero prebuilt exit as a signal to
                 # compile from source; the marker keeps the log honest.
-                print(f'KLLM_PREBUILT_INELIGIBLE: {error}', file=sys.stderr)
+                print(f"KLLM_PREBUILT_INELIGIBLE: {error}", file=sys.stderr)
                 return 3
             except (OSError, ValueError, subprocess.SubprocessError) as error:
-                print(f'error: {error}', file=sys.stderr)
+                print(f"error: {error}", file=sys.stderr)
                 return 1
             return 0
         from kllm.runtimes.build import managed_build
+
         try:
-            managed_build(sys.modules[__name__], args.source_repo, args.revision, args.runtime_dir, args.backend)
+            managed_build(
+                sys.modules[__name__],
+                args.source_repo,
+                args.revision,
+                args.runtime_dir,
+                args.backend,
+            )
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            print(f'error: {error}', file=sys.stderr)
+            print(f"error: {error}", file=sys.stderr)
             return 1
         return 0
     tag = read_pinned_release(args.tag)
@@ -2343,7 +2464,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("Run: kllm start   |   kllm join --key <key>")
             print("(Same as: uv run kllm … from the repo root.)")
-            print("Note: the global shim points at this checkout; re-run install after moving the repo.")
+            print(
+                "Note: the global shim points at this checkout; re-run install after moving the repo."
+            )
     if not args.skip_ui:
         print("Dashboard: kllm ui")
     if not args.skip_wireguard:

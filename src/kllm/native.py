@@ -76,7 +76,10 @@ def _launch_record(result: Any) -> dict[str, Any]:
     _launched_identities.clear()  # The existing runtime owns one managed child per node.
     if token and started:
         _launched_identities[result.pid] = dict(
-            pid=result.pid, role=result.role, start_token=token, started_at=started,
+            pid=result.pid,
+            role=result.role,
+            start_token=token,
+            started_at=started,
             log_sink_pid=getattr(result, "log_sink_pid", None),
         )
     record = dict(pid=result.pid, binary=result.binary, argv=list(result.argv), role=result.role)
@@ -363,11 +366,13 @@ def plan_split(
 
 def start_master(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
-    selected = selected_binary('llama-server')
+    selected = selected_binary("llama-server")
     if selected:
-        if getattr(n, 'RUNTIME_SELECTION_VERSION', 0) != 1:
-            raise RuntimeError('Rebuild the native extension with python scripts/build.py for managed runtimes')
-        kwargs['binary_path'] = selected
+        if getattr(n, "RUNTIME_SELECTION_VERSION", 0) != 1:
+            raise RuntimeError(
+                "Rebuild the native extension with python scripts/build.py for managed runtimes"
+            )
+        kwargs["binary_path"] = selected
     if kwargs.get("log_path"):
         kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if kwargs.get("env") is None:
@@ -385,11 +390,13 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
     n = require_native()
-    selected = selected_binary('rpc-server')
+    selected = selected_binary("rpc-server")
     if selected:
-        if getattr(n, 'RUNTIME_SELECTION_VERSION', 0) != 1:
-            raise RuntimeError('Rebuild the native extension with python scripts/build.py for managed runtimes')
-        kwargs['binary_path'] = selected
+        if getattr(n, "RUNTIME_SELECTION_VERSION", 0) != 1:
+            raise RuntimeError(
+                "Rebuild the native extension with python scripts/build.py for managed runtimes"
+            )
+        kwargs["binary_path"] = selected
     if kwargs.get("log_path"):
         kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if "devices" not in kwargs:
@@ -422,7 +429,7 @@ def process_alive(pid: int) -> bool:
 
 
 def resolve_llama_server(repo_root: str | None = None) -> str | None:
-    selected = selected_binary('llama-server')
+    selected = selected_binary("llama-server")
     if selected:
         return selected
     path = require_native().resolve_llama_server(repo_root)
@@ -430,7 +437,7 @@ def resolve_llama_server(repo_root: str | None = None) -> str | None:
 
 
 def resolve_rpc_server(repo_root: str | None = None) -> str | None:
-    selected = selected_binary('rpc-server')
+    selected = selected_binary("rpc-server")
     if selected:
         return selected
     path = require_native().resolve_rpc_server(repo_root)
@@ -440,9 +447,15 @@ def resolve_rpc_server(repo_root: str | None = None) -> str | None:
 # These operations deliberately have no Python networking fallback: host mutation
 # and run readiness must fail closed when the native boundary is unavailable.
 def managed_network_available() -> bool:
-    return _NATIVE is not None and all(hasattr(_NATIVE, name) for name in (
-        "start_network_bridge", "probe_network_rpc", "start_address_observer", "probe_ipv4_conflict",
-    ))
+    return _NATIVE is not None and all(
+        hasattr(_NATIVE, name)
+        for name in (
+            "start_network_bridge",
+            "probe_network_rpc",
+            "start_address_observer",
+            "probe_ipv4_conflict",
+        )
+    )
 
 
 def _managed_native():
@@ -453,11 +466,13 @@ def _managed_native():
 
 def start_network_bridge(config: dict):
     import json
+
     return _managed_native().start_network_bridge(json.dumps(config, allow_nan=False))
 
 
 def network_bridge_status(handle) -> dict:
     import json
+
     result: dict = json.loads(handle.status())
     return result
 
@@ -466,9 +481,14 @@ def stop_network_bridge(handle, expected_instance_id: str, *, terminate: bool = 
     return bool(handle.stop(expected_instance_id, terminate))
 
 
-def probe_network_rpc(endpoint: str, source: str, installed_tag: str, timeout_ms: int = 2000) -> dict:
+def probe_network_rpc(
+    endpoint: str, source: str, installed_tag: str, timeout_ms: int = 2000
+) -> dict:
     import json
-    result: dict = json.loads(_managed_native().probe_network_rpc(endpoint, source, installed_tag, timeout_ms))
+
+    result: dict = json.loads(
+        _managed_native().probe_network_rpc(endpoint, source, installed_tag, timeout_ms)
+    )
     return result
 
 
@@ -478,6 +498,7 @@ def start_address_observer(interface_index: int, epoch: str):
 
 def address_observer_events(handle) -> dict:
     import json
+
     result: dict = json.loads(handle.events())
     return result
 
@@ -492,6 +513,6 @@ def probe_ipv4_conflict(interface: str, mac: str, address: str) -> bool:
 
 def start_ipv4_conflict_observer(interface: str, mac: str, address: str):
     backend = _managed_native()
-    if not hasattr(backend, 'start_ipv4_conflict_observer'):
-        raise RuntimeError('native Ethernet conflict observation is unavailable')
+    if not hasattr(backend, "start_ipv4_conflict_observer"):
+        raise RuntimeError("native Ethernet conflict observation is unavailable")
     return backend.start_ipv4_conflict_observer(interface, mac, address)

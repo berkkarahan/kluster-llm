@@ -76,8 +76,14 @@ class RuntimeSetupService:
     def setup(self, body: LlamaSetupBody) -> RuntimeSetupResult:
         """Install the selected pack and restart a worker RPC server if needed."""
         state = self._state()
-        if state.process_pid and state.process_role == "worker" and self._process_alive(state.process_pid):
-            raise ValidationError("Stop the model on its master before replacing the worker runtime")
+        if (
+            state.process_pid
+            and state.process_role == "worker"
+            and self._process_alive(state.process_pid)
+        ):
+            raise ValidationError(
+                "Stop the model on its master before replacing the worker runtime"
+            )
         try:
             result = self._install_pack(body.tag, body.backend, body.force)
         except FileNotFoundError as exc:

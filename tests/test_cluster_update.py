@@ -224,7 +224,12 @@ def test_status_includes_update_and_software(client, monkeypatch):
     update_mod._init_update_progress([])
     monkeypatch.setattr(
         "kllm.agent.native.probe_capacity",
-        lambda: {"total_ram_bytes": 1, "available_ram_bytes": 1, "vram_bytes": None, "backend": "cpu"},
+        lambda: {
+            "total_ram_bytes": 1,
+            "available_ram_bytes": 1,
+            "vram_bytes": None,
+            "backend": "cpu",
+        },
     )
     r = c.get("/v1/status")
     assert r.status_code == 200

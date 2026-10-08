@@ -35,7 +35,7 @@ def parse_server_help(help_text: str) -> dict[str, EngineFlag]:
         if not matches:
             continue
         aliases = tuple(match.group() for match in matches)
-        suffix = header[matches[-1].end():].strip()
+        suffix = header[matches[-1].end() :].strip()
         arguments = tuple(suffix.split())
         description = " ".join(lines)
         if "removed" in description.lower() or "deprecated" in description.lower():
@@ -49,8 +49,16 @@ def parse_server_help(help_text: str) -> dict[str, EngineFlag]:
 def _read_catalog(path: str, mtime_ns: int, size: int) -> dict[str, EngineFlag]:
     del mtime_ns, size
     try:
-        result = subprocess.run([path, "--help"], capture_output=True, text=True, timeout=15, check=False,
-                                env={key: value for key, value in os.environ.items() if not key.startswith("LLAMA_ARG_")})
+        result = subprocess.run(
+            [path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            env={
+                key: value for key, value in os.environ.items() if not key.startswith("LLAMA_ARG_")
+            },
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ExtraArgsError("Could not inspect llama-server; check the installed runtime") from exc
     if result.returncode:
@@ -80,14 +88,28 @@ def engine_catalog() -> dict[str, EngineFlag]:
 def _validate_parser(path: str, mtime_ns: int, tokens: tuple[str, ...]) -> None:
     del mtime_ns
     try:
-        result = subprocess.run([path, *tokens, "--help"], capture_output=True, text=True, timeout=15, check=False,
-                                env={key: value for key, value in os.environ.items() if not key.startswith("LLAMA_ARG_")})
+        result = subprocess.run(
+            [path, *tokens, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            env={
+                key: value for key, value in os.environ.items() if not key.startswith("LLAMA_ARG_")
+            },
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ExtraArgsError("Could not validate the installed engine's arguments") from exc
     if result.returncode:
-        details = [line.strip() for line in (result.stderr + result.stdout).splitlines()
-                   if re.search(r"invalid|error|exception", line, re.IGNORECASE)]
-        raise ExtraArgsError("Engine argument validation failed: " + (details[-1][:500] if details else "check the option values"))
+        details = [
+            line.strip()
+            for line in (result.stderr + result.stdout).splitlines()
+            if re.search(r"invalid|error|exception", line, re.IGNORECASE)
+        ]
+        raise ExtraArgsError(
+            "Engine argument validation failed: "
+            + (details[-1][:500] if details else "check the option values")
+        )
 
 
 def validate_engine_parser(tokens: list[str]) -> None:
@@ -96,6 +118,7 @@ def validate_engine_parser(tokens: list[str]) -> None:
         return
     from kllm import native
     from kllm.state import repo_root
+
     root = repo_root()
     binary = native.resolve_llama_server(str(root) if root else None)
     if not binary:
@@ -114,17 +137,21 @@ def validate_engine_args(tokens: list[str], catalog: dict[str, EngineFlag]) -> N
         flag = tokens[index]
         spec = catalog.get(flag)
         if spec is None:
-            raise ExtraArgsError(f"extra_args: {flag!r} is not supported by the installed llama-server")
+            raise ExtraArgsError(
+                f"extra_args: {flag!r} is not supported by the installed llama-server"
+            )
         for alias in spec.aliases:
             sanitize_extra_args([alias])
         count = len(spec.arguments)
-        values = tokens[index + 1:index + 1 + count]
+        values = tokens[index + 1 : index + 1 + count]
         if len(values) != count or any(value in catalog for value in values):
             raise ExtraArgsError(f"extra_args: {flag} requires {count} value(s)")
         for placeholder, value in zip(spec.arguments, values):
             choices = re.fullmatch(r"[\[{]([\w.,|+-]+)[\]}]", placeholder)
             if choices and value not in re.split(r"[,|]", choices.group(1)):
-                raise ExtraArgsError(f"extra_args: invalid value for {flag}; choose {choices.group(1)}")
+                raise ExtraArgsError(
+                    f"extra_args: invalid value for {flag}; choose {choices.group(1)}"
+                )
         index += 1 + count
 
 
@@ -133,7 +160,9 @@ def public_expert_flags(catalog: dict[str, EngineFlag]) -> list[dict[str, Any]]:
 
     out = []
     for flag, spec in catalog.items():
-        if not flag.startswith("--") or flag != next((a for a in spec.aliases if a.startswith("--")), flag):
+        if not flag.startswith("--") or flag != next(
+            (a for a in spec.aliases if a.startswith("--")), flag
+        ):
             continue
         try:
             for alias in spec.aliases:
@@ -142,5 +171,7 @@ def public_expert_flags(catalog: dict[str, EngineFlag]) -> list[dict[str, Any]]:
             continue
         if flag in BLOCKED_FLAGS or flag in ALIASES:
             continue
-        out.append({"flag": flag, "arguments": list(spec.arguments), "description": spec.description})
+        out.append(
+            {"flag": flag, "arguments": list(spec.arguments), "description": spec.description}
+        )
     return sorted(out, key=lambda item: item["flag"])

@@ -24,8 +24,10 @@ from kllm.state import DEFAULT_CONTROL_PORT, home_dir, repo_root
 
 console = Console()
 
+
 class AgentRegistry:
     """Dynamic registry for coding agent launchers."""
+
     def __init__(self):
         self._planners: dict[str, Callable[..., LaunchPlan]] = {}
 
@@ -38,19 +40,46 @@ class AgentRegistry:
     def list_agents(self) -> list[str]:
         return sorted(self._planners.keys())
 
+
 registry = AgentRegistry()
 
 
 _OPENCODE_SUBCOMMANDS = {
-    "upgrade", "update", "uninstall", "acp", "api", "debug", "auth", "mcp",
-    "plugin", "models", "stats", "mini", "run", "session", "service",
-    "reload", "pair", "serve",
+    "upgrade",
+    "update",
+    "uninstall",
+    "acp",
+    "api",
+    "debug",
+    "auth",
+    "mcp",
+    "plugin",
+    "models",
+    "stats",
+    "mini",
+    "run",
+    "session",
+    "service",
+    "reload",
+    "pair",
+    "serve",
 }
 
 # Flags whose next argument is a value, not a positional.
 _OPENCODE_VALUE_FLAGS = {
-    "--model", "-m", "--agent", "--session", "-s", "--prompt", "--title",
-    "--file", "-f", "--log-level", "--completions", "--server", "--replay-limit",
+    "--model",
+    "-m",
+    "--agent",
+    "--session",
+    "-s",
+    "--prompt",
+    "--title",
+    "--file",
+    "-f",
+    "--log-level",
+    "--completions",
+    "--server",
+    "--replay-limit",
 }
 
 
@@ -89,8 +118,16 @@ class LaunchPlan:
 def _base_url(port: int, url: str | None = None) -> str:
     base = (url or os.environ.get("KLLM_URL") or f"http://127.0.0.1:{port}").rstrip("/")
     parsed = httpx.URL(base)
-    if parsed.scheme not in ("http", "https") or not parsed.host or parsed.userinfo or parsed.query or parsed.fragment:
-        raise typer.BadParameter("--url must be an HTTP(S) agent URL without credentials, query, or fragment")
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.host
+        or parsed.userinfo
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise typer.BadParameter(
+            "--url must be an HTTP(S) agent URL without credentials, query, or fragment"
+        )
     return base
 
 
@@ -137,7 +174,9 @@ def _served_model_id(catalog: dict[str, Any], requested: str | None) -> str | No
     return None
 
 
-def _ensure_inference(base: str, token: str, model: str | None, serve: bool, context: int, timeout: float) -> tuple[str, str]:
+def _ensure_inference(
+    base: str, token: str, model: str | None, serve: bool, context: int, timeout: float
+) -> tuple[str, str]:
     """Resolve workers to their master and wait for its authenticated served catalog."""
     deadline = time.monotonic() + timeout
     headers = {"Authorization": f"Bearer {token}"}
@@ -159,13 +198,19 @@ def _ensure_inference(base: str, token: str, model: str | None, serve: bool, con
             raise typer.BadParameter("cluster master required — run `kllm start` first")
         running = st.get("model_name") if st.get("process_pid") or st.get("inference_up") else None
         if running and model and Path(model).name != Path(running).name:
-            raise typer.BadParameter(f"inference is using {running}; stop it before selecting --model {model}")
+            raise typer.BadParameter(
+                f"inference is using {running}; stop it before selecting --model {model}"
+            )
         # Authenticate before starting a model or creating harness configuration.
         probe = client.get(f"{base}/v2/inference/models", headers=headers)
         if probe.status_code in (401, 403):
-            raise typer.BadParameter("target API token rejected; set KLLM_API_KEY or --api-key to the master's token")
+            raise typer.BadParameter(
+                "target API token rejected; set KLLM_API_KEY or --api-key to the master's token"
+            )
         if probe.status_code == 404:
-            raise typer.BadParameter("target agent needs updating: served-model discovery is unavailable")
+            raise typer.BadParameter(
+                "target agent needs updating: served-model discovery is unavailable"
+            )
         if probe.status_code == 200:
             served = _served_model_id(probe.json(), model or running)
             if served:
@@ -177,7 +222,9 @@ def _ensure_inference(base: str, token: str, model: str | None, serve: bool, con
                 raise typer.BadParameter("inference not running and --no-serve set")
             if not model:
                 raise typer.BadParameter("pass --model NAME or start a model in Plan & Run first")
-            started = client.post(f"{base}/v1/run", json={"model": model, "context": context}, timeout=timeout)
+            started = client.post(
+                f"{base}/v1/run", json={"model": model, "context": context}, timeout=timeout
+            )
             started.raise_for_status()
         while True:
             response = client.get(f"{base}/v2/inference/models", headers=headers)
@@ -188,7 +235,9 @@ def _ensure_inference(base: str, token: str, model: str | None, serve: bool, con
             elif response.status_code != 503:
                 response.raise_for_status()
             if time.monotonic() >= deadline:
-                raise typer.BadParameter("inference readiness timed out; inspect Plan & Run or increase --timeout")
+                raise typer.BadParameter(
+                    "inference readiness timed out; inspect Plan & Run or increase --timeout"
+                )
             time.sleep(min(0.5, max(0, deadline - time.monotonic())))
 
 
@@ -207,7 +256,9 @@ def _hermes_runtime_dir() -> Path | None:
 
 def _opencode_service_client(binary: str) -> bool:
     try:
-        version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=5, check=False)
+        version = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=5, check=False
+        )
     except (OSError, subprocess.TimeoutExpired):
         return False
     match = re.search(r"(\d+)\.\d+\.\d+", version.stdout + version.stderr)
@@ -259,7 +310,9 @@ def plan_opencode(base: str, token: str, model: str, yolo: bool, extra: list[str
     argv = [bin_, *extra]
     if _opencode_service_client(bin_):
         if any(arg == "--server" or arg.startswith("--server=") for arg in extra):
-            raise typer.BadParameter("OpenCode --server uses another service; omit it to connect this session to kllm")
+            raise typer.BadParameter(
+                "OpenCode --server uses another service; omit it to connect this session to kllm"
+            )
         if "--standalone" not in extra:
             argv.insert(2 if extra and extra[0] in ("run", "mini", "acp") else 1, "--standalone")
     # Pin the session (and any background-service project scope) to the
@@ -281,7 +334,7 @@ def plan_codex(
         else Path(tempfile.mkdtemp(prefix="kllm-codex-"))
     )
     home.mkdir(parents=True, exist_ok=True)
-    config_toml = f'''model = {json.dumps(model)}
+    config_toml = f"""model = {json.dumps(model)}
 model_provider = "kllm"
 
 [model_providers.kllm]
@@ -290,7 +343,7 @@ base_url = {json.dumps(f"{base}/v1")}
 wire_api = "responses"
 env_key = "KLLM_API_KEY"
 requires_openai_auth = false
-'''
+"""
     (home / "config.toml").write_text(config_toml, encoding="utf-8")
     env = {"CODEX_HOME": str(home), "KLLM_API_KEY": token}
     argv = [bin_, *extra]
@@ -314,9 +367,21 @@ def plan_hermes(base: str, token: str, model: str, persist: bool, extra: list[st
     home.mkdir(parents=True, exist_ok=True)
     cfg = home / "config.yaml"
     # JSON is valid YAML and safely quotes model IDs and URLs.
-    cfg.write_text(json.dumps({"model": {"default": model, "provider": "custom", "base_url": f"{base}/v1"},
-                               "auxiliary": {"compression": {"provider": "main"}}}), encoding="utf-8")
-    env = {"HERMES_HOME": str(home), "OPENAI_API_KEY": token, "OPENAI_BASE_URL": f"{base}/v1", "CUSTOM_BASE_URL": f"{base}/v1"}
+    cfg.write_text(
+        json.dumps(
+            {
+                "model": {"default": model, "provider": "custom", "base_url": f"{base}/v1"},
+                "auxiliary": {"compression": {"provider": "main"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        "HERMES_HOME": str(home),
+        "OPENAI_API_KEY": token,
+        "OPENAI_BASE_URL": f"{base}/v1",
+        "CUSTOM_BASE_URL": f"{base}/v1",
+    }
     runtime = _hermes_runtime_dir()
     if runtime is not None:
         env["HERMES_RUNTIME_DIR"] = str(runtime)
@@ -354,7 +419,11 @@ def plan_openclaw(base: str, token: str, model: str, persist: bool, extra: list[
         ),
         encoding="utf-8",
     )
-    env = {"OPENCLAW_STATE_DIR": str(home), "OPENCLAW_CONFIG_PATH": str(cfg_path), "KLLM_API_KEY": token}
+    env = {
+        "OPENCLAW_STATE_DIR": str(home),
+        "OPENCLAW_CONFIG_PATH": str(cfg_path),
+        "KLLM_API_KEY": token,
+    }
     cleanup = [] if persist else [home]
     return LaunchPlan(agent="openclaw", argv=[bin_, *extra], env=env, cleanup_dirs=cleanup)
 
@@ -365,45 +434,71 @@ def plan_pi(base: str, token: str, model: str, persist: bool, extra: list[str]) 
         raise typer.BadParameter("`pi` / `pi-agent` CLI not found on PATH")
     home = home_dir() / "harness" / "pi" if persist else Path(tempfile.mkdtemp(prefix="kllm-pi-"))
     home.mkdir(parents=True, exist_ok=True)
-    (home / "models.json").write_text(json.dumps({"providers": {"kllm": {
-        "baseUrl": f"{base}/v1", "api": "openai-completions", "apiKey": "${KLLM_API_KEY}",
-        "models": [{"id": model, "name": model}]
-    }}}), encoding="utf-8")
+    (home / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "kllm": {
+                        "baseUrl": f"{base}/v1",
+                        "api": "openai-completions",
+                        "apiKey": "${KLLM_API_KEY}",
+                        "models": [{"id": model, "name": model}],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     env = {"PI_CODING_AGENT_DIR": str(home), "KLLM_API_KEY": token}
     cleanup = [] if persist else [home]
-    return LaunchPlan(agent="pi", argv=[bin_, "--provider", "kllm", "--model", model, *extra], env=env, cleanup_dirs=cleanup)
+    return LaunchPlan(
+        agent="pi",
+        argv=[bin_, "--provider", "kllm", "--model", model, *extra],
+        env=env,
+        cleanup_dirs=cleanup,
+    )
 
 
 # Register built-in planners
-registry.register("claude", lambda **kw: plan_claude(
-    kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]
-))
-registry.register("opencode", lambda **kw: plan_opencode(
-    kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]
-))
-registry.register("codex", lambda **kw: plan_codex(
-    kw["base"], kw["token"], kw["model"], kw["persist"], kw["yolo"], kw["extra"]
-))
-registry.register("hermes", lambda **kw: plan_hermes(
-    kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
-))
-registry.register("openclaw", lambda **kw: plan_openclaw(
-    kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
-))
-registry.register("pi", lambda **kw: plan_pi(
-    kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]
-))
+registry.register(
+    "claude",
+    lambda **kw: plan_claude(kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]),
+)
+registry.register(
+    "opencode",
+    lambda **kw: plan_opencode(kw["base"], kw["token"], kw["model"], kw["yolo"], kw["extra"]),
+)
+registry.register(
+    "codex",
+    lambda **kw: plan_codex(
+        kw["base"], kw["token"], kw["model"], kw["persist"], kw["yolo"], kw["extra"]
+    ),
+)
+registry.register(
+    "hermes",
+    lambda **kw: plan_hermes(kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]),
+)
+registry.register(
+    "openclaw",
+    lambda **kw: plan_openclaw(kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"]),
+)
+registry.register(
+    "pi", lambda **kw: plan_pi(kw["base"], kw["token"], kw["model"], kw["persist"], kw["extra"])
+)
 
 # Public list of built-in harnesses (registration order-independent).
 AGENTS: list[str] = registry.list_agents()
 
 
-def _attach_skills(plan: LaunchPlan, skills: list[agent_skills.Skill] | None,
-                   selection: str) -> None:
+def _attach_skills(
+    plan: LaunchPlan, skills: list[agent_skills.Skill] | None, selection: str
+) -> None:
     """Provision only the Kluster pack; leave the harness's other sources alone."""
     profile_keys = {
-        "codex": "CODEX_HOME", "hermes": "HERMES_HOME",
-        "openclaw": "OPENCLAW_STATE_DIR", "pi": "PI_CODING_AGENT_DIR",
+        "codex": "CODEX_HOME",
+        "hermes": "HERMES_HOME",
+        "openclaw": "OPENCLAW_STATE_DIR",
+        "pi": "PI_CODING_AGENT_DIR",
     }
     key = profile_keys.get(plan.agent)
     if selection == "none":
@@ -413,7 +508,9 @@ def _attach_skills(plan: LaunchPlan, skills: list[agent_skills.Skill] | None,
                 agent_skills.install_skills([], root, prune=True)
         return
     if skills is None:
-        plan.notes.append("Kluster skill library unavailable; set KLLM_REPO_ROOT to a checkout containing skills/.")
+        plan.notes.append(
+            "Kluster skill library unavailable; set KLLM_REPO_ROOT to a checkout containing skills/."
+        )
         return
     if key and key in plan.env:
         root = Path(plan.env[key]) / "skills"
@@ -433,15 +530,23 @@ def _attach_skills(plan: LaunchPlan, skills: list[agent_skills.Skill] | None,
                 if not isinstance(user_config, dict):
                     raise ValueError("expected a JSON object")
             except ValueError as error:
-                raise agent_skills.SkillError("Invalid inherited OPENCODE_CONFIG_CONTENT; expected a JSON object") from error
+                raise agent_skills.SkillError(
+                    "Invalid inherited OPENCODE_CONFIG_CONTENT; expected a JSON object"
+                ) from error
             existing = user_config.get("skills", config.get("skills"))
             if _opencode_service_client(plan.argv[0]):
-                if existing is not None and (not isinstance(existing, list) or not all(isinstance(p, str) for p in existing)):
-                    raise agent_skills.SkillError("OpenCode V2 skills configuration must be an array of sources")
+                if existing is not None and (
+                    not isinstance(existing, list) or not all(isinstance(p, str) for p in existing)
+                ):
+                    raise agent_skills.SkillError(
+                        "OpenCode V2 skills configuration must be an array of sources"
+                    )
                 config["skills"] = [*(existing or []), str(root)]
             else:
                 if existing is not None and not isinstance(existing, dict):
-                    raise agent_skills.SkillError("OpenCode V1 skills configuration must be an object")
+                    raise agent_skills.SkillError(
+                        "OpenCode V1 skills configuration must be an object"
+                    )
                 settings = dict(existing or {})
                 paths = settings.get("paths", [])
                 if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
@@ -450,7 +555,9 @@ def _attach_skills(plan: LaunchPlan, skills: list[agent_skills.Skill] | None,
                 config["skills"] = settings
             plan.env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
     else:
-        plan.notes.append(f"Kluster skill injection is unavailable for registered harness {plan.agent}.")
+        plan.notes.append(
+            f"Kluster skill injection is unavailable for registered harness {plan.agent}."
+        )
         return
     plan.notes.append(f"Kluster skills: {selection} ({len(skills)}), copied to {root}")
 
@@ -473,13 +580,18 @@ def build_launch_plan(
     agent = agent.lower().strip()
     planner = registry.get_planner(agent)
     if not planner:
-        raise typer.BadParameter(f"unknown agent {agent!r}; choose from {', '.join(registry.list_agents())}")
+        raise typer.BadParameter(
+            f"unknown agent {agent!r}; choose from {', '.join(registry.list_agents())}"
+        )
     try:
         agent_skills.validate_selection(kllm_skills, session=True)
         repository = repo_root()
         library = repository / "skills" if repository else None
-        skills = (agent_skills.discover_skills(library, kllm_skills)
-                  if kllm_skills != "none" and library is not None and library.exists() else None)
+        skills = (
+            agent_skills.discover_skills(library, kllm_skills)
+            if kllm_skills != "none" and library is not None and library.exists()
+            else None
+        )
     except (OSError, agent_skills.SkillError) as error:
         raise typer.BadParameter(str(error)) from error
     base = _base_url(port, url)

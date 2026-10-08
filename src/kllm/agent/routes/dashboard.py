@@ -41,6 +41,4 @@ def mount_dashboard(app: FastAPI, dashboard_dir: Path | None) -> None:
                     "Pragma": "no-cache",
                 },
             )
-        raise HTTPException(
-            404, "dashboard not built — run: cd dashboard && npm run build"
-        )
+        raise HTTPException(404, "dashboard not built — run: cd dashboard && npm run build")

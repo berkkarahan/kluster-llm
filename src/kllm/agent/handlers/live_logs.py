@@ -62,7 +62,9 @@ class LiveLogsHandler:
         with mirror_state["lock"]:
             flight = mirror_state["flight"]
             retry_delay = 30.0 if mirror_state.get("error") == "denied" else 0.5
-            owner = flight is None and time.monotonic() - mirror_state["last_acquired"] >= retry_delay
+            owner = (
+                flight is None and time.monotonic() - mirror_state["last_acquired"] >= retry_delay
+            )
             if owner:
                 flight = threading.Event()
                 mirror_state["flight"] = flight
@@ -74,9 +76,7 @@ class LiveLogsHandler:
 
         return worker_log_snapshot(mirror_state, after, self._state().node_id)
 
-    def _refresh_worker_mirror(
-        self, mirror_state: dict[str, Any], flight: threading.Event
-    ) -> None:
+    def _refresh_worker_mirror(self, mirror_state: dict[str, Any], flight: threading.Event) -> None:
         failure: Exception | None = None
         try:
             try:

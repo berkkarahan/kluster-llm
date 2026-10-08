@@ -150,7 +150,9 @@ def probe(
             )
     host = results["host"]["host"]
     result = dict(
-        schema_version=2 if any("utilization" in device for device in results["gpu"]["devices"]) else 1,
+        schema_version=2
+        if any("utilization" in device for device in results["gpu"]["devices"])
+        else 1,
         node_id=node_id,
         generation=generation,
         sequence=sequence,

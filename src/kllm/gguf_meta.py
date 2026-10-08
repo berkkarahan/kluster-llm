@@ -85,6 +85,7 @@ def is_moe_architecture(arch: str | None) -> bool:
     normalized = arch.strip().lower().replace("-", "_").replace(".", "_")
     return normalized in MOE_ARCHITECTURES
 
+
 # Expert FFN tensors: ``blk.N.ffn_{up,down,gate}_{exps,<i>}.weight``. The router
 # ``blk.N.ffn_gate.weight`` and dense ``blk.N.ffn_{up,down}.weight`` are shared.
 _MOE_EXPERT_RE = re.compile(r"^blk\.\d+\.ffn_(?:up|down|gate)(?:_exps\.|\.[0-9]+\.)weight$")

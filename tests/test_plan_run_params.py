@@ -122,7 +122,10 @@ def test_preview_never_overwrites_applied_settings_or_remembered_model(client):
     agent.STATE.last_plan = {"fit_status": "fits", "model": "serving.gguf"}
     agent.STATE.model_name = "serving.gguf"
     with patch.object(agent.native, "plan_split", return_value=_fake_plan()):
-        r = c.post("/v1/plan?preview=true", json=_payload(context=8192, flash_attention="off", cache_type_v="f16"))
+        r = c.post(
+            "/v1/plan?preview=true",
+            json=_payload(context=8192, flash_attention="off", cache_type_v="f16"),
+        )
     assert r.status_code == 200, r.text
     assert r.json()["resolved_launch_settings"]["flash_attention"] == "off"
     assert agent.STATE.last_settings["context"] == 2048
@@ -132,7 +135,9 @@ def test_preview_never_overwrites_applied_settings_or_remembered_model(client):
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/plan?preview=true", "/v2/inference/plans?preview=true"])
-def test_required_node_api_uses_real_planner_and_preserves_preview_state(client, monkeypatch, endpoint):
+def test_required_node_api_uses_real_planner_and_preserves_preview_state(
+    client, monkeypatch, endpoint
+):
     from test_memory_estimation import synthetic_gguf
     from test_required_node_planning import node
     from kllm import run_planning
@@ -140,9 +145,13 @@ def test_required_node_api_uses_real_planner_and_preserves_preview_state(client,
 
     c, agent, tmp = client
     synthetic_gguf(_model_file(tmp))
-    nodes = [PlacementNodeInput.from_mapping(n) for n in (
-        node("master1", master=True, gpu=4000), node("w1", gpu=1000),
-    )]
+    nodes = [
+        PlacementNodeInput.from_mapping(n)
+        for n in (
+            node("master1", master=True, gpu=4000),
+            node("w1", gpu=1000),
+        )
+    ]
     monkeypatch.setattr(run_planning, "cluster_nodes", lambda _: nodes)
     before = agent.STATE.last_plan
     result = c.post(endpoint, json=_payload(required_nodes=["w1", "master1"]))
@@ -153,7 +162,9 @@ def test_required_node_api_uses_real_planner_and_preserves_preview_state(client,
     assert {a["node_id"] for a in plan["device_allocations"]} == {"master1", "w1"}
     assert agent.STATE.last_plan == before
     assert c.post(endpoint, json=_payload(required_nodes=["missing"])).status_code == 400
-    assert c.post(endpoint, json=_payload(required_nodes=["w1"], node_shares={"w1": 1})).status_code in (400, 422)
+    assert c.post(
+        endpoint, json=_payload(required_nodes=["w1"], node_shares={"w1": 1})
+    ).status_code in (400, 422)
 
 
 def test_real_plan_components_auto_context_and_unpriced_arguments(client, monkeypatch):
@@ -165,8 +176,12 @@ def test_real_plan_components_auto_context_and_unpriced_arguments(client, monkey
     synthetic_gguf(path, "qwen35moe")
     monkeypatch.setattr(run_planning, "cluster_nodes", lambda _: [capacity("master1")])
     agent.STATE.last_settings = {"model": "serving.gguf", "context": 2048}
-    result = c.post("/v1/plan?preview=true", json=_payload(
-        context_auto=True, context=512, device="cpu", batch_size=16384, micro_batch=16384)).json()
+    result = c.post(
+        "/v1/plan?preview=true",
+        json=_payload(
+            context_auto=True, context=512, device="cpu", batch_size=16384, micro_batch=16384
+        ),
+    ).json()
     assert result["context_effective"] == 8192
     resolved = result["resolved_launch_settings"]
     assert resolved["context"] == resolved["batch_size"] == resolved["micro_batch"] == 8192
@@ -174,7 +189,9 @@ def test_real_plan_components_auto_context_and_unpriced_arguments(client, monkey
     assert result["estimated_bytes"] == sum(result[c] for c in COMPONENTS)
     assert result["estimated_bytes"] == result["cpu_alloc_bytes"] + result["vram_alloc_bytes"]
     assert agent.STATE.last_settings["context"] == 2048
-    unknown = c.post("/v1/plan?preview=true", json=_payload(device="cpu", extra_args=["--embedding"])).json()
+    unknown = c.post(
+        "/v1/plan?preview=true", json=_payload(device="cpu", extra_args=["--embedding"])
+    ).json()
     assert unknown["estimate_complete"] is False
     assert any("--embedding" in w for w in unknown["estimate_warnings"])
 
@@ -197,14 +214,49 @@ def test_equivalent_extra_args_use_same_resolved_estimate(client, monkeypatch):
     c, _, tmp = client
     synthetic_gguf(_model_file(tmp))
     monkeypatch.setattr(run_planning, "cluster_nodes", lambda _: [capacity("master1")])
-    direct = c.post("/v1/plan?preview=true", json=_payload(
-        device="cpu", context=1024, batch_size=2048, micro_batch=1024, parallel_slots=2,
-        cache_type_k="q4_0", cache_type_v="f16", flash_attention="off")).json()
-    extra = c.post("/v1/plan?preview=true", json=_payload(device="cpu", extra_args=[
-        "--ctx-size=1024", "-b", "2048", "-ub", "1024", "-np", "2",
-        "-ctk", "q4_0", "-ctv", "f16", "-fa", "off"])).json()
+    direct = c.post(
+        "/v1/plan?preview=true",
+        json=_payload(
+            device="cpu",
+            context=1024,
+            batch_size=2048,
+            micro_batch=1024,
+            parallel_slots=2,
+            cache_type_k="q4_0",
+            cache_type_v="f16",
+            flash_attention="off",
+        ),
+    ).json()
+    extra = c.post(
+        "/v1/plan?preview=true",
+        json=_payload(
+            device="cpu",
+            extra_args=[
+                "--ctx-size=1024",
+                "-b",
+                "2048",
+                "-ub",
+                "1024",
+                "-np",
+                "2",
+                "-ctk",
+                "q4_0",
+                "-ctv",
+                "f16",
+                "-fa",
+                "off",
+            ],
+        ),
+    ).json()
     assert direct["estimated_bytes"] == extra["estimated_bytes"]
-    for key in ("context", "parallel_slots", "batch_size", "micro_batch", "flash_attention", "kv_unified"):
+    for key in (
+        "context",
+        "parallel_slots",
+        "batch_size",
+        "micro_batch",
+        "flash_attention",
+        "kv_unified",
+    ):
         assert direct["resolved_launch_settings"][key] == extra["resolved_launch_settings"][key]
 
 
@@ -215,19 +267,29 @@ def test_template_selection_and_threads_capabilities(client, monkeypatch):
     from kllm.run_settings import available_threads
     from kllm.run_settings import RunBody
     from kllm.run_launch import build_master_launch
+
     info = c.get("/v1/run-capabilities", params={"model": "toy.gguf"})
     assert info.status_code == 200, info.text
     assert info.json()["threads_max"] == available_threads()
     assert {p["id"] for p in info.json()["templates"]} == set(PRESETS)
     if agent.native.resolve_llama_server():
-        assert c.post("/v1/chat-template/validate", json={"text": "{{ messages[0]['content'] }}"}).json()["valid"]
+        assert c.post(
+            "/v1/chat-template/validate", json={"text": "{{ messages[0]['content'] }}"}
+        ).json()["valid"]
         assert c.post("/v1/chat-template/validate", json={"text": "{{ broken"}).status_code == 400
     bad = c.put("/v1/model-settings/toy.gguf", json={"parameter_set": {"chat_template": "made-up"}})
     assert bad.status_code == 422
     plan = _fake_plan()
-    launch = build_master_launch(RunBody(model="toy.gguf", chat_template="preset:qwen35-4b"),
-                                 plan, model_path=Path("missing.gguf"), rpc_servers=[], infer_port=8080,
-                                 repo_root=None, gpu_env={}, extra_args=[])
+    launch = build_master_launch(
+        RunBody(model="toy.gguf", chat_template="preset:qwen35-4b"),
+        plan,
+        model_path=Path("missing.gguf"),
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
     assert launch["chat_template_file"].endswith("Qwen3.5-4B.jinja")
     assert launch["jinja"] is True
     assert not any(a == "--chat-template" for a in launch["extra_args"])
@@ -241,15 +303,26 @@ def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
     with pytest.raises(ValueError, match="threads"):
         run_settings.RunBody(model="toy.gguf", threads=5)
     from kllm.run_planning import resolve_launch_settings
+
     monkeypatch.setattr("kllm.run_settings_resolution.available_threads", lambda: 4)
     with pytest.raises(ValueError, match="threads"):
-        resolve_launch_settings(run_settings.RunBody(model="toy.gguf", extra_args=["--threads", "5"]))
+        resolve_launch_settings(
+            run_settings.RunBody(model="toy.gguf", extra_args=["--threads", "5"])
+        )
     c, _, tmp = client
     _model_file(tmp)
-    saved = c.put("/v1/model-settings/toy.gguf", json={"parameter_set": {
-        "threads": 4, "chat_template": "preset:qwen3-0.6b", "flash_attention": "off", "cache_type_v": "f16",
-        "node_shares": {"worker": 0.3, "master1": 0.7},
-    }})
+    saved = c.put(
+        "/v1/model-settings/toy.gguf",
+        json={
+            "parameter_set": {
+                "threads": 4,
+                "chat_template": "preset:qwen3-0.6b",
+                "flash_attention": "off",
+                "cache_type_v": "f16",
+                "node_shares": {"worker": 0.3, "master1": 0.7},
+            }
+        },
+    )
     assert saved.status_code == 200, saved.text
     restored = c.get("/v1/model-settings/toy.gguf").json()["parameter_set"]
     assert restored["flash_attention"] == "off"
@@ -273,11 +346,15 @@ def test_dashboard_layer_overrides_legacy_config_at_plan_and_run_boundary(client
     _model_file(tmp)
     assert c.put("/v1/config", json={"device": "gpu", "split_mode": legacy}).status_code == 200
     payload = _payload(split_mode="layer")
-    with patch.object(agent.native, "plan_split", return_value=_fake_plan()) as planner, patch.object(
-        agent.native, "start_master",
-        return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
-    ) as launch, patch.object(agent.native, "process_alive", return_value=True), patch(
-        "kllm.agent.ensure_rpc_peers_reachable"
+    with (
+        patch.object(agent.native, "plan_split", return_value=_fake_plan()) as planner,
+        patch.object(
+            agent.native,
+            "start_master",
+            return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
+        ) as launch,
+        patch.object(agent.native, "process_alive", return_value=True),
+        patch("kllm.agent.ensure_rpc_peers_reachable"),
     ):
         planned = c.post("/v1/plan", json=payload)
         assert planned.status_code == 200, planned.text
@@ -294,9 +371,9 @@ def test_dashboard_layer_overrides_legacy_config_at_plan_and_run_boundary(client
 
     # Explicit local-only callers still retain their supported mode.
     with patch.object(agent.native, "plan_split", return_value=_fake_plan(rpc_endpoints=[])):
-        local = c.post("/v1/plan", json=_payload(
-            split_mode=legacy, cache_type_k="f16", cache_type_v="f16"
-        ))
+        local = c.post(
+            "/v1/plan", json=_payload(split_mode=legacy, cache_type_k="f16", cache_type_v="f16")
+        )
     assert local.status_code == 200, local.text
     assert local.json()["split_mode"] == legacy
 
@@ -326,20 +403,25 @@ def test_run_overflow_blocked(client):
 def test_run_tight_includes_warning(client):
     c, agent, tmp = client
     _model_file(tmp)
-    with patch.object(
-        agent.native,
-        "plan_split",
-        return_value=_fake_plan(fit_status="tight", hint="tight fit"),
-    ), patch.object(
-        agent.native,
-        "start_master",
-        return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
-    ), patch.object(
-        agent.native,
-        "process_alive",
-        return_value=True,
-    ), patch(
-        "kllm.agent.ensure_rpc_peers_reachable",
+    with (
+        patch.object(
+            agent.native,
+            "plan_split",
+            return_value=_fake_plan(fit_status="tight", hint="tight fit"),
+        ),
+        patch.object(
+            agent.native,
+            "start_master",
+            return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
+        ),
+        patch.object(
+            agent.native,
+            "process_alive",
+            return_value=True,
+        ),
+        patch(
+            "kllm.agent.ensure_rpc_peers_reachable",
+        ),
     ):
         r = c.post("/v1/run", json=_payload())
     assert r.status_code == 200
@@ -351,11 +433,14 @@ def test_run_rpc_preflight_blocks_unreachable(client):
     c, agent, tmp = client
     _model_file(tmp)
     agent.STATE.members["w1"]["rpc_port"] = 1
-    with patch.object(
-        agent.native,
-        "plan_split",
-        return_value=_fake_plan(),
-    ), patch.object(agent.native, "start_master") as sm:
+    with (
+        patch.object(
+            agent.native,
+            "plan_split",
+            return_value=_fake_plan(),
+        ),
+        patch.object(agent.native, "start_master") as sm,
+    ):
         r = c.post("/v1/run", json=_payload())
     assert r.status_code == 503
     assert "unreachable" in r.text.lower()
@@ -517,7 +602,10 @@ def test_moe_offload_follows_normalized_architecture(client):
     assert dense.status_code == 200, dense.text
     descriptor = _moe_offload_descriptor(dense)
     assert descriptor["available"] is False
-    assert descriptor["unavailable_reason"] == "This model does not declare a Mixture of Experts architecture"
+    assert (
+        descriptor["unavailable_reason"]
+        == "This model does not declare a Mixture of Experts architecture"
+    )
 
 
 @pytest.mark.parametrize("route", ["/v1/plan", "/v2/inference/plans"])
@@ -538,22 +626,26 @@ def _unified_plan(*, ram: int, reported: int, backend: str = "vulkan"):
     from kllm.core.placement import plan_devices
     from kllm.core.placement_models import ModelLayout, PlacementNodeInput, PlacementSettings
 
-    node = PlacementNodeInput.from_mapping({
-        "node_id": "box",
-        "is_master": True,
-        "backend": backend,
-        "total_ram_bytes": ram,
-        "available_ram_bytes": ram,
-        "unified_memory": True,
-        "devices": [{
-            "index": 0,
-            "device": "MTL0" if backend == "metal" else "Vulkan0",
+    node = PlacementNodeInput.from_mapping(
+        {
+            "node_id": "box",
+            "is_master": True,
             "backend": backend,
-            "name": "Apple M4" if backend == "metal" else "AMD Radeon 8060S",
-            "vram_bytes": reported,
-            "free_bytes": reported,
-        }],
-    })
+            "total_ram_bytes": ram,
+            "available_ram_bytes": ram,
+            "unified_memory": True,
+            "devices": [
+                {
+                    "index": 0,
+                    "device": "MTL0" if backend == "metal" else "Vulkan0",
+                    "backend": backend,
+                    "name": "Apple M4" if backend == "metal" else "AMD Radeon 8060S",
+                    "vram_bytes": reported,
+                    "free_bytes": reported,
+                }
+            ],
+        }
+    )
     return plan_devices(
         (node,),
         500 * 1024**2,
@@ -609,19 +701,21 @@ def test_plan_result_prints_gpu_names_beside_nodes():
     previous = inference.console
     inference.console = Console(file=buffer, force_terminal=False, no_color=True)
     try:
-        inference._print_plan_result({
-            "fit_status": "fits",
-            "estimated_bytes": 1,
-            "budget_bytes": 2,
-            "device_requested": "gpu",
-            "device_effective": "gpu",
-            "tensor_split": [1.0],
-            "node_ids": ["box"],
-            "node_alloc_bytes": [10],
-            "node_scores": [0.5],
-            "node_latency_ms": [1.0],
-            "node_gpu_names": {"box": ["AMD Radeon 8060S"]},
-        })
+        inference._print_plan_result(
+            {
+                "fit_status": "fits",
+                "estimated_bytes": 1,
+                "budget_bytes": 2,
+                "device_requested": "gpu",
+                "device_effective": "gpu",
+                "tensor_split": [1.0],
+                "node_ids": ["box"],
+                "node_alloc_bytes": [10],
+                "node_scores": [0.5],
+                "node_latency_ms": [1.0],
+                "node_gpu_names": {"box": ["AMD Radeon 8060S"]},
+            }
+        )
     finally:
         inference.console = previous
     assert "box [AMD Radeon 8060S]: alloc=10" in buffer.getvalue()
@@ -638,14 +732,16 @@ def test_missing_unified_flag_detects_strix_from_device_name():
             "backend": "vulkan",
             "total_ram_bytes": 32 * 1024**3,
             "available_ram_bytes": 32 * 1024**3,
-            "devices": [{
-                "index": 0,
-                "device": "Vulkan0",
-                "name": "AMD Radeon 8060S Graphics",
-                "backend": "vulkan",
-                "vram_bytes": 512 * 1024**2,
-                "free_bytes": 512 * 1024**2,
-            }],
+            "devices": [
+                {
+                    "index": 0,
+                    "device": "Vulkan0",
+                    "name": "AMD Radeon 8060S Graphics",
+                    "backend": "vulkan",
+                    "vram_bytes": 512 * 1024**2,
+                    "free_bytes": 512 * 1024**2,
+                }
+            ],
         }
     }
     nodes = cluster_nodes(members)

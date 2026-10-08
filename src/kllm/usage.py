@@ -175,7 +175,9 @@ def validate_resources(node_id: str, snapshot: Any, member: dict[str, Any], now:
     if requested > completed or completed > now + timedelta(seconds=30) or requested < now - WINDOW:
         raise ValidationError("invalid resource snapshot time")
     n = native.require_native()
-    if snapshot["schema_version"] == 1 and any("utilization" in device for device in snapshot["devices"]):
+    if snapshot["schema_version"] == 1 and any(
+        "utilization" in device for device in snapshot["devices"]
+    ):
         raise ValidationError("utilization requires resource schema 2")
     for source in ("host", "gpu"):
         part = dict(

@@ -1,4 +1,5 @@
 """Unit tests for VRAM-proportional tensor-split helpers."""
+
 from __future__ import annotations
 
 import pytest
@@ -73,8 +74,12 @@ def test_select_routing_single_remote():
 
 
 def test_device_can_hold():
-    assert device_can_hold(candidate(local=True, budget_bytes=100, score=1), model_bytes=80, overhead=20)
-    assert not device_can_hold(candidate(local=True, budget_bytes=99, score=1), model_bytes=80, overhead=20)
+    assert device_can_hold(
+        candidate(local=True, budget_bytes=100, score=1), model_bytes=80, overhead=20
+    )
+    assert not device_can_hold(
+        candidate(local=True, budget_bytes=99, score=1), model_bytes=80, overhead=20
+    )
 
 
 def test_proportional_weights_mib():

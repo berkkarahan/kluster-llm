@@ -52,11 +52,14 @@ class HeartbeatPayloadBuilder:
         member = state.members.get(state.node_id) or {}
         identity = self._software_identity()
         from kllm.config import load_config
+
         config = load_config()
         return {
             "node_id": state.node_id,
             "hostname": local_hostname(),
-            "rpc_devices": member.get("rpc_devices", []) if state.process_pid and state.process_role == "worker" else [],
+            "rpc_devices": member.get("rpc_devices", [])
+            if state.process_pid and state.process_role == "worker"
+            else [],
             "rpc_capabilities": member.get("rpc_capabilities", []),
             "rpc_control_version": 1,
             "runtime_management_version": 1,

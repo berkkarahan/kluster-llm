@@ -61,9 +61,9 @@ class MembershipHandlers:
     def _with_directory(self, response: dict[str, Any]) -> dict[str, Any]:
         if self._directory_snapshot is not None:
             try:
-                response['node_directory'] = self._directory_snapshot()
+                response["node_directory"] = self._directory_snapshot()
             except sqlite3.Error:
-                response['node_directory'] = []
+                response["node_directory"] = []
         return response
 
     def register(self, body: RegisterBody, request: Request) -> dict[str, Any]:

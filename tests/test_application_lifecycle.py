@@ -274,8 +274,16 @@ async def test_unexpected_usage_store_error_aborts_before_serving(monkeypatch):
 @pytest.mark.parametrize(
     ("platform", "members", "expected"),
     [
-        ("win32", {"node-1": {"process_started_at": "2026-01-01T00:00:00Z"}}, (77, "2026-01-01T00:00:00Z")),
-        ("darwin", {"node-1": {"process_started_at": "2026-01-01T00:00:00Z"}}, (77, "2026-01-01T00:00:00Z")),
+        (
+            "win32",
+            {"node-1": {"process_started_at": "2026-01-01T00:00:00Z"}},
+            (77, "2026-01-01T00:00:00Z"),
+        ),
+        (
+            "darwin",
+            {"node-1": {"process_started_at": "2026-01-01T00:00:00Z"}},
+            (77, "2026-01-01T00:00:00Z"),
+        ),
         ("win32", {}, (77, None)),
         ("linux", {"node-1": {"process_started_at": "2026-01-01T00:00:00Z"}}, None),
     ],

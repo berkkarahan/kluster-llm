@@ -1,4 +1,5 @@
 """Persistent policy, file sink, and real detached producer acceptance."""
+
 import json
 import os
 import subprocess
@@ -21,7 +22,7 @@ def wait_for(check, timeout=5):
         result = check()
         if result:
             return result
-        time.sleep(.02)
+        time.sleep(0.02)
     raise AssertionError("condition did not become true")
 
 
@@ -29,7 +30,9 @@ def test_persisted_stop_keeps_history_and_discards_output(tmp_path, monkeypatch)
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     state = ClusterState(node_id="n", role="master")
     state.save()
-    sink = OutputSink(tmp_path / "logs" / "llama.log", tmp_path / "cluster.json", tmp_path / ".log-sinks")
+    sink = OutputSink(
+        tmp_path / "logs" / "llama.log", tmp_path / "cluster.json", tmp_path / ".log-sinks"
+    )
     hub = LogHub()
     try:
         sink.sync()
@@ -63,7 +66,7 @@ def test_persisted_stop_keeps_history_and_discards_output(tmp_path, monkeypatch)
 
 def test_sink_write_failure_keeps_draining_and_reports_error(tmp_path):
     policy = tmp_path / "policy.json"
-    policy.write_text('{}')
+    policy.write_text("{}")
     path = tmp_path / "directory"
     path.mkdir()
     sink = OutputSink(path, policy, tmp_path / "acks")
@@ -80,16 +83,21 @@ def test_sink_write_failure_keeps_draining_and_reports_error(tmp_path):
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(os.name == "nt" or not native.native_available(), reason="requires native launcher and Unix executable fixture")
+@pytest.mark.skipif(
+    os.name == "nt" or not native.native_available(),
+    reason="requires native launcher and Unix executable fixture",
+)
 @pytest.mark.parametrize("role", ["master", "worker"])
-def test_native_output_sink_survives_parent_and_toggles_without_restarting(tmp_path, monkeypatch, role):
+def test_native_output_sink_survives_parent_and_toggles_without_restarting(
+    tmp_path, monkeypatch, role
+):
     # Private HTTP producer exercises the same native launch path as llama/RPC.
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     state = ClusterState(node_id="private", role="master")
     state.save()
     producer = tmp_path / "producer"
     address = tmp_path / "address"
-    producer.write_text(f'''#!{sys.executable}
+    producer.write_text(f"""#!{sys.executable}
 import os,sys
 from http.server import BaseHTTPRequestHandler,HTTPServer
 class Handler(BaseHTTPRequestHandler):
@@ -102,14 +110,22 @@ class Handler(BaseHTTPRequestHandler):
 server=HTTPServer(('127.0.0.1',0),Handler)
 open({str(address)!r},'w').write(str(server.server_port))
 server.serve_forever()
-''')
+""")
     producer.chmod(0o755)
     log = tmp_path / "logs" / f"{role}.log"
     env = os.environ.copy()
     env["KLLM_LLAMA_SERVER" if role == "master" else "KLLM_RPC_SERVER"] = str(producer)
-    launch = subprocess.run([sys.executable, "-c",
-        f"import json; from kllm import native; print(json.dumps(native.start_{role}(model='unused', tensor_split='1', devices=[], log_path={str(log)!r})))"],
-        env=env, capture_output=True, text=True, timeout=10)
+    launch = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import json; from kllm import native; print(json.dumps(native.start_{role}(model='unused', tensor_split='1', devices=[], log_path={str(log)!r})))",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
     assert launch.returncode == 0, launch.stderr
     info = json.loads(launch.stdout)
     pid, sink_pid = info["pid"], info["log_sink_pid"]
@@ -124,10 +140,12 @@ server.serve_forever()
     try:
         port = wait_for(lambda: address.read_text() if address.exists() else None)
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client:
+
             def infer(marker):
                 response = client.post("/infer", content=marker)
                 assert response.status_code == 200
                 assert response.text == str(pid)
+
             infer("before")
             wait_for(lambda: log.exists() and b"before" in log.read_bytes())
             state.logging_enabled, state.logging_generation = False, "0001"

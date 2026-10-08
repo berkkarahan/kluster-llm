@@ -7,6 +7,8 @@ import typer
 from kllm.commands.agent_runtime import _client
 from kllm.commands.ui import console
 from kllm.state import DEFAULT_CONTROL_PORT
+
+
 def model_delete(
     name: str = typer.Argument(..., help="Local model name or path"),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),

@@ -1,4 +1,5 @@
 """Atomic JSON helpers for GGUF sha256 identity sidecars."""
+
 from __future__ import annotations
 
 import json

@@ -18,8 +18,17 @@ import pytest
 
 from kllm import native
 
-pytestmark = [pytest.mark.integration, pytest.mark.skipif(not native.resource_probe_available(), reason="requires rebuilt native extension")]
-PYTHON = (getattr(sys, "_base_executable", None) or sys.executable) if sys.platform == "win32" else sys.executable
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not native.resource_probe_available(), reason="requires rebuilt native extension"
+    ),
+]
+PYTHON = (
+    (getattr(sys, "_base_executable", None) or sys.executable)
+    if sys.platform == "win32"
+    else sys.executable
+)
 
 
 @pytest.fixture(autouse=True)
@@ -34,15 +43,20 @@ def controlled_gpu_source(monkeypatch):
     code = (
         "import sys,json; from kllm.usage_probe import failure; "
         "exec('for line in sys.stdin:\\n r=json.loads(line)\\n "
-        "o={k:r[k] for k in (\"version\",\"generation\",\"request_id\")}\\n "
-        "o[\"result\"]=failure(\"gpu\",\"unsupported_counter\")\\n "
+        'o={k:r[k] for k in ("version","generation","request_id")}\\n '
+        'o["result"]=failure("gpu","unsupported_counter")\\n '
         "print(json.dumps(o),flush=True)')"
     )
-    monkeypatch.setattr(usage_probe, "helper_command", lambda source: (
-        [PYTHON, "-c", code] if source == "gpu" else original(source)))
+    monkeypatch.setattr(
+        usage_probe,
+        "helper_command",
+        lambda source: [PYTHON, "-c", code] if source == "gpu" else original(source),
+    )
 
 
-@pytest.mark.skipif(sys.platform not in ("win32", "darwin"), reason="new host collector targets Windows/macOS")
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "darwin"), reason="new host collector targets Windows/macOS"
+)
 def test_host_only_probe_and_invalid_selection():
     try:
         sample = native.probe_resources(node_id="test-node", managed_processes=[])
@@ -63,16 +77,20 @@ def test_host_only_probe_and_invalid_selection():
 
 def test_private_binding_rejects_malformed_requests():
     collector = native.require_native()._UsageCollector("host")
-    for request in ('{}', '{"version":1,"version":1}', '{"value":NaN}', 'x' * 65537):
+    for request in ("{}", '{"version":1,"version":1}', '{"value":NaN}', "x" * 65537):
         with pytest.raises(ValueError):
             collector.collect_json(request)
 
 
 def test_helper_rejects_unterminated_oversized_frame():
     from kllm import usage_probe
+
     child = subprocess.Popen(
-        usage_probe.helper_command("host"), env=usage_probe.helper_environment(),
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        usage_probe.helper_command("host"),
+        env=usage_probe.helper_environment(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     try:
         out, _ = child.communicate(b"x" * 65537, timeout=5)
@@ -90,10 +108,13 @@ def test_hung_source_is_bounded_and_closed(monkeypatch, blocked):
 
     native.close_resource_probes()
     original = usage_probe.helper_command
-    monkeypatch.setattr(usage_probe, "helper_command", lambda source: (
-        [PYTHON, "-c", "import time; time.sleep(60)"]
-        if source == blocked else original(source)
-    ))
+    monkeypatch.setattr(
+        usage_probe,
+        "helper_command",
+        lambda source: (
+            [PYTHON, "-c", "import time; time.sleep(60)"] if source == blocked else original(source)
+        ),
+    )
     children = []
     try:
         began = time.monotonic()
@@ -113,13 +134,17 @@ def test_hung_source_is_bounded_and_closed(monkeypatch, blocked):
     assert all(child.poll() is not None for child in children)
 
 
-@pytest.mark.skipif(sys.platform not in ("win32", "darwin"), reason="new host collector targets Windows/macOS")
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "darwin"), reason="new host collector targets Windows/macOS"
+)
 def test_concurrent_calls_share_bounded_helpers():
     from kllm import usage_probe
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            results = list(pool.map(lambda _: native.probe_resources(node_id="concurrent"), range(4)))
+            results = list(
+                pool.map(lambda _: native.probe_resources(node_id="concurrent"), range(4))
+            )
         assert len({r["snapshot_id"] for r in results}) == 4
         assert len(usage_probe._slots) <= 2
         assert all(r["host"]["memory"]["total"]["status"] == "measured" for r in results)
@@ -127,7 +152,9 @@ def test_concurrent_calls_share_bounded_helpers():
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(sys.platform not in ("win32", "darwin"), reason="new process collector targets Windows/macOS")
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "darwin"), reason="new process collector targets Windows/macOS"
+)
 def test_registered_process_rss_baseline_and_exit(tmp_path, monkeypatch):
     from kllm import runtime
 
@@ -136,7 +163,11 @@ def test_registered_process_rss_baseline_and_exit(tmp_path, monkeypatch):
     child = subprocess.Popen([PYTHON, "-c", "import time; time.sleep(60)"])
     try:
         token, started = native.require_native()._process_identity(child.pid)
-        runtime.save(runtime.RuntimeInfo(children=[runtime.ChildProc(child.pid, "llama-server", token, started)]))
+        runtime.save(
+            runtime.RuntimeInfo(
+                children=[runtime.ChildProc(child.pid, "llama-server", token, started)]
+            )
+        )
         selection = dict(pid=child.pid, role="master", start_token=token, started_at=started)
         first = native.probe_resources(node_id="process-test", managed_processes=[selection])
         point = first["processes"][0]
@@ -147,12 +178,22 @@ def test_registered_process_rss_baseline_and_exit(tmp_path, monkeypatch):
         second = native.probe_resources(node_id="process-test", managed_processes=[selection])
         assert second["processes"][0]["cpu"]["status"] == "measured"
         # Simulate an obsolete registration for this PID, even with the same coarse timestamp.
-        runtime.save(runtime.RuntimeInfo(children=[runtime.ChildProc(child.pid, "llama-server", "0", started)]))
-        mismatch = native.probe_resources(node_id="process-test", managed_processes=[dict(selection, start_token="0")])
+        runtime.save(
+            runtime.RuntimeInfo(
+                children=[runtime.ChildProc(child.pid, "llama-server", "0", started)]
+            )
+        )
+        mismatch = native.probe_resources(
+            node_id="process-test", managed_processes=[dict(selection, start_token="0")]
+        )
         assert mismatch["processes"][0]["state"] == "exited"
         assert mismatch["processes"][0]["rss"]["value"] is None
         assert mismatch["processes"][0]["cpu"]["reason"] == "process_identity_mismatch"
-        runtime.save(runtime.RuntimeInfo(children=[runtime.ChildProc(child.pid, "llama-server", token, started)]))
+        runtime.save(
+            runtime.RuntimeInfo(
+                children=[runtime.ChildProc(child.pid, "llama-server", token, started)]
+            )
+        )
         child.terminate()
         child.wait(timeout=5)
         exited = native.probe_resources(node_id="process-test", managed_processes=[selection])
@@ -186,9 +227,25 @@ def test_shared_pool_references_are_not_duplicate_physical_memory():
     missing = usage_probe.metric("bytes", "device", "unsupported_counter")
     source["device_discovery"].update(status="measured", reason=None)
     for index in range(2):
-        source["devices"].append(dict(device_key=f"gpu:{index}", name="same GPU name", vendor="test",
-            memory_kind="shared", inventory_device_id=None, memory=[dict(kind="shared", pool_id="host:ram",
-            backing_pool_id="host:ram", total=missing.copy(), used=missing.copy(), free=missing.copy())]))
+        source["devices"].append(
+            dict(
+                device_key=f"gpu:{index}",
+                name="same GPU name",
+                vendor="test",
+                memory_kind="shared",
+                inventory_device_id=None,
+                memory=[
+                    dict(
+                        kind="shared",
+                        pool_id="host:ram",
+                        backing_pool_id="host:ram",
+                        total=missing.copy(),
+                        used=missing.copy(),
+                        free=missing.copy(),
+                    )
+                ],
+            )
+        )
     native.require_native()._validate_source_json("gpu", json.dumps(source))
     host = usage_probe.failure("host", "source_error")["host"]
     host["memory"]["total"].update(value=16 * 1024**3, status="measured", reason=None)
@@ -222,7 +279,11 @@ def test_malformed_helper_response_preserves_the_other_source(monkeypatch, mode)
     elif mode == "oversize":
         script += "s='x'*65537; "
     script += "print(s,flush=True)"
-    monkeypatch.setattr(usage_probe, "helper_command", lambda source: [PYTHON, "-c", script] if source == "gpu" else original(source))
+    monkeypatch.setattr(
+        usage_probe,
+        "helper_command",
+        lambda source: [PYTHON, "-c", script] if source == "gpu" else original(source),
+    )
     try:
         result = native.probe_resources(node_id="malformed")
         assert result["device_discovery"]["status"] == "error"
@@ -249,7 +310,14 @@ while True:
 time.sleep(60)
 """
     from kllm import usage_probe
-    parent = subprocess.Popen([PYTHON, "-c", code], env=usage_probe.helper_environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    parent = subprocess.Popen(
+        [PYTHON, "-c", code],
+        env=usage_probe.helper_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     children = []
     try:
         ready = queue.Queue(maxsize=1)
@@ -261,7 +329,7 @@ time.sleep(60)
         parent.wait(timeout=5)
         deadline = time.monotonic() + 5
         while any(child.is_running() for child in children) and time.monotonic() < deadline:
-            time.sleep(.05)
+            time.sleep(0.05)
         assert not any(child.is_running() for child in children)
     finally:
         if parent.poll() is None:
@@ -290,14 +358,21 @@ def test_unreaped_source_is_quarantined_without_spawning_a_replacement(monkeypat
 
     native.close_resource_probes()
     command, kill = usage_probe.helper_command, usage_probe.Slot.kill
-    monkeypatch.setattr(usage_probe, "helper_command", lambda source: (
-        [PYTHON, "-c", "import time; time.sleep(60)"] if source == "gpu" else command(source)))
+    monkeypatch.setattr(
+        usage_probe,
+        "helper_command",
+        lambda source: (
+            [PYTHON, "-c", "import time; time.sleep(60)"] if source == "gpu" else command(source)
+        ),
+    )
+
     def cannot_kill(slot, reason="timeout"):
         if slot.source == "gpu":
             with usage_probe._lock:
                 slot.cancelled, slot.cancel_reason = True, reason
         else:
             kill(slot, reason)
+
     monkeypatch.setattr(usage_probe.Slot, "kill", cannot_kill)
     try:
         first = native.probe_resources(node_id="quarantine-test")
@@ -313,7 +388,9 @@ def test_unreaped_source_is_quarantined_without_spawning_a_replacement(monkeypat
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(sys.platform not in ("win32", "darwin"), reason="requires target host CPU source")
+@pytest.mark.skipif(
+    sys.platform not in ("win32", "darwin"), reason="requires target host CPU source"
+)
 def test_short_cpu_interval_does_not_renew_its_observation():
     native.close_resource_probes()
     try:
@@ -322,7 +399,7 @@ def test_short_cpu_interval_does_not_renew_its_observation():
         deadline = time.monotonic() + 2.0
         measured = first["host"]["cpu"]
         while measured["status"] != "measured" and time.monotonic() < deadline:
-            time.sleep(.05)
+            time.sleep(0.05)
             measured = native.probe_resources(node_id="cpu-interval")["host"]["cpu"]
         assert measured["status"] == "measured"
         repeated = native.probe_resources(node_id="cpu-interval")["host"]["cpu"]
@@ -347,7 +424,10 @@ def test_native_sampler_collects_host_resources_without_inventing_a_process(tmp_
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(sys.platform != "darwin" or os.environ.get("KLLM_TEST_HARDWARE") != "1", reason="opt-in macOS Metal topology acceptance")
+@pytest.mark.skipif(
+    sys.platform != "darwin" or os.environ.get("KLLM_TEST_HARDWARE") != "1",
+    reason="opt-in macOS Metal topology acceptance",
+)
 def test_hardware_macos_metal_scope_is_truthful():
     native.close_resource_probes()
     try:
@@ -377,14 +457,22 @@ def test_hardware_macos_metal_scope_is_truthful():
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(sys.platform != "darwin" or os.environ.get("KLLM_TEST_HARDWARE") != "1", reason="opt-in IORegistry reference acceptance")
+@pytest.mark.skipif(
+    sys.platform != "darwin" or os.environ.get("KLLM_TEST_HARDWARE") != "1",
+    reason="opt-in IORegistry reference acceptance",
+)
 def test_hardware_macos_gpu_matches_ioreg_reference():
     import plistlib
 
     def reference():
-        entries = plistlib.loads(subprocess.check_output(["ioreg", "-a", "-r", "-c", "IOAccelerator"], timeout=3))
-        return {f"metal:{entry['IORegistryEntryID']:x}": entry["PerformanceStatistics"]
-            for entry in entries if "PerformanceStatistics" in entry}
+        entries = plistlib.loads(
+            subprocess.check_output(["ioreg", "-a", "-r", "-c", "IOAccelerator"], timeout=3)
+        )
+        return {
+            f"metal:{entry['IORegistryEntryID']:x}": entry["PerformanceStatistics"]
+            for entry in entries
+            if "PerformanceStatistics" in entry
+        }
 
     native.close_resource_probes()
     try:
@@ -395,7 +483,9 @@ def test_hardware_macos_gpu_matches_ioreg_reference():
             assert sample["schema_version"] == 2
             for device in sample["devices"]:
                 key = device["device_key"]
-                assert key in before and key in after, "GPU identity must match IORegistry, never list order"
+                assert key in before and key in after, (
+                    "GPU identity must match IORegistry, never list order"
+                )
                 util = device["utilization"]
                 assert util["status"] == "measured"
                 bounds = [before[key]["Device Utilization %"], after[key]["Device Utilization %"]]
@@ -404,38 +494,59 @@ def test_hardware_macos_gpu_matches_ioreg_reference():
                 assert used["status"] == "measured"
                 bounds = [before[key]["In use system memory"], after[key]["In use system memory"]]
                 assert min(bounds) - 8 * 1024**2 <= used["value"] <= max(bounds) + 8 * 1024**2
-            time.sleep(.05)
+            time.sleep(0.05)
     finally:
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform not in ("win32", "darwin"), reason="opt-in Windows/macOS native hardware acceptance")
+@pytest.mark.skipif(
+    os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform not in ("win32", "darwin"),
+    reason="opt-in Windows/macOS native hardware acceptance",
+)
 def test_hardware_sustained_probe_delivery(tmp_path, monkeypatch):
     from kllm import runtime, usage_probe
 
     monkeypatch.setattr(runtime, "runtime_path", lambda: tmp_path / "runtime.json")
     monkeypatch.setattr(runtime, "ensure_home", lambda: None)
-    child = subprocess.Popen([PYTHON, "-c", "data=bytearray(64*1024*1024)\ndata[::4096]=b'x'*16384\nwhile True: pass"])
+    child = subprocess.Popen(
+        [PYTHON, "-c", "data=bytearray(64*1024*1024)\ndata[::4096]=b'x'*16384\nwhile True: pass"]
+    )
     me = psutil.Process()
     native.close_resource_probes()
     try:
         token, started = native.require_native()._process_identity(child.pid)
-        runtime.save(runtime.RuntimeInfo(children=[runtime.ChildProc(child.pid, "llama-server", token, started)]))
+        runtime.save(
+            runtime.RuntimeInfo(
+                children=[runtime.ChildProc(child.pid, "llama-server", token, started)]
+            )
+        )
         selection = dict(pid=child.pid, role="master", start_token=token, started_at=started)
+
         def sample(_):
             began = time.monotonic()
             result = native.probe_resources(node_id="hardware-check", managed_processes=[selection])
             return time.monotonic() - began, result
+
         sample(0)
         time.sleep(2)
         _, warm = sample(0)
         assert warm["host"]["cpu"]["status"] == "measured"
         assert warm["processes"][0]["cpu"]["status"] == "measured"
-        required_gpu = [(d["device_key"], m["kind"], field) for d in warm["devices"] for m in d["memory"]
-                        for field in ("used", "free") if m[field]["status"] == "measured"]
+        required_gpu = [
+            (d["device_key"], m["kind"], field)
+            for d in warm["devices"]
+            for m in d["memory"]
+            for field in ("used", "free")
+            if m[field]["status"] == "measured"
+        ]
+
         def rss_tree():
-            return me.memory_info().rss + sum(psutil.Process(s.process.pid).memory_info().rss
-                for s in usage_probe._slots.values() if s.process and s.process.poll() is None)
+            return me.memory_info().rss + sum(
+                psutil.Process(s.process.pid).memory_info().rss
+                for s in usage_probe._slots.values()
+                if s.process and s.process.poll() is None
+            )
+
         durations = []
         successful = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -447,47 +558,82 @@ def test_hardware_sustained_probe_delivery(tmp_path, monkeypatch):
                 time.sleep(max(0, began + cycle * 2 - time.monotonic()))
                 for duration, result in pool.map(sample, range(4)):
                     durations.append(duration)
-                    metrics = [result["host"]["cpu"], result["host"]["memory"]["used"],
-                               result["host"]["memory"]["available"], result["processes"][0]["cpu"], result["processes"][0]["rss"]]
+                    metrics = [
+                        result["host"]["cpu"],
+                        result["host"]["memory"]["used"],
+                        result["host"]["memory"]["available"],
+                        result["processes"][0]["cpu"],
+                        result["processes"][0]["rss"],
+                    ]
                     devices = {d["device_key"]: d for d in result["devices"]}
                     missing = False
                     for key, kind, field in required_gpu:
                         try:
-                            metrics.append(next(m[field] for m in devices[key]["memory"] if m["kind"] == kind))
+                            metrics.append(
+                                next(m[field] for m in devices[key]["memory"] if m["kind"] == kind)
+                            )
                         except (KeyError, StopIteration):
                             missing = True
                     now = datetime.now(timezone.utc)
-                    ok = not missing and all(m["status"] == "measured" and 0 <= (now - datetime.fromisoformat(m["observed_at"].replace("Z", "+00:00"))).total_seconds() <= 2 for m in metrics)
+                    ok = not missing and all(
+                        m["status"] == "measured"
+                        and 0
+                        <= (
+                            now - datetime.fromisoformat(m["observed_at"].replace("Z", "+00:00"))
+                        ).total_seconds()
+                        <= 2
+                        for m in metrics
+                    )
                     successful += int(ok)
                 assert len(usage_probe._slots) == 2
             time.sleep(max(0, began + 600 - time.monotonic()))
             growth = rss_tree() - baseline_tree
         native.close_resource_probes()
         handle_growth = (me.num_handles() if sys.platform == "win32" else me.num_fds()) - handles
-        report = dict(requests=len(durations), successful=successful, p95=sorted(durations)[1139], maximum=max(durations),
-                      tree_growth=growth, retained_parent_growth=me.memory_info().rss-baseline_parent, handle_growth=handle_growth,
-                      gpu_names=[d["name"] for d in warm["devices"]])
+        report = dict(
+            requests=len(durations),
+            successful=successful,
+            p95=sorted(durations)[1139],
+            maximum=max(durations),
+            tree_growth=growth,
+            retained_parent_growth=me.memory_info().rss - baseline_parent,
+            handle_growth=handle_growth,
+            gpu_names=[d["name"] for d in warm["devices"]],
+        )
         print(json.dumps(report, indent=2))
         assert successful >= 1140
         assert report["p95"] <= 1 and report["maximum"] <= 2
-        assert growth <= 16 * 1024**2 and report["retained_parent_growth"] <= 16 * 1024**2 and handle_growth <= 5
+        assert (
+            growth <= 16 * 1024**2
+            and report["retained_parent_growth"] <= 16 * 1024**2
+            and handle_growth <= 5
+        )
     finally:
         native.close_resource_probes()
         child.kill()
         child.wait(timeout=5)
 
 
-@pytest.mark.skipif(os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform not in ("win32", "darwin"), reason="opt-in Windows/macOS native hardware acceptance")
+@pytest.mark.skipif(
+    os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform not in ("win32", "darwin"),
+    reason="opt-in Windows/macOS native hardware acceptance",
+)
 def test_hardware_host_and_process_accuracy(tmp_path, monkeypatch):
     from kllm import runtime
 
     monkeypatch.setattr(runtime, "runtime_path", lambda: tmp_path / "runtime.json")
     monkeypatch.setattr(runtime, "ensure_home", lambda: None)
-    child = subprocess.Popen([PYTHON, "-c", "data=bytearray(64*1024*1024)\ndata[::4096]=b'x'*16384\nwhile True: pass"])
+    child = subprocess.Popen(
+        [PYTHON, "-c", "data=bytearray(64*1024*1024)\ndata[::4096]=b'x'*16384\nwhile True: pass"]
+    )
     native.close_resource_probes()
     try:
         token, started = native.require_native()._process_identity(child.pid)
-        runtime.save(runtime.RuntimeInfo(children=[runtime.ChildProc(child.pid, "llama-server", token, started)]))
+        runtime.save(
+            runtime.RuntimeInfo(
+                children=[runtime.ChildProc(child.pid, "llama-server", token, started)]
+            )
+        )
         selection = dict(pid=child.pid, role="master", start_token=token, started_at=started)
         process = psutil.Process(child.pid)
         native.probe_resources(node_id="reference-check", managed_processes=[selection])
@@ -499,28 +645,55 @@ def test_hardware_host_and_process_accuracy(tmp_path, monkeypatch):
             time.sleep(2)
             at = time.monotonic()
             point = native.probe_resources(node_id="reference-check", managed_processes=[selection])
-            cpu, process_cpu = psutil.cpu_percent(None), process.cpu_percent(None) / psutil.cpu_count()
+            cpu, process_cpu = (
+                psutil.cpu_percent(None),
+                process.cpu_percent(None) / psutil.cpu_count(),
+            )
             memory, rss = psutil.virtual_memory(), process.memory_info().rss
             expected = dict(total=memory.total, used=memory.used, available=memory.available)
             if sys.platform == "darwin":
                 text = subprocess.check_output(["/usr/bin/vm_stat"], text=True, timeout=1)
                 page_size = int(re.search(r"page size of (\d+) bytes", text)[1])
-                values = {name: int(re.search(rf"{name}:\s+(\d+)", text)[1]) for name in ("Pages free", "Pages active", "Pages inactive", "Pages wired down")}
-                expected.update(used=(values["Pages active"] + values["Pages wired down"]) * page_size,
-                                available=(values["Pages free"] + values["Pages inactive"]) * page_size)
+                values = {
+                    name: int(re.search(rf"{name}:\s+(\d+)", text)[1])
+                    for name in ("Pages free", "Pages active", "Pages inactive", "Pages wired down")
+                }
+                expected.update(
+                    used=(values["Pages active"] + values["Pages wired down"]) * page_size,
+                    available=(values["Pages free"] + values["Pages inactive"]) * page_size,
+                )
             assert time.monotonic() - at <= 1, "reference observation skew exceeded one second"
-            actual_cpu, actual_process = point["host"]["cpu"]["value"], point["processes"][0]["cpu"]["value"]
+            actual_cpu, actual_process = (
+                point["host"]["cpu"]["value"],
+                point["processes"][0]["cpu"]["value"],
+            )
             counts["host_cpu"] += int(actual_cpu is not None and abs(actual_cpu - cpu) <= 5)
-            counts["process_cpu"] += int(actual_process is not None and abs(actual_process - process_cpu) <= 5)
+            counts["process_cpu"] += int(
+                actual_process is not None and abs(actual_process - process_cpu) <= 5
+            )
             actual_rss = point["processes"][0]["rss"]["value"]
             assert process_cpu > 0, "reference must measure the busy workload, not a launcher"
             assert rss >= 64 * 1024**2, "reference must include the touched workload allocation"
-            counts["rss"] += int(actual_rss is not None and abs(actual_rss - rss) <= max(rss * .05, 64 * 1024**2))
+            counts["rss"] += int(
+                actual_rss is not None and abs(actual_rss - rss) <= max(rss * 0.05, 64 * 1024**2)
+            )
             for field, value in expected.items():
                 actual = point["host"]["memory"][field]["value"]
-                counts[field] += int(actual is not None and abs(actual - value) <= max(value * .05, 64 * 1024**2))
-            pairs.append(dict(host_cpu=[actual_cpu, cpu], process_cpu=[actual_process, process_cpu], rss=[actual_rss, rss]))
-        print(json.dumps(dict(platform=sys.platform, passing_pairs=counts, observations=30, pairs=pairs)))
+                counts[field] += int(
+                    actual is not None and abs(actual - value) <= max(value * 0.05, 64 * 1024**2)
+                )
+            pairs.append(
+                dict(
+                    host_cpu=[actual_cpu, cpu],
+                    process_cpu=[actual_process, process_cpu],
+                    rss=[actual_rss, rss],
+                )
+            )
+        print(
+            json.dumps(
+                dict(platform=sys.platform, passing_pairs=counts, observations=30, pairs=pairs)
+            )
+        )
         assert min(counts.values()) >= 29
     finally:
         native.close_resource_probes()
@@ -528,11 +701,21 @@ def test_hardware_host_and_process_accuracy(tmp_path, monkeypatch):
         child.wait(timeout=5)
 
 
-@pytest.mark.skipif(os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform != "win32", reason="opt-in Windows WDDM accuracy acceptance")
+@pytest.mark.skipif(
+    os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform != "win32",
+    reason="opt-in Windows WDDM accuracy acceptance",
+)
 def test_hardware_windows_gpu_reference():
     def powershell(script):
-        value = json.loads(subprocess.check_output(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, timeout=8))
+        value = json.loads(
+            subprocess.check_output(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                text=True,
+                timeout=8,
+            )
+        )
         return value if isinstance(value, list) else [value]
+
     capacity_script = r"""
 Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object {
   $p=Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
@@ -548,8 +731,14 @@ exit 0
         native.probe_resources(node_id="gpu-reference")
         time.sleep(2)
         warm = native.probe_resources(node_id="gpu-reference")
-        eligible = [(device, view) for device in warm["devices"] for view in device["memory"]
-                    if view["kind"] == "dedicated" and view["used"]["status"] == "measured" and view["free"]["status"] == "measured"]
+        eligible = [
+            (device, view)
+            for device in warm["devices"]
+            for view in device["memory"]
+            if view["kind"] == "dedicated"
+            and view["used"]["status"] == "measured"
+            and view["free"]["status"] == "measured"
+        ]
         assert eligible, "SC-002 requires measured Windows dedicated used/free"
         device, view = eligible[0]
         matches = {int(row["Total"]) for row in capacities if row["Name"] == device["name"]}
@@ -560,22 +749,53 @@ exit 0
         passed = 0
         for _ in range(30):
             current = native.probe_resources(node_id="gpu-reference")
-            measured = next(v for d in current["devices"] if d["device_key"] == device["device_key"] for v in d["memory"] if v["kind"] == "dedicated")
-            counters = powershell(r"(Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage' -MaxSamples 1).CounterSamples | Select-Object InstanceName,CookedValue | ConvertTo-Json -Compress")
-            reference = next(int(row["CookedValue"]) for row in counters if row["InstanceName"].lower() == instance)
+            measured = next(
+                v
+                for d in current["devices"]
+                if d["device_key"] == device["device_key"]
+                for v in d["memory"]
+                if v["kind"] == "dedicated"
+            )
+            counters = powershell(
+                r"(Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage' -MaxSamples 1).CounterSamples | Select-Object InstanceName,CookedValue | ConvertTo-Json -Compress"
+            )
+            reference = next(
+                int(row["CookedValue"])
+                for row in counters
+                if row["InstanceName"].lower() == instance
+            )
             free = capacity - reference
             actual_used, actual_free = measured["used"]["value"], measured["free"]["value"]
-            ok = actual_used is not None and actual_free is not None and free >= 0 and abs(actual_used - reference) <= max(reference * .05, 64 * 1024**2) and abs(actual_free - free) <= max(free * .05, 64 * 1024**2)
+            ok = (
+                actual_used is not None
+                and actual_free is not None
+                and free >= 0
+                and abs(actual_used - reference) <= max(reference * 0.05, 64 * 1024**2)
+                and abs(actual_free - free) <= max(free * 0.05, 64 * 1024**2)
+            )
             passed += int(ok)
             pairs.append(dict(used=[actual_used, reference], free=[actual_free, free]))
-            time.sleep(.2)
-        print(json.dumps(dict(gpu=device["name"], reference_capacity=capacity, passing_pairs=passed, observations=30, pairs=pairs)))
+            time.sleep(0.2)
+        print(
+            json.dumps(
+                dict(
+                    gpu=device["name"],
+                    reference_capacity=capacity,
+                    passing_pairs=passed,
+                    observations=30,
+                    pairs=pairs,
+                )
+            )
+        )
         assert passed >= 29
     finally:
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform != "win32", reason="opt-in Windows GPU Engine reference acceptance")
+@pytest.mark.skipif(
+    os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform != "win32",
+    reason="opt-in Windows GPU Engine reference acceptance",
+)
 def test_hardware_windows_gpu_utilization_reference():
     """Compare overlapping one-second driver windows under idle or steady load."""
     native.close_resource_probes()
@@ -585,14 +805,19 @@ def test_hardware_windows_gpu_utilization_reference():
     try:
         for _ in range(30):
             native.probe_resources(node_id="engine-reference")
-            reference = json.loads(subprocess.check_output(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, timeout=8))
+            reference = json.loads(
+                subprocess.check_output(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                    text=True,
+                    timeout=8,
+                )
+            )
             reference = reference if isinstance(reference, list) else [reference]
             engines = {}
             for row in reference:
                 name = row["InstanceName"].lower()
                 if "luid_" in name:
-                    key = name[name.index("luid_"):].split("#", 1)[0]
+                    key = name[name.index("luid_") :].split("#", 1)[0]
                     engines[key] = engines.get(key, 0.0) + float(row["CookedValue"])
             sample = native.probe_resources(node_id="engine-reference")
             assert sample["devices"], "driver exposes no GPU for acceptance"
@@ -603,15 +828,22 @@ def test_hardware_windows_gpu_utilization_reference():
                 assert values, "GPU engine reference identity is missing"
                 measured = device["utilization"]
                 expected = max(values)
-                valid &= measured["status"] == "measured" and abs(measured["value"] - expected) <= 10
-                pairs.append(dict(device=device["name"], native=measured["value"], reference=expected))
+                valid &= (
+                    measured["status"] == "measured" and abs(measured["value"] - expected) <= 10
+                )
+                pairs.append(
+                    dict(device=device["name"], native=measured["value"], reference=expected)
+                )
             passed += int(valid)
         assert passed >= 29, pairs
     finally:
         native.close_resource_probes()
 
 
-@pytest.mark.skipif(os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform not in ("win32", "darwin"), reason="opt-in real private-agent/native integration")
+@pytest.mark.skipif(
+    os.environ.get("KLLM_TEST_HARDWARE") != "1" or sys.platform not in ("win32", "darwin"),
+    reason="opt-in real private-agent/native integration",
+)
 def test_hardware_private_agents_publish_host_only_resources(tmp_path):
     from kllm import usage_probe
 
@@ -619,12 +851,16 @@ def test_hardware_private_agents_publish_host_only_resources(tmp_path):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             return listener.getsockname()[1]
+
     master_port, worker_port = port(), port()
     assert master_port != worker_port
     key = "temporary-resource-integration-key"
     processes, logs = [], []
     try:
-        for role, node, control_port in [("master", "native-master", master_port), ("worker", "native-worker", worker_port)]:
+        for role, node, control_port in [
+            ("master", "native-master", master_port),
+            ("worker", "native-worker", worker_port),
+        ]:
             script = (
                 "from kllm.state import ClusterState; import uvicorn; "
                 f"s=ClusterState(node_id={node!r},role={role!r},control_port={control_port},"
@@ -635,25 +871,38 @@ def test_hardware_private_agents_publish_host_only_resources(tmp_path):
             )
             output = (tmp_path / f"{role}.log").open("wb")
             logs.append(output)
-            process = subprocess.Popen([PYTHON, "-c", script], stdout=output, stderr=subprocess.STDOUT,
-                env=dict(usage_probe.helper_environment(), KLLM_HOME=str(tmp_path / role)))
+            process = subprocess.Popen(
+                [PYTHON, "-c", script],
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                env=dict(usage_probe.helper_environment(), KLLM_HOME=str(tmp_path / role)),
+            )
             processes.append(process)
             url = f"http://127.0.0.1:{control_port}"
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                assert process.poll() is None, (tmp_path / f"{role}.log").read_text(errors="replace")
+                assert process.poll() is None, (tmp_path / f"{role}.log").read_text(
+                    errors="replace"
+                )
                 try:
                     response = httpx.get(url + "/v1/usage/live", timeout=1)
                     if response.status_code == 200:
                         break
                 except httpx.RequestError:
                     pass
-                time.sleep(.1)
+                time.sleep(0.1)
             else:
-                pytest.fail(f"{role} did not start: " + (tmp_path / f"{role}.log").read_text(errors="replace"))
+                pytest.fail(
+                    f"{role} did not start: "
+                    + (tmp_path / f"{role}.log").read_text(errors="replace")
+                )
             if role == "master":
-                registration = httpx.post(url + "/v1/register", headers={"X-Kllm-Key": key},
-                    json=dict(node_id="native-worker", host="127.0.0.1", control_port=worker_port), timeout=5)
+                registration = httpx.post(
+                    url + "/v1/register",
+                    headers={"X-Kllm-Key": key},
+                    json=dict(node_id="native-worker", host="127.0.0.1", control_port=worker_port),
+                    timeout=5,
+                )
                 assert registration.status_code == 200, registration.text
         master_url = f"http://127.0.0.1:{master_port}"
         deadline = time.monotonic() + 20
@@ -663,18 +912,35 @@ def test_hardware_private_agents_publish_host_only_resources(tmp_path):
             resources = worker.get("resources")
             if resources and resources["host"]["cpu"]["status"] == "measured":
                 break
-            time.sleep(.25)
+            time.sleep(0.25)
         else:
-            pytest.fail("worker native resources were not delivered: " + (tmp_path / "worker.log").read_text(errors="replace"))
+            pytest.fail(
+                "worker native resources were not delivered: "
+                + (tmp_path / "worker.log").read_text(errors="replace")
+            )
         assert resources["host"]["memory"]["total"]["value"] > 0
         assert resources["collector"]["kind"] == "native"
         assert resources["processes"] == [] and worker["reading"] is None
         assert worker["process_state"] == "no managed process"
         assert worker["resource_freshness"] == "fresh"
-        history = httpx.get(master_url + "/v1/usage/lifetimes", params=dict(node_id="native-worker"), timeout=2).raise_for_status().json()
+        history = (
+            httpx.get(
+                master_url + "/v1/usage/lifetimes", params=dict(node_id="native-worker"), timeout=2
+            )
+            .raise_for_status()
+            .json()
+        )
         assert history["lifetimes"] == []
-        print(json.dumps(dict(registered_nodes=list(live["nodes"]), worker_snapshot=resources["snapshot_id"],
-                              host_cpu=resources["host"]["cpu"]["value"], process_history_rows=len(history["lifetimes"]))))
+        print(
+            json.dumps(
+                dict(
+                    registered_nodes=list(live["nodes"]),
+                    worker_snapshot=resources["snapshot_id"],
+                    host_cpu=resources["host"]["cpu"]["value"],
+                    process_history_rows=len(history["lifetimes"]),
+                )
+            )
+        )
     finally:
         for process in processes:
             if process.poll() is None:

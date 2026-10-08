@@ -32,12 +32,19 @@ def local_status(state: ClusterState) -> dict:
             if not psutil.pid_exists(sink_pid) or ack.get("error"):
                 status = "error"
                 break
-            if ack.get("generation") != state.logging_generation or ack.get("enabled") != state.logging_enabled:
+            if (
+                ack.get("generation") != state.logging_generation
+                or ack.get("enabled") != state.logging_enabled
+            ):
                 status = "pending"
         except (OSError, ValueError, AttributeError, TypeError):
             status = "pending" if psutil.pid_exists(sink_pid) else "error"
-    return dict(enabled=state.logging_enabled, generation=state.logging_generation,
-                status=status, supported=True)
+    return dict(
+        enabled=state.logging_enabled,
+        generation=state.logging_generation,
+        status=status,
+        supported=True,
+    )
 
 
 def policy(state: ClusterState) -> dict:
@@ -79,8 +86,14 @@ def overview(state: ClusterState) -> dict:
             status = "unsupported" if not ack.get("supported") else "pending"
             if time.time() - float(member.get("last_seen") or 0) > 20:
                 status = "unreachable"
-            elif ack.get("generation") == desired["generation"] and ack.get("enabled") == desired["enabled"]:
+            elif (
+                ack.get("generation") == desired["generation"]
+                and ack.get("enabled") == desired["enabled"]
+            ):
                 status = ack.get("status", "pending")
             nodes[node_id] = dict(status=status)
-    return {**desired, "nodes": nodes,
-            "status": "applied" if all(n["status"] == "applied" for n in nodes.values()) else "partial"}
+    return {
+        **desired,
+        "nodes": nodes,
+        "status": "applied" if all(n["status"] == "applied" for n in nodes.values()) else "partial",
+    }

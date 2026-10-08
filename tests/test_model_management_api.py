@@ -21,9 +21,15 @@ def client(tmp_path, monkeypatch):
     from kllm import models as model_ops
     from kllm import load_progress
 
-    previous_download_state = (model_ops.downloads._DOWNLOAD_PROGRESS, model_ops.downloads._DOWNLOAD_LAST_TERMINAL, model_ops.downloads._DOWNLOAD_CANCEL)
+    previous_download_state = (
+        model_ops.downloads._DOWNLOAD_PROGRESS,
+        model_ops.downloads._DOWNLOAD_LAST_TERMINAL,
+        model_ops.downloads._DOWNLOAD_CANCEL,
+    )
     previous_load_state = (load_progress._active, load_progress._latest_terminal)
-    model_ops.downloads._DOWNLOAD_PROGRESS = model_ops.downloads._DOWNLOAD_LAST_TERMINAL = model_ops.downloads._DOWNLOAD_CANCEL = None
+    model_ops.downloads._DOWNLOAD_PROGRESS = model_ops.downloads._DOWNLOAD_LAST_TERMINAL = (
+        model_ops.downloads._DOWNLOAD_CANCEL
+    ) = None
     load_progress._active = load_progress._latest_terminal = None
     load_progress._samples.clear()
 
@@ -37,12 +43,17 @@ def client(tmp_path, monkeypatch):
     try:
         yield TestClient(agent_mod.app), agent_mod, token
     finally:
-        model_ops.downloads._DOWNLOAD_PROGRESS, model_ops.downloads._DOWNLOAD_LAST_TERMINAL, model_ops.downloads._DOWNLOAD_CANCEL = previous_download_state
+        (
+            model_ops.downloads._DOWNLOAD_PROGRESS,
+            model_ops.downloads._DOWNLOAD_LAST_TERMINAL,
+            model_ops.downloads._DOWNLOAD_CANCEL,
+        ) = previous_download_state
         load_progress._active, load_progress._latest_terminal = previous_load_state
         load_progress._samples.clear()
 
 
 # ---------------------------------------------------------------- downloads
+
 
 def test_download_progress_idle(client):
     c, _, _ = client
@@ -135,11 +146,17 @@ def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
 
     monkeypatch.setattr(agent, "_download_job_runner", fake_runner)
     try:
-        for phase, error in (("complete", None), ("error", "transfer failed"), ("cancelled", "cancelled")):
+        for phase, error in (
+            ("complete", None),
+            ("error", "transfer failed"),
+            ("cancelled", "cancelled"),
+        ):
             model_ops.downloads._reset_download_state()
             model_ops.set_download_terminal("old.gguf", 4, phase, error)
             finished.clear()
-            accepted = c.post("/v1/models/download", json={"source": f"https://example.com/{phase}.gguf"})
+            accepted = c.post(
+                "/v1/models/download", json={"source": f"https://example.com/{phase}.gguf"}
+            )
             assert accepted.status_code == 200, accepted.text
             assert finished.wait(timeout=5)
             from kllm.models.download_progress import DownloadProgress
@@ -157,7 +174,9 @@ def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
                 updated_at="2026-01-01T00:00:00Z",
                 finished_at=None,
             )
-            blocked = c.post("/v1/models/download", json={"source": "https://example.com/busy.gguf"})
+            blocked = c.post(
+                "/v1/models/download", json={"source": "https://example.com/busy.gguf"}
+            )
             assert blocked.status_code == 409
     finally:
         model_ops.downloads._reset_download_state()
@@ -305,6 +324,7 @@ def test_download_error_snapshot(client, monkeypatch):
 
 # ------------------------------------------------------------- load progress
 
+
 def test_load_progress_idle(client):
     c, _, _ = client
     r = c.get("/v1/load-progress")
@@ -327,8 +347,10 @@ def test_load_progress_active(client, monkeypatch):
     pid = os.getpid()  # a live pid for the liveness probe
     load_progress.begin("toy.gguf", pid, 1024)
     try:
-        with patch.object(load_progress, "_health_ok", return_value=False), \
-             patch.object(load_progress, "_rss_bytes", return_value=512):
+        with (
+            patch.object(load_progress, "_health_ok", return_value=False),
+            patch.object(load_progress, "_rss_bytes", return_value=512),
+        ):
             r = c.get("/v1/load-progress")
         body = r.json()
         assert body["phase"] == "loading"
@@ -360,8 +382,10 @@ def test_load_progress_dead_process(client, monkeypatch):
 
     load_progress.begin("toy.gguf", 999_999, 1024)
     try:
-        with patch.object(load_progress, "_alive", return_value=False), \
-             patch.object(load_progress, "_health_ok", return_value=False):
+        with (
+            patch.object(load_progress, "_alive", return_value=False),
+            patch.object(load_progress, "_health_ok", return_value=False),
+        ):
             r = c.get("/v1/load-progress")
         body = r.json()
         assert body["phase"] == "error"
@@ -378,16 +402,20 @@ def test_load_records_keep_previous_terminal_during_next_load(monkeypatch):
         load_progress._active = load_progress._latest_terminal = None
         load_progress.begin("first.gguf", 123, 100)
         first_id = load_progress._active["operation_id"]
-        with patch.object(load_progress, "_alive", return_value=True), \
-             patch.object(load_progress, "_health_ok", return_value=True):
+        with (
+            patch.object(load_progress, "_alive", return_value=True),
+            patch.object(load_progress, "_health_ok", return_value=True),
+        ):
             assert load_progress.records(8080)["last_terminal"]["phase"] == "ready"
         load_progress.end()
 
         load_progress.begin("second.gguf", 124, 100)
         second_id = load_progress._active["operation_id"]
-        with patch.object(load_progress, "_health_ok", return_value=False), \
-             patch.object(load_progress, "_alive", return_value=True), \
-             patch.object(load_progress, "_rss_bytes", return_value=20):
+        with (
+            patch.object(load_progress, "_health_ok", return_value=False),
+            patch.object(load_progress, "_alive", return_value=True),
+            patch.object(load_progress, "_rss_bytes", return_value=20),
+        ):
             records = load_progress.records(8080)
         assert records["current"]["operation_id"] == second_id
         assert records["last_terminal"]["operation_id"] == first_id
@@ -420,9 +448,11 @@ def test_late_load_sample_cannot_terminalize_replacement_operation(monkeypatch):
         load_progress._active = load_progress._latest_terminal = None
         load_progress.begin("first.gguf", 123, 100)
         result = []
-        with patch.object(load_progress, "_alive", return_value=True), \
-             patch.object(load_progress, "_health_ok", side_effect=health), \
-             patch.object(load_progress, "_rss_bytes", return_value=10):
+        with (
+            patch.object(load_progress, "_alive", return_value=True),
+            patch.object(load_progress, "_health_ok", side_effect=health),
+            patch.object(load_progress, "_rss_bytes", return_value=10),
+        ):
             worker = threading.Thread(target=lambda: result.append(load_progress.sample(8080)))
             worker.start()
             assert entered.wait(1)
@@ -450,8 +480,10 @@ def test_load_progress_rate_eta(client, monkeypatch):
     pid = os.getpid()
     load_progress.begin("toy.gguf", pid, 10_000)
     try:
-        with patch.object(load_progress, "_health_ok", return_value=False), \
-             patch.object(load_progress, "_rss_bytes", side_effect=[1000, 3000]):
+        with (
+            patch.object(load_progress, "_health_ok", return_value=False),
+            patch.object(load_progress, "_rss_bytes", side_effect=[1000, 3000]),
+        ):
             c.get("/v1/load-progress")
             time.sleep(0.05)
             body = c.get("/v1/load-progress").json()
@@ -463,6 +495,7 @@ def test_load_progress_rate_eta(client, monkeypatch):
 
 
 # ----------------------------------------------------------- model settings
+
 
 def test_model_settings_put_and_get(client, tmp_path):
     c, agent, _ = client

@@ -11,7 +11,6 @@ from kllm.commands.ui import console
 from kllm.state import DEFAULT_CONTROL_PORT
 
 
-
 def ui_cmd(
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
     open_browser: bool = typer.Option(True, "--open/--no-open"),

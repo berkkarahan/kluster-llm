@@ -1,4 +1,5 @@
 """Session skill injection through each harness boundary, without inference."""
+
 import json
 import shutil
 from pathlib import Path
@@ -11,8 +12,12 @@ from kllm.cli import main
 from kllm.commands import connect as command
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE_KEYS = {"codex": "CODEX_HOME", "hermes": "HERMES_HOME",
-                "openclaw": "OPENCLAW_STATE_DIR", "pi": "PI_CODING_AGENT_DIR"}
+PROFILE_KEYS = {
+    "codex": "CODEX_HOME",
+    "hermes": "HERMES_HOME",
+    "openclaw": "OPENCLAW_STATE_DIR",
+    "pi": "PI_CODING_AGENT_DIR",
+}
 
 
 @pytest.fixture
@@ -23,16 +28,22 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(connect, "repo_root", lambda: ROOT)
     monkeypatch.setattr(connect, "_which", lambda name: f"/fake/{name}")
     monkeypatch.setattr(connect, "_opencode_service_client", lambda _: False)
-    monkeypatch.setattr(connect, "_ensure_inference", lambda *args: ("http://master:1234", "/models/served.gguf"))
+    monkeypatch.setattr(
+        connect, "_ensure_inference", lambda *args: ("http://master:1234", "/models/served.gguf")
+    )
     scratch = tmp_path / "sessions"
     scratch.mkdir()
     original = connect.tempfile.mkdtemp
-    monkeypatch.setattr(connect.tempfile, "mkdtemp", lambda **kwargs: original(**{"dir": scratch, **kwargs}))
+    monkeypatch.setattr(
+        connect.tempfile, "mkdtemp", lambda **kwargs: original(**{"dir": scratch, **kwargs})
+    )
     return tmp_path
 
 
 def build(agent, **kwargs):
-    return connect.build_launch_plan(agent, api_key="private-test-token", url="http://master", **kwargs)
+    return connect.build_launch_plan(
+        agent, api_key="private-test-token", url="http://master", **kwargs
+    )
 
 
 def skill_root(plan):
@@ -50,7 +61,8 @@ def test_every_harness_receives_complete_selected_pack(isolated, agent):
     plan = build(agent, kllm_skills="operations", extra=["--verbose"])
     root = skill_root(plan)
     assert {p.parent.name for p in root.glob("*/SKILL.md")} == {
-        s.name for s in agent_skills.discover_skills(ROOT / "skills", "operations")}
+        s.name for s in agent_skills.discover_skills(ROOT / "skills", "operations")
+    }
     assert (root / "kllm-10gbe/references/windows.md").is_file()
     assert "--verbose" in plan.argv
     assert any("operations (6)" in note for note in plan.notes)
@@ -88,7 +100,9 @@ def test_persistent_local_edit_blocks_prune(isolated):
 @pytest.mark.parametrize("v2", [False, True])
 def test_opencode_preserves_other_sources_and_provider(isolated, monkeypatch, v2):
     monkeypatch.setattr(connect, "_opencode_service_client", lambda _: v2)
-    existing = ["/existing"] if v2 else {"paths": ["/existing"], "urls": ["https://skills.example/"]}
+    existing = (
+        ["/existing"] if v2 else {"paths": ["/existing"], "urls": ["https://skills.example/"]}
+    )
     monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"skills": existing}))
     plan = build("opencode", kllm_skills="development", extra=["run", "hello"])
     cfg = json.loads(plan.env["OPENCODE_CONFIG_CONTENT"])
@@ -130,7 +144,9 @@ def test_missing_library_keeps_connection_behavior(isolated, monkeypatch):
 def test_invalid_library_fails_before_inference(isolated, monkeypatch, tmp_path):
     (tmp_path / "skills").mkdir()
     monkeypatch.setattr(connect, "repo_root", lambda: tmp_path)
-    monkeypatch.setattr(connect, "_ensure_inference", lambda *args: pytest.fail("must not prepare inference"))
+    monkeypatch.setattr(
+        connect, "_ensure_inference", lambda *args: pytest.fail("must not prepare inference")
+    )
     with pytest.raises(typer.BadParameter, match="Missing or unsafe"):
         build("codex")
 
@@ -146,6 +162,7 @@ def test_invalid_inherited_opencode_config_cleans_scratch(isolated, monkeypatch)
 def test_interrupted_skill_preparation_removes_temporary_profile(isolated, monkeypatch, agent):
     def interrupt(*args, **kwargs):
         raise KeyboardInterrupt()
+
     monkeypatch.setattr(agent_skills, "install_skills", interrupt)
     with pytest.raises(KeyboardInterrupt):
         build(agent)
@@ -181,8 +198,22 @@ def test_cli_no_launch_redacts_and_cleans_skill_sources(isolated, monkeypatch, c
         original(plan)
 
     monkeypatch.setattr(command, "print_plan", record)
-    assert main(["connect", "claude", "--url", "http://master", "--api-key", "private-test-token",
-                 "--kllm-skills", "operations", "--no-launch"]) == 0
+    assert (
+        main(
+            [
+                "connect",
+                "claude",
+                "--url",
+                "http://master",
+                "--api-key",
+                "private-test-token",
+                "--kllm-skills",
+                "operations",
+                "--no-launch",
+            ]
+        )
+        == 0
+    )
     assert all(not d.exists() for d in plans[0].cleanup_dirs)
     output = capsys.readouterr()
     assert "private-test-token" not in output.out + output.err

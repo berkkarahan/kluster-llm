@@ -16,7 +16,15 @@ from kllm.commands.gpu_options import (
 from kllm.commands.ui import console as console, format_vram as _fmt_vram
 
 __all__ = [
-    "_agent_base", "_agent_healthy", "_client", "_ensure_agent", "_fmt_vram",
-    "_prompt_gpu_ids", "_replace_tracked_instance", "_resolve_cli_gpus",
-    "_stop_local", "console", "parse_gpu_ids",
+    "_agent_base",
+    "_agent_healthy",
+    "_client",
+    "_ensure_agent",
+    "_fmt_vram",
+    "_prompt_gpu_ids",
+    "_replace_tracked_instance",
+    "_resolve_cli_gpus",
+    "_stop_local",
+    "console",
+    "parse_gpu_ids",
 ]

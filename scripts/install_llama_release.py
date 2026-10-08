@@ -55,7 +55,11 @@ def score_release_asset(
         score += 50
     elif backend == "cpu" and "cpu" in n:
         score += 50
-    elif backend == "cpu" and not macos and ("cuda" not in n and "vulkan" not in n and "rocm" not in n):
+    elif (
+        backend == "cpu"
+        and not macos
+        and ("cuda" not in n and "vulkan" not in n and "rocm" not in n)
+    ):
         # Non-macOS: unnamed packs without a GPU tag may be CPU. macOS
         # ``bin-macos-*`` packs are Metal — never treat them as CPU.
         score += 40

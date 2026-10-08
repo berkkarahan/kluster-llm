@@ -1,4 +1,5 @@
 """Pinned-runtime memory contracts using small, sparse synthetic GGUFs."""
+
 from __future__ import annotations
 
 import os
@@ -20,18 +21,37 @@ from kllm.run_settings import RunBody
 
 def synthetic_gguf(path: Path, arch="llama", **metadata):
     """Write real tensor descriptors and sparse data, without CI model downloads."""
-    values = {"general.architecture": arch, f"{arch}.block_count": 4,
-              f"{arch}.context_length": 8192, f"{arch}.embedding_length": 512,
-              f"{arch}.feed_forward_length": 1024, f"{arch}.attention.head_count": 8,
-              f"{arch}.attention.head_count_kv": 2, f"{arch}.attention.key_length": 64,
-              f"{arch}.attention.value_length": 64}
+    values = {
+        "general.architecture": arch,
+        f"{arch}.block_count": 4,
+        f"{arch}.context_length": 8192,
+        f"{arch}.embedding_length": 512,
+        f"{arch}.feed_forward_length": 1024,
+        f"{arch}.attention.head_count": 8,
+        f"{arch}.attention.head_count_kv": 2,
+        f"{arch}.attention.key_length": 64,
+        f"{arch}.attention.value_length": 64,
+    }
     if arch == "deepseek2":
-        values.update({f"{arch}.attention.kv_lora_rank": 512, f"{arch}.rope.dimension_count": 64,
-                       f"{arch}.attention.key_length_mla": 128, f"{arch}.attention.value_length_mla": 128})
+        values.update(
+            {
+                f"{arch}.attention.kv_lora_rank": 512,
+                f"{arch}.rope.dimension_count": 64,
+                f"{arch}.attention.key_length_mla": 128,
+                f"{arch}.attention.value_length_mla": 128,
+            }
+        )
     if arch == "qwen35moe":
-        values.update({f"{arch}.ssm.state_size": 64, f"{arch}.ssm.inner_size": 2048,
-                       f"{arch}.ssm.time_step_rank": 32, f"{arch}.ssm.group_count": 4,
-                       f"{arch}.ssm.conv_kernel": 4, f"{arch}.full_attention_interval": 4})
+        values.update(
+            {
+                f"{arch}.ssm.state_size": 64,
+                f"{arch}.ssm.inner_size": 2048,
+                f"{arch}.ssm.time_step_rank": 32,
+                f"{arch}.ssm.group_count": 4,
+                f"{arch}.ssm.conv_kernel": 4,
+                f"{arch}.full_attention_interval": 4,
+            }
+        )
     values.update({f"{arch}.{k}": v for k, v in metadata.items()})
     tensors = [("token_embd.weight", (512, 2048))]
     tensors += [(f"blk.{i}.attn_q.weight", (512, 512)) for i in range(4)]
@@ -66,11 +86,18 @@ def synthetic_gguf(path: Path, arch="llama", **metadata):
 
 def synthetic_moe_gguf(path: Path, arch="qwen2moe", experts=4, layers=2):
     """Write an MoE GGUF with per-expert FFN tensors to exercise expert splits."""
-    values = {"general.architecture": arch, f"{arch}.block_count": layers,
-              f"{arch}.context_length": 8192, f"{arch}.embedding_length": 512,
-              f"{arch}.feed_forward_length": 1024, f"{arch}.attention.head_count": 8,
-              f"{arch}.attention.head_count_kv": 2, f"{arch}.attention.key_length": 64,
-              f"{arch}.attention.value_length": 64, f"{arch}.expert_count": experts}
+    values = {
+        "general.architecture": arch,
+        f"{arch}.block_count": layers,
+        f"{arch}.context_length": 8192,
+        f"{arch}.embedding_length": 512,
+        f"{arch}.feed_forward_length": 1024,
+        f"{arch}.attention.head_count": 8,
+        f"{arch}.attention.head_count_kv": 2,
+        f"{arch}.attention.key_length": 64,
+        f"{arch}.attention.value_length": 64,
+        f"{arch}.expert_count": experts,
+    }
     tensors = [("token_embd.weight", (512, 2048))]
     for i in range(layers):
         tensors.append((f"blk.{i}.attn_q.weight", (512, 512)))
@@ -187,8 +214,10 @@ def test_physical_batch_and_context_padding(tmp_path):
     assert capped["micro_batch"] == 512
 
 
-@pytest.mark.parametrize("dtype,block_bytes", [("q4_0", 18), ("q4_1", 20), ("q5_0", 22),
-                                               ("q5_1", 24), ("q8_0", 34), ("iq4_nl", 18)])
+@pytest.mark.parametrize(
+    "dtype,block_bytes",
+    [("q4_0", 18), ("q4_1", 20), ("q5_0", 22), ("q5_1", 24), ("q8_0", 34), ("iq4_nl", 18)],
+)
 def test_block_quantized_cache_storage_includes_scales(tmp_path, dtype, block_bytes):
     layout = synthetic_gguf(tmp_path / "model.gguf")
     result = costs(layout, cache_type_k=dtype, cache_type_v=dtype)
@@ -196,8 +225,11 @@ def test_block_quantized_cache_storage_includes_scales(tmp_path, dtype, block_by
 
 
 def test_pure_recurrent_architecture_has_no_kv_and_scales_state(tmp_path):
-    layout = synthetic_gguf(tmp_path / "mamba.gguf", "mamba", **{
-        "ssm.state_size": 16, "ssm.inner_size": 1024, "ssm.conv_kernel": 4})
+    layout = synthetic_gguf(
+        tmp_path / "mamba.gguf",
+        "mamba",
+        **{"ssm.state_size": 16, "ssm.inner_size": 1024, "ssm.conv_kernel": 4},
+    )
     one = costs(layout, parallel_slots=1)
     two = costs(layout, parallel_slots=2)
     assert one.kv_bytes == two.kv_bytes == 0
@@ -208,8 +240,13 @@ def test_pure_recurrent_architecture_has_no_kv_and_scales_state(tmp_path):
 
 def test_gpt_oss_alternating_swa_pattern_prices_full_attention_layers(tmp_path):
     layout = synthetic_gguf(
-        tmp_path / "gpt-oss.gguf", "gpt-oss",
-        **{"attention.sliding_window": 128, "attention.head_count": 64, "attention.head_count_kv": 8},
+        tmp_path / "gpt-oss.gguf",
+        "gpt-oss",
+        **{
+            "attention.sliding_window": 128,
+            "attention.head_count": 64,
+            "attention.head_count_kv": 8,
+        },
     )
     result = costs(layout)
     # llama.cpp openai-moe.cpp loads the alternating pattern (set_swa_pattern(2)):
@@ -232,12 +269,16 @@ def test_flash_swa_and_split_scratch(tmp_path):
     assert off.compute_bytes > on.compute_bytes
     row = settings(split_mode="row")
     a = memory_costs(
-        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
-        PlacementSettings.from_mapping(dict(row, device_count=1))
+        ModelLayout.from_mapping(layout),
+        12 * MIB,
+        4096,
+        PlacementSettings.from_mapping(dict(row, device_count=1)),
     )
     b = memory_costs(
-        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
-        PlacementSettings.from_mapping(dict(row, device_count=3))
+        ModelLayout.from_mapping(layout),
+        12 * MIB,
+        4096,
+        PlacementSettings.from_mapping(dict(row, device_count=3)),
     )
     assert b.compute_bytes > a.compute_bytes
 
@@ -245,29 +286,62 @@ def test_flash_swa_and_split_scratch(tmp_path):
 def test_auxiliary_assets_and_resolved_launch(tmp_path):
     draft = tmp_path / "draft.gguf"
     layout = synthetic_gguf(draft)
-    projector, adapter, vector = [tmp_path / name for name in ("projector.gguf", "adapter.gguf", "vector.gguf")]
+    projector, adapter, vector = [
+        tmp_path / name for name in ("projector.gguf", "adapter.gguf", "vector.gguf")
+    ]
     for path in (projector, adapter, vector):
         path.write_bytes(bytes(1024))
-    body = RunBody(model="fixture.gguf", draft_model=str(draft), speculative="draft", vision=True,
-                   mmproj=str(projector), extra_args=["--lora-scaled", str(adapter), "0.5",
-                                                     "--control-vector", str(vector), "--draft-max", "8",
-                                                     "--kv-unified", "--swa-full", "-ctkd", "q8_0"])
+    body = RunBody(
+        model="fixture.gguf",
+        draft_model=str(draft),
+        speculative="draft",
+        vision=True,
+        mmproj=str(projector),
+        extra_args=[
+            "--lora-scaled",
+            str(adapter),
+            "0.5",
+            "--control-vector",
+            str(vector),
+            "--draft-max",
+            "8",
+            "--kv-unified",
+            "--swa-full",
+            "-ctkd",
+            "q8_0",
+        ],
+    )
     base_settings = resolve_launch_settings(body)
     resolved = estimate_auxiliary_assets(body, base_settings)
     resolved_mapping = resolved.to_mapping()
     assert base_settings.draft_size_bytes == 0
     assert resolved.draft_size_bytes == draft.stat().st_size
     memory = memory_costs(
-        ModelLayout.from_mapping(layout), draft.stat().st_size, 4096,
-        PlacementSettings.from_mapping(resolved_mapping)
+        ModelLayout.from_mapping(layout),
+        draft.stat().st_size,
+        4096,
+        PlacementSettings.from_mapping(resolved_mapping),
     )
     assert memory.auxiliary_weights_bytes == 12 * MIB + 3072
     assert memory.auxiliary_runtime_bytes > 512 * MIB
     assert memory.complete
-    launch = build_master_launch(body, {"ngl": 5, "tensor_split_csv": "5", "resolved_launch_settings": resolved_mapping},
-                                 model_path=draft, rpc_servers=[], infer_port=8080, repo_root=None,
-                                 gpu_env={}, extra_args=[])
-    for flag in ("--kv-unified", "--swa-full", "--spec-draft-n-max", "--cache-type-k-draft", "--spec-type"):
+    launch = build_master_launch(
+        body,
+        {"ngl": 5, "tensor_split_csv": "5", "resolved_launch_settings": resolved_mapping},
+        model_path=draft,
+        rpc_servers=[],
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
+    for flag in (
+        "--kv-unified",
+        "--swa-full",
+        "--spec-draft-n-max",
+        "--cache-type-k-draft",
+        "--spec-type",
+    ):
         assert launch["extra_args"].count(flag) == 1
     assert "--draft-max" not in launch["extra_args"]
     assert "draft-simple" in launch["extra_args"]
@@ -277,12 +351,23 @@ def test_auxiliary_assets_and_resolved_launch(tmp_path):
 
 def test_unknown_arguments_and_missing_assets_are_incomplete(tmp_path):
     layout = synthetic_gguf(tmp_path / "model.gguf")
-    body = RunBody(model="fixture.gguf", draft_model=str(tmp_path / "missing.gguf"), vision=True,
-                   extra_args=["--lora", str(tmp_path / "missing-adapter.gguf"), "--some-new-memory-flag", "1"])
+    body = RunBody(
+        model="fixture.gguf",
+        draft_model=str(tmp_path / "missing.gguf"),
+        vision=True,
+        extra_args=[
+            "--lora",
+            str(tmp_path / "missing-adapter.gguf"),
+            "--some-new-memory-flag",
+            "1",
+        ],
+    )
     resolved = estimate_auxiliary_assets(body, resolve_launch_settings(body))
     memory = memory_costs(
-        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
-        PlacementSettings.from_mapping(resolved.to_mapping())
+        ModelLayout.from_mapping(layout),
+        12 * MIB,
+        4096,
+        PlacementSettings.from_mapping(resolved.to_mapping()),
     )
     assert not memory.complete
     assert any("draft model" in w for w in memory.warnings)
@@ -292,36 +377,68 @@ def test_unknown_arguments_and_missing_assets_are_incomplete(tmp_path):
     neutral = RunBody(model="fixture.gguf", extra_args=["--temp", "0.2", "--threads-batch", "2"])
     resolved = estimate_auxiliary_assets(neutral, resolve_launch_settings(neutral))
     assert memory_costs(
-        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
-        PlacementSettings.from_mapping(resolved.to_mapping())
+        ModelLayout.from_mapping(layout),
+        12 * MIB,
+        4096,
+        PlacementSettings.from_mapping(resolved.to_mapping()),
     ).complete
 
 
-COMPONENTS = ("weights_estimate_bytes", "auxiliary_weights_bytes", "kv_estimate_bytes",
-              "recurrent_state_bytes", "checkpoint_estimate_bytes", "compute_estimate_bytes",
-              "auxiliary_runtime_bytes", "execution_overhead_bytes")
+COMPONENTS = (
+    "weights_estimate_bytes",
+    "auxiliary_weights_bytes",
+    "kv_estimate_bytes",
+    "recurrent_state_bytes",
+    "checkpoint_estimate_bytes",
+    "compute_estimate_bytes",
+    "auxiliary_runtime_bytes",
+    "execution_overhead_bytes",
+)
 
 
 def capacity(nid="master", *, master=True, unified=False, memory=8192 * MIB):
-    return dict(node_id=nid, is_master=master, total_ram_bytes=memory, available_ram_bytes=memory,
-                backend="metal" if unified else "vulkan", unified_memory=unified,
-                devices=[dict(index=0, device="Metal" if unified else "Vulkan0", vram_bytes=memory,
-                              free_bytes=memory, backend="metal" if unified else "vulkan")],
-                rpc_endpoint=f"{nid}:50052")
+    return dict(
+        node_id=nid,
+        is_master=master,
+        total_ram_bytes=memory,
+        available_ram_bytes=memory,
+        backend="metal" if unified else "vulkan",
+        unified_memory=unified,
+        devices=[
+            dict(
+                index=0,
+                device="Metal" if unified else "Vulkan0",
+                vram_bytes=memory,
+                free_bytes=memory,
+                backend="metal" if unified else "vulkan",
+            )
+        ],
+        rpc_endpoint=f"{nid}:50052",
+    )
 
 
 @pytest.mark.parametrize("placement", ["cpu", "gpu", "unified", "rpc", "overflow"])
 def test_allocation_conserves_components(model_layout, placement):
-    master = capacity(unified=placement == "unified", memory=32 * MIB if placement == "overflow" else 8192 * MIB)
+    master = capacity(
+        unified=placement == "unified", memory=32 * MIB if placement == "overflow" else 8192 * MIB
+    )
     nodes = [master]
     if placement == "rpc":
         master["devices"] = []
         master["backend"] = "cpu"
         nodes.insert(0, capacity("worker", master=False))
     typed_nodes = tuple(PlacementNodeInput.from_mapping(value) for value in nodes)
-    result = plan_devices(typed_nodes, 12 * MIB, ModelLayout.from_mapping(model_layout), PlacementSettings.from_mapping(settings()), context=4096,
-                          headroom=.8, device="cpu" if placement == "cpu" else "gpu",
-                          vram_weight=.6, latency_weight=.4)
+    result = plan_devices(
+        typed_nodes,
+        12 * MIB,
+        ModelLayout.from_mapping(model_layout),
+        PlacementSettings.from_mapping(settings()),
+        context=4096,
+        headroom=0.8,
+        device="cpu" if placement == "cpu" else "gpu",
+        vram_weight=0.6,
+        latency_weight=0.4,
+    )
     assert result.estimated_bytes == sum(getattr(result, c) for c in COMPONENTS)
     assert result.estimated_bytes == result.vram_alloc_bytes + result.cpu_alloc_bytes
     assert result.estimated_bytes == sum(result.node_alloc_bytes)
@@ -335,12 +452,27 @@ def test_automatic_context_reprices_batch_for_each_candidate(tmp_path):
     layout = synthetic_gguf(tmp_path / "model.gguf")
     resolved = settings(context_auto=True, context=512, batch_size=8192, micro_batch=8192)
     node = capacity(memory=400 * MIB)
-    result = native.plan_split([node], 12 * MIB, context=512, context_auto=True, headroom=1,
-                               device="cpu", model_layout=layout, launch_settings=resolved)
+    result = native.plan_split(
+        [node],
+        12 * MIB,
+        context=512,
+        context_auto=True,
+        headroom=1,
+        device="cpu",
+        model_layout=layout,
+        launch_settings=resolved,
+    )
     assert result["fit_status"] != "overflow"
     assert 512 <= result["context_effective"] < 8192
-    expected = native.plan_split([node], 12 * MIB, context=result["context_effective"], headroom=1,
-                                 device="cpu", model_layout=layout, launch_settings=resolved)
+    expected = native.plan_split(
+        [node],
+        12 * MIB,
+        context=result["context_effective"],
+        headroom=1,
+        device="cpu",
+        model_layout=layout,
+        launch_settings=resolved,
+    )
     assert result["estimated_bytes"] == expected["estimated_bytes"]
     assert sum(result[c] for c in COMPONENTS) == result["estimated_bytes"]
 
@@ -352,16 +484,31 @@ def test_legacy_native_parity_for_supported_single_slot_cache_geometry(k, v):
     # The legacy heuristic models 128 K and V elements per token/layer and
     # 32 layers for this file-size tier. Compare its supported float widths;
     # quantized block scales and slot semantics deliberately differ.
-    layout = dict(architecture="llama", layers=[MIB] * 32, input_bytes=0, output_bytes=0,
-                  confidence="metadata", metadata={"llama.embedding_length": 4096,
-                  "llama.attention.head_count": 32, "llama.attention.head_count_kv": 1})
+    layout = dict(
+        architecture="llama",
+        layers=[MIB] * 32,
+        input_bytes=0,
+        output_bytes=0,
+        confidence="metadata",
+        metadata={
+            "llama.embedding_length": 4096,
+            "llama.attention.head_count": 32,
+            "llama.attention.head_count_kv": 1,
+        },
+    )
     resolved = settings(cache_type_k=k, cache_type_v=v, parallel_slots=1)
     python = memory_costs(
-        ModelLayout.from_mapping(layout), 1024 * MIB, 4096,
-        PlacementSettings.from_mapping(resolved)
+        ModelLayout.from_mapping(layout), 1024 * MIB, 4096, PlacementSettings.from_mapping(resolved)
     )
-    legacy = native.plan_split([capacity()], 1024 * MIB, context=4096, device="cpu",
-                                cache_type_k=k, cache_type_v=v, parallel_slots=1)
+    legacy = native.plan_split(
+        [capacity()],
+        1024 * MIB,
+        context=4096,
+        device="cpu",
+        cache_type_k=k,
+        cache_type_v=v,
+        parallel_slots=1,
+    )
     assert legacy["kv_estimate_bytes"] == python.kv_bytes
     assert legacy["estimate_complete"] is False
     assert "legacy native" in legacy["estimate_confidence"]
@@ -389,8 +536,7 @@ def test_moe_expert_tensor_split(tmp_path):
     assert all(eb > 0 for eb in layout["expert_layers"])
     assert all(eb < lb for eb, lb in zip(layout["expert_layers"], layout["layers"]))
     memory = memory_costs(
-        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
-        PlacementSettings.from_mapping(settings())
+        ModelLayout.from_mapping(layout), 12 * MIB, 4096, PlacementSettings.from_mapping(settings())
     )
     assert memory.expert_bytes == sum(layout["expert_layers"])
     assert memory.expert_bytes > 0
@@ -400,8 +546,7 @@ def test_non_moe_layout_has_no_expert_split(tmp_path):
     layout = synthetic_gguf(tmp_path / "plain.gguf")
     assert all(eb == 0 for eb in layout["expert_layers"])
     memory = memory_costs(
-        ModelLayout.from_mapping(layout), 12 * MIB, 4096,
-        PlacementSettings.from_mapping(settings())
+        ModelLayout.from_mapping(layout), 12 * MIB, 4096, PlacementSettings.from_mapping(settings())
     )
     assert memory.expert_bytes == 0
 

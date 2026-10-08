@@ -52,9 +52,7 @@ async def plan_run_validation_handler(
     return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
-async def http_error_handler(
-    request: Request, exc: StarletteHTTPException
-) -> JSONResponse:
+async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Render HTTP failures with the response shape selected by API version."""
     if request.url.path.startswith("/v2/"):
         content = error_envelope(exc.status_code, exc.detail)

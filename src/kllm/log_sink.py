@@ -15,8 +15,17 @@ from kllm.state import home_dir, state_path
 
 
 def command(path: str | Path) -> list[str]:
-    return [sys.executable, "-m", "kllm.log_sink", "--log-path", str(path),
-            "--state-path", str(state_path()), "--status-dir", str(home_dir() / ".log-sinks")]
+    return [
+        sys.executable,
+        "-m",
+        "kllm.log_sink",
+        "--log-path",
+        str(path),
+        "--state-path",
+        str(state_path()),
+        "--status-dir",
+        str(home_dir() / ".log-sinks"),
+    ]
 
 
 class OutputSink:
@@ -36,7 +45,10 @@ class OutputSink:
     def sync(self) -> None:
         try:
             policy = json.loads(self.policy.read_text(encoding="utf-8"))
-            enabled, generation = policy.get("logging_enabled", True), policy.get("logging_generation", "")
+            enabled, generation = (
+                policy.get("logging_enabled", True),
+                policy.get("logging_generation", ""),
+            )
             if type(enabled) is not bool or not isinstance(generation, str):
                 return
         except FileNotFoundError:
@@ -53,8 +65,13 @@ class OutputSink:
             self._ack()
 
     def _ack(self) -> None:
-        status = dict(pid=os.getpid(), path=str(self.path), enabled=self.enabled,
-                      generation=self.generation, error=self.error)
+        status = dict(
+            pid=os.getpid(),
+            path=str(self.path),
+            enabled=self.enabled,
+            generation=self.generation,
+            error=self.error,
+        )
         if status != self.last_status:
             temporary = self.status_path.with_suffix(".tmp")
             try:
@@ -101,7 +118,7 @@ class PolicyFileHandler(logging.Handler):
         self.watcher.start()
 
     def _watch(self) -> None:
-        while not self.stopped.wait(.1):
+        while not self.stopped.wait(0.1):
             self.sink.sync()
 
     def emit(self, record: logging.LogRecord) -> None:

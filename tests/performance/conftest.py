@@ -1,4 +1,5 @@
 """Opt-in timing and child-process leak helpers for performance tests."""
+
 from __future__ import annotations
 
 import os

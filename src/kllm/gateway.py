@@ -25,9 +25,7 @@ async def _upstream_reachable(port: int, client: httpx.AsyncClient | None = None
     if client is not None:
         for path in ("/health", "/v1/models"):
             try:
-                response = await client.get(
-                    f"{infer_base(port)}{path}", timeout=1.0
-                )
+                response = await client.get(f"{infer_base(port)}{path}", timeout=1.0)
                 if response.status_code < 500:
                     return True
             except httpx.RequestError:
@@ -47,9 +45,7 @@ async def _upstream_reachable(port: int, client: httpx.AsyncClient | None = None
             return False
 
 
-async def require_inference(
-    port: int, client: httpx.AsyncClient | None = None
-) -> None:
+async def require_inference(port: int, client: httpx.AsyncClient | None = None) -> None:
     if not await _upstream_reachable(port, client):
         raise HTTPException(
             503,
@@ -63,8 +59,10 @@ def _openai_tools_passthrough(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_model_defaults(
-    body: dict[str, Any], model_path: Path | str | None,
-    active_config: dict[str, Any] | None = None, protocol: str = "chat",
+    body: dict[str, Any],
+    model_path: Path | str | None,
+    active_config: dict[str, Any] | None = None,
+    protocol: str = "chat",
 ) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(400, "request must be a JSON object")
@@ -86,12 +84,19 @@ async def proxy_chat_completions(
     model_path: Path | str | None = None,
     active_config: dict[str, Any] | None = None,
 ) -> Response:
-    body = _apply_model_defaults(_openai_tools_passthrough(await request.json()), model_path, active_config)
+    body = _apply_model_defaults(
+        _openai_tools_passthrough(await request.json()), model_path, active_config
+    )
     return await _proxy(request, port, "/v1/chat/completions", body)
 
 
-async def proxy_responses(port: int, request: Request, *, count_tokens: bool = False,
-                          active_config: dict[str, Any] | None = None) -> Response:
+async def proxy_responses(
+    port: int,
+    request: Request,
+    *,
+    count_tokens: bool = False,
+    active_config: dict[str, Any] | None = None,
+) -> Response:
     """llama.cpp owns Responses conversion, tool events and token accounting."""
     body = await request.json()
     if not isinstance(body, dict):
@@ -99,7 +104,9 @@ async def proxy_responses(port: int, request: Request, *, count_tokens: bool = F
     body = _coalesce_response_instructions(body)
     if not count_tokens and active_config is not None:
         body = apply_active_defaults(body, active_config, "responses")
-    return await _proxy(request, port, "/v1/responses/input_tokens" if count_tokens else "/v1/responses", body)
+    return await _proxy(
+        request, port, "/v1/responses/input_tokens" if count_tokens else "/v1/responses", body
+    )
 
 
 def _coalesce_response_instructions(body: dict[str, Any]) -> dict[str, Any]:
@@ -121,7 +128,12 @@ def _coalesce_response_instructions(body: dict[str, Any]) -> dict[str, Any]:
         content = item.get("content")
         if isinstance(content, str):
             prefix.append(content)
-        elif isinstance(content, list) and all(isinstance(part, dict) and part.get("type") in ("input_text", "text") and isinstance(part.get("text"), str) for part in content):
+        elif isinstance(content, list) and all(
+            isinstance(part, dict)
+            and part.get("type") in ("input_text", "text")
+            and isinstance(part.get("text"), str)
+            for part in content
+        ):
             prefix.append("\n".join(part["text"] for part in content))
         else:
             return body
@@ -154,7 +166,9 @@ async def _proxy(request: Request, port: int, path: str, body: dict[str, Any]) -
             stream=True,
         )
     except httpx.RequestError as exc:
-        raise HTTPException(503, "inference not running — use `kllm run --model …` or dashboard Plan & Run") from exc
+        raise HTTPException(
+            503, "inference not running — use `kllm run --model …` or dashboard Plan & Run"
+        ) from exc
 
     async def close() -> None:
         # Cancellation must not interrupt returning the connection to the pool.
@@ -162,21 +176,27 @@ async def _proxy(request: Request, port: int, path: str, body: dict[str, Any]) -
             await upstream.aclose()
 
     if body.get("stream") and upstream.status_code < 400:
+
         async def chunks() -> AsyncIterator[bytes]:
             try:
                 async for chunk in upstream.aiter_bytes():
                     yield chunk
             finally:
                 await close()
+
         return StreamingResponse(
-            chunks(), status_code=upstream.status_code,
+            chunks(),
+            status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "text/event-stream"),
             background=BackgroundTask(close),
         )
     try:
         content = await upstream.aread()
-        return Response(content, status_code=upstream.status_code,
-                        media_type=upstream.headers.get("content-type", "application/json"))
+        return Response(
+            content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "application/json"),
+        )
     finally:
         await close()
 
@@ -280,21 +300,40 @@ def _openai_chunk_to_anthropic_sse(data: dict[str, Any], msg_id: str) -> list[st
         )
         events.append(
             "event: content_block_start\ndata: "
-            + json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+            + json.dumps(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            )
         )
     text = delta.get("content")
     if text:
         events.append(
             "event: content_block_delta\ndata: "
-            + json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}})
+            + json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                }
+            )
         )
     if finish:
         events.append(
-            "event: content_block_stop\ndata: " + json.dumps({"type": "content_block_stop", "index": 0})
+            "event: content_block_stop\ndata: "
+            + json.dumps({"type": "content_block_stop", "index": 0})
         )
         events.append(
             "event: message_delta\ndata: "
-            + json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}})
+            + json.dumps(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 0},
+                }
+            )
         )
         events.append("event: message_stop\ndata: " + json.dumps({"type": "message_stop"}))
     return events

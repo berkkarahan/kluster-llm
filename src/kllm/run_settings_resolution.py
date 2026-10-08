@@ -56,7 +56,9 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         "split_mode": resolve_split_mode(body),
         "kv_unified": body.parallel_slots == "auto",
         "swa_full": False,
-        "speculative": "draft-simple" if body.draft_enabled() and body.speculative == "auto" else body.speculative,
+        "speculative": "draft-simple"
+        if body.draft_enabled() and body.speculative == "auto"
+        else body.speculative,
         "draft_max": 3 if body.draft_max is None else body.draft_max,
         "draft_cache_type_k": "f16",
         "draft_cache_type_v": "f16",
@@ -184,8 +186,10 @@ def estimate_auxiliary_assets(
     settings_values = settings.to_mapping()
     warnings = []
     weights = 0
-    for label, path in (("draft model", body.draft_model if body.draft_enabled() else None),
-                        ("vision projector", body.mmproj if body.vision else None)):
+    for label, path in (
+        ("draft model", body.draft_model if body.draft_enabled() else None),
+        ("vision projector", body.mmproj if body.vision else None),
+    ):
         if not path:
             continue
         size = _file_size_bytes(path)

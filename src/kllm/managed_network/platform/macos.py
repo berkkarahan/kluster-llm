@@ -1,4 +1,5 @@
 """macOS exact aliases; networksetup services, DNS and gateways are never changed."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -23,31 +24,66 @@ class MacOSAdapter(PlatformAdapter):
 
     def inspect(self, adapter_id: str) -> AdapterSnapshot:
         if not INTERFACE_RE.fullmatch(adapter_id):
-            raise PlatformRefusal('INVALID_ADAPTER', 'Invalid macOS adapter identifier')
+            raise PlatformRefusal("INVALID_ADAPTER", "Invalid macOS adapter identifier")
         service, hardware = _mac_service(adapter_id, run_fixed)
         index = socket.if_nametoindex(adapter_id)
-        output = run_fixed(['ifconfig', adapter_id])
-        match = re.search(r'\bether\s+([0-9a-f:]{17})', output, re.I)
+        output = run_fixed(["ifconfig", adapter_id])
+        match = re.search(r"\bether\s+([0-9a-f:]{17})", output, re.I)
         if not match:
-            raise PlatformRefusal('INVALID_ADAPTER', 'Adapter does not have a verifiable Ethernet MAC')
+            raise PlatformRefusal(
+                "INVALID_ADAPTER", "Adapter does not have a verifiable Ethernet MAC"
+            )
         mac = match.group(1).lower()
         state = _inspect_macos(adapter_id, run_fixed)
-        info = run_fixed(['networksetup', '-getinfo', service])
-        gateway = re.search(r'^Router:\s*(.*)$', info, re.M)
-        facts = {'service': service, 'hardware': hardware, 'dns': run_fixed(['networksetup', '-getdnsservers', service]).strip(), 'gateway': gateway.group(1).strip() if gateway else None}
-        fingerprint = digest({'service': service, 'hardware': hardware, 'mac': mac, 'index': index, 'interface': adapter_id})
+        info = run_fixed(["networksetup", "-getinfo", service])
+        gateway = re.search(r"^Router:\s*(.*)$", info, re.M)
+        facts = {
+            "service": service,
+            "hardware": hardware,
+            "dns": run_fixed(["networksetup", "-getdnsservers", service]).strip(),
+            "gateway": gateway.group(1).strip() if gateway else None,
+        }
+        fingerprint = digest(
+            {
+                "service": service,
+                "hardware": hardware,
+                "mac": mac,
+                "index": index,
+                "interface": adapter_id,
+            }
+        )
         return AdapterSnapshot(adapter_id, adapter_id, index, fingerprint, mac, state, facts)
 
     def add_exact(self, snapshot: AdapterSnapshot, assignment: NodeAssignment) -> None:
-        network = ipaddress.IPv4Network(f'{assignment.address}/{assignment.prefix_length}', strict=False)
-        run_fixed(['ifconfig', snapshot.os_interface, 'inet', assignment.address, 'netmask', str(network.netmask), 'alias'])
+        network = ipaddress.IPv4Network(
+            f"{assignment.address}/{assignment.prefix_length}", strict=False
+        )
+        run_fixed(
+            [
+                "ifconfig",
+                snapshot.os_interface,
+                "inet",
+                assignment.address,
+                "netmask",
+                str(network.netmask),
+                "alias",
+            ]
+        )
 
     def delete_exact(self, snapshot: AdapterSnapshot, assignment: NodeAssignment) -> None:
-        run_fixed(['ifconfig', snapshot.os_interface, 'inet', assignment.address, '-alias'])
+        run_fixed(["ifconfig", snapshot.os_interface, "inet", assignment.address, "-alias"])
 
     def check_source_route(self, snapshot: AdapterSnapshot, source: str, peer: str) -> None:
-        output = run_fixed(['route', '-n', 'get', peer])
-        interface = re.search(r'^\s*interface:\s*(\S+)', output, re.M)
-        flags = re.search(r'^\s*flags:\s*(.*)', output, re.M)
-        if not interface or interface.group(1) != snapshot.os_interface or (flags and 'GATEWAY' in flags.group(1)) or not any(str(address.ip) == source for address in snapshot.state.addresses):
-            raise PlatformRefusal('MANAGEMENT_ROUTE_CONFLICT', 'Dedicated source does not use the selected direct interface')
+        output = run_fixed(["route", "-n", "get", peer])
+        interface = re.search(r"^\s*interface:\s*(\S+)", output, re.M)
+        flags = re.search(r"^\s*flags:\s*(.*)", output, re.M)
+        if (
+            not interface
+            or interface.group(1) != snapshot.os_interface
+            or (flags and "GATEWAY" in flags.group(1))
+            or not any(str(address.ip) == source for address in snapshot.state.addresses)
+        ):
+            raise PlatformRefusal(
+                "MANAGEMENT_ROUTE_CONFLICT",
+                "Dedicated source does not use the selected direct interface",
+            )

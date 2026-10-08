@@ -30,11 +30,32 @@ def test_plan_cli_forwards_repeated_required_nodes(monkeypatch):
     import kllm.commands.inference as inference
 
     calls = []
+
     def respond(request):
         calls.append(json.loads(request.content))
         return httpx.Response(200, json={"fit_status": "fits"})
-    monkeypatch.setattr(inference, "_client", lambda port: httpx.Client(base_url="http://agent.test", transport=httpx.MockTransport(respond)))
-    assert main(["plan", "--model", "fixture.gguf", "--require-node", "master", "--require-node", "worker"]) == 0
+
+    monkeypatch.setattr(
+        inference,
+        "_client",
+        lambda port: httpx.Client(
+            base_url="http://agent.test", transport=httpx.MockTransport(respond)
+        ),
+    )
+    assert (
+        main(
+            [
+                "plan",
+                "--model",
+                "fixture.gguf",
+                "--require-node",
+                "master",
+                "--require-node",
+                "worker",
+            ]
+        )
+        == 0
+    )
     assert calls[0]["required_nodes"] == ["master", "worker"]
 
 
@@ -64,29 +85,49 @@ def test_connect_hermes_loopback_uses_local_token(monkeypatch, tmp_path, capsys)
         assert request.url.host == "127.0.0.1"
         assert request.url.port == 18765
         if request.url.path == "/v1/status":
-            return httpx.Response(200, json={"role": "master", "inference_up": True, "model_name": model})
+            return httpx.Response(
+                200, json={"role": "master", "inference_up": True, "model_name": model}
+            )
         assert request.url.path == "/v2/inference/models"
         assert request.headers["authorization"] == f"Bearer {token}"
         return httpx.Response(200, json={"data": [{"id": served}]})
 
     client_type = httpx.Client
-    monkeypatch.setattr(connect.httpx, "Client", lambda **kwargs: client_type(
-        transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(
+        connect.httpx,
+        "Client",
+        lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs),
+    )
     plans = []
     original_print = connect_command.print_plan
 
     def inspect_plan(plan):
         plans.append(plan)
         cfg = json.loads((plan.cleanup_dirs[0] / "config.yaml").read_text())
-        assert cfg["model"] == {"default": served, "provider": "custom",
-                                "base_url": "http://127.0.0.1:18765/v1"}
+        assert cfg["model"] == {
+            "default": served,
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:18765/v1",
+        }
         assert plan.env["OPENAI_API_KEY"] == token
         original_print(plan)
 
     monkeypatch.setattr(connect_command, "print_plan", inspect_plan)
 
-    assert main(["connect", "hermes", "--url", "http://127.0.0.1:18765",
-                 "--model", model, "--no-launch"]) == 0
+    assert (
+        main(
+            [
+                "connect",
+                "hermes",
+                "--url",
+                "http://127.0.0.1:18765",
+                "--model",
+                model,
+                "--no-launch",
+            ]
+        )
+        == 0
+    )
     assert len(plans) == 1
     assert [request.method for request in calls] == ["GET", "GET"]
     assert all(not directory.exists() for directory in plans[0].cleanup_dirs)

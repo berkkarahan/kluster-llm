@@ -14,6 +14,17 @@ _IFCONFIG_INET_RE = re.compile(
     r"\binet\s+(\d+\.\d+\.\d+\.\d+)\s+netmask\s+(0x[0-9a-fA-F]+|\d+\.\d+\.\d+\.\d+)"
 )
 
+# App-managed private-network subnets in proposal order (spec 012). A host
+# already carrying one of these addresses is on the dedicated link, so it is
+# preferred over the default-route management interface for RPC. Keep in sync
+# with ``kllm.managed_network.allocation.CANDIDATES``.
+PREFERRED_PRIVATE_SUBNETS: tuple[str, ...] = (
+    "10.10.10.0/24",
+    "192.168.234.0/24",
+    "172.29.234.0/24",
+    "10.234.234.0/24",
+)
+
 
 def local_ip_toward(remote: str) -> str | None:
     """Return the local IPv4 used to reach ``remote`` (UDP connect trick)."""
@@ -40,6 +51,22 @@ def local_ip_toward(remote: str) -> str | None:
     return None
 
 
+def _preferred_private_address(addresses: list[str]) -> str | None:
+    """First local address inside the app's private-network subnets, in order."""
+    parsed: list[tuple[str, ipaddress.IPv4Address | ipaddress.IPv6Address]] = []
+    for ip in addresses:
+        try:
+            parsed.append((str(ip), ipaddress.ip_address(str(ip))))
+        except ValueError:
+            continue
+    for cidr in PREFERRED_PRIVATE_SUBNETS:
+        network = ipaddress.ip_network(cidr)
+        matches = sorted(ip for ip, addr in parsed if addr.version == 4 and addr in network)
+        if matches:
+            return matches[0]
+    return None
+
+
 def pick_rpc_bind_host(
     preferred: str | None = None,
     *,
@@ -52,8 +79,9 @@ def pick_rpc_bind_host(
     Explicit preferred wins (including ``0.0.0.0`` for debug). When ``toward`` is
     set (typically the master host on join), prefer the local IP that routes to
     that peer — avoids advertising Hyper-V / VPN / virtual NIC addresses that
-    the master cannot reach. Otherwise pick the best non-loopback IPv4,
-    preferring RFC1918/lab ranges.
+    the master cannot reach. Otherwise prefer an address on the app's
+    private-network subnets (10.10.10.0/24 first), then the default-route
+    interface, then the best non-loopback IPv4 (RFC1918/lab ranges).
     """
     if preferred is not None and str(preferred).strip() != "":
         return str(preferred).strip()
@@ -64,6 +92,15 @@ def pick_rpc_bind_host(
     if toward_ip:
         return toward_ip
 
+    candidates = resolve_addresses()
+
+    # Prefer an address already on the app's dedicated private network before
+    # the default-route interface, so a multi-homed master does not advertise
+    # its management address (spec 012).
+    internal = _preferred_private_address(candidates)
+    if internal:
+        return internal
+
     # Without a peer hint, prefer the default-route interface (UDP egress trick).
     # Lexicographic sort among private IPs often picks VMware/Hyper-V switches
     # (e.g. 192.168.235.1) ahead of the Wi‑Fi/Ethernet LAN the cluster uses.
@@ -71,7 +108,6 @@ def pick_rpc_bind_host(
     if route_ip and is_usable_lan_peer(route_ip):
         return route_ip
 
-    candidates = resolve_addresses()
     ranked = sorted(candidates, key=_rank_bind_candidate)
     if ranked:
         return ranked[0]

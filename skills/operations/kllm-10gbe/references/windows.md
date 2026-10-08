@@ -49,7 +49,7 @@ Use this fallback only for a requested manual setup. A switch permits more than 
    ```
 
    Do not pass `-DefaultGateway` or change DNS. For example, use distinct host addresses such as `.1`, `.2`, and `.3` only after confirming the chosen `/24` has no overlap on every computer.
-3. Keep ordinary management on its existing interface. Configure the master to advertise/bind its own private address and rejoin workers using the private master address plus each worker's own `--rpc-bind`. Use `kllm-cluster` for lifecycle commands; keep join keys out of logs/history. Confirm worker status points at the private master and that accepted heartbeats are fresh, not only persisted membership.
+3. Keep ordinary management on its existing interface. Configure the master to advertise/bind its own private address and rejoin workers using the private master address plus each worker's own `--rpc-bind`. On the app's preferred private subnets (`10.10.10.0/24` first, then the documented fallbacks) `kllm start` binds the dedicated address automatically; for any other subnet pass `--rpc-bind <master-private-ip>`. Use `kllm-cluster` for lifecycle commands; keep join keys out of logs/history. Confirm worker status points at the private master and that accepted heartbeats are fresh, not only persisted membership.
 4. On Windows nodes that accept inbound RPC, keep TCP 50052 scoped to that node's private address, the private subnet, and the selected Ethernet interface. For an existing local allow rule, confirm it is TCP 50052, then modify its `PersistentStore` filters with local administrator approval and verify the effective `ActiveStore` filters:
 
    ```powershell

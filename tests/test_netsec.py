@@ -107,6 +107,98 @@ def test_pick_rpc_bind_host_default_route_beats_vmware_lex_order(monkeypatch):
     assert network_discovery.pick_rpc_bind_host(None) == "192.168.68.63"
 
 
+def test_pick_rpc_bind_host_prefers_private_network_over_default_route(monkeypatch):
+    from kllm import network_discovery
+
+    monkeypatch.setattr(
+        network_discovery,
+        "_list_ipv4_addresses",
+        lambda: ["192.168.68.60", "10.10.10.3"],
+    )
+
+    def fake_toward(remote: str) -> str | None:
+        if remote == "8.8.8.8":
+            return "192.168.68.60"
+        return None
+
+    monkeypatch.setattr(network_discovery, "local_ip_toward", fake_toward)
+    assert network_discovery.pick_rpc_bind_host(None) == "10.10.10.3"
+
+
+def test_pick_rpc_bind_host_private_network_subnet_order(monkeypatch):
+    from kllm import network_discovery
+
+    def fake_toward(remote: str) -> str | None:
+        if remote == "8.8.8.8":
+            return "192.168.68.60"
+        return None
+
+    monkeypatch.setattr(network_discovery, "local_ip_toward", fake_toward)
+    monkeypatch.setattr(
+        network_discovery,
+        "_list_ipv4_addresses",
+        lambda: ["172.29.234.9", "192.168.234.7"],
+    )
+    assert network_discovery.pick_rpc_bind_host(None) == "192.168.234.7"
+
+    monkeypatch.setattr(
+        network_discovery,
+        "_list_ipv4_addresses",
+        lambda: ["10.234.234.4", "172.29.234.9"],
+    )
+    assert network_discovery.pick_rpc_bind_host(None) == "172.29.234.9"
+
+    monkeypatch.setattr(
+        network_discovery,
+        "_list_ipv4_addresses",
+        lambda: ["192.168.68.60", "10.234.234.4"],
+    )
+    assert network_discovery.pick_rpc_bind_host(None) == "10.234.234.4"
+
+
+def test_preferred_private_subnets_match_managed_network_candidates():
+    from kllm import network_discovery
+    from kllm.managed_network.allocation import CANDIDATES
+
+    assert tuple(CANDIDATES) == network_discovery.PREFERRED_PRIVATE_SUBNETS
+
+
+def test_pick_rpc_bind_host_ignores_other_10x_addresses(monkeypatch):
+    from kllm import network_discovery
+
+    monkeypatch.setattr(
+        network_discovery,
+        "_list_ipv4_addresses",
+        lambda: ["10.66.87.5", "192.168.68.63"],
+    )
+
+    def fake_toward(remote: str) -> str | None:
+        if remote == "8.8.8.8":
+            return "192.168.68.63"
+        return None
+
+    monkeypatch.setattr(network_discovery, "local_ip_toward", fake_toward)
+    assert network_discovery.pick_rpc_bind_host(None) == "192.168.68.63"
+
+
+def test_pick_rpc_bind_host_toward_beats_private_network(monkeypatch):
+    from kllm import network_discovery
+
+    monkeypatch.setattr(
+        network_discovery,
+        "_list_ipv4_addresses",
+        lambda: ["10.10.10.3", "192.168.68.63"],
+    )
+
+    def fake_toward(remote: str) -> str | None:
+        if remote == "192.168.68.62":
+            return "192.168.68.63"
+        return None
+
+    monkeypatch.setattr(network_discovery, "local_ip_toward", fake_toward)
+    assert network_discovery.pick_rpc_bind_host(None, toward="192.168.68.62") == "192.168.68.63"
+
+
 def test_is_usable_lan_peer():
     from kllm.netsec import is_usable_lan_peer
 

@@ -440,6 +440,7 @@ test('model search keeps one in-flight request and forwards the selected source'
       recording: { recording: 'interrupted', last_successful_save: null },
     };
     appStore.selectedNodeId = 'master';
+    appStore.rpcBindInput = '192.168.68.60';
     await appStore.stopCluster();
     assert.ok(requests.some((req) => req.path === '/v2/cluster' && req.method === 'DELETE'));
     assert.equal(appStore.status.role, 'idle');
@@ -448,6 +449,7 @@ test('model search keeps one in-flight request and forwards the selected source'
     assert.deepEqual(appStore.liveUsage.nodes, {});
     assert.deepEqual(appStore.liveUsage.relationships, []);
     assert.equal(appStore.selectedNodeId, '');
+    assert.equal(appStore.rpcBindInput, '');
     appStore.connected = false;
     assert.equal(appStore.viewState(), 'idle');
 

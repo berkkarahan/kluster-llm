@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from kllm.membership_state import LIVENESS_TIMEOUT_S
 from kllm.runtimes.models import BuildRequest, RuntimeTarget, TargetRequest, body_digest
-from kllm.runtimes.registry import RuntimeRegistry
+from kllm.runtimes.registry import RuntimeRegistry, TERMINAL
 from kllm.runtimes.selection import snapshot, use_runtime
 
 _RETRY_BASE_S = 30.0
@@ -142,6 +142,10 @@ class RuntimeControlService:
         selection_supported = self.native_supported()
         member = state.members.get(state.node_id) or {}
         fields = self._identity_fields(self.service.directory_view().get(state.node_id, {}), member, state.node_id)
+        # An in-flight preparation is not an error: report the job phase until
+        # the artifact exists, and only surface the capture failure after a
+        # terminal attempt has actually failed.
+        preparing = job is not None and job['phase'] not in TERMINAL
         return {'node_id': state.node_id, 'role': state.role, 'capability': 1,
                 'selection_supported': selection_supported,
                 'target_state': kind, 'target_error': target_error,
@@ -149,7 +153,7 @@ class RuntimeControlService:
                 'running': {k: running[k] for k in ('runtime_id', 'build_id', 'commit')} if running else None,
                 'phase': 'upgrade_required' if not selection_supported else 'prepared' if prepared else (job or {}).get('phase', 'not_installed'),
                 **fields,
-                'job': job, 'error': 'Rebuild the native extension for runtime selection' if not selection_supported else (job or {}).get('error') or error}
+                'job': job, 'error': 'Rebuild the native extension for runtime selection' if not selection_supported else (job or {}).get('error') or (None if preparing else error)}
 
     def status(self):
         data = self.registry.snapshot()

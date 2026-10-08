@@ -391,6 +391,19 @@ def test_runtime_status_labels_nodes_from_the_shared_directory(registry):
     assert row['channel'] == {'connected': True, 'error': None}
 
 
+def test_active_preparation_does_not_report_a_missing_artifact(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    registry.data['jobs']['job-1'] = {'job_id': 'job-1', 'runtime_id': selected.runtime_id, 'backend': 'cpu',
+                                      'phase': 'building', 'error': None, 'created_at': 0, 'finished_at': None}
+    status = manager.local_status(selected.runtime_id)
+    assert (status['phase'], status['error']) == ('building', None)
+    registry.data['jobs']['job-1'].update(phase='failed', error='toolchain failed')
+    status = manager.local_status(selected.runtime_id)
+    assert (status['phase'], status['error']) == ('failed', 'toolchain failed')
+
+
 def test_repeated_failed_observations_do_not_burn_the_retry_budget(registry):
     manager = control(registry)
     failed = {'phase': 'failed', 'job': {'job_id': 'job-1', 'phase': 'failed'}}

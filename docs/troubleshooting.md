@@ -193,12 +193,15 @@ New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Dire
 Never open RPC port 50052 to the public internet.
 
 A worker can keep heartbeating (the dashboard still shows it connected) while
-its `rpc-server` is not running. `kllm run` then fails with `RPC peer(s)
-unreachable`. The worker agent now reconciles this on its membership tick: if the
-tracked `rpc-server` is missing or dead it stops any leftover `rpc-server` still
-holding port 50052 and restarts a tracked one. Give it a few seconds, then
-retry. If it keeps failing, check `kllm status` for that node and confirm the
-`rpc-server` binary and port are available.
+its `rpc-server` is not running; a Run starts it through the signed command
+channel. The worker retries a failed RPC start (cold GPU probe, immediate exit,
+or bind timeout) up to three bounded attempts inside that one command, and the
+master waits up to 60 seconds for the final result. A first Run after a fresh
+macOS runtime build can therefore recover on its own. If it still fails, the
+master shows `RPC startup failed` only after the retries are exhausted; inspect
+`kllm status` for that node: its `rpc_error` holds the real cause and the RPC
+logs hold the `rpc-server` output. Confirm the `rpc-server` binary and port are
+available, then retry.
 
 ### RPC handshake or malformed-response errors
 

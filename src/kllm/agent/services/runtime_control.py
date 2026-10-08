@@ -21,9 +21,11 @@ _RETRY_PHASES = ('failed', 'interrupted', 'cancelled')
 
 
 class RuntimeControlService:
-    def __init__(self, service, registry: RuntimeRegistry, backend, *, native_supported=lambda: True):
+    def __init__(self, service, registry: RuntimeRegistry, backend, *, native_supported=lambda: True, warm_capabilities=lambda: None):
         self.service, self.registry, self.backend = service, registry, backend
         self.native_supported = native_supported
+        self.warm_capabilities = warm_capabilities
+        self.warmed_runtime_id: str | None = None
         self.task = None
         self.observed: dict[str, dict] = {}
         self.node_errors: dict[str, str] = {}
@@ -118,6 +120,19 @@ class RuntimeControlService:
                                request_id=str(uuid4()) if retry else str(uuid5(NAMESPACE_URL, f'{value.cluster_binding_id}:{self.service.state().node_id}:{value.revision}:{backend}')))
         self.registry.build(request)
         return self.local_status()
+
+    def _warm_prepared(self, status: dict | None) -> None:
+        """Run the freshly prepared binary once off the Run path.
+
+        The first ``llama-server --list-devices`` after a macOS source build is
+        the slow one; doing it here (through the capacity refresh scheduler)
+        keeps the RPC start command inside its signed deadline.
+        """
+        identity = ((status or {}).get('prepared') or {}).get('runtime_id')
+        if (status or {}).get('phase') != 'prepared' or not identity or identity == self.warmed_runtime_id:
+            return
+        self.warmed_runtime_id = identity
+        self.warm_capabilities()
 
     @staticmethod
     def _identity_fields(identity: dict, member: dict, node: str) -> dict:
@@ -307,7 +322,8 @@ class RuntimeControlService:
                 self.local_retry_after = 0.0
             retry = await asyncio.to_thread(self._local_retry, target['version']['runtime_id'])
             try:
-                await asyncio.to_thread(self.prepare, target, retry=retry)
+                status = await asyncio.to_thread(self.prepare, target, retry=retry)
+                self._warm_prepared(status)
                 self.reconcile_error = None
             except (OSError, ValueError, KeyError) as error:
                 self.reconcile_error = str(error)[:1000]
@@ -346,7 +362,9 @@ class RuntimeControlService:
             target = RuntimeTarget.model_validate(command.body['target'])
             if target.cluster_binding_id != str(command.cluster_binding_id) or target.master_node_id != command.master_node_id:
                 raise ValueError('Runtime target belongs to another cluster')
-            return await asyncio.to_thread(self.prepare, target.model_dump(), retry=command.body.get('retry', False))
+            status = await asyncio.to_thread(self.prepare, target.model_dump(), retry=command.body.get('retry', False))
+            self._warm_prepared(status)
+            return status
         if command.action == 'runtime_status':
             if set(command.body) != {'runtime_id'}:
                 raise ValueError('Invalid runtime inspection body')

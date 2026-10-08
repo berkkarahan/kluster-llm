@@ -16,6 +16,11 @@ from kllm import native, runtime
 from kllm.run_planning import member_rpc_host
 from kllm.runtimes.selection import snapshot, use_runtime
 
+# The worker retries a cold RPC start inside one signed command. The signed
+# command schema caps its lifetime at 60 s, so the master must wait that long
+# for the final result instead of dropping the command at the default 10 s.
+START_TTL_MS = 60_000
+
 
 def selected_workers(plan: dict[str, Any], members: dict[str, Any]) -> list[str]:
     endpoints = set(plan.get('rpc_endpoints') or [])
@@ -117,13 +122,15 @@ class RpcRunCoordinator:
             if session is None:
                 return node, {'status': 'failed', 'message': 'Paired worker channel unavailable'}
             try:
-                if action == 'start' and self.runtime_snapshot is not None:
-                    return node, await session.request_runtime(run_id, action, body={'runtime_id': self.runtime_snapshot['runtime_id']})
+                if action == 'start':
+                    body = {'runtime_id': self.runtime_snapshot['runtime_id']} if self.runtime_snapshot is not None else None
+                    return node, await session.request_runtime(run_id, action, ttl_ms=START_TTL_MS, body=body)
                 return node, await session.request_runtime(run_id, action)
             except (Exception, asyncio.CancelledError) as error:
                 if isinstance(error, asyncio.CancelledError):
                     raise
-                return node, {'status': 'failed', 'message': str(error)[:512]}
+                message = str(error) or f'{action} command timed out'
+                return node, {'status': 'failed', 'message': message[:512]}
         return dict(await asyncio.gather(*(request(node) for node in workers)))
 
     def _release_workers(self) -> None:

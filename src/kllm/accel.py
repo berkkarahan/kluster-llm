@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import os
 import sys
-from functools import lru_cache
+import threading
+import time
 from typing import Any, Sequence
 
 VALID_ACCEL_BACKENDS = frozenset({"metal", "cuda", "rocm", "vulkan", "cpu"})
 # User-selectable GPU engines (cpu is device mode, not a backend picker value).
 SELECTABLE_ACCEL_BACKENDS = frozenset({"metal", "cuda", "rocm", "vulkan"})
+
+# One accelerator init at a time: a cold Metal/Vulkan start can exceed the
+# probe timeout when it contends with a second probe (capacity refresh and RPC
+# startup both probe the same managed binary).
+_PROBE_TIMEOUT_S = 15
+_PROBE_TTL_S = 30.0
+_PROBE_CACHE_MAX = 4
+_probe_lock = threading.Lock()
+_probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
 
 def accel_backend_override() -> str | None:
@@ -200,13 +210,32 @@ def metal_device_init_failed(output: str) -> bool:
     return bool(re.search(r"^\s*:\s*\(\d+ MiB,", output, re.M))
 
 
-@lru_cache(maxsize=8)
 def binary_capabilities(binary: str, mtime_ns: int, epoch: int) -> dict[str, Any]:
-    """Cache capability probes; file identity invalidates after installation."""
+    """Probe one binary's devices with a single-flight, short-TTL cache.
+
+    ``epoch`` keeps the caller's periodic refresh intent; the lock and TTL also
+    stop the capacity refresh and an RPC start from launching two accelerator
+    probes at the same time. File identity (``mtime_ns``) still invalidates
+    after a runtime installation.
+    """
+    del epoch
+    key = (binary, mtime_ns)
+    with _probe_lock:
+        cached = _probe_cache.get(key)
+        if cached is not None and time.monotonic() - cached[0] < _PROBE_TTL_S:
+            return cached[1]
+        result = _run_capability_probe(binary)
+        _probe_cache[key] = (time.monotonic(), result)
+        if len(_probe_cache) > _PROBE_CACHE_MAX:
+            oldest = min(_probe_cache, key=lambda item: _probe_cache[item][0])
+            _probe_cache.pop(oldest, None)
+        return result
+
+
+def _run_capability_probe(binary: str) -> dict[str, Any]:
     import subprocess
 
-    del mtime_ns, epoch
-    kwargs: dict[str, Any] = dict(capture_output=True, text=True, timeout=15)
+    kwargs: dict[str, Any] = dict(capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     devices = subprocess.run([binary, "--list-devices"], **kwargs)

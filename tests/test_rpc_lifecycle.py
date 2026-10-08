@@ -61,6 +61,128 @@ def worker(monkeypatch, tmp_path):
     return SimpleNamespace(service=service, state=state, live=live, tokens=tokens, calls=calls, clock=clock)
 
 
+def _retry_state(monkeypatch, tmp_path):
+    monkeypatch.setenv('KLLM_HOME', str(tmp_path))
+    monkeypatch.setattr('kllm.agent.services.worker_rpc.netsec.ensure_rpc_firewall', lambda *_: {})
+    state = ClusterState(role='worker', node_id='worker', master_host='10.0.0.1', join_key='test', rpc_bind='10.0.0.2')
+    state.members['worker'] = {'rpc_capabilities': CPU, 'rpc_status': 'idle'}
+    state.save = lambda: None
+    return state
+
+
+def _retry_service(state, outcomes, *, clock, sleep, listener=None, before_start=None):
+    calls, live, tokens = [], {}, {}
+
+    def start(_state):
+        if before_start is not None:
+            before_start()
+        value = outcomes.pop(0)
+        calls.append(value.get('pid', 0))
+        if value.get('error'):
+            return value
+        pid = value['pid']
+        live[pid], tokens[pid] = True, f'token-{pid}'
+        state.process_pid, state.process_role = pid, 'worker'
+        state.members['worker']['rpc_devices'] = CPU
+        return value
+
+    service = WorkerRpcService(
+        lambda: state, lambda: SimpleNamespace(start_commanded_worker=start),
+        alive=lambda pid: live.get(pid, False), token=lambda pid: tokens[pid],
+        stop=lambda pid, **_: live.__setitem__(pid, False),
+        clock=lambda: clock[0], sleep=sleep, listener=listener or (lambda *_: True),
+    )
+    return SimpleNamespace(service=service, calls=calls, live=live, tokens=tokens)
+
+
+def test_transient_start_failure_is_retried(monkeypatch, tmp_path):
+    state = _retry_state(monkeypatch, tmp_path)
+    clock, sleeps = [10.0], []
+    retry = _retry_service(state, [{'error': 'probe timed out'}, {'pid': 101}], clock=clock, sleep=sleeps.append)
+    result = retry.service.execute(command(), 60)
+    assert result['status'] == 'serving' and result['pid'] == 101
+    assert retry.calls == [0, 101] and sleeps == [1.0]
+    assert state.members['worker']['rpc_status'] == 'serving'
+
+
+def test_start_retries_are_bounded(monkeypatch, tmp_path):
+    state = _retry_state(monkeypatch, tmp_path)
+    clock, sleeps = [10.0], []
+    retry = _retry_service(state, [{'error': 'probe timed out'}] * 3, clock=clock, sleep=sleeps.append)
+    with pytest.raises(PlatformRefusal, match='after 3 attempt'):
+        retry.service.execute(command(), 60)
+    assert retry.calls == [0, 0, 0] and sleeps == [1.0, 2.0]
+    assert state.members['worker']['rpc_status'] == 'failed'
+    assert 'probe timed out' in state.members['worker']['rpc_error']
+
+
+def test_retry_stops_when_deadline_budget_is_small(monkeypatch, tmp_path):
+    state = _retry_state(monkeypatch, tmp_path)
+    clock, sleeps = [10.0], []
+    retry = _retry_service(
+        state, [{'error': 'probe timed out'}, {'pid': 101}],
+        clock=clock, sleep=sleeps.append, before_start=lambda: clock.__setitem__(0, 40.0),
+    )
+    with pytest.raises(PlatformRefusal, match='after 1 attempt'):
+        retry.service.execute(command(), 50)
+    assert retry.calls == [0] and sleeps == []
+
+
+def test_listener_failure_restarts_rpc_server(monkeypatch, tmp_path):
+    state = _retry_state(monkeypatch, tmp_path)
+    clock, sleeps = [10.0], []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    retry = _retry_service(
+        state, [{'pid': 101}, {'pid': 102}],
+        clock=clock, sleep=sleep, listener=lambda pid, host, port: pid == 102,
+    )
+    result = retry.service.execute(command(), 60)
+    assert result['pid'] == 102
+    assert retry.calls == [101, 102]
+    assert retry.live[101] is False
+    assert 1.0 in sleeps
+
+
+def test_non_transient_refusal_is_not_retried(monkeypatch, tmp_path):
+    state = _retry_state(monkeypatch, tmp_path)
+    clock, calls = [10.0], []
+
+    def start(_state):
+        calls.append('start')
+        raise PlatformRefusal('RPC_BUSY', 'RPC belongs to another run')
+
+    service = WorkerRpcService(
+        lambda: state, lambda: SimpleNamespace(start_commanded_worker=start),
+        alive=lambda *_: True, token=lambda *_: 'token',
+        stop=lambda *_, **__: None, clock=lambda: clock[0], sleep=lambda _: None,
+    )
+    with pytest.raises(PlatformRefusal, match='another run'):
+        service.execute(command(), 60)
+    assert calls == ['start']
+
+
+def test_unexpected_start_error_is_not_retried(monkeypatch, tmp_path):
+    state = _retry_state(monkeypatch, tmp_path)
+    clock, calls = [10.0], []
+
+    def start(_state):
+        calls.append('start')
+        raise OSError('spawn failed')
+
+    service = WorkerRpcService(
+        lambda: state, lambda: SimpleNamespace(start_commanded_worker=start),
+        alive=lambda *_: True, token=lambda *_: 'token',
+        stop=lambda *_, **__: None, clock=lambda: clock[0], sleep=lambda _: None,
+    )
+    with pytest.raises(OSError, match='spawn failed'):
+        service.execute(command(), 60)
+    assert calls == ['start']
+
+
 def test_join_enrolls_without_runtime_side_effects():
     state = ClusterState(node_id='worker')
     state.save = lambda: None
@@ -163,15 +285,16 @@ def coordinator(monkeypatch):
         node: {'role': 'worker', 'rpc_bind': host, 'rpc_port': 50052, 'rpc_control_version': 1, 'rpc_capabilities': CPU}
         for node, host in (('selected', '10.0.0.2'), ('idle', '10.0.0.3'))
     }}
-    calls, metadata = [], {}
+    calls, metadata, ttls = [], {}, []
     failures = {}
 
     class Session:
         def __init__(self, node):
             self.node = node
 
-        async def request_runtime(self, run_id, action):
+        async def request_runtime(self, run_id, action, *, ttl_ms=10000, body=None):
             calls.append((self.node, action, run_id))
+            ttls.append((self.node, action, ttl_ms))
             if failures.get((self.node, action)):
                 return {'status': 'failed', 'message': 'controlled failure'}
             return {'status': 'idle' if action == 'stop' else 'serving', 'pid': 101, 'rpc_devices': CPU}
@@ -203,7 +326,13 @@ def coordinator(monkeypatch):
         return {'ok': True}
 
     controller.run = run
-    return SimpleNamespace(controller=controller, state=state, calls=calls, failures=failures, plan=plan)
+    return SimpleNamespace(controller=controller, state=state, calls=calls, failures=failures, plan=plan, ttls=ttls)
+
+
+def test_master_start_waits_for_worker_retries(coordinator):
+    coordinator.controller.launch(RunBody(model='controlled.gguf'))
+    assert ('selected', 'start', 60000) in coordinator.ttls
+    assert all(ttl == 10000 for _, action, ttl in coordinator.ttls if action != 'start')
 
 
 def test_master_starts_only_allocated_workers_and_stops_them_with_model(coordinator):

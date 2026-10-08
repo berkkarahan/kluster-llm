@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -172,6 +173,13 @@ class ChannelSession:
 
 
 class NetworkChannelHub:
+    # A pinned master peer can outlive the master's own pairing record (for
+    # example after a restored cluster.json). Re-asserting our peer is the only
+    # way to reconcile that divergence, so a rejected handshake retries the
+    # mutual join-secret bootstrap at this interval instead of looping on a
+    # connection the master keeps refusing.
+    BOOTSTRAP_RETRY_S = 15.0
+
     def __init__(self, store: NetworkStore, identity: LocalIdentity, state: Callable[[], Any], master_base: Callable[[], str | None], handler: Callable[[SignedCommand, float], Awaitable[dict[str, Any]]]):
         self.store, self.identity, self.state, self.master_base, self.handler = store, identity, state, master_base, handler
         self.bootstrap: Callable[[], Awaitable[None]] | None = None
@@ -231,7 +239,8 @@ class NetworkChannelHub:
             finally:
                 if self.sessions.get(peer.node_id) is session:
                     self.sessions.pop(peer.node_id, None)
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as error:
+            logging.getLogger(__name__).debug('network channel handshake refused: %s', error)
             try:
                 await socket.close(code=1008)
             except Exception:
@@ -264,13 +273,26 @@ class NetworkChannelHub:
     async def client_loop(self) -> None:
         import websockets
         import httpx
+        logger = logging.getLogger(__name__)
+        next_bootstrap = 0.0
+        reassert = False
         while not self.stopping:
             try:
                 peers = [p for p in self.store.peers() if p.expected_role == 'master']
                 base = self.master_base()
                 bootstrap = getattr(self, 'bootstrap', None)
-                if self.state().role == 'worker' and not peers and base and bootstrap:
-                    await bootstrap()
+                now = time.monotonic()
+                # Pair when unpinned, and re-assert a pinned peer whose handshake
+                # the master keeps refusing (throttled). The master only pairs an
+                # enrolled worker that proves the join secret, and a redundant
+                # commit is a safe upsert, so this cannot widen trust.
+                if self.state().role == 'worker' and base and bootstrap and (not peers or (reassert and now >= next_bootstrap)):
+                    next_bootstrap = now + self.BOOTSTRAP_RETRY_S
+                    reassert = False
+                    try:
+                        await bootstrap()
+                    except IdentityError as error:
+                        logger.warning('network channel pairing rejected: %s', error)
                     peers = [p for p in self.store.peers() if p.expected_role == 'master']
                 if self.state().role != 'worker' or len(peers) != 1 or not base:
                     await asyncio.sleep(1)
@@ -283,8 +305,10 @@ class NetworkChannelHub:
                         await session.pump()
                     finally:
                         self.sessions.pop(peers[0].node_id, None)
-            except (OSError, IdentityError, StoreConflict, ValueError, TimeoutError, websockets.WebSocketException, httpx.HTTPError):
-                pass  # Signed state is reconciled after a fresh handshake, never replayed blindly.
+                        reassert = True
+            except (OSError, IdentityError, StoreConflict, ValueError, TimeoutError, websockets.WebSocketException, httpx.HTTPError) as error:
+                reassert = True
+                logger.debug('network channel unavailable: %s', error)
             await asyncio.sleep(1)
 
     async def start(self) -> None:

@@ -136,7 +136,8 @@ def build_router(registry: Callable, control: Callable, state: Callable, token_v
             return registry().build(BuildRequest(runtime_id=target['version']['runtime_id'], backend=selected.backend(), request_id=str(uuid4())))
         session = selected.service.channels.sessions.get(node_id)
         if session is None:
-            raise HTTPException(409, 'Worker command channel unavailable')
+            raise HTTPException(409, detail={'code': 'CHANNEL_UNAVAILABLE',
+                                             'message': 'This worker has no paired signed control channel; re-pair it before forcing a sync'})
         return await session.request_runtime(uuid4(), 'prepare_runtime', body={'target': target, 'retry': True})
 
     @router.get('/cluster/runtime-target/nodes/{node_id}/builds/{job_id}/logs')
@@ -144,7 +145,8 @@ def build_router(registry: Callable, control: Callable, state: Callable, token_v
         authorize(request, master=True)
         session = control().service.channels.sessions.get(node_id)
         if session is None:
-            raise HTTPException(409, 'Worker command channel unavailable')
+            raise HTTPException(409, detail={'code': 'CHANNEL_UNAVAILABLE',
+                                             'message': 'This worker has no paired signed control channel; re-pair it to read remote build logs'})
         return await session.request_runtime(uuid4(), 'runtime_build_logs', body={'job_id': job_id})
 
     @router.post('/cluster/runtime-target/nodes/{node_id}/builds/{job_id}/cancel')
@@ -152,7 +154,8 @@ def build_router(registry: Callable, control: Callable, state: Callable, token_v
         authorize(request, mutation=True, master=True)
         session = control().service.channels.sessions.get(node_id)
         if session is None:
-            raise HTTPException(409, 'Worker command channel unavailable')
+            raise HTTPException(409, detail={'code': 'CHANNEL_UNAVAILABLE',
+                                             'message': 'This worker has no paired signed control channel; re-pair it to cancel remote builds'})
         return await session.request_runtime(uuid4(), 'cancel_runtime_build', body={'job_id': job_id})
 
     return router

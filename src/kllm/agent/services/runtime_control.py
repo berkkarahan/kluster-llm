@@ -21,6 +21,7 @@ class RuntimeControlService:
         self.native_supported = native_supported
         self.task = None
         self.observed: dict[str, dict] = {}
+        self.node_errors: dict[str, str] = {}
         self.closed = False
         self.reconcile_error: str | None = None
 
@@ -133,7 +134,10 @@ class RuntimeControlService:
                 value = {'node_id': node, 'role': member.get('role'), 'phase': 'waiting_for_target',
                          'capability': 1}
                 if node not in self.service.channels.sessions:
-                    value['error'] = 'Runtime control channel not connected; the master sends the saved target automatically once it reconnects'
+                    value['error'] = ('Runtime control channel not connected: this worker is not paired with the master; '
+                                      're-pair it, then the master sends the saved target automatically')
+                elif node in self.node_errors:
+                    value['error'] = f'the master could not sync this worker: {self.node_errors[node]}'
             if observed and target and value.get('target_revision') != target['revision']:
                 value['phase'] = 'waiting_for_target'
             value['name'] = member.get('host') or node
@@ -194,10 +198,12 @@ class RuntimeControlService:
                     value = await session.request_runtime(uuid4(), 'prepare_runtime', body={'target': target})
                     if self.target() == target and node in self.service.state().members:
                         self.observed[node] = {'time': time.monotonic(), 'value': value}
+                        self.node_errors.pop(node, None)
                 except (Exception, asyncio.CancelledError) as error:
                     if isinstance(error, asyncio.CancelledError):
                         raise
                     self.observed.pop(node, None)
+                    self.node_errors[node] = str(error)[:300]
             semaphore = asyncio.Semaphore(4)
             async def bounded(node, session):
                 async with semaphore:

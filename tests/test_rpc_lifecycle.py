@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from kllm.agent.schemas import JoinBody
 from kllm.agent.services.cluster_join import ClusterJoinDependencies, ClusterJoinService
@@ -344,6 +345,48 @@ def test_master_starts_only_allocated_workers_and_stops_them_with_model(coordina
     assert c.controller.phase == 'idle'
     assert c.state.members['selected']['rpc_status'] == 'idle'
     assert [node for node, action, _ in c.calls if action == 'stop' and node != 'master'] == ['selected']
+
+
+def test_stop_drops_rpc_ownership_when_the_worker_has_left(coordinator):
+    c = coordinator
+    c.controller.run_id = uuid4()
+    c.controller.workers = ['departed']
+    c.controller.phase = 'cleanup_pending'
+    assert 'departed' not in c.state.members
+    assert 'departed' not in c.controller.service.channels.sessions
+
+    assert c.controller.stop(lambda: {'ok': True}) == {'ok': True}
+
+    assert c.controller.workers == []
+    assert c.controller.phase == 'idle'
+    assert c.controller.run_id is None
+
+
+def test_stop_keeps_cleanup_pending_while_an_enrolled_worker_is_disconnected(coordinator):
+    c = coordinator
+    c.controller.service.channels.sessions.pop('selected')
+    c.controller.run_id = uuid4()
+    c.controller.workers = ['selected']
+    c.controller.phase = 'cleanup_pending'
+
+    with pytest.raises(HTTPException, match='RPC cleanup pending on selected'):
+        c.controller.stop(lambda: {'ok': True})
+
+    assert c.controller.workers == ['selected']
+    assert c.controller.phase == 'cleanup_pending'
+    assert c.controller.run_id is not None
+
+
+def test_stop_keeps_cleanup_pending_when_the_worker_process_does_not_stop(coordinator):
+    c = coordinator
+    c.failures[('selected', 'stop')] = True
+    c.controller.launch(RunBody(model='controlled.gguf'))
+
+    with pytest.raises(HTTPException, match='RPC cleanup pending on selected'):
+        c.controller.stop(lambda: c.controller.stop_master() or {'ok': True})
+
+    assert c.controller.workers == ['selected']
+    assert c.controller.phase == 'cleanup_pending'
 
 
 def test_failed_rpc_start_releases_all_attempted_owners(coordinator):

@@ -29,7 +29,7 @@ dependencies = [
 Repository = "https://github.com/berkkarahan/kluster-llm"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-xdist>=3.6", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-xdist>=3.6", "ruff>=0.6", "pre-commit>=4", "mypy>=1.11"]
 
 [dependency-groups]
 dev = [
@@ -38,6 +38,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.6",
     "ruff>=0.6",
+    "pre-commit>=4",
     "mypy>=1.11",
 ]
 

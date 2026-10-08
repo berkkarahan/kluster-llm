@@ -1,10 +1,14 @@
-.PHONY: install build test
+.PHONY: install build test hooks
 
 install:
 	uv run python scripts/install.py
 
 build:
 	uv run python scripts/build.py
+
+hooks:
+	uv sync
+	uv run pre-commit install
 
 test:
 	uv run python -m pytest -q

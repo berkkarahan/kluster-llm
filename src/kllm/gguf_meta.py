@@ -64,12 +64,26 @@ MOE_ARCHITECTURES = frozenset(
         "qwen2moe",
         "qwen3moe",
         "qwen35moe",
+        "qwen3next",
         "deepseek2",
         "deepseek3",
         "gpt_oss",
-        "glm4",
+        "glm4moe",
+        "llama4",
+        "mixtral",
+        "minimaxm2",
+        "grovemoe",
+        "hunyuan_moe",
     }
 )
+
+
+def is_moe_architecture(arch: str | None) -> bool:
+    """Match GGUF arch names modulo separator style (gpt-oss == gpt_oss)."""
+    if not arch:
+        return False
+    normalized = arch.strip().lower().replace("-", "_").replace(".", "_")
+    return normalized in MOE_ARCHITECTURES
 
 # Expert FFN tensors: ``blk.N.ffn_{up,down,gate}_{exps,<i>}.weight``. The router
 # ``blk.N.ffn_gate.weight`` and dense ``blk.N.ffn_{up,down}.weight`` are shared.

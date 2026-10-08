@@ -4,7 +4,10 @@ import struct
 from pathlib import Path
 
 from kllm import gguf_meta
+import pytest
+
 from kllm.gguf_meta import (
+    is_moe_architecture,
     read_context_length,
     read_inference_metadata,
     sniff_reasoning_flags,
@@ -143,3 +146,16 @@ def test_sniff_reasoning_effort_and_preserve():
     assert flags["supports_reasoning_effort"] is True
     assert flags["supports_preserve_thinking"] is True
     assert flags["supports_enable_thinking"] is True
+
+
+@pytest.mark.parametrize(
+    "arch",
+    ["gpt-oss", "gpt_oss", "GPT-OSS", "glm4moe", "qwen3next"],
+)
+def test_is_moe_architecture_accepts_known_moe_names(arch: str):
+    assert is_moe_architecture(arch) is True
+
+
+@pytest.mark.parametrize("arch", ["llama", "qwen35", None, ""])
+def test_is_moe_architecture_rejects_dense_and_empty_names(arch: str | None):
+    assert is_moe_architecture(arch) is False

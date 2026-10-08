@@ -31,6 +31,9 @@ export type Member = {
   available_ram_bytes?: number;
   control_port?: number;
   rpc_port?: number;
+  lan_host?: string | null;
+  /** TCP address the master last saw this worker's control connection arrive from. */
+  control_source?: string | null;
   gpu_ids?: number[] | null;
   latency_ms?: number | null;
   process_pid?: number | null;
@@ -603,6 +606,19 @@ export type NetworkInventory = {
   selection?: string | null;
   error_code?: string;
 };
+export type FastSubnetWorker = {
+  node_id: string;
+  address: string | null;
+  reachable: boolean;
+};
+
+export type FastSubnetReachability = {
+  network_id: string | null;
+  subnet: string | null;
+  master_address: string | null;
+  workers: FastSubnetWorker[];
+};
+
 export type ManagedNetwork = {
   network_id: string;
   subnet: string;

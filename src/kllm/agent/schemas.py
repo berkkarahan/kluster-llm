@@ -135,6 +135,14 @@ class UpdateProgressBody(BaseModel):
     host: str | None = None
 
 
+class FastSubnetReconnectBody(BaseModel):
+    """Master names a worker; the worker receives the private master endpoint."""
+
+    node_id: str | None = None
+    master_host: str | None = None
+    master_port: int = DEFAULT_CONTROL_PORT
+
+
 class LogLineBody(BaseModel):
     event_id: uuid.UUID | None = None
     ts: float | None = Field(default=None, allow_inf_nan=False)

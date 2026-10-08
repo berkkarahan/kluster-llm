@@ -18,7 +18,8 @@ import type {
     UsageLive,
     UsageLifetimes,
     UsageSeries,
-    UsagePage
+    UsagePage,
+    FastSubnetReachability
   } from './types';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './types';
 import { formatMemoryComponent } from './format-memory';
@@ -156,6 +157,10 @@ class AppStore {
   models = $state<ModelInfo[]>([]);
   apiToken = $state('');
   busy = $state('');
+  fastSubnetReachability = $state<FastSubnetReachability | null>(null);
+  fastSubnetProbe = $state<'idle' | 'checking' | 'done' | 'failed'>('idle');
+  reconnectingNodeId = $state('');
+  fastSubnetErrors = $state<Record<string, string>>({});
   joinKeyInput = $state('');
   masterHostInput = $state('');
   rpcBindInput = $state('');
@@ -1606,6 +1611,66 @@ class AppStore {
       await this.post('/v2/cluster/membership', undefined, 'DELETE');
       this.resetClusterView();
     } finally { this.clearingLifecycle = false; }
+  }
+
+  async probeFastSubnetOnce() {
+    if (this.fastSubnetProbe !== 'idle' || this.status?.role !== 'master') return;
+    this.fastSubnetProbe = 'checking';
+    try {
+      const response = await fetch('/v2/cluster/fast-subnet/reachability');
+      const text = await response.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
+      }
+      const reachability = data as FastSubnetReachability | null;
+      if (!response.ok || !reachability || !Array.isArray(reachability.workers)) {
+        this.fastSubnetProbe = 'failed';
+        this.fastSubnetReachability = null;
+        return;
+      }
+      this.fastSubnetReachability = reachability;
+      this.fastSubnetProbe = 'done';
+    } catch {
+      this.fastSubnetProbe = 'failed';
+      this.fastSubnetReachability = null;
+    }
+  }
+
+  async reconnectWorkerFastSubnet(nodeId: string) {
+    const source = `fast-subnet:${nodeId}`;
+    const errorGeneration = errors.generation;
+    errors.observe(source, '');
+    this.fastSubnetErrors = { ...this.fastSubnetErrors, [nodeId]: '' };
+    this.reconnectingNodeId = nodeId;
+    try {
+      const response = await fetch('/v2/cluster/fast-subnet/reconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: nodeId })
+      });
+      const text = await response.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      if (!response.ok) {
+        throw new Error(apiErrorMessage(data, text, response.status, 'reconnect'));
+      }
+      pushToast('ok', 'Worker rejoined on the fast subnet');
+      await this.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.fastSubnetErrors = { ...this.fastSubnetErrors, [nodeId]: message };
+      errors.publish(source, message, errorGeneration);
+      pushToast('danger', message, 4000, { generation: errorGeneration });
+    } finally {
+      if (this.reconnectingNodeId === nodeId) this.reconnectingNodeId = '';
+    }
   }
 
   async updateWorkers() {

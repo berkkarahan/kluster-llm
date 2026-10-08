@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException
 
+from kllm.membership_state import LIVENESS_TIMEOUT_S
 from kllm.runtimes.models import BuildRequest, RuntimeTarget, TargetRequest, body_digest
 from kllm.runtimes.registry import RuntimeRegistry
 from kllm.runtimes.selection import snapshot, use_runtime
@@ -112,13 +113,30 @@ class RuntimeControlService:
             if node == self.service.state().node_id:
                 continue
             observation = self.observed.get(node)
-            connected = node in self.service.channels.sessions and observation and now - observation['time'] < 10
-            value = deepcopy(observation['value']) if connected else {'node_id': node, 'role': member.get('role'), 'phase': 'offline', 'capability': member.get('runtime_management_version', 0)}
-            if node in self.service.channels.sessions and member.get('runtime_management_version') != 1:
-                value.update(phase='upgrade_required', error='Upgrade/rebuild this worker agent for runtime management')
-            if connected and target and value.get('target_revision') != target['revision']:
+            # Membership and liveness belong to the main cluster store, which
+            # the dashboard already renders these nodes from: an enrolled, live
+            # member is connected even before its signed runtime channel has
+            # observed the target. The signed observation only refines the
+            # preparation phase; only the store's liveness rule says offline.
+            live = time.time() - float(member.get('last_seen') or 0) <= LIVENESS_TIMEOUT_S
+            observed = observation is not None and now - observation['time'] < 10
+            if not live:
+                value = {'node_id': node, 'role': member.get('role'), 'phase': 'offline',
+                         'capability': member.get('runtime_management_version', 0)}
+            elif observed:
+                value = deepcopy(observation['value'])
+            elif member.get('runtime_management_version') != 1:
+                value = {'node_id': node, 'role': member.get('role'), 'phase': 'upgrade_required',
+                         'capability': member.get('runtime_management_version', 0),
+                         'error': 'Upgrade/rebuild this worker agent for runtime management'}
+            else:
+                value = {'node_id': node, 'role': member.get('role'), 'phase': 'waiting_for_target',
+                         'capability': 1}
+                if node not in self.service.channels.sessions:
+                    value['error'] = 'Runtime control channel not connected; the master sends the saved target automatically once it reconnects'
+            if observed and target and value.get('target_revision') != target['revision']:
                 value['phase'] = 'waiting_for_target'
-            value['name'] = member.get('hostname') or node
+            value['name'] = member.get('host') or node
             nodes.append(value)
         data['nodes'] = nodes
         data['reconcile_error'] = self.reconcile_error

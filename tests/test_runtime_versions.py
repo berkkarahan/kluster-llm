@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import textwrap
 import threading
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 import zipfile
@@ -56,7 +57,12 @@ def prepared(registry, selected):
 
 def control(registry, role='master', node_id='master'):
     state = ClusterState(role=role, node_id=node_id)
-    state.members = {'master': {'role': 'master'}, 'worker': {'role': 'worker', 'runtime_management_version': 1}, 'offline': {'role': 'worker'}}
+    state.members = {
+        'master': {'role': 'master'},
+        'worker': {'role': 'worker', 'runtime_management_version': 1, 'host': 'worker.example', 'last_seen': time.time()},
+        'oldagent': {'role': 'worker', 'runtime_management_version': 0, 'host': 'old.example', 'last_seen': time.time()},
+        'offline': {'role': 'worker', 'last_seen': time.time() - 3600},
+    }
     authority = SimpleNamespace(cluster_binding_id=uuid4())
     service = SimpleNamespace(state=lambda: state, channels=SimpleNamespace(master_authority=lambda: authority, sessions={}), rpc_runs=None)
     return RuntimeControlService(service, registry, lambda: 'cpu')
@@ -250,6 +256,44 @@ def test_unrebuilt_native_is_visible_and_blocks_before_run_admission(registry):
 def test_worker_view_reports_local_preparation_without_fabricating_peer_liveness(registry):
     manager = control(registry, role='worker', node_id='worker')
     assert [node['node_id'] for node in manager.status()['nodes']] == ['worker']
+
+
+def test_master_view_labels_enrolled_live_children_from_the_main_store(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    manager.change_target(TargetRequest(runtime_id=selected.runtime_id, expected_revision=0, request_id=str(uuid4())))
+    rows = {node['node_id']: node for node in manager.status()['nodes']}
+    # The main store shows these members as connected; a missing signed
+    # observation must not relabel a live, supported child as offline.
+    assert rows['worker']['phase'] == 'waiting_for_target'
+    assert rows['worker']['capability'] == 1
+    assert rows['worker']['name'] == 'worker.example'
+    assert rows['worker']['error'].startswith('Runtime control channel not connected')
+    # The store's own capability field gates old worker agents without a channel.
+    assert rows['oldagent']['phase'] == 'upgrade_required'
+    # Only the store's liveness rule produces the offline label.
+    assert rows['offline']['phase'] == 'offline'
+
+
+def test_fresh_worker_observation_reports_prepared_target_and_lag_blocks(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    target = manager.change_target(TargetRequest(runtime_id=selected.runtime_id, expected_revision=0, request_id=str(uuid4())))
+    manager.observed['worker'] = {'time': time.monotonic(), 'value': {
+        'node_id': 'worker', 'role': 'worker', 'capability': 1,
+        'target_revision': target['revision'], 'phase': 'prepared',
+        'prepared': {'runtime_id': selected.runtime_id, 'build_id': 'job', 'backend': 'cpu', 'commit': selected.commit},
+        'running': None, 'job': None, 'error': None}}
+    assert {node['node_id']: node for node in manager.status()['nodes']}['worker']['phase'] == 'prepared'
+    # A newer master target keeps the observed worker waiting, not prepared.
+    replacement = version('b' * 40)
+    registry.add(replacement)
+    manager.change_target(TargetRequest(runtime_id=replacement.runtime_id, expected_revision=1, request_id=str(uuid4())))
+    row = {node['node_id']: node for node in manager.status()['nodes']}['worker']
+    assert row['phase'] == 'waiting_for_target'
+    assert row['prepared']['runtime_id'] == selected.runtime_id
 
 
 def test_fast_failed_installer_keeps_logs_and_releases_process_tracking(tmp_path, monkeypatch):

@@ -1574,6 +1574,9 @@ class AppStore {
     if (this.liveUsage) {
       this.liveUsage = { ...this.liveUsage, nodes: {}, relationships: [] };
     }
+    // Drop the last resolved bind so the next Start/Join sends no override and
+    // the agent picks its default (internal private subnet first).
+    this.rpcBindInput = '';
     this.selectedNodeId = '';
   }
 

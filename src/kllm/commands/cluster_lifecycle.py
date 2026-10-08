@@ -21,7 +21,12 @@ def start(
     ),
     port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port"),
     rpc_bind: Optional[str] = typer.Option(
-        None, "--rpc-bind", help="RPC/advertise bind host (default: private LAN IP, not 0.0.0.0)"
+        None,
+        "--rpc-bind",
+        help=(
+            "RPC/advertise bind host (default: app private-network IP first, "
+            "else private LAN IP; not 0.0.0.0)"
+        ),
     ),
     overlay: str = typer.Option(
         "none", "--overlay", help="RPC overlay: none | wireguard (join-key gated WireGuard mesh)"
@@ -91,7 +96,12 @@ def join(
     ),
     rpc_port: int = typer.Option(50052, "--rpc-port"),
     rpc_bind: Optional[str] = typer.Option(
-        None, "--rpc-bind", help="RPC bind host (default: private LAN IP, not 0.0.0.0)"
+        None,
+        "--rpc-bind",
+        help=(
+            "RPC bind host (default: local IP toward the master, else app "
+            "private-network IP; not 0.0.0.0)"
+        ),
     ),
     overlay: str = typer.Option(
         "none", "--overlay", help="RPC overlay: none | wireguard (must match master when using WG)"

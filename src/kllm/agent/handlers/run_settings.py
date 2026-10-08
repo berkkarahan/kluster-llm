@@ -107,8 +107,8 @@ class RunSettingsHandlers:
             if name == "enable_thinking" and metadata and not reasoning.get("supports_enable_thinking"):
                 reason = "The embedded template does not expose a thinking toggle"
             if name == "moe_offload" and metadata:
-                from kllm.gguf_meta import MOE_ARCHITECTURES
-                if metadata.get("architecture") not in MOE_ARCHITECTURES:
+                from kllm.gguf_meta import is_moe_architecture
+                if not is_moe_architecture(metadata.get("architecture")):
                     reason = "This model does not declare a Mixture of Experts architecture"
             descriptor.update({"available": reason is None, "unavailable_reason": reason})
         return {

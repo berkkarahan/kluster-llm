@@ -166,6 +166,12 @@ uv run kllm status
 uv run python scripts/install.py --check
 ```
 
+The default bind prefers a local address on the app's private-network subnets
+(`10.10.10.0/24` first, then the documented fallbacks) when present, otherwise
+the default-route LAN IP. A running cluster keeps its persisted bind across
+agent restarts: stop and start the cluster, or pass
+`kllm start --rpc-bind <internal-ip>`, to move RPC onto the dedicated link.
+
 RPC port 50052 must be reachable over a private LAN or WireGuard overlay. Test it from the master:
 
 ```bash
@@ -401,7 +407,7 @@ A connected worker showing **Joined · idle** has no running RPC process by desi
 
 After an abrupt agent restart, prior address observations and readiness are invalid. Present addresses with lost ownership remain untouched. Open that node's local cleanup review: inspect the current exact address and adapter snapshot, then either keep the address and release app ownership or explicitly confirm that exact delta for removal. A changed snapshot refuses removal and requires another review. Never delete all addresses from an adapter to resolve one journal. Graceful shutdown stops a matching dependent managed inference before closing bridges; unrelated legacy inference is identified separately.
 
-A local node-label change (for example, `cluster.json` was reset or restored while `managed-network.sqlite` kept its pairing) is recoverable: the agent keeps the pinned signing key and adopts the current label, clearing superseded authority and channel fences, so rejoin the cluster to pair again. A worker that still holds a pinned master peer while the master lost the worker's pairing record (the reverse split) re-asserts the pairing automatically and throttles the mutual join-secret bootstrap it once trusted; only a genuinely changed private key is still refused (`local identity key changed; explicit re-pairing required`), because that is an identity swap rather than a label rotation. Until a worker's signed channel is paired, Settings → **llama.cpp** shows *Runtime control channel not connected … re-pair it*, and forcing a sync returns `CHANNEL_UNAVAILABLE` instead of a bare conflict; use the manual identity pairing under Advanced details to restore it immediately. While signed cluster control is unavailable, Settings → **llama.cpp** still lists, saves, builds and locally selects versions; setting or enforcing a cluster target and starting managed inference require the recovered agent.
+A local node-label change (for example, `cluster.json` was reset or restored while `managed-network.sqlite` kept its pairing) is recoverable: the agent keeps the pinned signing key and adopts the current label, clearing superseded authority and channel fences, so rejoin the cluster to pair again. A worker that still holds a pinned master peer while the master rebuilt or restored its own network state (the reverse split) re-asserts the pairing automatically and throttles the mutual join-secret bootstrap it once trusted. Because the Ed25519 key is the cryptographic identity, a rotated master label or cluster binding is adopted the same way: the superseded pin is replaced and stale authority/channels are cleared once that node's local networking is settled (a non-stopped managed network or unresolved cleanup journal defers adoption with explicit guidance). Only a genuinely changed private key is still refused (`explicit re-pairing required`), because that is an identity swap rather than a label rotation. Until a worker's signed channel is paired, Settings → **llama.cpp** shows *Runtime control channel not connected … re-pair it*, and forcing a sync returns `CHANNEL_UNAVAILABLE` instead of a bare conflict; use the manual identity pairing under Advanced details with *Explicitly replace an existing pairing* to restore it immediately, including for a changed key or unsettled networking that automatic adoption refuses. While signed cluster control is unavailable, Settings → **llama.cpp** still lists, saves, builds and locally selects versions; setting or enforcing a cluster target and starting managed inference require the recovered agent.
 
 Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.
 

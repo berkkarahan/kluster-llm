@@ -109,34 +109,42 @@ class RuntimeControlService:
         data['target'] = target
         nodes = [self.local_status()]
         now = time.monotonic()
-        members = self.service.state().members if self.service.state().role == 'master' else {}
-        for node, member in list(members.items()):
+        is_master = self.service.state().role == 'master'
+        # Membership and liveness belong to the main cluster store, which the
+        # dashboard already renders these nodes from: every node mirrors the
+        # store, so workers see the same cluster as the cluster view. An
+        # enrolled, live member is connected even before its signed runtime
+        # channel has observed the target. The signed observation only refines
+        # the preparation phase; only the store's liveness rule says offline.
+        for node, member in list(self.service.state().members.items()):
             if node == self.service.state().node_id:
                 continue
+            role = member.get('role')
             observation = self.observed.get(node)
-            # Membership and liveness belong to the main cluster store, which
-            # the dashboard already renders these nodes from: an enrolled, live
-            # member is connected even before its signed runtime channel has
-            # observed the target. The signed observation only refines the
-            # preparation phase; only the store's liveness rule says offline.
-            live = time.time() - float(member.get('last_seen') or 0) <= LIVENESS_TIMEOUT_S
+            # The master stamps its own last_seen only at startup, so a mirrored
+            # master is live by definition while this node is enrolled; worker
+            # liveness stays on the store's heartbeat rule. The master is also
+            # always runtime-capable even though it never advertises the field.
+            live = role == 'master' or time.time() - float(member.get('last_seen') or 0) <= LIVENESS_TIMEOUT_S
+            capability = 1 if role == 'master' else member.get('runtime_management_version', 0)
             observed = observation is not None and now - observation['time'] < 10
             if not live:
-                value = {'node_id': node, 'role': member.get('role'), 'phase': 'offline',
-                         'capability': member.get('runtime_management_version', 0)}
+                value = {'node_id': node, 'role': role, 'phase': 'offline', 'capability': capability}
             elif observed:
                 value = deepcopy(observation['value'])
-            elif member.get('runtime_management_version') != 1:
-                value = {'node_id': node, 'role': member.get('role'), 'phase': 'upgrade_required',
-                         'capability': member.get('runtime_management_version', 0),
+            elif capability != 1:
+                value = {'node_id': node, 'role': role, 'phase': 'upgrade_required',
+                         'capability': capability,
                          'error': 'Upgrade/rebuild this worker agent for runtime management'}
             else:
-                value = {'node_id': node, 'role': member.get('role'), 'phase': 'waiting_for_target',
+                value = {'node_id': node, 'role': role, 'phase': 'waiting_for_target',
                          'capability': 1}
-                if node not in self.service.channels.sessions:
+                # Only the master owns worker command channels and can explain
+                # their state; a worker listing peers must not claim a channel.
+                if is_master and node not in self.service.channels.sessions:
                     value['error'] = ('Runtime control channel not connected: this worker is not paired with the master; '
                                       're-pair it, then the master sends the saved target automatically')
-                elif node in self.node_errors:
+                elif is_master and node in self.node_errors:
                     value['error'] = f'the master could not sync this worker: {self.node_errors[node]}'
             if observed and target and value.get('target_revision') != target['revision']:
                 value['phase'] = 'waiting_for_target'

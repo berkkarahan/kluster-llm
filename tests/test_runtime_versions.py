@@ -253,9 +253,22 @@ def test_unrebuilt_native_is_visible_and_blocks_before_run_admission(registry):
             pytest.fail('Run admission must not execute')
 
 
-def test_worker_view_reports_local_preparation_without_fabricating_peer_liveness(registry):
+def test_worker_view_lists_store_members_without_fabricating_peer_preparation(registry):
     manager = control(registry, role='worker', node_id='worker')
-    assert [node['node_id'] for node in manager.status()['nodes']] == ['worker']
+    rows = {node['node_id']: node for node in manager.status()['nodes']}
+    # A worker mirrors the main cluster store, so it shows the same cluster as
+    # the cluster view instead of only itself.
+    assert set(rows) == {'worker', 'master', 'oldagent', 'offline'}
+    # The mirrored master is the enrollment authority, never offline or stale.
+    assert rows['master']['phase'] == 'waiting_for_target'
+    assert rows['master']['capability'] == 1
+    # Peer preparation is never observed on a worker, so peers cannot read prepared.
+    assert all(rows[node]['phase'] != 'prepared' for node in ('master', 'oldagent', 'offline'))
+    # The store's capability and liveness rules drive the remaining labels.
+    assert rows['oldagent']['phase'] == 'upgrade_required'
+    assert rows['offline']['phase'] == 'offline'
+    # Worker command channels are master-only state; a worker must not claim them.
+    assert all('Runtime control channel' not in (rows[node].get('error') or '') for node in rows)
 
 
 def test_master_view_labels_enrolled_live_children_from_the_main_store(registry):

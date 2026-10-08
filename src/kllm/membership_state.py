@@ -19,6 +19,7 @@ _SNAPSHOT_OPTIONAL = (
     "rpc_capabilities",
     "rpc_control_version",
     "rpc_status",
+    "runtime_management_version",
     "rpc_error",
     "unified_memory",
     "binary_version",

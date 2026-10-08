@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import re
+import socket
 from collections.abc import Callable
 from typing import Any
 
 from kllm.state import ClusterState
 from kllm.logging_control import local_status
+
+_HOSTNAME_INVALID = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def local_hostname() -> str | None:
+    """Return a bounded, safe hostname for the shared node directory."""
+    value = _HOSTNAME_INVALID.sub("-", (socket.gethostname() or "").strip()).strip(".-").strip()
+    return value[:64] or None
 
 
 class HeartbeatPayloadBuilder:
@@ -45,6 +55,7 @@ class HeartbeatPayloadBuilder:
         config = load_config()
         return {
             "node_id": state.node_id,
+            "hostname": local_hostname(),
             "rpc_devices": member.get("rpc_devices", []) if state.process_pid and state.process_role == "worker" else [],
             "rpc_capabilities": member.get("rpc_capabilities", []),
             "rpc_control_version": 1,

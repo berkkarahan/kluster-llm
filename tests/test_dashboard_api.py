@@ -110,6 +110,16 @@ def test_status_exposes_feature_flags(client):
     assert agent._live_status()["feature_flags"] == {"private-network-setup": True}
 
 
+def test_status_exposes_the_shared_node_directory(client, monkeypatch):
+    c, agent, _ = client
+    rows = [{"node_id": "box", "hostname": "gpu-box", "role": "worker", "private_address": "10.10.10.4"}]
+    monkeypatch.setattr(agent, "_network_directory", lambda: rows)
+
+    body = c.get("/v1/status").json()
+    assert body["network_directory"] == rows
+    assert agent._live_status()["network_directory"] == rows
+
+
 def test_list_models_empty(client):
     c, _, _ = client
     r = c.get("/v1/models")

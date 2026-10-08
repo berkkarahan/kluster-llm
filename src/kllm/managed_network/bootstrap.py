@@ -52,15 +52,19 @@ def adopt_rotated_master(store: NetworkStore, prior: PeerIdentity, peer: PeerIde
     replaces the pin exactly like the local label-rotation policy in
     ``NetworkStore.pin_identity``. A changed key is an identity swap and stays
     refused until the operator re-pairs locally.
+
+    The same key proves this is the same master, so adoption may proceed even
+    while a managed network is not stopped; owned addresses and local cleanup
+    journals are unaffected by a label/binding rotation.
     """
     if (prior.key_id, prior.public_key) != (peer.key_id, peer.public_key):
         raise IdentityError("Master identity key changed; explicit re-pairing required")
     try:
-        store.pair(peer, replace=True)
+        store.pair(peer, replace=True, allow_live=True)
     except StoreConflict as error:
         raise IdentityError(
-            "Master identity changed and local networking is not settled; "
-            f"resolve Kluster network state on this node before re-pairing ({error})"
+            "Master identity changed and the local pairing store refused the update; "
+            f"review Kluster network state on this node before re-pairing ({error})"
         ) from None
 
 

@@ -131,7 +131,7 @@
       <span class="node-icon"><Icon name={masterCard ? 'server' : 'monitor'} /></span>
       <span class="od-field od-fill">
         <strong>{node.host || node.node_id}</strong>
-        <span class="topology-node-role">{node.role} · {node.node_id}{node.connected && node.rpc_status ? ` · ${runtimeLabel(node)}` : ''}</span>
+        <span class="topology-node-role">{node.address ? `${node.address} · ` : ''}{node.role} · {node.node_id}{node.connected && node.rpc_status ? ` · ${runtimeLabel(node)}` : ''}</span>
       </span>
       <span class="topology-health" class:offline={!node.connected || offline}>
         <Icon name={node.connected && !offline ? 'circleCheck' : 'alert'} small />

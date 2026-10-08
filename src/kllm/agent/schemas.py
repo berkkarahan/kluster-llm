@@ -62,6 +62,7 @@ class LoggingAcknowledgement(BaseModel):
 class RegisterBody(BaseModel):
     node_id: str
     host: str
+    hostname: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     control_port: int = DEFAULT_CONTROL_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     total_ram_bytes: int = 0

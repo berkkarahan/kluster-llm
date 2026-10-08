@@ -278,7 +278,7 @@
       <span class="node-name">{node.host}</span>
       <span class="node-role-chip">{node.role}</span>
     </span>
-    <span class="node-id">{node.node_id}</span>
+    <span class="node-id">{node.address ? `${node.address} · ${node.node_id}` : node.node_id}</span>
     <span class="node-state">{stateText(node)}</span>
     <span class="node-metric"><span class="k">Host CPU</span><span class="v">{cpuText(node)}</span></span>
     <span class="node-metric"><span class="k">Host RAM</span><span class="v">{ramText(node)}</span></span>

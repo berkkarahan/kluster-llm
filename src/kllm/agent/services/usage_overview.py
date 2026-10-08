@@ -20,9 +20,19 @@ class UsageOverviewService:
         self,
         resources: usage.ResourceState,
         assignment_for_node: Callable[[str], str | None],
+        directory: Callable[[], dict[str, dict[str, Any]]] | None = None,
     ) -> None:
         self._resources = resources
         self._assignment_for_node = assignment_for_node
+        self._directory = directory
+
+    @staticmethod
+    def _display_identity(identity: dict[str, Any], meta: dict[str, Any], node_id: str) -> dict[str, Any]:
+        address = identity.get('private_address') or identity.get('rpc_bind') or identity.get('lan_host') or meta.get('host')
+        return {
+            "host": identity.get('hostname') or meta.get('host') or node_id,
+            "address": address or None,
+        }
 
     def build(
         self,
@@ -35,6 +45,7 @@ class UsageOverviewService:
         try:
             store = store_provider()
             members = dict(state.members) if state.role == "master" else {}
+            directory = self._directory() if self._directory else {}
             self._resources.prune(members)
             known = store.known_nodes()
             now = datetime.now(timezone.utc)
@@ -60,7 +71,7 @@ class UsageOverviewService:
                 )
                 node: dict[str, Any] = {
                     "node_id": node_id,
-                    "host": meta.get("host") or node_id,
+                    **self._display_identity(directory.get(node_id, {}), meta, node_id),
                     "role": meta.get("role", "worker"),
                     "backend": meta.get("actual_backend") or meta.get("backend"),
                     "devices": meta.get("devices") or [],
@@ -118,12 +129,13 @@ class UsageOverviewService:
                     "usage history unavailable; previously saved records preserved"
                 ) from exc
             now = datetime.now(timezone.utc)
+            directory = self._directory() if self._directory else {}
             nodes = {
                 node_id: self._attach_resources(
                     node_id,
                     {
                         "node_id": node_id,
-                        "host": member.get("host") or node_id,
+                        **self._display_identity(directory.get(node_id, {}), member, node_id),
                         "role": member.get("role", "worker"),
                         "connected": True,
                         "reading": None,

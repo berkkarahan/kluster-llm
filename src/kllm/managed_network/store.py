@@ -14,8 +14,8 @@ from uuid import UUID, uuid4
 
 from .models import (
     AdmissionLease, LocalMutationJournal, ManagedNetwork, MasterAuthority,
-    NetworkOperation, NodeAssignment, ParticipantResult, PeerIdentity, RunNetworkReservation,
-    VerificationEvidence, MAX_COUNTER, utc_now, validate_transition,
+    NetworkOperation, NodeAssignment, NodeNetworkIdentity, ParticipantResult, PeerIdentity,
+    RunNetworkReservation, VerificationEvidence, MAX_COUNTER, utc_now, validate_transition,
 )
 
 
@@ -47,6 +47,7 @@ class NetworkStore:
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS peers (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, body TEXT NOT NULL);
         CREATE UNIQUE INDEX IF NOT EXISTS one_master ON peers(role) WHERE role='master';
+        CREATE TABLE IF NOT EXISTS node_directory (node_id TEXT PRIMARY KEY, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS authority (binding TEXT PRIMARY KEY, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS channels (peer TEXT PRIMARY KEY, binding TEXT NOT NULL, term INTEGER NOT NULL, session TEXT NOT NULL, channel TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS networks (id TEXT PRIMARY KEY, binding TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL);
@@ -165,7 +166,7 @@ class NetworkStore:
             db.execute("INSERT INTO metadata VALUES ('cluster_binding',?)", (str(binding),))
             return binding
 
-    def pair(self, peer: PeerIdentity, *, replace: bool = False) -> None:
+    def pair(self, peer: PeerIdentity, *, replace: bool = False, allow_live: bool = False) -> None:
         from .identity import validate_peer
         validate_peer(peer)
         with self.execution(), self.transaction() as db:
@@ -178,13 +179,39 @@ class NetworkStore:
             if (row and row[0] != peer.model_dump_json()) or superseded:
                 if not replace:
                     raise StoreConflict('explicit peer replacement required')
-                if db.execute("SELECT 1 FROM networks WHERE state!='stopped'").fetchone() or db.execute("SELECT 1 FROM journals WHERE phase!='removed_observed'").fetchone():
+                # A same-key rotation is the same cryptographic identity under a
+                # new label; owned addresses and journals stay valid, so the
+                # settled-networking gate only applies to identity swaps.
+                if not allow_live and (db.execute("SELECT 1 FROM networks WHERE state!='stopped'").fetchone() or db.execute("SELECT 1 FROM journals WHERE phase!='removed_observed'").fetchone()):
                     raise StoreConflict('peer replacement requires settled local networking')
                 if superseded:
                     db.execute('DELETE FROM peers WHERE role=? AND node_id!=?', (peer.expected_role, peer.node_id))
                 db.execute('DELETE FROM authority')
                 db.execute('DELETE FROM channels')
             db.execute('INSERT INTO peers VALUES (?,?,?) ON CONFLICT(node_id) DO UPDATE SET role=excluded.role,body=excluded.body', (peer.node_id, peer.expected_role, peer.model_dump_json()))
+
+    def directory(self) -> list[NodeNetworkIdentity]:
+        with self.lock:
+            return [NodeNetworkIdentity.model_validate_json(row[0]) for row in self.db.execute('SELECT body FROM node_directory ORDER BY node_id')]
+
+    def put_directory(self, item: NodeNetworkIdentity) -> None:
+        with self.transaction() as db:
+            self._put_directory(db, item)
+
+    def put_directory_many(self, items: list[NodeNetworkIdentity], *, replace: bool = False) -> None:
+        with self.transaction() as db:
+            if replace:
+                db.execute('DELETE FROM node_directory')
+            for item in items:
+                self._put_directory(db, item)
+
+    def remove_directory(self, node_id: str) -> None:
+        with self.transaction() as db:
+            db.execute('DELETE FROM node_directory WHERE node_id=?', (node_id,))
+
+    @staticmethod
+    def _put_directory(db: sqlite3.Connection, item: NodeNetworkIdentity) -> None:
+        db.execute('INSERT INTO node_directory VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET body=excluded.body', (item.node_id, item.model_dump_json()))
 
     def peer(self, node_id: str) -> PeerIdentity | None:
         with self.lock:

@@ -22,9 +22,9 @@ test('llama.cpp settings resolves immutable forks, synchronizes targets, and fit
     const job = {job_id: '00000000-0000-4000-8000-000000000001', runtime_id: b.runtime_id, phase: 'failed', backend: 'cuda', error: 'Fixture build failure'};
     const library = {versions: [{version: a, build: built(a)}, {version: b, build: null}], jobs: [job], selected: null, bootstrap: {repository: upstream, ref: 'v0.5.0'},
       target: {version: b, revision: 5, cluster_binding_id: 'fixture', master_node_id: 'master'}, running: {...a, ...built(a)},
-      nodes: [{node_id: 'master', role: 'master', capability: 1, phase: 'prepared', prepared: built(a), running: built(a)},
-        {node_id: 'worker', role: 'worker', capability: 1, phase: 'failed', job, error: job.error},
-        {node_id: 'offline', role: 'worker', capability: 1, phase: 'offline'}]};
+      nodes: [{node_id: 'master', name: 'control-box', address: '10.10.10.1', role: 'master', capability: 1, phase: 'prepared', prepared: built(a), running: built(a)},
+        {node_id: 'worker', name: 'gpu-box', address: '10.10.10.2', role: 'worker', capability: 1, phase: 'failed', job, error: job.error},
+        {node_id: 'offline', name: 'spare-box', role: 'worker', capability: 1, phase: 'offline'}]};
     const commands = [];
     const status = () => ({role, node_id: role === 'worker' ? 'worker' : 'master', members: {}, process_pid: 99,
       process_role: role, inference_up: true, runtimes: library, capacity: {backend: 'metal'}, accel_backend: 'metal',
@@ -91,6 +91,8 @@ test('llama.cpp settings resolves immutable forks, synchronizes targets, and fit
         await navigate();
         assert.ok(await evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), `Runtime tab overflows ${width}px`);
         assert.match(await evaluate('document.body.innerText'),/Pending target/);
+        assert.match(await evaluate('document.body.innerText'),/gpu-box/);
+        assert.match(await evaluate('document.body.innerText'),/10\.10\.10\.2/);
         const shot=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,`master-${width}.png`),Buffer.from(shot.data,'base64'));
       }
       await click('+ Add version');

@@ -14,13 +14,14 @@ from kllm.managed_network.allocation import AdapterSelection, OperationRequest, 
 from kllm.managed_network.executor import LocalNetworkExecutor, platform_adapter
 from kllm.managed_network.identity import IdentityError, LocalIdentity, SignedCommand, SignedRuntimeCommand
 from kllm.managed_network.models import (
-    AdmissionLease, ManagedNetwork, MasterAuthority, NetworkOperation,
-    NetworkState, Phase, NodeAssignment, ParticipantResult, RPCChildIdentity, VerificationEvidence, utc_now,
+    AdmissionLease, AssignmentState, ManagedNetwork, MasterAuthority, NetworkOperation,
+    NetworkState, NodeAssignment, NodeNetworkIdentity, ParticipantResult, Phase, RPCChildIdentity, VerificationEvidence, utc_now,
 )
 from kllm.managed_network.platform.base import PlatformAdapter, PlatformRefusal, is_admin
 from kllm.managed_network.store import NetworkStore, StoreConflict, digest
 from kllm.managed_network.verification import Freshness
 from kllm.state import repo_root
+from .heartbeat_payload import local_hostname
 from .network_channel import NetworkChannelHub
 
 
@@ -64,6 +65,8 @@ class ManagedNetworkService:
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.store.recover()
+        if self.state().role == 'master':
+            await asyncio.to_thread(self.sync_directory)
         await self.channels.start()
         if self.runtimes is not None:
             self.runtimes.task = asyncio.create_task(self.runtimes.reconcile(), name='kllm-runtime-target')
@@ -337,6 +340,7 @@ class ManagedNetworkService:
                 operation.phase = 'failed'
                 operation.terminal_result = {'error_code': code, 'message': 'Setup failed; review participant prerequisites and cleanup state', 'rollback': rollback}
                 self.store.update_operation(operation, operation.operation_revision)
+                await asyncio.to_thread(self.sync_directory)
 
     async def _verify_configuration(self, network: ManagedNetwork, operation: NetworkOperation, assignments: list[NodeAssignment], request: StartRequest) -> bool:
         # Start the master listener before workers attempt their reverse echo.
@@ -360,6 +364,7 @@ class ManagedNetworkService:
         for assignment in assignments:
             assignment.state = 'ready'
             self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
+        await asyncio.to_thread(self.sync_directory)
         return True
 
     async def prepare_rpc(self, network: ManagedNetwork, operation: NetworkOperation, assignments: list[NodeAssignment]) -> None:
@@ -539,6 +544,7 @@ class ManagedNetworkService:
             operation.phase = 'failed' if pending else 'complete'
             operation.terminal_result = {'state': network.observed_state, 'cleanup_pending': [node for node, result in results.items() if result['status'] != 'stopped']}
             self.store.update_operation(operation, operation.operation_revision)
+            await asyncio.to_thread(self.sync_directory)
 
     async def cancel(self, operation_id: UUID, request) -> dict[str, Any]:
         operation = await asyncio.to_thread(self.store.cancel_operation, operation_id, request.request_id, request.expected_operation_revision)
@@ -575,6 +581,67 @@ class ManagedNetworkService:
 
     def summaries(self) -> list[dict[str, Any]]:
         return [self.network_view(n.network_id) for n in self.store.networks()]
+
+    def directory_payload(self) -> list[dict[str, Any]]:
+        return [item.model_dump(mode='json') for item in self.store.directory()]
+
+    def directory_view(self) -> dict[str, dict[str, Any]]:
+        return {item.node_id: item.model_dump(mode='json') for item in self.store.directory()}
+
+    def remove_directory(self, node_id: str) -> None:
+        self.store.remove_directory(node_id)
+
+    @staticmethod
+    def _directory_host(value: Any) -> str:
+        return ''.join(char for char in str(value or '') if ord(char) >= 32 and ord(char) != 127)[:253]
+
+    def sync_directory(self) -> None:
+        """Refresh the durable node directory from membership plus assignments.
+
+        The directory is a display/identity read model: membership owns liveness
+        and the managed-network store owns the dedicated address. Rows are only
+        rewritten when an identity field changes so ``updated_at`` stays stable.
+        """
+        state = self.state()
+        if state.role != 'master':
+            return
+        assignments: dict[str, tuple[int, NodeAssignment]] = {}
+        for network in self.store.networks():
+            rank = 2 if network.observed_state == 'ready' else 1 if network.observed_state != 'stopped' else 0
+            for assignment in self.store.assignments(network.network_id):
+                previous = assignments.get(assignment.node_id)
+                if previous is None or rank >= previous[0]:
+                    assignments[assignment.node_id] = (rank, assignment)
+        current = {item.node_id: item for item in self.store.directory()}
+        items = []
+        for node_id, member in state.members.items():
+            rank, assignment = assignments.get(node_id, (0, None))
+            private: str | None = None
+            prefix: int | None = None
+            network_id: UUID | None = None
+            assignment_state: AssignmentState | None = None
+            link: int | None = None
+            if assignment is not None and rank > 0 and assignment.state in ('configured', 'verification_pending', 'ready', 'degraded'):
+                private, prefix, network_id = assignment.address, assignment.prefix_length, assignment.network_id
+                assignment_state, link = assignment.state, assignment.link_speed_mbps
+            hostname = self._directory_host(member.get('hostname')) or (local_hostname() or '' if node_id == state.node_id else '')
+            item = NodeNetworkIdentity(
+                node_id=node_id,
+                hostname=hostname,
+                role=member.get('role') or ('master' if node_id == state.node_id else 'worker'),
+                lan_host=self._directory_host(member.get('lan_host') or member.get('host')),
+                rpc_bind=self._directory_host(member.get('rpc_bind') or member.get('host')),
+                private_address=private,
+                private_prefix_length=prefix,
+                network_id=network_id,
+                assignment_state=assignment_state,
+                link_speed_mbps=link,
+            )
+            prior = current.pop(node_id, None)
+            if prior is not None and prior.model_dump(exclude={'updated_at'}) == item.model_dump(exclude={'updated_at'}):
+                item = prior
+            items.append(item)
+        self.store.put_directory_many(items)
 
     async def _health(self, network: ManagedNetwork, operation: NetworkOperation, assignments: list[NodeAssignment]) -> None:
         if any(a.node_id not in self.state().members for a in assignments):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import base64
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -151,6 +152,44 @@ class NodeAssignment(Record):
     @field_validator('address')
     @classmethod
     def address_valid(cls, value: str) -> str:
+        ip = ipaddress.IPv4Address(value)
+        if str(ip) != value or not any(ip in n for n in PRIVATE_NETWORKS):
+            raise ValueError('canonical private IPv4 address required')
+        return value
+
+
+class NodeNetworkIdentity(Record):
+    """Durable per-node network identity shared by cluster and runtime views.
+
+    Identity is durable and master-owned; liveness stays in the transient
+    cluster membership store. A worker keeps a replica in its own store so its
+    dashboard renders the same names and addresses as the master.
+    """
+
+    node_id: Identifier
+    hostname: str = Field(default='', max_length=64)
+    role: Literal['master', 'worker'] = 'worker'
+    lan_host: Message = ''
+    rpc_bind: Message = ''
+    private_address: str | None = None
+    private_prefix_length: Annotated[int, Field(strict=True, ge=8, le=30)] | None = None
+    network_id: UUID | None = None
+    assignment_state: AssignmentState | None = None
+    link_speed_mbps: Counter | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator('hostname')
+    @classmethod
+    def safe_hostname(cls, value: str) -> str:
+        if value and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', value):
+            raise ValueError('hostname must use letters, digits, dot, underscore or hyphen')
+        return value
+
+    @field_validator('private_address')
+    @classmethod
+    def canonical_private_address(cls, value: str | None) -> str | None:
+        if value is None or value == '':
+            return None
         ip = ipaddress.IPv4Address(value)
         if str(ip) != value or not any(ip in n for n in PRIVATE_NETWORKS):
             raise ValueError('canonical private IPv4 address required')

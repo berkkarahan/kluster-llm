@@ -14,6 +14,11 @@ from kllm.runtimes.models import BuildRequest, RuntimeTarget, TargetRequest, bod
 from kllm.runtimes.registry import RuntimeRegistry
 from kllm.runtimes.selection import snapshot, use_runtime
 
+_RETRY_BASE_S = 30.0
+_RETRY_MAX_S = 300.0
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_PHASES = ('failed', 'interrupted', 'cancelled')
+
 
 class RuntimeControlService:
     def __init__(self, service, registry: RuntimeRegistry, backend, *, native_supported=lambda: True):
@@ -24,19 +29,52 @@ class RuntimeControlService:
         self.node_errors: dict[str, str] = {}
         self.closed = False
         self.reconcile_error: str | None = None
+        self.retry_attempts: dict[str, int] = {}
+        self.retry_after: dict[str, float] = {}
+        self.retry_jobs: dict[str, str | None] = {}
+        self._retry_marker: tuple[str, int] | None = None
+        self.local_attempts = 0
+        self.local_retry_after = 0.0
 
-    def target(self):
+    def target_state(self) -> tuple[str, dict | None, str | None]:
+        """Classify the stored target: current, label_stale, binding_stale or absent.
+
+        A label rotation under the same signing binding is recoverable: the
+        master re-stamps the target automatically. A binding change is surfaced
+        so the operator re-applies the saved version instead of losing it.
+        """
         target = self.registry.target()
         if target is None:
-            return None
+            return 'absent', None, None
         state = self.service.state()
         if state.role == 'master':
-            authority = self.service.channels.master_authority()
-            if target['cluster_binding_id'] != str(authority.cluster_binding_id) or target['master_node_id'] != state.node_id:
-                return None
-        elif state.role != 'worker' or target['master_node_id'] not in state.members:
-            return None
-        return target
+            try:
+                authority = self.service.channels.master_authority()
+            except ValueError as error:
+                return 'binding_stale', target, str(error)
+            if target['cluster_binding_id'] != str(authority.cluster_binding_id):
+                return 'binding_stale', target, 'The cluster signing binding changed; re-apply the saved target'
+            if target['master_node_id'] != state.node_id:
+                return 'label_stale', target, None
+            return 'current', target, None
+        if state.role != 'worker':
+            return 'absent', None, None
+        if target['master_node_id'] not in state.members:
+            return 'label_stale', target, 'Waiting for the master to re-send the current target'
+        return 'current', target, None
+
+    def target(self):
+        kind, target, _ = self.target_state()
+        return target if kind in ('current', 'label_stale') else None
+
+    def _restamp_target(self, target: dict) -> dict:
+        """Re-bind a stored target to the current master label after rotation."""
+        state = self.service.state()
+        if target['master_node_id'] == state.node_id:
+            return target
+        restamped = RuntimeTarget.model_validate({**target, 'master_node_id': state.node_id, 'revision': target['revision'] + 1})
+        self.registry.set_target(restamped)
+        return restamped.model_dump()
 
     def change_target(self, request: TargetRequest):
         if self.service.state().role != 'master':
@@ -50,7 +88,7 @@ class RuntimeControlService:
                 if requests[key]['digest'] != digest:
                     raise ValueError('Request ID reused with a different target')
                 return deepcopy(requests[key]['target'])
-            prior = self.target()
+            prior = self.registry.target()
             if request.expected_revision != (prior or {}).get('revision', 0):
                 raise ValueError('Target changed; refresh before applying your selection')
             version = self.registry.data['versions'][request.runtime_id]['version']
@@ -81,9 +119,15 @@ class RuntimeControlService:
         self.registry.build(request)
         return self.local_status()
 
+    @staticmethod
+    def _identity_fields(identity: dict, member: dict, node: str) -> dict:
+        name = identity.get('hostname') or identity.get('lan_host') or member.get('host') or node
+        address = identity.get('private_address') or identity.get('rpc_bind') or identity.get('lan_host') or member.get('host')
+        return {'name': name, 'address': address or None}
+
     def local_status(self, identity: str | None = None):
         state = self.service.state()
-        target = self.target()
+        kind, target, target_error = self.target_state()
         identity = identity or (target or {}).get('version', {}).get('runtime_id')
         data = self.registry.snapshot()
         job = next((j for j in reversed(data['jobs']) if j['runtime_id'] == identity), None)
@@ -96,17 +140,24 @@ class RuntimeControlService:
                 error = str(failure)
         running = data['running']
         selection_supported = self.native_supported()
+        member = state.members.get(state.node_id) or {}
+        fields = self._identity_fields(self.service.directory_view().get(state.node_id, {}), member, state.node_id)
         return {'node_id': state.node_id, 'role': state.role, 'capability': 1,
                 'selection_supported': selection_supported,
+                'target_state': kind, 'target_error': target_error,
                 'target_revision': (target or {}).get('revision'), 'prepared': prepared,
                 'running': {k: running[k] for k in ('runtime_id', 'build_id', 'commit')} if running else None,
                 'phase': 'upgrade_required' if not selection_supported else 'prepared' if prepared else (job or {}).get('phase', 'not_installed'),
+                **fields,
                 'job': job, 'error': 'Rebuild the native extension for runtime selection' if not selection_supported else (job or {}).get('error') or error}
 
     def status(self):
         data = self.registry.snapshot()
-        target = self.target()
+        kind, target, target_error = self.target_state()
+        directory = self.service.directory_view()
         data['target'] = target
+        data['target_state'] = kind
+        data['target_error'] = target_error
         nodes = [self.local_status()]
         now = time.monotonic()
         is_master = self.service.state().role == 'master'
@@ -148,10 +199,13 @@ class RuntimeControlService:
                     value['error'] = f'the master could not sync this worker: {self.node_errors[node]}'
             if observed and target and value.get('target_revision') != target['revision']:
                 value['phase'] = 'waiting_for_target'
-            value['name'] = member.get('host') or node
+            value.update(self._identity_fields(directory.get(node, {}), member, node))
+            if is_master:
+                value['channel'] = {'connected': node in self.service.channels.sessions,
+                                    'error': self.node_errors.get(node)}
             nodes.append(value)
         data['nodes'] = nodes
-        data['reconcile_error'] = self.reconcile_error
+        data['reconcile_error'] = self.reconcile_error or (target_error if kind == 'binding_stale' else None)
         return data
 
     @contextmanager
@@ -185,16 +239,71 @@ class RuntimeControlService:
                                                'message': f'{node}: prepare the target in Settings → llama.cpp', 'runtime': value})
         return results
 
+    def _retry_due(self, node: str) -> bool:
+        return (0 < self.retry_attempts.get(node, 0) < _RETRY_MAX_ATTEMPTS
+                and time.monotonic() >= self.retry_after.get(node, 0.0))
+
+    @staticmethod
+    def _backoff(attempts: int) -> float:
+        return min(_RETRY_MAX_S, _RETRY_BASE_S * (2 ** (attempts - 1)))
+
+    def _note_retry(self, node: str, value: dict) -> None:
+        phases = {value.get('phase'), (value.get('job') or {}).get('phase')}
+        if phases & set(_RETRY_PHASES):
+            job_id = (value.get('job') or {}).get('job_id')
+            if self.retry_jobs.get(node) == job_id:
+                return  # The same failed attempt must not burn through the retry budget.
+            self.retry_jobs[node] = job_id
+            attempts = self.retry_attempts.get(node, 0) + 1
+            self.retry_attempts[node] = attempts
+            self.retry_after[node] = time.monotonic() + self._backoff(attempts)
+        elif phases & {'prepared', 'queued', 'downloading', 'building', 'verifying'}:
+            self.retry_attempts.pop(node, None)
+            self.retry_after.pop(node, None)
+            self.retry_jobs.pop(node, None)
+
+    def _local_retry(self, identity: str | None) -> bool:
+        job = next((j for j in reversed(self.registry.snapshot()['jobs']) if j['runtime_id'] == identity), None)
+        phase = (job or {}).get('phase')
+        if phase not in _RETRY_PHASES:
+            self.local_attempts = 0
+            self.local_retry_after = 0.0
+            return False
+        now = time.monotonic()
+        if self.local_attempts == 0:
+            self.local_attempts = 1
+            self.local_retry_after = now + self._backoff(1)
+            return False
+        if self.local_attempts >= _RETRY_MAX_ATTEMPTS or now < self.local_retry_after:
+            return False
+        self.local_attempts += 1
+        self.local_retry_after = now + self._backoff(self.local_attempts)
+        return True
+
     async def reconcile(self):
         while not self.closed:
             await asyncio.sleep(2)
             if self.service.state().role != 'master':
                 continue
-            target = self.target()
+            kind, target, target_error = self.target_state()
+            if kind == 'binding_stale':
+                self.reconcile_error = target_error or 'The cluster signing binding changed; re-apply the saved target'
+                continue
             if not target:
                 continue
+            if kind == 'label_stale':
+                target = await asyncio.to_thread(self._restamp_target, target)
+            marker = (target['cluster_binding_id'], target['revision'])
+            if marker != self._retry_marker:
+                self._retry_marker = marker
+                self.retry_attempts.clear()
+                self.retry_after.clear()
+                self.retry_jobs.clear()
+                self.local_attempts = 0
+                self.local_retry_after = 0.0
+            retry = await asyncio.to_thread(self._local_retry, target['version']['runtime_id'])
             try:
-                await asyncio.to_thread(self.prepare, target)
+                await asyncio.to_thread(self.prepare, target, retry=retry)
                 self.reconcile_error = None
             except (OSError, ValueError, KeyError) as error:
                 self.reconcile_error = str(error)[:1000]
@@ -203,10 +312,14 @@ class RuntimeControlService:
                 if member.get('runtime_management_version') != 1:
                     return
                 try:
-                    value = await session.request_runtime(uuid4(), 'prepare_runtime', body={'target': target})
+                    body = {'target': target}
+                    if self._retry_due(node):
+                        body['retry'] = True
+                    value = await session.request_runtime(uuid4(), 'prepare_runtime', body=body)
                     if self.target() == target and node in self.service.state().members:
                         self.observed[node] = {'time': time.monotonic(), 'value': value}
                         self.node_errors.pop(node, None)
+                        self._note_retry(node, value)
                 except (Exception, asyncio.CancelledError) as error:
                     if isinstance(error, asyncio.CancelledError):
                         raise

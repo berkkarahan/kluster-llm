@@ -64,7 +64,7 @@ def control(registry, role='master', node_id='master'):
         'offline': {'role': 'worker', 'last_seen': time.time() - 3600},
     }
     authority = SimpleNamespace(cluster_binding_id=uuid4())
-    service = SimpleNamespace(state=lambda: state, channels=SimpleNamespace(master_authority=lambda: authority, sessions={}), rpc_runs=None)
+    service = SimpleNamespace(state=lambda: state, channels=SimpleNamespace(master_authority=lambda: authority, sessions={}), rpc_runs=None, directory_view=lambda: {})
     return RuntimeControlService(service, registry, lambda: 'cpu')
 
 
@@ -335,6 +335,93 @@ def test_retry_without_a_paired_channel_is_actionable(registry):
     response = client.post('/v2/cluster/runtime-target/nodes/worker/retry', headers={'x-api-key': 'test'})
     assert response.status_code == 409
     assert response.json()['detail']['code'] == 'CHANNEL_UNAVAILABLE'
+
+
+def test_target_survives_master_label_rotation_and_is_restamped(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    authority = manager.service.channels.master_authority()
+    registry.set_target(RuntimeTarget(version=selected, revision=2, cluster_binding_id=str(authority.cluster_binding_id),
+                                      master_node_id='old-master'))
+    kind, raw, error = manager.target_state()
+    assert (kind, error) == ('label_stale', None)
+    assert raw['master_node_id'] == 'old-master'
+    restamped = manager._restamp_target(raw)
+    assert (restamped['master_node_id'], restamped['revision']) == ('master', 3)
+    assert registry.target()['master_node_id'] == 'master'
+    assert manager.target_state()[0] == 'current'
+
+
+def test_binding_change_is_surfaced_not_hidden(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry)
+    registry.set_target(RuntimeTarget(version=selected, revision=1, cluster_binding_id=str(uuid4()),
+                                      master_node_id='master'))
+    kind, raw, error = manager.target_state()
+    assert kind == 'binding_stale' and error
+    data = manager.status()
+    assert (data['target_state'], data['target'], data['reconcile_error']) == ('binding_stale', raw, error)
+    # The saved version is still selectable for re-application.
+    applied = manager.change_target(TargetRequest(runtime_id=selected.runtime_id, expected_revision=1, request_id=str(uuid4())))
+    assert applied['version']['runtime_id'] == selected.runtime_id
+    assert manager.target_state()[0] == 'current'
+
+
+def test_worker_target_reports_stale_master_label(registry):
+    selected = version()
+    registry.add(selected)
+    manager = control(registry, role='worker', node_id='worker')
+    registry.set_target(RuntimeTarget(version=selected, revision=1, cluster_binding_id=str(uuid4()),
+                                      master_node_id='old-master'))
+    kind, raw, error = manager.target_state()
+    assert kind == 'label_stale' and error
+    assert manager.target() == raw  # Displayed while the master re-sends the current target.
+
+
+def test_runtime_status_labels_nodes_from_the_shared_directory(registry):
+    manager = control(registry)
+    manager.service.directory_view = lambda: {
+        'worker': {'hostname': 'gpu-box', 'private_address': '10.10.10.4', 'rpc_bind': '192.168.1.20'}}
+    row = {node['node_id']: node for node in manager.status()['nodes']}['worker']
+    assert (row['name'], row['address']) == ('gpu-box', '10.10.10.4')
+    manager.service.channels.sessions['worker'] = SimpleNamespace()
+    row = {node['node_id']: node for node in manager.status()['nodes']}['worker']
+    assert row['channel'] == {'connected': True, 'error': None}
+
+
+def test_repeated_failed_observations_do_not_burn_the_retry_budget(registry):
+    manager = control(registry)
+    failed = {'phase': 'failed', 'job': {'job_id': 'job-1', 'phase': 'failed'}}
+    manager._note_retry('worker', failed)
+    manager._note_retry('worker', failed)
+    assert manager.retry_attempts['worker'] == 1
+    assert manager._retry_due('worker') is False
+    manager.retry_after['worker'] = 0.0
+    assert manager._retry_due('worker') is True
+    manager._note_retry('worker', {'phase': 'failed', 'job': {'job_id': 'job-2', 'phase': 'failed'}})
+    assert manager.retry_attempts['worker'] == 2
+    manager._note_retry('worker', {'phase': 'downloading', 'job': {'job_id': 'job-3', 'phase': 'downloading'}})
+    assert manager.retry_attempts == {} and manager._retry_due('worker') is False
+
+
+def test_local_failure_retry_waits_for_backoff_then_resets(registry):
+    selected = version()
+    manager = control(registry)
+    registry.add(selected)
+    registry.data['jobs']['job-1'] = {'job_id': 'job-1', 'runtime_id': selected.runtime_id, 'backend': 'cpu',
+                                      'phase': 'failed', 'error': 'boom', 'created_at': 0, 'finished_at': 0}
+    assert manager._local_retry(selected.runtime_id) is False  # First failure schedules the backoff.
+    assert manager.local_attempts == 1
+    assert manager._local_retry(selected.runtime_id) is False
+    manager.local_retry_after = 0.0
+    assert manager._local_retry(selected.runtime_id) is True
+    assert manager.local_attempts == 2
+    registry.data['jobs']['job-2'] = {'job_id': 'job-2', 'runtime_id': selected.runtime_id, 'backend': 'cpu',
+                                      'phase': 'queued', 'created_at': 0, 'finished_at': None}
+    assert manager._local_retry(selected.runtime_id) is False
+    assert manager.local_attempts == 0
 
 
 def test_fast_failed_installer_keeps_logs_and_releases_process_tracking(tmp_path, monkeypatch):

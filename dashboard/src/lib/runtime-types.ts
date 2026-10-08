@@ -15,14 +15,17 @@ export type RuntimeTarget = {
   version: RuntimeVersion; revision: number; cluster_binding_id: string; master_node_id: string;
 };
 export type RuntimeNode = {
-  node_id: string; name?: string; role: string; capability: number; phase: string;
+  node_id: string; name?: string; address?: string | null; role: string; capability: number; phase: string;
   target_revision?: number; prepared?: RuntimeBuild | null; running?: RuntimeBuild | null;
-  job?: RuntimeJob | null; error?: string | null;
+  job?: RuntimeJob | null; error?: string | null; target_state?: RuntimeTargetState;
+  target_error?: string | null; channel?: { connected: boolean; error?: string | null };
 };
+export type RuntimeTargetState = 'current' | 'label_stale' | 'binding_stale' | 'absent';
 export type RuntimeLibrary = {
   versions: { version: RuntimeVersion; build: RuntimeBuild | null }[];
   jobs: RuntimeJob[]; target: RuntimeTarget | null; selected: string | null;
   running: (RuntimeVersion & RuntimeBuild) | null; nodes?: RuntimeNode[];
+  target_state?: RuntimeTargetState; target_error?: string | null;
   legacy?: { label: string; phase: string; message: string };
   reconcile_error?: string | null;
   bootstrap?: {repository: string; ref: string};

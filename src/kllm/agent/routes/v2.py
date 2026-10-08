@@ -33,6 +33,8 @@ def build_router(handlers: Mapping[str, Endpoint]) -> APIRouter:
         ("/cluster/discovery", "GET", "discover"),
         ("/cluster/updates", "POST", "cluster_update_endpoint"),
         ("/cluster/updates/progress", "POST", "cluster_update_progress"),
+        ("/cluster/fast-subnet/reachability", "GET", "fast_subnet_reachability"),
+        ("/cluster/fast-subnet/reconnect", "POST", "fast_subnet_reconnect"),
         ("/models", "GET", "list_models"),
         ("/models/search", "POST", "search_models"),
         ("/models/downloads", "POST", "download_model"),

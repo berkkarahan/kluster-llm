@@ -15,6 +15,23 @@ from kllm.agent.schemas import RegisterBody, UnregisterBody
 from kllm.state import ClusterState
 
 
+def observed_control_source(request: Request) -> str | None:
+    """Return the TCP peer the worker used to reach this master.
+
+    The dashboard compares this address with the managed subnet to tell a
+    router path from the dedicated fast subnet. IPv4-mapped IPv6 peers are
+    stored as dotted IPv4 so that comparison stays exact.
+    """
+    peer = request.client.host if request.client else None
+    if not isinstance(peer, str):
+        return None
+    peer = peer.strip()
+    mapped = "::ffff:"
+    if peer.lower().startswith(mapped):
+        peer = peer[len(mapped) :]
+    return peer or None
+
+
 class MembershipHandlers:
     """Handle membership routes through injected agent collaborators."""
 
@@ -96,7 +113,7 @@ class MembershipHandlers:
             }
 
         advertised = body.lan_host or body.host
-        peer = request.client.host if request.client else None
+        peer = observed_control_source(request)
         response: dict[str, Any] = {"ok": True}
         if (
             state.overlay == netsec.OVERLAY_NONE
@@ -113,6 +130,8 @@ class MembershipHandlers:
             "role": "worker",
             "last_seen": time.time(),
         }
+        if peer:
+            member["control_source"] = peer
         if state.overlay == netsec.OVERLAY_WIREGUARD:
             if not body.wg_public_key:
                 raise HTTPException(400, "wg_public_key required when master overlay=wireguard")
@@ -218,6 +237,9 @@ class MembershipHandlers:
                 except (OSError, sqlite3.Error):
                     pass
             state.members[body.node_id].update(update)
+            peer = observed_control_source(request)
+            if peer:
+                state.members[body.node_id]["control_source"] = peer
             state.members[body.node_id]["last_seen"] = time.time()
             state.save()
             self._refresh_directory()

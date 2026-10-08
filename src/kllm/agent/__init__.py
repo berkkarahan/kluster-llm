@@ -82,6 +82,7 @@ from kllm.agent.errors import (
 )
 from kllm.agent.handlers.models import ModelHandlers
 from kllm.agent.handlers.cluster_updates import ClusterUpdateHandlers
+from kllm.agent.handlers.fast_subnet import FastSubnetHandlers
 from kllm.agent.handlers.usage import (
     UsageHistoryHandlers,
     UsageHistoryProxy,
@@ -127,6 +128,7 @@ from kllm.agent.schemas import (
     TemplateCheckBody,
     UnregisterBody,
     UpdateProgressBody,
+    FastSubnetReconnectBody,
 )
 from kllm.agent.run_route import (
     finish_master_launch,
@@ -135,6 +137,7 @@ from kllm.agent.run_route import (
 )
 from kllm.agent.services.models import ModelService
 from kllm.agent.services.cluster_updates import ClusterUpdateService
+from kllm.agent.services.fast_subnet import FastSubnetService
 from kllm.agent.services.gpus import GpuSelectionService
 from kllm.agent.gpu_api import GpuApi
 from kllm.agent.runtime_api import (
@@ -1093,6 +1096,36 @@ def cluster_update_progress(
     return _cluster_update_handlers().progress(body)
 
 
+def _fast_subnet_networks() -> list[dict[str, Any]]:
+    service = getattr(app.state, "managed_network", None)
+    if service is None:
+        return []
+    return service.summaries()
+
+
+_fast_subnet_service = FastSubnetService(
+    networks=_fast_subnet_networks,
+    join=lambda body: join_cluster(body),
+)
+
+
+def _fast_subnet_handlers() -> FastSubnetHandlers:
+    return FastSubnetHandlers(_fast_subnet_service, lambda: STATE)
+
+
+def fast_subnet_reachability() -> dict[str, Any]:
+    """Master: probe each worker's private control port once."""
+    return _fast_subnet_handlers().reachability()
+
+
+def fast_subnet_reconnect(
+    body: FastSubnetReconnectBody,
+    x_kllm_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Master: tell one worker to rejoin. Worker: rejoin the private master."""
+    return _fast_subnet_handlers().reconnect(body, x_kllm_key)
+
+
 def delete_model(body: DeleteBody) -> ModelDeletion:
     return _model_handlers().delete(body)
 
@@ -2016,6 +2049,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "discover": discover,
     "cluster_update_endpoint": cluster_update_endpoint,
     "cluster_update_progress": cluster_update_progress,
+    "fast_subnet_reachability": fast_subnet_reachability,
+    "fast_subnet_reconnect": fast_subnet_reconnect,
     "list_models": list_models,
     "chat_completions": chat_completions,
     "anthropic_messages": anthropic_messages,

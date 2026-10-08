@@ -8,6 +8,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import NodeUsageDetails from '$lib/components/NodeUsageDetails.svelte';
   import UsageHistory from '$lib/components/UsageHistory.svelte';
+  import { addressInSubnet, observedControlAddress } from '$lib/fast-subnet';
   import { formatGib } from '$lib/format-memory';
   import { onMount, tick } from 'svelte';
 
@@ -123,6 +124,44 @@
   }
 
   const topologyNodes = $derived(Object.values(displayNodes));
+  const readyFastSubnet = $derived(
+    (appStore.status?.managed_networks ?? []).find((network) => network.observed_state === 'ready') ?? null
+  );
+  const fastSubnetNodes = $derived.by(() => {
+    const offers: Record<string, {
+      path: 'fast-subnet' | 'router';
+      phase: 'hidden' | 'checking' | 'ready' | 'busy';
+      address: string | null;
+      error: string;
+    }> = {};
+    if (!isMaster || view === 'offline' || !readyFastSubnet) return offers;
+    const reachable = new Map(
+      (appStore.fastSubnetReachability?.workers ?? [])
+        .filter((worker) => worker.reachable && worker.address)
+        .map((worker) => [worker.node_id, worker.address])
+    );
+    for (const node of topologyNodes) {
+      if (node.role !== 'worker' || !node.connected) continue;
+      const observed = observedControlAddress(appStore.status?.members?.[node.node_id]);
+      if (!observed || !readyFastSubnet.subnet) continue;
+      const onSubnet = addressInSubnet(observed, readyFastSubnet.subnet);
+      const address = reachable.get(node.node_id) ?? null;
+      const busy = appStore.reconnectingNodeId === node.node_id;
+      let phase: 'hidden' | 'checking' | 'ready' | 'busy' = 'hidden';
+      if (!onSubnet && appStore.fastSubnetProbe === 'checking') phase = 'checking';
+      else if (!onSubnet && address && (appStore.fastSubnetProbe === 'done' || busy)) {
+        phase = busy ? 'busy' : 'ready';
+      }
+      offers[node.node_id] = {
+        path: onSubnet ? 'fast-subnet' : 'router',
+        phase,
+        address,
+        error: appStore.fastSubnetErrors[node.node_id] ?? ''
+      };
+    }
+    return offers;
+  });
+  let fastSubnetProbed = false;
   const connectedCount = $derived(topologyNodes.filter((node) => node.connected).length);
   const memoryUsed = $derived.by(() => {
     let total = 0;
@@ -158,6 +197,14 @@
       return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`;
     }).join(' ');
   }
+
+  $effect(() => {
+    if (fastSubnetProbed || appStore.status?.role !== 'master') return;
+    const ready = (appStore.status.managed_networks ?? []).some((network) => network.observed_state === 'ready');
+    if (!ready) return;
+    fastSubnetProbed = true;
+    void appStore.probeFastSubnetOnce();
+  });
 
   onMount(() => {
     let disposed = false;
@@ -329,6 +376,7 @@
         selectedId={appStore.selectedNodeId}
         offline={view === 'offline'}
         networks={appStore.status?.managed_networks ?? []}
+        fastSubnet={{ nodes: fastSubnetNodes, onReconnect: (id) => void appStore.reconnectWorkerFastSubnet(id) }}
         onselect={(id) => appStore.selectedNodeId = id}
       />
     </section>

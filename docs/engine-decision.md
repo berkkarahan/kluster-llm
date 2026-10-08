@@ -61,6 +61,7 @@ Use `--split-mode layer` when devices span different backends (Metal / CUDA / RO
 - Treat `rpc-server` as **LAN-only**. Upstream llama.cpp RPC has **no auth/TLS** and maintainers do not plan to add it ([discussion #14932](https://github.com/ggml-org/llama.cpp/discussions/14932)); HTTP `--api-key` on `llama-server` does **not** protect port **50052**. Firewall TCP 50052; never expose on the public internet. Reachability equals compromise (see e.g. CVE-2026-34159).
 - **Optional:** `--overlay wireguard` (CLI/dashboard) builds a join-key-derived WireGuard mesh and rebinds RPC to overlay IPs (`10.66.87.0/24`). Requires system WireGuard tooling (`wg` / `wg-quick` or WireGuard for Windows). Control-plane HTTP stays on the LAN.
 - Prefer worker **tensor cache** (`rpc-server -c`) to avoid re-shipping large tensors on reconnect.
+- Pass **`--threads`** on `rpc-server` from the same physical-core count as master `--threads-batch`. The binary's own default is 8, which leaves CPU layers idle on larger machines. Generation threads on `llama-server` stay capped at 8 so GPU decode is not oversubscribed.
 - Optional RDMA only when both ends support it (typically Linux RoCE); do not require it for baseline support.
 
 ## When to re-evaluate

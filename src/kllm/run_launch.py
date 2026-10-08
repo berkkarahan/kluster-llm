@@ -14,7 +14,7 @@ from kllm.model_defaults import (
     resolve_model_defaults,
 )
 from kllm.models.resolved_settings import ResolvedLaunchSettings
-from kllm.run_settings import RunBody
+from kllm.run_settings import RunBody, cpu_batch_threads
 from kllm.effective_config import deployment_defaults
 
 
@@ -80,6 +80,10 @@ def build_master_launch(
                 index = merged_extra.index(flag)
                 del merged_extra[index:index + 2]
             merged_extra += [flag, str(value)]
+    if body.threads_batch is None and "--threads-batch" not in merged_extra:
+        # Unset means "same as --threads" in llama-server, which keeps prefill
+        # on the generation cap. Physical cores are faster for CPU prompt work.
+        merged_extra += ["--threads-batch", str(cpu_batch_threads())]
     launch: dict[str, Any] = {
         "model": str(model_path),
         "tensor_split": plan_result["tensor_split_csv"],

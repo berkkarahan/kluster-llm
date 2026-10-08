@@ -29,6 +29,28 @@ def available_threads() -> int:
         return max(1, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1))
 
 
+def cpu_batch_threads() -> int:
+    """Threads for prompt processing and the worker RPC CPU device.
+
+    Generation stays at ``min(DEFAULT_THREADS, available CPUs)`` so a busy GPU
+    decode is not oversubscribed. Prompt processing and ``rpc-server --threads``
+    (binary default 8) use the physical cores inside the current affinity, and
+    never go below that generation count.
+    """
+    logical = available_threads()
+    physical: int | None
+    try:
+        import psutil
+        counted = psutil.cpu_count(logical=False)
+        physical = int(counted) if counted else None
+    except (ImportError, OSError, ValueError):
+        physical = None
+    if not physical or physical < 1:
+        physical = max(1, logical // 2) if logical > 1 else 1
+    generation = min(DEFAULT_THREADS, logical)
+    return max(generation, min(logical, physical))
+
+
 class RunSettingsFields(BaseModel):
     """Validated request settings; handlers derive normalized copies at boundaries."""
 

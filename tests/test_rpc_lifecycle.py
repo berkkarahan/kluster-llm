@@ -13,7 +13,7 @@ from kllm.agent.schemas import JoinBody
 from kllm.agent.services.cluster_join import ClusterJoinDependencies, ClusterJoinService
 from kllm.agent.services.gpus import ResolvedGpuSelection
 from kllm.agent.services.rpc_runs import RpcRunCoordinator, remap_rpc_plan
-from kllm.agent.services.worker_rpc import WorkerRpcService
+from kllm.agent.services.worker_rpc import LEASE_SECONDS, WorkerRpcService
 from kllm.core.gpu_selection import GpuSelection
 from kllm.managed_network.identity import SignedRuntimeCommand
 from kllm.managed_network.platform.base import PlatformRefusal
@@ -222,7 +222,7 @@ def test_duplicate_start_and_stale_stop_respect_run_ownership(worker):
 
 def test_expired_lease_stops_without_restarting(worker):
     worker.service.execute(command(), 20)
-    worker.clock[0] = 26
+    worker.clock[0] = 10 + LEASE_SECONDS + 1
     worker.service.expire()
     worker.service.expire()
     assert worker.state.process_pid is None
@@ -245,7 +245,7 @@ def test_renewal_requires_a_live_process_and_current_run(worker):
 def test_reused_pid_is_not_killed_by_old_ownership(worker):
     result = worker.service.execute(command(), 20)
     worker.tokens[result['pid']] = 'a-new-process'
-    worker.clock[0] = 26
+    worker.clock[0] = 10 + LEASE_SECONDS + 1
     worker.service.expire()
     assert worker.live[result['pid']]
     assert [name for name, _ in worker.calls] == ['start']
@@ -406,6 +406,24 @@ def test_unsupported_worker_fails_before_stopping_current_model(coordinator):
     with pytest.raises(Exception, match='upgrade'):
         c.controller.launch(RunBody(model='controlled.gguf'))
     assert c.calls == [] and c.state.process_pid == 77
+
+
+def test_one_missed_worker_renewal_does_not_reload(coordinator):
+    controller = coordinator.controller
+    controller.launch(RunBody(model='controlled.gguf'))
+    assert controller.observe_health(master_alive=True, workers_serving=False, network_ready=True) == 'wait'
+    assert controller.phase == 'serving'
+    assert controller.observe_health(master_alive=True, workers_serving=True, network_ready=True) == 'healthy'
+    assert controller.observe_health(master_alive=True, workers_serving=False, network_ready=False) == 'wait'
+    assert controller.observe_health(master_alive=True, workers_serving=False, network_ready=False) == 'recover'
+
+
+def test_dead_local_server_reloads_without_a_grace_poll(coordinator):
+    controller = coordinator.controller
+    controller.launch(RunBody(model='controlled.gguf'))
+    assert controller.observe_health(master_alive=False, workers_serving=True, network_ready=True) == 'recover'
+    controller.runtime_error = 'relay failed'
+    assert controller.observe_health(master_alive=True, workers_serving=True, network_ready=True) == 'recover'
 
 
 def test_recovery_has_three_bounded_attempts_and_stop_cancels_it(coordinator):

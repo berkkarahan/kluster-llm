@@ -61,7 +61,7 @@ Joining establishes membership and networking and leaves the worker idle. The ma
 
 Stopping or replacing the model releases that run's RPC processes while the workers stay joined. Planning and previews start no RPC processes. The same lifecycle applies to LAN, WireGuard, and managed private networks: private-network setup verifies addresses, routes, and signed connectivity; runtime compatibility checks and RPC relay admission occur when inference starts.
 
-Workers accept signed commands from their paired current master. Runtime ownership expires after 15 seconds without renewal (the master renews every 5 seconds). Worker heartbeat, software installation, and agent restart do not start RPC. If RPC or an inference relay fails during serving, the master stops the affected run and reloads its saved settings with the same selected workers, trying at 1-, 2-, and 4-second intervals. Stop cancels recovery. Three failed attempts leave inference stopped with an error; 60 seconds of healthy serving resets the retry budget. Interrupted inference requests are not replayed.
+Workers accept signed commands from their paired current master. Runtime ownership expires after 60 seconds without renewal (the master renews every 5 seconds). Worker heartbeat, software installation, and agent restart do not start RPC. If the local llama-server dies, or a worker renewal or private-network check fails on two consecutive samples, the master stops the affected run and reloads its saved settings with the same selected workers, trying at 1-, 2-, and 4-second intervals. One missed renewal does not reload the model. Stop cancels recovery. Three failed attempts leave inference stopped with an error; 60 seconds of healthy serving resets the retry budget. Interrupted inference requests are not replayed.
 
 Optional overlay (must match on master and workers):
 
@@ -145,7 +145,7 @@ Commands load the model's saved configuration by default. Explicit flags overrid
 | `--extra-arg` (repeatable) | — | Sanitized; cannot override `--host` / `--port` / `--rpc` |
 | `--settings saved\|defaults` | saved | Saved model configuration or clean defaults |
 | `--remember` / `--no-remember` | off | Explicitly save after successful plan/run |
-| `--threads-batch` | generation threads | Prompt-processing threads on the master |
+| `--threads-batch` | physical cores, at least `--threads` | Prompt-processing threads on the master. Worker `rpc-server` CPU devices use the same count instead of the binary default of 8 |
 | `--draft-max` | 3 | Maximum draft tokens when draft-model speculation is enabled |
 | `--seed` | engine default | -1 random, or an unsigned 32-bit seed |
 | `--max-output-tokens` | engine default | Positive response limit or -1 |

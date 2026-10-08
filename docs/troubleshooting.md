@@ -203,6 +203,11 @@ master shows `RPC startup failed` only after the retries are exhausted; inspect
 logs hold the `rpc-server` output. Confirm the `rpc-server` binary and port are
 available, then retry.
 
+While a model is serving, one missed worker renewal does not reload it. A second
+consecutive miss does. The worker keeps the RPC process for 60 seconds without a
+renewal, so a short path blip does not expire it first. The local llama-server
+dying restarts the run immediately.
+
 ### RPC handshake or malformed-response errors
 
 This usually means nodes have different llama.cpp builds. On every node:
@@ -288,6 +293,7 @@ If Run fails with `no GPUs available` and `timed out` just after a llama.cpp run
 - Check GPU utilization and thermal throttling on every node.
 - Reduce context or choose a smaller quantization when memory pressure causes spill.
 - Prefer the default `layer` split for heterogeneous clusters.
+- A gap between chat requests reuses the agent's connection to the local llama-server, so the next completion does not open a new socket first.
 
 ### Output quality or precision drift
 
@@ -303,6 +309,8 @@ Row and tensor modes are only appropriate where the planner accepts the selected
 ## Network diagnosis
 
 Use stable private addresses on dedicated links. Verify both directions with `ping`, then verify the control and RPC ports separately. High latency, packet loss, or DHCP address changes can interrupt inference even when cluster discovery succeeds.
+
+A worker marks the master unreachable after two consecutive failed heartbeats, not the first. The signed network channel reconnects on its own after a dropped socket and backs off up to 8 seconds. It re-runs pairing only when the master refuses the handshake.
 
 For 10GbE and Thunderbolt IP setup, see [../network-config/10gbe-bridging-guide.md](../network-config/10gbe-bridging-guide.md).
 
@@ -404,7 +412,7 @@ If adapter refresh reports HTTP 500 or a JSON parsing error, check `~/.kllm/logs
 
 Show the panel first with `kllm flags private-network-setup --enable` (it is hidden by default), then use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. Network setup verifies connectivity independently of RPC. At inference startup, `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`). A version prepared from a prebuilt release pack has no such evidence; prepare that version from source in Settings → llama.cpp (or install with `--from-source`) before using the private network. Stop the current model before installing; the next Run lets the master start fresh RPC processes and verify their capabilities.
 
-A connected worker showing **Joined · idle** has no running RPC process by design. Start the model on the master to allocate workers. An upgrade-required error means a selected worker cannot accept signed runtime commands; update its agent and rejoin. **Recovering** means the master is restarting the selected RPC workers and reloading the model. Stop cancels that retry loop. **Cleanup pending** retains ownership information after an unacknowledged stop: reconnect the worker and retry Stop before starting another run. A disconnected worker expires its RPC ownership after 15 seconds and stops the owned process without restarting it.
+A connected worker showing **Joined · idle** has no running RPC process by design. Start the model on the master to allocate workers. An upgrade-required error means a selected worker cannot accept signed runtime commands; update its agent and rejoin. **Recovering** means the master is restarting the selected RPC workers and reloading the model. Stop cancels that retry loop. **Cleanup pending** retains ownership information after an unacknowledged stop: reconnect the worker and retry Stop before starting another run. A disconnected worker expires its RPC ownership after 60 seconds and stops the owned process without restarting it.
 
 `RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN/WireGuard.
 

@@ -21,7 +21,13 @@ from kllm.state import ClusterState
 from .runtime_setup import RuntimeSetupService
 from kllm.runtimes.selection import use_runtime
 
-LEASE_SECONDS = 15.0
+# The master renews about every 5s (RpcRunCoordinator.monitor) and this process
+# reaps the lease about every 1s (ManagedNetworkService._expire_worker_rpc).
+# The signed control channel can stay silent for a ping interval plus timeout
+# plus reconnect, which is longer than 15s. Expiring then killed a live
+# rpc-server and forced a full model reload. 60s still drops an orphan on the
+# private bind if the master is actually gone.
+LEASE_SECONDS = 60.0
 
 # A freshly built runtime can need longer than one probe or spawn window on
 # macOS (Metal/MoltenVK cold start). Retry the whole start a bounded number of

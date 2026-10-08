@@ -9,7 +9,7 @@ from typing import Any
 
 from kllm.model_defaults import ModelDefaults, overlay_user_inference, resolve_model_defaults
 from kllm.parameter_catalog import GENERATION_FIELDS, PARAMETERS, SAMPLING_DEFAULTS
-from kllm.run_settings import RunSettingsFields
+from kllm.run_settings import RunSettingsFields, cpu_batch_threads
 
 
 def deployment_defaults(body: RunSettingsFields, defaults: ModelDefaults) -> ModelDefaults:
@@ -62,7 +62,7 @@ def effective_configuration(body: RunSettingsFields, plan: dict[str, Any], path:
         values["mmproj"] = None
     if not body.draft_enabled():
         values["draft_model"] = None
-    values["threads_batch"] = body.threads_batch or values["threads"]
+    values["threads_batch"] = body.threads_batch or cpu_batch_threads()
     values["draft_max"] = values.get("draft_max") if values.get("draft_max") is not None else 3
     slots = max(1, int(values.get("parallel_slots") or 1))
     values["context_per_request"] = int(values["context"]) // slots

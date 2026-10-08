@@ -21,6 +21,10 @@ from kllm.runtimes.selection import snapshot, use_runtime
 # for the final result instead of dropping the command at the default 10 s.
 START_TTL_MS = 60_000
 
+# The monitor samples every 5s and the worker lease is 60s. One missed renewal
+# is a blip; the second still starts recovery long before the worker drops RPC.
+RECOVERY_GRACE_POLLS = 2
+
 
 def selected_workers(plan: dict[str, Any], members: dict[str, Any]) -> list[str]:
     endpoints = set(plan.get('rpc_endpoints') or [])
@@ -73,6 +77,7 @@ class RpcRunCoordinator:
         self.recovery_workers: set[str] | None = None
         self.runtime_error: str | None = None
         self.runtime_snapshot: dict | None = None
+        self.unhealthy_polls = 0
         saved = json.loads(service.store.metadata('rpc_run') or '{}')
         self.saved_master = {'pid': saved.get('pid'), 'start_token': saved.get('start_token')}
         if saved.get('run_id'):
@@ -289,25 +294,48 @@ class RpcRunCoordinator:
             results = await self._commands(run_id, workers, 'renew')
             if phase == 'starting':
                 continue
-            healthy = bool(pid and native.process_alive(pid))
-            if healthy:
+            master_alive = bool(pid and native.process_alive(pid))
+            if master_alive:
                 try:
-                    healthy = str(native.require_native()._process_identity(pid)[0]) == token
+                    master_alive = str(native.require_native()._process_identity(pid)[0]) == token
                 except (RuntimeError, ValueError, OSError):
-                    healthy = False
-            healthy = healthy and all(result.get('status') == 'serving' for result in results.values())
-            healthy = healthy and self.runtime_error is None
-            if healthy and self.body and self.body.network_id:
+                    master_alive = False
+            workers_serving = all(result.get('status') == 'serving' for result in results.values())
+            network_ready = True
+            if self.body and self.body.network_id:
                 network = self.service.store.network(UUID(self.body.network_id))
-                healthy = bool(network and network.observed_state == 'ready')
-            if healthy:
+                network_ready = bool(network and network.observed_state == 'ready')
+            decision = self.observe_health(
+                master_alive=master_alive,
+                workers_serving=workers_serving,
+                network_ready=network_ready,
+            )
+            if decision == 'healthy':
                 if time.monotonic() - self.healthy_since >= 60:
                     self.retries = 0
                 continue
-            if generation != self.generation or self.cancel.is_set():
+            if decision == 'wait' or generation != self.generation or self.cancel.is_set():
                 continue
+            self.unhealthy_polls = 0
             if self.recovery_task is None or self.recovery_task.done():
                 self.recovery_task = asyncio.create_task(asyncio.to_thread(self._recover, generation))
+
+    def observe_health(self, *, master_alive: bool, workers_serving: bool, network_ready: bool) -> str:
+        """Decide whether this sample is healthy, a tolerated blip, or a reload.
+
+        A dead local server is recovered immediately. A worker or private-network
+        miss must repeat so one dropped renewal does not reload the model.
+        """
+        remote_ok = workers_serving and network_ready and self.runtime_error is None
+        if master_alive and remote_ok:
+            self.unhealthy_polls = 0
+            return 'healthy'
+        if not master_alive or self.runtime_error is not None:
+            return 'recover'
+        self.unhealthy_polls += 1
+        if self.unhealthy_polls >= RECOVERY_GRACE_POLLS:
+            return 'recover'
+        return 'wait'
 
     def _recover(self, generation: int) -> None:
         with self.lock:

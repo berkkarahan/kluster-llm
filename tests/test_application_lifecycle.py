@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kllm import http_clients
 from kllm.agent.application_lifecycle import AgentLifecycleDependencies, AgentLifespan
 from kllm.state import ClusterState
 
@@ -16,6 +17,7 @@ async def test_agent_lifespan_closes_app_resources_when_application_fails(role, 
     state = ClusterState(node_id="node-1", role=role, members={"old-master": {"role": "master"}})
     monkeypatch.setattr(state, "save", lambda: None)
     calls: list[str] = []
+    seen: dict = {}
     feed = SimpleNamespace()
 
     class AsyncClientContext:
@@ -56,7 +58,7 @@ async def test_agent_lifespan_closes_app_resources_when_application_fails(role, 
         close_usage_store=lambda _app: calls.append("close-store"),
         stop_live_feed=lambda _feed: calls.append("stop-feed"),
         platform="linux",
-        async_client_factory=lambda **_kwargs: AsyncClientContext(),
+        async_client_factory=lambda **kwargs: seen.update(kwargs) or AsyncClientContext(),
     )
     app = SimpleNamespace(state=SimpleNamespace())
     lifespan = AgentLifespan(dependencies)
@@ -66,6 +68,11 @@ async def test_agent_lifespan_closes_app_resources_when_application_fails(role, 
             assert ("master heartbeat unreachable" in state.netsec_warnings) == (role == "worker")
             assert "old-master" in state.members
             assert app.state.inference_client == "inference-client"
+            assert seen["limits"] is http_clients.INFERENCE_LIMITS
+            assert seen["limits"].keepalive_expiry == 120.0
+            assert seen["trust_env"] is False
+            assert seen["timeout"].connect == 5.0
+            assert seen["timeout"].read is None
             assert app.state.live_feed is feed
             raise RuntimeError("request failed")
 

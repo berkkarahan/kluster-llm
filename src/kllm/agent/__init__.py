@@ -692,19 +692,26 @@ def _ensure_master_control_route(master_host: str, master_port: int) -> list[str
     return warnings
 
 
+_membership_heartbeats: MembershipHeartbeatService | None = None
+
+
 def _membership_heartbeat_service() -> MembershipHeartbeatService:
-    return MembershipHeartbeatService(
-        state=lambda: STATE,
-        ensure_control_route=_ensure_master_control_route,
-        control_base=_master_control_base,
-        heartbeat_payload=_heartbeat_payload,
-        control_client=http_clients.control_client,
-        mark_unreachable=lambda state: membership_mod.mark_master_unreachable(state),
-        clear_unreachable=lambda state: membership_mod.clear_master_unreachable(state),
-        worker_local_leave=_worker_local_leave,
-        apply_snapshot=_apply_cluster_snapshot,
-        member_rpc_host=member_rpc_host,
-    )
+    """Reuse one service so a missed heartbeat can be counted across ticks."""
+    global _membership_heartbeats
+    if _membership_heartbeats is None:
+        _membership_heartbeats = MembershipHeartbeatService(
+            state=lambda: STATE,
+            ensure_control_route=lambda host, port: _ensure_master_control_route(host, port),
+            control_base=_master_control_base,
+            heartbeat_payload=_heartbeat_payload,
+            control_client=lambda: http_clients.control_client(),
+            mark_unreachable=lambda state: membership_mod.mark_master_unreachable(state),
+            clear_unreachable=lambda state: membership_mod.clear_master_unreachable(state),
+            worker_local_leave=_worker_local_leave,
+            apply_snapshot=_apply_cluster_snapshot,
+            member_rpc_host=member_rpc_host,
+        )
+    return _membership_heartbeats
 
 
 def _worker_post_heartbeat() -> None:

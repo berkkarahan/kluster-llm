@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -61,7 +62,27 @@ class ChannelSession:
             self.fence.check_live()
             self.out_sequence += 1
             command.sequence = self.out_sequence
-            await self.wire.send(self.identity.sign(command.model_dump(mode='json')))
+            payload = self.identity.sign(command.model_dump(mode='json'))
+            try:
+                await self.wire.send(payload)
+            except TimeoutError:
+                expired = True
+            else:
+                expired = False
+        if expired:
+            # Drop the socket only after releasing send_lock. Closing while the
+            # lock is held deadlocks the pump if it is waiting to send a result.
+            await self._drop_after_send_timeout()
+            raise TimeoutError('node channel send timed out')
+
+    async def _drop_after_send_timeout(self) -> None:
+        """A peer that stops reading must not keep this signed session."""
+        self.closed = True
+        self.fence.connected = False
+        try:
+            await asyncio.wait_for(self.wire.close(1001), 2)
+        except Exception:
+            pass
 
     async def request(self, *, network_id: UUID, operation_id: UUID, operation_revision: int, phase_sequence: int, phase: str, assignment_revision: int, expected_local_revision: int, body: dict[str, Any], ttl_ms: int = 5000) -> dict[str, Any]:
         if self.closed or len(self.pending) >= 16:
@@ -172,6 +193,32 @@ class ChannelSession:
             await asyncio.gather(self.task, return_exceptions=True)
 
 
+def _handshake_refused(error: BaseException) -> bool:
+    """True when the master rejected pairing, not when the path merely dropped.
+
+    Close code 1008 is the server's refusal. A refused handshake has to re-assert
+    the join secret; a timeout or connection error should only reconnect.
+    """
+    if isinstance(error, IdentityError):
+        return True
+    received = getattr(error, 'rcvd', None)
+    code = getattr(received, 'code', None)
+    if code is None:
+        code = getattr(error, 'code', None)
+    return code == 1008
+
+
+def reconnect_delay(previous: float, *, established: bool) -> float:
+    """Back off after a failed dial; retry quickly after a session that came up.
+
+    Workers that lose the master together would otherwise reconnect in lockstep.
+    Callers apply jitter to the returned delay.
+    """
+    if established:
+        return 1.0
+    return min(8.0, max(1.0, previous * 2))
+
+
 class NetworkChannelHub:
     # A pinned master peer can outlive the master's own pairing record (for
     # example after a restored cluster.json). Re-asserting our peer is the only
@@ -276,7 +323,10 @@ class NetworkChannelHub:
         logger = logging.getLogger(__name__)
         next_bootstrap = 0.0
         reassert = False
+        # 0.5 grows to 1s on the first failed dial, then 2, 4, and 8.
+        delay = 0.5
         while not self.stopping:
+            connected = False
             try:
                 peers = [p for p in self.store.peers() if p.expected_role == 'master']
                 base = self.master_base()
@@ -298,18 +348,27 @@ class NetworkChannelHub:
                     await asyncio.sleep(1)
                     continue
                 url = base.replace('https://', 'wss://', 1).replace('http://', 'ws://', 1).rstrip('/') + '/v2/cluster/network-control'
-                async with websockets.connect(url, max_size=65536, max_queue=16, open_timeout=5, close_timeout=2, ping_interval=5, ping_timeout=2, proxy=None) as socket:
+                # A 2s pong deadline drops the signed channel when the event loop
+                # stalls briefly, and the worker then reconciles every in-flight
+                # command. 20s still notices a dead peer inside the RPC lease.
+                async with websockets.connect(
+                    url, max_size=65536, max_queue=16, open_timeout=5, close_timeout=2,
+                    ping_interval=20, ping_timeout=20, proxy=None,
+                ) as socket:
                     session = await self._connect(socket, peers[0], base)
+                    connected = True
                     self.sessions[peers[0].node_id] = session
                     try:
                         await session.pump()
                     finally:
                         self.sessions.pop(peers[0].node_id, None)
-                        reassert = True
             except (OSError, IdentityError, StoreConflict, ValueError, TimeoutError, websockets.WebSocketException, httpx.HTTPError) as error:
-                reassert = True
+                if _handshake_refused(error):
+                    reassert = True
                 logger.debug('network channel unavailable: %s', error)
-            await asyncio.sleep(1)
+            delay = reconnect_delay(delay, established=connected)
+            # Full jitter keeps a cluster from dialing the master in one burst.
+            await asyncio.sleep(delay * (0.5 + random.random() * 0.5))
 
     async def start(self) -> None:
         self.stopping = False

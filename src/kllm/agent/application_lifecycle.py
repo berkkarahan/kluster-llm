@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from kllm.http_clients import INFERENCE_LIMITS
 from kllm.membership_state import mark_master_unreachable
 from kllm.state import ClusterState
 
@@ -102,7 +103,9 @@ class AgentLifespan:
             usage_thread.start()
 
         async with deps.async_client_factory(
-            timeout=httpx.Timeout(None, connect=5), trust_env=False
+            timeout=httpx.Timeout(None, connect=5.0),
+            trust_env=False,
+            limits=INFERENCE_LIMITS,
         ) as client:
             app.state.inference_client = client
             diagnostics_task = (

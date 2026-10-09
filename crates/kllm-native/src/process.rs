@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -29,6 +29,12 @@ pub struct ProcessHandle {
 #[derive(Clone, Debug)]
 pub struct LaunchResult {
     #[pyo3(get)]
+    pub log_sink_pid: Option<u32>,
+    #[pyo3(get)]
+    pub process_start_token: Option<String>,
+    #[pyo3(get)]
+    pub process_started_at: Option<String>,
+    #[pyo3(get)]
     pub pid: u32,
     #[pyo3(get)]
     pub binary: String,
@@ -40,11 +46,38 @@ pub struct LaunchResult {
 
 struct TrackedChild {
     child: Child,
+    sink: Option<Child>,
+}
+
+impl Drop for TrackedChild {
+    fn drop(&mut self) {
+        if let Some(mut sink) = self.sink.take() {
+            // Reap the helper after EOF without blocking the runtime registry.
+            std::thread::spawn(move || {
+                let _ = sink.wait();
+            });
+        }
+    }
 }
 
 fn children() -> &'static Mutex<Vec<TrackedChild>> {
     static CELL: OnceLock<Mutex<Vec<TrackedChild>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn reap_exited(children: &mut Vec<TrackedChild>) {
+    children.retain_mut(|tracked| match tracked.child.try_wait() {
+        Ok(Some(_)) => {
+            if let Some(sink) = tracked.sink.as_mut() {
+                let _ = sink.try_wait();
+            }
+            false
+        }
+        Ok(None) => true,
+        // Keep an unqueryable handle so stop_process still gets a chance to
+        // terminate/wait it instead of silently losing ownership.
+        Err(_) => true,
+    });
 }
 
 pub struct LaunchConfig {
@@ -55,6 +88,7 @@ pub struct LaunchConfig {
     pub env: HashMap<String, String>,
     /// When set, child stdout and stderr are appended to this file.
     pub log_path: Option<PathBuf>,
+    pub log_helper_argv: Vec<String>,
 }
 
 fn extract_env(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, String>> {
@@ -156,6 +190,88 @@ fn push_auto_i32(argv: &mut Vec<String>, flag: &str, value: Option<String>, fall
     argv.push(n.to_string());
 }
 
+fn push_load_and_template(
+    argv: &mut Vec<String>,
+    load_mode: Option<String>,
+    ctx_checkpoints: Option<String>,
+    cache_ram: Option<String>,
+    chat_template_file: Option<String>,
+    chat_template: Option<String>,
+    mmproj_auto: bool,
+    mmproj: Option<String>,
+    draft_model: Option<String>,
+) {
+    if let Some(mode) = load_mode {
+        if mode != "auto" {
+            argv.push("--load-mode".into());
+            argv.push(mode);
+        }
+    }
+    push_auto_i32(argv, "--ctx-checkpoints", ctx_checkpoints, -1);
+    push_auto_i32(argv, "--cache-ram", cache_ram, -1);
+    if let Some(path) = chat_template_file {
+        argv.push("--chat-template-file".into());
+        argv.push(path);
+    } else if let Some(tmpl) = chat_template {
+        if tmpl != "default" && !tmpl.is_empty() {
+            argv.push("--chat-template".into());
+            argv.push(tmpl);
+        }
+    }
+    if mmproj_auto {
+        argv.push("--mmproj-auto".into());
+    } else if let Some(path) = mmproj {
+        argv.push("--mmproj".into());
+        argv.push(path);
+    }
+    if let Some(draft) = draft_model {
+        argv.push("--model-draft".into());
+        argv.push(draft);
+    }
+}
+
+fn push_sampling_flags(
+    argv: &mut Vec<String>,
+    extra: &[String],
+    temperature: Option<String>,
+    top_k: Option<String>,
+    top_p: Option<String>,
+    min_p: Option<String>,
+    presence_penalty: Option<String>,
+    repeat_penalty: Option<String>,
+    jinja: bool,
+    chat_template_kwargs: Option<String>,
+    reasoning_format: Option<String>,
+) {
+    if let Some(v) = temperature {
+        push_flag_value(argv, extra, "--temp", v);
+    }
+    if let Some(v) = top_k {
+        push_flag_value(argv, extra, "--top-k", v);
+    }
+    if let Some(v) = top_p {
+        push_flag_value(argv, extra, "--top-p", v);
+    }
+    if let Some(v) = min_p {
+        push_flag_value(argv, extra, "--min-p", v);
+    }
+    if let Some(v) = presence_penalty {
+        push_flag_value(argv, extra, "--presence-penalty", v);
+    }
+    if let Some(v) = repeat_penalty {
+        push_flag_value(argv, extra, "--repeat-penalty", v);
+    }
+    if jinja {
+        push_flag_only(argv, extra, "--jinja");
+    }
+    if let Some(v) = chat_template_kwargs {
+        push_flag_value(argv, extra, "--chat-template-kwargs", v);
+    }
+    if let Some(v) = reasoning_format {
+        push_flag_value(argv, extra, "--reasoning-format", v);
+    }
+}
+
 impl LaunchConfig {
     pub fn master_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         let model: String = dict
@@ -213,6 +329,12 @@ impl LaunchConfig {
             .get_item("tensor_split")?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("tensor_split"))?
             .extract()?;
+        let split_mode = opt_string(dict, "split_mode")?.unwrap_or_else(|| "layer".into());
+        if !matches!(split_mode.as_str(), "layer" | "row" | "tensor") {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "split_mode must be layer, row, or tensor; got {split_mode:?}"
+            )));
+        }
         let ngl: u32 = dict
             .get_item("ngl")?
             .map(|v| v.extract())
@@ -230,7 +352,7 @@ impl LaunchConfig {
         let env = extract_env(dict)?;
         let log_path = opt_string(dict, "log_path")?.map(PathBuf::from);
 
-        let binary = resolve_llama_server(repo_root.as_deref()).ok_or_else(|| {
+        let binary = opt_string(dict, "binary_path")?.or_else(|| resolve_llama_server(repo_root.as_deref())).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
                 "llama-server not found; set KLLM_LLAMA_SERVER or build vendor/llama.cpp",
             )
@@ -245,7 +367,7 @@ impl LaunchConfig {
             "--port".into(),
             port.to_string(),
             "--split-mode".into(),
-            "layer".into(),
+            split_mode,
             "--tensor-split".into(),
             tensor_split,
             "--cache-type-k".into(),
@@ -259,64 +381,33 @@ impl LaunchConfig {
             "--ctx-size".into(),
             context.to_string(),
         ];
-        push_auto_i32(&mut argv, "--ubatch-size", micro_batch, 2);
-        push_auto_i32(&mut argv, "--parallel", parallel, -1);
-        push_auto_i32(&mut argv, "--batch-size", batch_size, -1);
-        if let Some(mode) = load_mode {
-            if mode != "auto" {
-                argv.push("--load-mode".into());
-                argv.push(mode);
-            }
-        }
-        push_auto_i32(&mut argv, "--ctx-checkpoints", ctx_checkpoints, -1);
-        push_auto_i32(&mut argv, "--cache-ram", cache_ram, -1);
-        if let Some(path) = chat_template_file {
-            argv.push("--chat-template-file".into());
-            argv.push(path);
-        } else if let Some(tmpl) = chat_template {
-            if tmpl != "default" && !tmpl.is_empty() {
-                argv.push("--chat-template".into());
-                argv.push(tmpl);
-            }
-        }
-        if mmproj_auto {
-            argv.push("--mmproj-auto".into());
-        } else if let Some(path) = mmproj {
-            argv.push("--mmproj".into());
-            argv.push(path);
-        }
-        if let Some(draft) = draft_model {
-            argv.push("--model-draft".into());
-            argv.push(draft);
-        }
-
-        if let Some(v) = temperature {
-            push_flag_value(&mut argv, &extra_args, "--temp", v);
-        }
-        if let Some(v) = top_k {
-            push_flag_value(&mut argv, &extra_args, "--top-k", v);
-        }
-        if let Some(v) = top_p {
-            push_flag_value(&mut argv, &extra_args, "--top-p", v);
-        }
-        if let Some(v) = min_p {
-            push_flag_value(&mut argv, &extra_args, "--min-p", v);
-        }
-        if let Some(v) = presence_penalty {
-            push_flag_value(&mut argv, &extra_args, "--presence-penalty", v);
-        }
-        if let Some(v) = repeat_penalty {
-            push_flag_value(&mut argv, &extra_args, "--repeat-penalty", v);
-        }
-        if jinja {
-            push_flag_only(&mut argv, &extra_args, "--jinja");
-        }
-        if let Some(v) = chat_template_kwargs {
-            push_flag_value(&mut argv, &extra_args, "--chat-template-kwargs", v);
-        }
-        if let Some(v) = reasoning_format {
-            push_flag_value(&mut argv, &extra_args, "--reasoning-format", v);
-        }
+        push_auto_i32(&mut argv, "--ubatch-size", micro_batch, 128);
+        push_auto_i32(&mut argv, "--parallel", parallel, 1);
+        push_auto_i32(&mut argv, "--batch-size", batch_size, 512);
+        push_load_and_template(
+            &mut argv,
+            load_mode,
+            ctx_checkpoints,
+            cache_ram,
+            chat_template_file,
+            chat_template,
+            mmproj_auto,
+            mmproj,
+            draft_model,
+        );
+        push_sampling_flags(
+            &mut argv,
+            &extra_args,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            presence_penalty,
+            repeat_penalty,
+            jinja,
+            chat_template_kwargs,
+            reasoning_format,
+        );
 
         if !rpc_servers.is_empty() {
             argv.push("--rpc".into());
@@ -330,6 +421,7 @@ impl LaunchConfig {
             argv,
             env,
             log_path,
+            log_helper_argv: opt_string_list(dict, "log_helper_argv")?,
         })
     }
 
@@ -356,9 +448,9 @@ impl LaunchConfig {
         let env = extract_env(dict)?;
         let log_path = opt_string(dict, "log_path")?.map(PathBuf::from);
 
-        let binary = resolve_rpc_server(repo_root.as_deref()).ok_or_else(|| {
+        let binary = opt_string(dict, "binary_path")?.or_else(|| resolve_rpc_server(repo_root.as_deref())).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
-                "rpc-server not found; set KLLM_RPC_SERVER or place rpc-server in worker-windows/",
+                "rpc-server not found; set KLLM_RPC_SERVER or run scripts/install.py",
             )
         })?;
 
@@ -372,6 +464,13 @@ impl LaunchConfig {
             // See docs/engine-decision.md (RPC operational rules).
             "-c".into(),
         ];
+        if let Some(devices) = dict.get_item("devices")? {
+            let devices: Vec<String> = devices.extract()?;
+            if !devices.is_empty() {
+                argv.push("--device".into());
+                argv.push(devices.join(","));
+            }
+        }
         if threads > 0 {
             argv.push("--threads".into());
             argv.push(threads.to_string());
@@ -383,6 +482,7 @@ impl LaunchConfig {
             argv,
             env,
             log_path,
+            log_helper_argv: opt_string_list(dict, "log_helper_argv")?,
         })
     }
 }
@@ -425,7 +525,6 @@ pub fn resolve_rpc_server(repo_root: Option<&str>) -> Option<String> {
     let rels = [
         "vendor/bin/rpc-server",
         "vendor/bin/rpc-server.exe",
-        "worker-windows/rpc-server.exe",
         "vendor/llama.cpp/build/bin/rpc-server",
         "vendor/llama.cpp/build/bin/rpc-server.exe",
         "vendor/llama.cpp/build/bin/ggml-rpc-server",
@@ -534,9 +633,43 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
         cmd.env(path_key, merged);
     }
     cmd.stdin(Stdio::null());
+    let mut sink = None;
     match &cfg.log_path {
         Some(path) => {
-            let (out, err) = stdio_for_log(path)?;
+            let (out, err) = if let Some(executable) = cfg.log_helper_argv.first() {
+                let mut helper = Command::new(executable);
+                helper
+                    .args(&cfg.log_helper_argv[1..])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    helper.process_group(0);
+                }
+                let mut process = helper.spawn()?;
+                let input = process
+                    .stdin
+                    .take()
+                    .ok_or_else(|| ProcessError::Message("missing log sink input".into()))?;
+                #[cfg(unix)]
+                let writer = File::from(std::os::fd::OwnedFd::from(input));
+                #[cfg(windows)]
+                let writer = File::from(std::os::windows::io::OwnedHandle::from(input));
+                let cloned = match writer.try_clone() {
+                    Ok(cloned) => cloned,
+                    Err(error) => {
+                        let _ = process.kill();
+                        let _ = process.wait();
+                        return Err(error.into());
+                    }
+                };
+                sink = Some(process);
+                (Stdio::from(writer), Stdio::from(cloned))
+            } else {
+                stdio_for_log(path)?
+            };
             cmd.stdout(out).stderr(err);
         }
         None => {
@@ -544,14 +677,29 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
         }
     }
 
-    let child = cmd.spawn()?;
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(helper) = sink.as_mut() {
+                let _ = helper.kill();
+                let _ = helper.wait();
+            }
+            return Err(error.into());
+        }
+    };
+    let log_sink_pid = sink.as_ref().map(Child::id);
     let pid = child.id();
-    children()
+    let identity = crate::usage::process_counters(pid).ok();
+    let mut tracked = children()
         .lock()
-        .map_err(|_| ProcessError::Message("process lock poisoned".into()))?
-        .push(TrackedChild { child });
+        .map_err(|_| ProcessError::Message("process lock poisoned".into()))?;
+    reap_exited(&mut tracked);
+    tracked.push(TrackedChild { child, sink });
 
     Ok(LaunchResult {
+        log_sink_pid,
+        process_start_token: identity.as_ref().map(|p| p.token.clone()),
+        process_started_at: identity.map(|p| p.started),
         pid,
         binary: cfg.binary.to_string_lossy().into(),
         argv: cfg.argv.clone(),
@@ -563,11 +711,16 @@ pub fn stop_process(pid: u32, force: bool) -> bool {
     if let Ok(mut guard) = children().lock() {
         if let Some(idx) = guard.iter().position(|c| c.child.id() == pid) {
             let mut tracked = guard.remove(idx);
+            if tracked.child.try_wait().ok().flatten().is_some() {
+                reap_exited(&mut guard);
+                return true;
+            }
             let _ = tracked.child.kill();
             let _ = tracked.child.wait();
             let _ = force;
             return true;
         }
+        reap_exited(&mut guard);
     }
 
     #[cfg(windows)]
@@ -591,6 +744,19 @@ pub fn stop_process(pid: u32, force: bool) -> bool {
 pub fn process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
+    }
+    if let Ok(mut guard) = children().lock() {
+        if let Some(idx) = guard.iter().position(|c| c.child.id() == pid) {
+            return match guard[idx].child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => {
+                    guard.remove(idx);
+                    false
+                }
+                Err(_) => false,
+            };
+        }
+        reap_exited(&mut guard);
     }
     #[cfg(windows)]
     {
@@ -616,6 +782,21 @@ pub fn process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reaps_completed_tracked_children() {
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        #[cfg(unix)]
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        child.wait().unwrap();
+        let mut tracked = vec![TrackedChild { child, sink: None }];
+        reap_exited(&mut tracked);
+        assert!(tracked.is_empty());
+    }
 
     #[test]
     fn resolve_does_not_panic() {

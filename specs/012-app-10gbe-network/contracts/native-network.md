@@ -1,0 +1,30 @@
+# Native Network Boundary (additive)
+
+Existing PyO3 start_master/start_worker contracts remain intact. Add network bridge/probe bindings through src/kllm/native.py; do not change global RPC bind selection. Rust owns bounded data forwarding and socket lifetime, Python owns policy, signatures and host address changes.
+
+## Bridge Interface
+
+- start_network_bridge(config) -> handle: role, network_id, assignment_revision, bind host/port, target host/port, optional outbound source address, allowed peer address, expected child identity and admission generation. Validate literal IPv4 and port bounds; no hostnames or wildcard binds.
+- network_bridge_status(handle) -> instance ID, actual listener, source/target addresses, active streams, pending connects, transfer counters, bounded last error, closed state.
+- stop_network_bridge(handle, expected_instance_id, drain_policy) -> result: reject stale handles; close listener first; drain admitted streams or explicitly terminate only when the owning run/leave controls authorize it. Idempotent when already stopped.
+- probe_rpc(endpoint, source_binding, installed_tag, expected_protocol, timeout_ms) -> bounded result: compatible protocol, device count, actual source/peer, duration and sanitized failure. Only coordinator-owned idle reservations may call it.
+
+Worker listener binds exactly its dedicated address, default 50052, and accepts the current dedicated master source only. Target is the existing same-host private RPC address and port with verified PID/start identity. Do not accept arbitrary target routes or expose wildcard/public forwarding. Reject unadmitted streams before opening upstream. Master bridge binds only 127.0.0.1 and an allocated port; outbound bind is exactly the assigned master dedicated address, with no automatic fallback. Its target is that worker's dedicated bridge.
+
+Each bridge owns socket/thread handles separately from runtime's single GPU child record. Release the Python GIL for blocking native work. Bounded copy buffers (64 KiB per direction per stream), bounded admission/connection count, backpressure, cancellation and half-close propagation are required. No full-payload queues, no periodic timeout that silently kills a long idle inference stream, and no listener readiness probe that opens upstream accidentally. Build-time and runtime handling must work on Windows, macOS and Linux; socket2 is used for portable bind-before-connect.
+
+Fail-closed admission is enabled by a signed coordinator reservation before the master native connection opens. Worker receives the matching reservation and allows only one upstream inference/probe connection at a time, with lease state renewed over the signed command channel. Existing LAN RPC ownership is detected through current run state/OS connections; unknown busy state means RPC_BUSY. Expired admission blocks new accepts but does not tear down existing admitted streams. Listen/target ownership changes invalidate status immediately.
+
+Master process lifetime matters: an in-agent bridge disappears on agent termination, so it cannot safely support a detached surviving llama-server indefinitely. Before launch, record that a managed run depends on the current agent/bridge instance. Graceful agent restart stops the dependent managed inference run before closing bridges. On abrupt agent loss, connections fail and restart reports the surviving child/run as degraded/uncertain; stop the recorded child through existing process identity checks before recreating bridges/new admission. Legacy inference lifecycle is unchanged. Do not claim restart-transparent inference.
+
+## RPC Probe and Transport Compatibility
+
+Use one independently owned socket for the committed llama-release's valid HELLO and read-only DEVICE_COUNT exchange; enforce exact bounded response sizes and compatible protocol, then close/drain before inference launch. Avoid cached enumeration dispatchers, raw connect/close and extra probe connections during active inference. The pinned source serves clients serially, so a persistent probe blocks use. This behavior must be tested against the installed CPU runtime before hardware acceptance. [Pinned RPC source](https://raw.githubusercontent.com/ggml-org/llama.cpp/v0.5.0/ggml/src/ggml-rpc/ggml-rpc.cpp).
+
+Support TCP-only runtime transport for byte bridges on BOTH master llama-server and every worker rpc-server. Verify installed binary identity against recorded transport build flags and runtime capability evidence; absent/inconsistent evidence is unsupported. A zero-capability probe does not prove the real client cannot negotiate another transport. Read protocol sizes/capabilities from the committed pin's adapter constants; zero upgrade capabilities in the probe. Managed networking must reject RDMA-enabled/unknown transport builds unless end-to-end TCP-only operation is proven, rather than forward an incompatible transport upgrade. Do not patch upstream wire framing or invent a relay prefix in normal RPC traffic. Runtime pin changes require revalidation and node synchronization.
+
+A successful idle probe establishes protocol/path evidence, not bandwidth, model fit or future run health. Active runs use their existing stream health and signed dedicated diagnostic evidence. A bridge failure invalidates admission and marks a dependent run/network degraded; never reroute that connection.
+
+## Address Observation Binding
+
+Add start_address_observer(adapter_identity), address_observer_events(handle) and stop_address_observer(handle). Return ordered bounded events, initial snapshot barrier, observation epoch, high-water mark and explicit loss/gap state to the journal. Isolate Linux netlink, macOS routing sockets and Windows IP Helper callbacks in address_events.rs; extend existing libc/windows target features rather than put FFI in Python. If trustworthy continuity cannot be established, report unsupported before mutation or require local cleanup review for an existing journal. See platform-lifecycle.md for removal rules.

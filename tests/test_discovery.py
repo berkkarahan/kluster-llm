@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
+import json
+
+from kllm import discovery
 from kllm.discovery import DiscoveredMaster, browse_masters, join_key_id
 
 
@@ -38,6 +42,12 @@ def test_browse_masters_falls_back_to_helper(monkeypatch):
             DiscoveredMaster(name="m", host="192.168.68.63", port=18765, key_id=kid),
         ],
     )
+    monkeypatch.setattr(
+        "kllm.discovery_http._browse_via_http",
+        lambda timeout, key, port=18765: (_ for _ in ()).throw(
+            AssertionError("http should not run")
+        ),
+    )
     found = browse_masters(timeout=0.1, key="secret")
     assert len(found) == 1
     assert found[0].host == "192.168.68.63"
@@ -57,6 +67,94 @@ def test_browse_masters_skips_helper_when_inprocess_finds(monkeypatch):
         raise AssertionError("helper should not run")
 
     monkeypatch.setattr("kllm.discovery._browse_via_helper", boom)
+    monkeypatch.setattr(
+        "kllm.discovery_http._browse_via_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("http should not run")),
+    )
     found = browse_masters(timeout=0.1, key=None)
     assert found[0].host == "10.0.0.1"
     assert calls["helper"] == 0
+
+
+def test_browse_masters_falls_back_to_http(monkeypatch):
+    """When mDNS and helper are empty, HTTP /24 probe finds the master."""
+    kid = join_key_id("secret")
+    monkeypatch.setattr("kllm.discovery._browse_inprocess", lambda timeout=2.0, key=None: [])
+    monkeypatch.setattr("kllm.discovery._browse_via_helper", lambda timeout, key: [])
+    monkeypatch.setattr(
+        "kllm.discovery_http._browse_via_http",
+        lambda timeout, key, port=18765: [
+            DiscoveredMaster(name="kllm-9aaafd02", host="192.168.68.100", port=port, key_id=kid),
+        ],
+    )
+    found = browse_masters(timeout=0.1, key="secret")
+    assert len(found) == 1
+    assert found[0].host == "192.168.68.100"
+    assert found[0].key_id == kid
+
+
+def test_probe_http_master_matches_kid(monkeypatch):
+    from kllm.discovery_http import _probe_http_master
+
+    kid = join_key_id("secret")
+    payload = json.dumps({"ok": True, "role": "master", "node_id": "abc", "kid": kid}).encode()
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return payload
+
+    monkeypatch.setattr("kllm.discovery_http.urllib.request.urlopen", lambda *a, **k: _Resp())
+    hit = _probe_http_master("192.168.68.100", 18765, kid, 0.2)
+    assert hit is not None
+    assert hit.host == "192.168.68.100"
+    assert hit.key_id == kid
+
+    miss = _probe_http_master("192.168.68.100", 18765, join_key_id("other"), 0.2)
+    assert miss is None
+
+
+def test_http_probe_hosts_covers_full_netmask(monkeypatch):
+    """/22 LAN is probed in full, not truncated to the caller's /24."""
+    from kllm import netsec
+
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_networks",
+        lambda: [ipaddress.ip_network("192.168.68.0/22")],
+    )
+    hosts = discovery._http_probe_hosts(18765)
+    assert "127.0.0.1" in hosts
+    assert "192.168.68.64" in hosts
+    assert "192.168.69.5" in hosts  # neighbouring /24 inside the /22
+    assert "192.168.71.254" in hosts
+    assert "192.168.72.1" not in hosts
+
+
+def test_http_probe_hosts_caps_scan(monkeypatch):
+    from kllm import netsec
+
+    monkeypatch.setattr(
+        netsec,
+        "_list_ipv4_networks",
+        lambda: [ipaddress.ip_network("10.0.0.0/8")],
+    )
+    hosts = discovery._http_probe_hosts(18765)
+    assert len(hosts) <= discovery.MAX_PROBE_HOSTS
+
+
+def test_http_probe_hosts_falls_back_to_24(monkeypatch):
+    """No interface masks available -> historical /24-per-IP behaviour."""
+    from kllm import netsec
+
+    monkeypatch.setattr(netsec, "_list_ipv4_networks", lambda: [])
+    monkeypatch.setattr(netsec, "_list_ipv4_addresses", lambda: ["192.168.68.57"])
+    hosts = discovery._http_probe_hosts(18765)
+    assert "127.0.0.1" in hosts
+    assert "192.168.68.64" in hosts
+    assert "192.168.69.1" not in hosts

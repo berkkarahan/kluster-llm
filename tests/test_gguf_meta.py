@@ -3,7 +3,11 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+from kllm import gguf_meta
+import pytest
+
 from kllm.gguf_meta import (
+    is_moe_architecture,
     read_context_length,
     read_inference_metadata,
     sniff_reasoning_flags,
@@ -58,6 +62,29 @@ def test_read_context_length_from_minimal_gguf(tmp_path: Path):
     assert read_context_length(path) == 8192
 
 
+def test_metadata_cache_is_stat_keyed_and_returns_isolated_values(tmp_path: Path):
+    gguf_meta._read_inference_metadata.cache_clear()
+    path = tmp_path / "cached.gguf"
+    path.write_bytes(_minimal_gguf(arch="llama", context_length=8192))
+    first = read_inference_metadata(path)
+    assert first is not None
+    first["sampling"]["temperature"] = 99
+    before = gguf_meta._read_inference_metadata.cache_info()
+    second = read_inference_metadata(path)
+    after = gguf_meta._read_inference_metadata.cache_info()
+    assert second is not None and second["sampling"] == {}
+    assert after.hits == before.hits + 1
+
+    path.write_bytes(_minimal_gguf(arch="llama", context_length=4096))
+    assert read_context_length(path) == 4096
+
+    path.write_bytes(b"GGUF\x03\x00")
+    before_truncated_read = gguf_meta._read_inference_metadata.cache_info()
+    assert read_inference_metadata(path) is None
+    after_truncated_read = gguf_meta._read_inference_metadata.cache_info()
+    assert after_truncated_read.misses == before_truncated_read.misses + 1
+
+
 def test_read_context_length_invalid_returns_none(tmp_path: Path):
     path = tmp_path / "bad.gguf"
     path.write_bytes(b"not-a-gguf")
@@ -78,6 +105,7 @@ def test_read_inference_metadata_sampling_and_template(tmp_path: Path):
             [
                 lambda b: _write_kv_string(b, "general.architecture", "qwen35moe"),
                 lambda b: _write_kv_u32(b, "qwen35moe.context_length", 262144),
+                lambda b: _write_kv_u32(b, "qwen35moe.block_count", 40),
                 lambda b: _write_kv_f32(b, "general.sampling.temp", 0.6),
                 lambda b: _write_kv_u32(b, "general.sampling.top_k", 20),
                 lambda b: _write_kv_f32(b, "general.sampling.top_p", 0.95),
@@ -90,6 +118,7 @@ def test_read_inference_metadata_sampling_and_template(tmp_path: Path):
     assert meta is not None
     assert meta["architecture"] == "qwen35moe"
     assert meta["context_length"] == 262144
+    assert meta["block_count"] == 40
     assert abs(float(meta["sampling"]["temperature"]) - 0.6) < 1e-5
     assert meta["sampling"]["top_k"] == 20
     assert abs(float(meta["sampling"]["top_p"]) - 0.95) < 1e-5
@@ -117,3 +146,16 @@ def test_sniff_reasoning_effort_and_preserve():
     assert flags["supports_reasoning_effort"] is True
     assert flags["supports_preserve_thinking"] is True
     assert flags["supports_enable_thinking"] is True
+
+
+@pytest.mark.parametrize(
+    "arch",
+    ["gpt-oss", "gpt_oss", "GPT-OSS", "glm4moe", "qwen3next"],
+)
+def test_is_moe_architecture_accepts_known_moe_names(arch: str):
+    assert is_moe_architecture(arch) is True
+
+
+@pytest.mark.parametrize("arch", ["llama", "qwen35", None, ""])
+def test_is_moe_architecture_rejects_dense_and_empty_names(arch: str | None):
+    assert is_moe_architecture(arch) is False

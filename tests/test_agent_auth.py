@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,15 +10,17 @@ def client(tmp_path, monkeypatch):
     # Re-import agent state against the temp home
     import importlib
 
-    import kllm.state as state_mod
     import kllm.agent as agent_mod
+    import kllm.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod
+    test_client.close()
 
 
 def test_health(client):
@@ -91,7 +91,9 @@ def test_discover_includes_key_id(client, monkeypatch):
     def fake_browse(timeout: float = 2.0, key: str | None = None):
         masters = [
             DiscoveredMaster(name="kllm-a", host="192.168.1.10", port=18765, key_id=kid),
-            DiscoveredMaster(name="kllm-b", host="192.168.1.11", port=18765, key_id="ffffffffffff0000"),
+            DiscoveredMaster(
+                name="kllm-b", host="192.168.1.11", port=18765, key_id="ffffffffffff0000"
+            ),
         ]
         if key is not None:
             want = join_key_id(key)
@@ -111,15 +113,17 @@ def test_discover_includes_key_id(client, monkeypatch):
     assert r2.json()["masters"][0]["host"] == "192.168.1.10"
 
 
+@pytest.mark.unit
 def test_join_discovers_master_by_key(client, monkeypatch):
     c, agent = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
     from unittest.mock import patch
 
     from kllm.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int | None = None):
         masters = [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
         if key is not None:
             want = join_key_id(key)
@@ -133,12 +137,18 @@ def test_join_discovers_master_by_key(client, monkeypatch):
             return None
 
         def json(self):
+            worker_id = agent.STATE.node_id
             return {
                 "ok": True,
+                "accepted": True,
                 "members": 2,
                 "cluster_members": {
                     "kllm-m": {"node_id": "kllm-m", "host": "192.168.10.1", "role": "master"},
-                    "testnode": {"node_id": "testnode", "host": "192.168.10.2", "role": "worker"},
+                    worker_id: {
+                        "node_id": worker_id,
+                        "host": "192.168.10.2",
+                        "role": "worker",
+                    },
                 },
                 "last_plan": None,
                 "apply_error": None,
@@ -155,6 +165,17 @@ def test_join_discovers_master_by_key(client, monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def get(self, *a, **k):
+            return type(
+                "HealthResponse",
+                (),
+                {
+                    "status_code": 200,
+                    "raise_for_status": lambda self: None,
+                    "json": lambda self: {"control_protocol": 2},
+                },
+            )()
+
         def post(self, url, *a, **k):
             assert "192.168.10.1:18765" in url
             return FakeResp()
@@ -162,7 +183,11 @@ def test_join_discovers_master_by_key(client, monkeypatch):
     monkeypatch.setattr(agent.discovery, "browse_masters", fake_browse)
     with (
         patch.object(agent.netsec, "pick_rpc_bind_host", return_value="192.168.10.2"),
-        patch.object(agent.netsec, "ensure_rpc_firewall", return_value={"ok": True, "applied": False, "warning": None}),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
         patch.object(
             agent.native,
             "probe_capacity",
@@ -185,10 +210,16 @@ def test_join_discovers_master_by_key(client, monkeypatch):
 def test_join_no_matching_master_returns_404(client, monkeypatch):
     c, agent = client
 
-    monkeypatch.setattr(agent.discovery, "browse_masters", lambda timeout=2.0, key=None: [])
+    monkeypatch.setattr(
+        agent.discovery,
+        "browse_masters",
+        lambda timeout=2.0, key=None, port=None: [],
+    )
     r = c.post("/v1/join", json={"key": "missing", "overlay": "none"})
     assert r.status_code == 404
-    assert "no matching master" in r.text.lower() or "no matching master" in r.json()["detail"].lower()
+    assert (
+        "no matching master" in r.text.lower() or "no matching master" in r.json()["detail"].lower()
+    )
 
 
 def test_join_multiple_matching_masters_returns_409(client, monkeypatch):
@@ -197,7 +228,7 @@ def test_join_multiple_matching_masters_returns_409(client, monkeypatch):
 
     kid = join_key_id("dup-key")
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int | None = None):
         return [
             DiscoveredMaster(name="a", host="10.0.0.1", port=18765, key_id=kid),
             DiscoveredMaster(name="b", host="10.0.0.2", port=18765, key_id=kid),

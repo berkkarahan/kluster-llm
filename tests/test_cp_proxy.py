@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+
+from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.core.gpu_selection import GpuSelection
 
 
 @pytest.fixture()
@@ -25,7 +29,9 @@ def client(tmp_path, monkeypatch):
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod, netsec_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod, netsec_mod
+    test_client.close()
 
 
 @pytest.fixture()
@@ -37,6 +43,8 @@ def echo_tcp():
     srv.listen(5)
     port = srv.getsockname()[1]
     stop = threading.Event()
+    clients = set()
+    clients_lock = threading.Lock()
 
     def _run():
         srv.settimeout(0.5)
@@ -45,23 +53,71 @@ def echo_tcp():
                 cs, _ = srv.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                if stop.is_set():
+                    return
+                raise
+            with clients_lock:
+                clients.add(cs)
             try:
                 cs.recv(64)
+            except (ConnectionResetError, OSError):
+                pass
             finally:
+                with clients_lock:
+                    clients.discard(cs)
                 cs.close()
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     yield port
     stop.set()
+    with clients_lock:
+        pending = list(clients)
+    for client in pending:
+        try:
+            client.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        client.close()
     srv.close()
+    t.join(timeout=1)
+    assert not t.is_alive(), "echo server thread did not stop"
 
 
+@pytest.mark.integration
 def test_tcp_reachable_localhost(echo_tcp):
     from kllm import cp_proxy
 
     assert cp_proxy.tcp_reachable("127.0.0.1", echo_tcp)
+
+
+def test_tcp_reachable_handles_refusal(monkeypatch):
+    from kllm import cp_proxy
+
+    def refused(*_args, **_kwargs):
+        raise OSError("controlled refusal")
+
+    monkeypatch.setattr(cp_proxy.socket, "create_connection", refused)
     assert not cp_proxy.tcp_reachable("127.0.0.1", 1)
+
+
+@pytest.mark.integration
+def test_shell_can_reach_localhost(echo_tcp, monkeypatch):
+    from kllm import cp_proxy
+
+    run = cp_proxy.subprocess.run
+
+    def controlled_run(args, **kwargs):
+        command = str(args[-1])
+        if command.endswith("/1") or ".Connect('127.0.0.1',1)" in command:
+            return subprocess.CompletedProcess(args, 1)
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(cp_proxy.subprocess, "run", controlled_run)
+    assert cp_proxy._shell_can_reach("127.0.0.1", echo_tcp)
+    assert not cp_proxy._shell_can_reach("127.0.0.1", 1)
+    assert not cp_proxy._shell_can_reach("127.0.0.1; rm -rf /", echo_tcp)
 
 
 def test_ensure_for_master_direct_when_reachable(echo_tcp):
@@ -71,14 +127,21 @@ def test_ensure_for_master_direct_when_reachable(echo_tcp):
     assert cp_proxy.ensure_for_master("127.0.0.1", echo_tcp) is None
 
 
-def test_ensure_skips_proxy_when_connection_refused():
+@pytest.mark.unit
+def test_ensure_skips_proxy_when_connection_refused(monkeypatch):
+    import errno
     from kllm import cp_proxy
 
+    def refused(*_args, **_kwargs):
+        raise OSError(errno.ECONNREFUSED, "connection refused")
+
     cp_proxy.stop_current()
+    monkeypatch.setattr(cp_proxy.socket, "create_connection", refused)
     assert cp_proxy.probe_master("127.0.0.1", 1) == "down"
     assert cp_proxy.ensure_for_master("127.0.0.1", 1) is None
 
 
+@pytest.mark.integration
 def test_proxy_relays_when_blocked(echo_tcp, monkeypatch):
     from kllm import cp_proxy
 
@@ -96,13 +159,23 @@ def test_proxy_relays_when_blocked(echo_tcp, monkeypatch):
         cp_proxy.stop_current()
 
 
+@pytest.mark.integration
 def test_join_uses_proxy_base(client, monkeypatch):
     """Join register URL goes via localhost proxy when LAN probe fails."""
     _client, agent, _netsec = client
     from kllm import cp_proxy
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b'{"ok":true,"control_protocol":2}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):  # noqa: N802
+            assert self.path == "/v2/cluster/nodes/register"
             length = int(self.headers.get("Content-Length", "0"))
             self.rfile.read(length)
             body = (
@@ -141,10 +214,12 @@ def test_join_uses_proxy_base(client, monkeypatch):
     monkeypatch.setattr(
         agent,
         "_resolve_gpu_selection",
-        lambda ids: {"gpu_ids": [], "gpus": [], "vram_bytes": 0, "backend": "cpu"},
+        lambda gpu_ids, listed=None: ResolvedGpuSelection(GpuSelection((), "cpu", 0), ()),
     )
     monkeypatch.setattr(agent.netsec, "ensure_rpc_firewall", lambda *a, **k: {})
-    monkeypatch.setattr(agent.netsec, "pick_rpc_bind_host", lambda preferred, toward=None: "10.0.0.2")
+    monkeypatch.setattr(
+        agent.netsec, "pick_rpc_bind_host", lambda preferred, toward=None: "10.0.0.2"
+    )
     monkeypatch.setattr(agent.native, "start_worker", lambda **kw: {"pid": None})
 
     try:

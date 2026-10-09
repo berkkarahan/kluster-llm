@@ -1,44 +1,131 @@
 <script lang="ts">
   import { appStore } from '$lib/store.svelte';
   import { pushToast } from '$lib/toast';
+  import { onMount } from 'svelte';
+  import ChatPanel from '$lib/components/ChatPanel.svelte';
+  import { connectCommand, type CommandShell } from '$lib/connect-command';
 
-  const agents = ['claude', 'opencode', 'codex', 'hermes', 'openclaw', 'pi'];
+  const agents = [
+    { id: 'claude', name: 'Claude' },
+    { id: 'opencode', name: 'OpenCode' },
+    { id: 'codex', name: 'Codex' },
+    { id: 'hermes', name: 'Hermes' },
+    { id: 'openclaw', name: 'OpenClaw' },
+    { id: 'pi', name: 'Pi' }
+  ];
 
-  function cmd(agent: string) {
-    const model = appStore.selectedModel || appStore.status?.model_name || 'MODEL.gguf';
-    return `kllm connect ${agent} --model ${model}`;
+  let shell = $state<CommandShell>('bash');
+  let harness = $state('codex');
+  type ConnectionSnapshot = { role: 'master'; node_id: string; url: string; model: string; api_token: string };
+  let connection = $state<ConnectionSnapshot | null>(null);
+  let connectionError = $state('');
+  let loading = $state(true);
+  let generation = 0;
+  let disposed = false;
+  const remoteMaster = $derived(appStore.status?.role === 'worker');
+  const connectionIdentity = $derived([
+    appStore.status?.role,
+    appStore.status?.node_id,
+    appStore.status?.master_host,
+    appStore.status?.process_pid,
+    appStore.status?.inference_up,
+    appStore.status?.model_name,
+    appStore.status?.active_config?.run_id
+  ].join(':'));
+
+  async function refreshConnection(): Promise<ConnectionSnapshot | null> {
+    const current = ++generation;
+    loading = true;
+    connectionError = '';
+    try {
+      const result = await appStore.networkRequest<ConnectionSnapshot>('/v2/inference/connection');
+      if (disposed || current !== generation) return null;
+      if (result.role !== 'master' || !result.url || !result.model || !result.api_token) {
+        throw new Error('Master returned incomplete Connect details');
+      }
+      connection = result;
+      return result;
+    } catch (failure) {
+      if (!disposed && current === generation) {
+        connection = null;
+        connectionError = String(failure).replace(/^Error:\s*/, '');
+      }
+      return null;
+    } finally {
+      if (!disposed && current === generation) loading = false;
+    }
   }
 
-  async function copy(text: string) {
-    await navigator.clipboard.writeText(text);
+  function cmd(snapshot: ConnectionSnapshot | null, agent = harness, noLaunch = false, redact = true) {
+    return snapshot
+      ? connectCommand(agent, snapshot.model, snapshot.url, snapshot.api_token, shell, noLaunch, redact)
+      : '';
+  }
+
+  async function copy(noLaunch = false) {
+    const snapshot = await refreshConnection();
+    if (!snapshot) return;
+    await navigator.clipboard.writeText(cmd(snapshot, harness, noLaunch, false));
     pushToast('ok', 'copied');
   }
+
+  onMount(() => {
+    shell = /Win/.test(navigator.platform) ? 'powershell' : 'bash';
+    void refreshConnection();
+    return () => { disposed = true; generation += 1; };
+  });
+
+  $effect(() => {
+    if (connectionIdentity !== '::::::') void refreshConnection();
+  });
 </script>
 
-<div class="max-w-3xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-2" style="color: var(--muted)">Connect harnesses</h1>
-  <p class="mono text-[12px] mb-4" style="color: var(--muted)">
-    Same as Unsloth-style wrapping: session-scoped env pointing at the kllm agent API. CLI is the launcher; copy
-    commands here for parity.
-  </p>
-
-  <div class="panel p-3 mb-4 mono text-[12px]" style="border-color: var(--border)">
-    <div>API base <span style="color: var(--accent)">http://127.0.0.1:{appStore.status?.control_port ?? 18765}</span></div>
-    <div class="mt-1">
-      Token
-      <button class="btn ml-2" onclick={() => copy(appStore.apiToken || '')}>Copy token</button>
-      <button class="btn ml-1" onclick={() => appStore.loadToken()}>Refresh</button>
+<div class="stack">
+  <header class="page-heading">
+    <div>
+      <p class="eyebrow">Connect</p>
+      <h1 id="page-title">Connect a harness</h1>
+      <p>Point a coding agent at this cluster, then chat with the running model.</p>
     </div>
-  </div>
+  </header>
 
-  <div class="flex flex-col gap-2">
+  <section class="panel panel-pad stack-sm">
+    <div class="od-stat">
+      <span class="stat-label">Endpoint</span>
+      <strong class="mono">{connection?.url || '—'}</strong>
+    </div>
+    <p>Model: {connection?.model || (loading ? 'Checking master…' : 'Start a model on the master first')}</p>
+    <label class="field" style="max-width: 240px">
+      Shell
+      <select class="field" bind:value={shell}>
+        <option value="bash">Bash / Zsh</option>
+        <option value="powershell">PowerShell</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" disabled={loading} onclick={() => refreshConnection()}>Refresh</button>
+    </div>
+    {#if remoteMaster}<p>Commands use the master’s inference endpoint, model, and token.</p>{/if}
+    {#if connectionError}<p role="status">{connectionError}</p>{/if}
+  </section>
+
+  <div class="connection-grid">
     {#each agents as agent}
-      <div class="panel px-3 py-2 flex items-center gap-3" style="border-color: var(--border)">
-        <span class="mono w-24" style="color: var(--accent)">{agent}</span>
-        <code class="mono flex-1 text-[12px] truncate" style="color: var(--muted)">{cmd(agent)}</code>
-        <button class="btn" onclick={() => copy(cmd(agent))}>Copy</button>
-        <button class="btn" onclick={() => copy(`kllm connect ${agent} --no-launch`)}>--no-launch</button>
-      </div>
+      <button class="harness" class:active={harness === agent.id} type="button" onclick={() => harness = agent.id}>
+        <span class="harness-letter">{agent.name.slice(0, 1)}</span>
+        <span class="od-field">
+          <strong>{agent.name}</strong>
+          <small>{agent.id}</small>
+        </span>
+      </button>
     {/each}
   </div>
+
+  <div class="code-row">
+    <code>{cmd(connection) || (loading ? 'Checking master…' : 'Connect command unavailable')}</code>
+    <button class="btn" type="button" disabled={loading || !connection} onclick={() => copy()}>Copy command</button>
+    <button class="btn" type="button" disabled={loading || !connection} onclick={() => copy(true)}>--no-launch</button>
+  </div>
+
+  <ChatPanel />
 </div>

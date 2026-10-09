@@ -27,7 +27,7 @@ import install as kllm_install  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = kllm_install.parse_args(argv)
+    kllm_install.parse_args(argv)
     # build.py never installs llama / WireGuard / system toolchains by default
     argv_full = list(argv or sys.argv[1:])
     extras = []

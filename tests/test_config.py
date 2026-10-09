@@ -26,6 +26,9 @@ def test_default_config(kllm_home):
         "vram_percent": 80,
         "ram_percent": 80,
         "accel_backend": None,
+        "split_mode": "layer",
+        "unified_memory": None,
+        "flags": {"private-network-setup": False},
     }
     assert config.resolve_memory_fraction("gpu") == 0.80
     assert config.resolve_memory_fraction("cpu") == 0.80
@@ -44,12 +47,38 @@ def test_save_and_load_accel_backend(kllm_home):
     assert "accel_backend" not in text2
 
 
+def test_save_and_load_unified_memory_override(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"unified_memory": True})
+    assert out["unified_memory"] is True
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert "unified_memory = true" in text
+    assert config.load_config()["unified_memory"] is True
+    config.save_config({"unified_memory": False})
+    assert "unified_memory = false" in (home / "config.toml").read_text(encoding="utf-8")
+    config.save_config({"unified_memory": None})
+    assert "unified_memory" not in (home / "config.toml").read_text(encoding="utf-8")
+    assert config.load_config()["unified_memory"] is None
+    with pytest.raises(ValueError):
+        config.save_config({"unified_memory": "yes"})
+
+
 def test_invalid_accel_backend_rejected(kllm_home):
     _, config = kllm_home
     with pytest.raises(ValueError):
         config.save_config({"accel_backend": "tpu"})
     with pytest.raises(ValueError):
         config.save_config({"accel_backend": "cpu"})
+
+
+def test_save_and_load_split_mode(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"split_mode": "tensor"})
+    assert out["split_mode"] == "tensor"
+    assert 'split_mode = "tensor"' in (home / "config.toml").read_text(encoding="utf-8")
+    assert config.get_split_mode() == "tensor"
+    with pytest.raises(ValueError):
+        config.save_config({"split_mode": "pipeline"})
 
 
 def test_save_and_load_full_config(kllm_home):
@@ -121,3 +150,45 @@ def test_invalid_gpu_ids_rejected(kllm_home):
         config.save_config({"gpu_ids": []})
     with pytest.raises(ValueError):
         config.save_config({"gpu_ids": [-1]})
+
+
+def test_feature_flags_default_disabled(kllm_home):
+    _, config = kllm_home
+    assert config.feature_flags() == {"private-network-setup": False}
+    assert config.get_feature_flag("private-network-setup") is False
+    with pytest.raises(ValueError):
+        config.get_feature_flag("nope")
+
+
+def test_set_feature_flag_roundtrip_and_toml(kllm_home):
+    home, config = kllm_home
+    assert config.set_feature_flag("private-network-setup", True) is True
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert "[flags]" in text
+    assert "private-network-setup = true" in text
+    assert config.get_feature_flag("private-network-setup") is True
+    config.set_feature_flag("private-network-setup", False)
+    text2 = (home / "config.toml").read_text(encoding="utf-8")
+    assert "[flags]" not in text2
+    assert config.get_feature_flag("private-network-setup") is False
+
+
+def test_feature_flag_survives_other_config_saves(kllm_home):
+    _, config = kllm_home
+    config.set_feature_flag("private-network-setup", True)
+    config.save_config({"device": "cpu"})
+    assert config.load_config()["device"] == "cpu"
+    assert config.get_feature_flag("private-network-setup") is True
+
+
+def test_invalid_feature_flags_rejected(kllm_home):
+    _, config = kllm_home
+    with pytest.raises(ValueError):
+        config.set_feature_flag("nope", True)
+    with pytest.raises(ValueError):
+        config.set_feature_flag("private-network-setup", "yes")
+    with pytest.raises(ValueError):
+        config.save_config({"flags": {"nope": True}})
+    with pytest.raises(ValueError):
+        config.save_config({"flags": {"private-network-setup": "yes"}})
+    assert config.feature_flags() == {"private-network-setup": False}

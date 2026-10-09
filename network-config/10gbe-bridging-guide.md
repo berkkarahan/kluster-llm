@@ -83,30 +83,48 @@ If you have 10GbE NICs, set up a dedicated point-to-point link.
 
 ### Setup Steps
 
-#### 1. macOS Side
+Use the repository script on both hosts. It requires an explicitly selected adapter with DHCP disabled and an OS-reported negotiated speed of at least 10 Gbps. It refuses lower or unreported speed, address/route conflicts, and unsupported adapters without changing network settings. It does not set DNS or a gateway.
+
+Choose an unused private subnet; this example uses `192.168.10.0/24`. Run one command per host with opposite roles.
+
+#### macOS and Linux
 
 ```bash
-# List Ethernet interfaces
-networksetup -listnetworkserviceorder
+# Use the explicit device name from the OS, for example en3 or en8:
+sudo .venv/bin/python scripts/configure_10gbe.py configure \
+  --interface en3 --role coordinator --subnet 192.168.10.0/24
 
-# Configure static IP on the dedicated 10GbE NIC (replace "en3" with actual)
-sudo networksetup -setstaticnetworksetup en3 192.168.10.1 255.255.255.0 "" ""
-
-# Disable other services to prevent interference
-sudo networksetup -setdnsservers en3 empty
+# On the peer host:
+sudo .venv/bin/python scripts/configure_10gbe.py configure \
+  --interface enp5s0 --role worker --subnet 192.168.10.0/24
 ```
 
-#### 2. Windows Side
+#### Windows
+
+Run PowerShell as Administrator. Use the adapter's numeric interface index from `Get-NetAdapter`.
 
 ```powershell
-# Find the 10GbE NIC
-Get-NetAdapter | Where-Object { $_.Speed -gt 1000000000 } | Format-Table Name, Speed
-
-# Set static IP (replace "Ethernet2" with actual name)
-New-NetIPAddress -IPAddress 192.168.10.2 -PrefixLength 24 -InterfaceAlias "Ethernet2"
-
-Set-NetIPConfiguration -InterfaceAlias "Ethernet2" -DnsDomain ""
+Get-NetAdapter | Format-Table Name, InterfaceIndex, Status, LinkSpeed
+& .\.venv\Scripts\python.exe scripts\configure_10gbe.py configure `
+  --interface 12 --role coordinator --subnet 192.168.10.0/24
 ```
+
+Run the worker command on the peer with its own interface index and `--role worker`. Coordinator receives the first usable address (`192.168.10.1` in this example); worker receives the second (`192.168.10.2`).
+
+The address is temporary and disappears after reboot. Run configure again after reboot. On Windows, the script uses `New-NetIPAddress -PolicyStore ActiveStore`; it does not add the address to the persistent store. A Windows adapter using DHCP is rejected rather than having DHCP disabled implicitly.
+
+### Verify the peer
+
+Run from each host using the selected interface and the peer address printed by configure:
+
+```bash
+sudo .venv/bin/python scripts/configure_10gbe.py verify \
+  --interface en3 --peer 192.168.10.2
+```
+
+On Windows, use the same Admin PowerShell Python invocation with `verify --interface 12 --peer 192.168.10.2`.
+
+An echo reply reports `reachable`. An explicit OS no-route/destination-unreachable reports `unreachable`. A timeout or missing echo reply reports `unable-to-verify`, since ICMP filtering and an offline peer cannot be distinguished by that probe. Check cable/link state, negotiated speed, route selection, and host firewall policy. Use `iperf3` separately to measure throughput; reachability does not prove 10GbE performance.
 
 ---
 
@@ -135,12 +153,8 @@ ifconfig | grep "192.168.10"  # macOS
 # or
 ipconfig | findstr "192.168.10"  # Windows
 
-# 2. Ping test (sub-millisecond expected)
-ping -S 192.168.10.1 192.168.10.2 -c 10
-
-# Expected output:
-# 10 packets transmitted, 10 received, 0% packet loss, time 0ms
-# rtt min/avg/max = 0.05/0.08/0.12 ms
+# 2. Verify from each host using that host's dedicated interface
+sudo .venv/bin/python scripts/configure_10gbe.py verify --interface en3 --peer 192.168.10.2
 
 # 3. Bandwidth test (optional)
 # macOS side:
@@ -185,13 +199,13 @@ Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Disabled
 
 ## Firewall Configuration
 
-### macOS (Coordinator)
+### macOS
 
-No firewall changes needed if both hosts are on the same subnet. The RPC server binds to `0.0.0.0`.
+`kllm` selects a private interface address for RPC and registers the installed binary with the application firewall when needed.
 
-### Windows (Worker)
+### Windows
 
-The `run_worker.ps1` script automatically opens TCP 50052. If you need to manually configure:
+`kllm join` attempts to open TCP 50052. If elevation is unavailable, configure the rule from an Administrator PowerShell session:
 
 ```powershell
 # Allow inbound RPC traffic
@@ -201,11 +215,13 @@ New-NetFirewallRule -Name "kllm-RPC" `
     -Action Allow `
     -Protocol TCP `
     -LocalPort 50052 `
-    -Profile Any
+    -Profile Private
 
 # Verify
 Get-NetFirewallRule -Name "kllm-RPC" | Format-Table DisplayName, Enabled
 ```
+
+Keep this rule on the Private profile and restrict it to trusted LAN/WireGuard networks. RPC is unauthenticated upstream; never expose TCP 50052 on public networks.
 
 ---
 
@@ -241,3 +257,13 @@ Get-NetFirewallRule -Name "kllm-RPC" | Format-Table DisplayName, Enabled
 | Thunderbolt IP Bridge | 0.05-0.2 ms | 40 Gbps | Best performance |
 
 For distributed inference, **Thunderbolt IP bridge is strongly recommended** due to lowest latency and highest bandwidth.
+
+## App-managed setup
+
+For temporary dedicated addressing, use the Home → Private 10GbE network panel. Follow the supported agent installation, install a TCP-only RPC source build with `uv run python scripts/install.py --llama-only --rpc-tcp-only` on every node, and restart the agents. Keep agents under the original account. Read the administrator notice and enable local access once on each computer through its OS approval prompt. The selected interfaces must be dedicated physical Ethernet, with readable DHCP configuration, link up and negotiated at least 1 Gbps (10 Gbps preferred).
+
+Updated joined nodes bootstrap and pin their initial public identities automatically. Return to the master and click Set up private network; sole safe adapters and a subnet are chosen automatically. Multiple suitable adapters require a choice. Advanced details retains manual pairing and configuration. The operation prepares every participant before applying any exact temporary IPv4 address. LAN/WireGuard management, DNS profiles and default gateways remain in use. Dedicated IPv4 DHCP changes are saved and restored with the exact owned address on stop. The manual script below remains available for operator-managed configuration.
+
+Readiness includes dedicated source/interface checks, signed bidirectional TCP diagnostics and a bounded valid idle RPC probe. The original worker RPC process remains the sole GPU owner. Inference must explicitly select the network on Plan & Run; launch endpoints are master-local loopback relays whose outbound source is the assigned dedicated IP. The default and saved model settings do not select this network.
+
+Stop dependent inference before network stop, retry or adding participants. Unreachable cleanup is pending; lost address-observer continuity requires local review rather than automatic deletion. Use Review network recovery locally: Keep current settings preserves the current configuration and releases Kluster ownership; Restore Kluster’s changes authorizes restoration of the exact reviewed configuration. Advanced details retains manual address-only recovery. Do not expose unauthenticated upstream RPC port 50052 publicly. Real multi-node generation, cable-loss and mixed-OS acceptance must be recorded separately from local contract/socket tests.

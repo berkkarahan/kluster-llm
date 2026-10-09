@@ -9,13 +9,13 @@ from fastapi import HTTPException
 
 from kllm.membership import cluster_snapshot
 from kllm.run_planning import (
-    build_master_launch,
     cluster_nodes,
     ensure_rpc_peers_reachable,
     member_rpc_host,
     ordered_members,
     rpc_server_endpoints,
 )
+from kllm.run_launch import build_master_launch
 from kllm.run_settings import RunBody, RunSettingsFields
 
 
@@ -31,7 +31,10 @@ def test_ordered_members_workers_then_master():
     assert rpc == ["10.0.0.2:50052", "10.0.0.3:50053"]
 
 
-def test_member_rpc_host_prefers_host_over_lan():
+def test_member_rpc_host_prefers_rpc_bind():
+    assert (
+        member_rpc_host({"rpc_bind": "192.168.68.63", "host": "192.168.68.62"}) == "192.168.68.63"
+    )
     assert member_rpc_host({"host": "10.8.0.2", "lan_host": "192.168.1.5"}) == "10.8.0.2"
     assert member_rpc_host({"lan_host": "192.168.1.5"}) == "192.168.1.5"
     assert member_rpc_host({}) == "127.0.0.1"
@@ -53,9 +56,9 @@ def test_cluster_nodes_carries_latency_and_master_flag():
         },
     }
     nodes = cluster_nodes(members)
-    assert nodes[0]["node_id"] == "w"
-    assert nodes[0]["latency_ms"] == 12.5
-    assert nodes[1]["is_master"] is True
+    assert nodes[0].node_id == "w"
+    assert nodes[0].latency_ms == 12.5
+    assert nodes[1].is_master is True
 
 
 def test_build_master_launch_rpc_aligns_with_worker_order():
@@ -69,12 +72,13 @@ def test_build_master_launch_rpc_aligns_with_worker_order():
         "tensor_split_csv": "0.2000,0.3000,0.5000",
         "ngl": 32,
         "context_effective": 4096,
+        "rpc_endpoints": ["10.0.0.2:50052", "10.0.0.3:50053"],
     }
     launch = build_master_launch(
         body,
         plan,
         model_path=Path("/tmp/toy.gguf"),
-        rpc_servers=rpc_server_endpoints(members),
+        rpc_servers=[],  # must not override plan rpc_endpoints
         infer_port=8080,
         repo_root=None,
         gpu_env={},
@@ -83,31 +87,90 @@ def test_build_master_launch_rpc_aligns_with_worker_order():
     assert launch["rpc_servers"] == ["10.0.0.2:50052", "10.0.0.3:50053"]
     assert launch["tensor_split"] == "0.2000,0.3000,0.5000"
     assert len(launch["tensor_split"].split(",")) == len(ordered_members(members))
-    assert launch["micro_batch"] == 2
+    assert launch["micro_batch"] == 128
+    assert isinstance(launch["micro_batch"], int)
+
+
+def test_build_master_launch_empty_rpc_endpoints_skips_workers():
+    body = RunBody(model="toy.gguf")
+    plan = {
+        "tensor_split_csv": "32",
+        "ngl": 32,
+        "context_effective": 4096,
+        "rpc_endpoints": [],
+    }
+    launch = build_master_launch(
+        body,
+        plan,
+        model_path=Path("/tmp/toy.gguf"),
+        rpc_servers=rpc_server_endpoints(
+            {
+                "m": {"node_id": "m", "role": "master", "host": "10.0.0.1"},
+                "w1": {"node_id": "w1", "role": "worker", "host": "10.0.0.2", "rpc_port": 50052},
+            }
+        ),
+        infer_port=8080,
+        repo_root=None,
+        gpu_env={},
+        extra_args=[],
+    )
+    assert launch["rpc_servers"] == []
+    assert launch["tensor_split"] == "32"
+    assert launch["micro_batch"] == 128
     assert isinstance(launch["micro_batch"], int)
 
 
 def test_ensure_rpc_peers_reachable_fails_closed_port():
     with pytest.raises(HTTPException) as ei:
-        ensure_rpc_peers_reachable(["127.0.0.1:1"], timeout_s=0.2)
+        ensure_rpc_peers_reachable(["192.0.2.1:50052"], timeout_s=0.2)
     assert ei.value.status_code == 503
     assert "unreachable" in str(ei.value.detail).lower()
 
 
-def test_ensure_rpc_peers_reachable_ok_when_listening():
-    import socket
+def test_ensure_rpc_peers_reachable_uses_control_plane(monkeypatch):
+    from kllm import http_clients
+    import httpx
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    port = srv.getsockname()[1]
-    try:
-        # create_connection succeeds as soon as the backlog accepts the SYN;
-        # no accept thread required.
-        ensure_rpc_peers_reachable([f"127.0.0.1:{port}"], timeout_s=1.0)
-    finally:
-        srv.close()
+    calls = []
+
+    def handle(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "process_pid": 42,
+                "process_role": "worker",
+                "rpc_bind": "127.0.0.1",
+                "rpc_port": 50052,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(http_clients, "control_client", lambda: client)
+        ensure_rpc_peers_reachable(["127.0.0.1:50052"])
+    assert calls == ["http://127.0.0.1:18765/v1/status"]
+
+
+def test_ensure_rpc_peers_reachable_rejects_rpc_bind_mismatch(monkeypatch):
+    from kllm import http_clients
+    import httpx
+
+    def handle(_request):
+        return httpx.Response(
+            200,
+            json={
+                "process_pid": 42,
+                "process_role": "worker",
+                "rpc_bind": "192.168.68.63",
+                "rpc_port": 50052,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(http_clients, "control_client", lambda: client)
+        with pytest.raises(HTTPException) as ei:
+            ensure_rpc_peers_reachable(["192.168.68.62:50052"])
+    assert "192.168.68.63" in str(ei.value.detail)
 
 
 def test_run_settings_rejects_zero_weights():
@@ -116,6 +179,21 @@ def test_run_settings_rejects_zero_weights():
         assert False, "expected validation error"
     except ValueError as exc:
         assert "zero" in str(exc).lower()
+
+
+def test_just_enough_master_requires_automatic_layer_placement():
+    assert RunSettingsFields(model="x.gguf", just_enough_master=True).just_enough_master is True
+    with pytest.raises(ValueError, match="automatic layer placement"):
+        RunSettingsFields(model="x.gguf", just_enough_master=True, split_mode="row")
+    with pytest.raises(ValueError, match="automatic layer placement"):
+        RunSettingsFields(model="x.gguf", just_enough_master=True, node_shares={"master": 1.0})
+    # Remembered per-model defaults carry the placement preference.
+    assert (
+        RunSettingsFields(model="x.gguf", just_enough_master=True).snapshot_for_remember()[
+            "just_enough_master"
+        ]
+        is True
+    )
 
 
 def test_snapshot_includes_latency_ms():
@@ -167,6 +245,7 @@ def test_native_knapsack_exposes_placement_fields():
     assert "node_alloc_bytes" in plan
     assert "node_scores" in plan
     assert plan["vram_alloc_bytes"] > 0
-    assert plan["node_scores"][0] != plan["node_scores"][1] or plan["node_latency_ms"][0] != plan[
-        "node_latency_ms"
-    ][1]
+    assert (
+        plan["node_scores"][0] != plan["node_scores"][1]
+        or plan["node_latency_ms"][0] != plan["node_latency_ms"][1]
+    )

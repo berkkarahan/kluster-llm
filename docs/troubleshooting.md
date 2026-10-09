@@ -1,540 +1,455 @@
 # Troubleshooting Guide
 
-This guide covers common issues and their solutions for the Kluster LLM project.
+Use the Python installer and `kllm` CLI for every supported platform. Avoid manual binary copies or alternate launch scripts until the recovery steps in [agent-install.md](agent-install.md) are exhausted.
 
----
+## Installation
 
-## Setup Issues
+### Re-run the supported installer
 
-### Preferred installer
+From the repository root:
 
 ```bash
+uv run python scripts/install.py
+# If uv is not installed yet:
 python scripts/install.py
 ```
 
-Installs Rust/Node (if missing), `kllm`, dashboard, `llama-server` + `rpc-server` at the tag in `llama-release`, and WireGuard. Use `--backend vulkan|cuda|metal|cpu` as needed.
+The installer stages `llama-server`, `rpc-server`, and their shared libraries under `vendor/bin`.
 
-llama.cpp only (run on **every** node; pin is committed `llama-release`):
-
-```bash
-python scripts/install.py --llama-only
-python scripts/install.py --check
-```
-
-Agent-oriented checklist (success criteria, flags, recovery): [agent-install.md](agent-install.md).
-
-### "setup_mac.sh: command not found"
-
-**Solution:** Prefer `python scripts/install.py --backend metal`, or:
+### Verify an installation
 
 ```bash
-chmod +x coordinator-macos/setup_mac.sh
-./coordinator-macos/setup_mac.sh
+uv run python scripts/install.py --check
+uv run python -c "import kllm; from kllm import native; assert native.native_available()"
+uv run kllm status
 ```
 
-### "setup_windows.ps1: cannot be loaded because running scripts is disabled"
-
-**Solution:** Prefer `python scripts\install.py`, or:
+On Windows, verify the staged executables with:
 
 ```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-powershell -ExecutionPolicy Bypass -File worker-windows\setup_windows.ps1
+Get-ChildItem vendor\bin\llama-server.exe, vendor\bin\rpc-server.exe
 ```
 
-### "Xcode Command Line Tools not installed"
+On Unix:
 
-**Cause:** Missing CLT on macOS.
+```bash
+ls -l vendor/bin/llama-server vendor/bin/rpc-server
+```
 
-**Solution:**
+### llama.cpp binary missing or wrong version
+
+Every run participant must use the same exact llama.cpp source revision. For managed versions,
+open Settings → llama.cpp on the master, select the target, and inspect each selected node's
+preparation status/logs. Retry failed builds; unused offline nodes do not block a run. Old agents
+need upgrading and a native rebuild. For bootstrap installations, repair the committed
+`llama-release` default and recheck it on every node:
+
+```bash
+uv run python scripts/install.py --llama-only --force
+uv run python scripts/install.py --check
+```
+
+If a release archive omits `rpc-server`, build the pinned source with RPC enabled:
+
+```bash
+uv run python scripts/install.py --llama-only --from-source --force
+```
+
+Do not copy binaries between operating systems or mix tags. Override a deliberate external installation with `KLLM_LLAMA_SERVER` and `KLLM_RPC_SERVER`.
+
+Managed source builds are staged under `~/.kllm/runtimes/<short-id>/<short-build>/source`. The short
+directory names keep llama.cpp's Windows toolchain (MSVC `cl.exe`, MSBuild file tracking) inside the
+legacy 260-character path limit, and the managed builder also enables `core.longpaths` for its Git
+steps. Build logs include the exact Git or toolchain error when a stage fails. If a node still
+reports `Filename too long` or `Cannot open source file`, update the Kluster checkout on that node
+and retry, or point `KLLM_HOME` at a shorter directory.
+
+Windows Vulkan source builds also need the LunarG Vulkan SDK (`glslc`, Vulkan headers and
+`vulkan-1.lib`). The managed builder provisions `KhronosGroup.VulkanSDK` via winget when it is
+missing; if winget or elevation is unavailable, install the SDK from
+https://vulkan.lunarg.com/sdk/home#windows and retry — no shell restart is needed.
+
+### Build tools are missing
+
+Allow the installer to provision its supported toolchains. If a package manager requests a shell restart, open a new terminal and rerun the same installer command. Useful checks are:
+
+```bash
+cmake --version
+cargo --version
+node --version
+npm --version
+```
+
+On macOS, install Xcode Command Line Tools when prompted:
+
 ```bash
 xcode-select --install
-# Follow installer prompts, then: python scripts/install.py --backend metal
+uv run python scripts/install.py --backend metal
 ```
 
----
+### macOS Metal or Vulkan build failure
 
-## Compilation Issues
+The default macOS build must provide Metal and Vulkan through MoltenVK. Run the installer without `--prefer-prebuilt`:
 
-### "cmake: command not found"
-
-**Cause:** CMake not installed or not in PATH.
-
-**Solution:**
 ```bash
-brew install cmake
-# Re-run setup_mac.sh
+uv run python scripts/install.py --llama-only --backend metal --from-source --force
 ```
 
-### "LLAMA_METAL=1: unrecognized option"
+If Homebrew upgraded OpenSSL, MoltenVK, glslc, or SPIR-V headers, rerun the command so the installer can invalidate stale CMake paths. Use `--backend cpu` only when a CPU-only installation is intentional.
 
-**Cause:** Outdated llama.cpp version.
+## Cluster startup
 
-**Solution:**
-```bash
-cd coordinator-macos/../vendor/llama.cpp
-git pull --rebase
-cmake -B build -DGGML_METAL=1 -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target llama-server -j$(sysctl -n hw.ncpu)
-```
+### `kllm ui` does not open or appears to hang
 
-### "clang: error: unsupported option '-fopenmp'"
+`kllm ui` starts the local agent before opening the browser. If startup fails, use the state and
+log paths printed by the CLI; the agent log is normally `~/.kllm/logs/agent.log`. A corrupt
+`cluster.json` now fails immediately instead of waiting for the health timeout. Do not expose or
+paste its contents because it may contain cluster credentials.
 
-**Cause:** Incompatible compiler version.
+If the CLI reports invalid persisted cluster state and no usable backup exists, stop the tracked
+runtime and move the file aside explicitly. This creates a new node identity and clears saved
+cluster membership/settings, but keeps downloaded models, logs, tokens, dashboard assets, and
+runtime binaries.
 
-**Solution:**
-```bash
-brew install llvm
-export CC=/opt/homebrew/opt/llvm/bin/clang
-export CXX=/opt/homebrew/opt/llvm/bin/clang++
-# Re-run compilation
-```
+PowerShell:
 
----
-
-## Runtime Issues
-
-### RPC must stay on a private LAN
-
-**Cause:** llama.cpp RPC is unauthenticated (upstream documents it as PoC / insecure on open networks; no in-app auth planned).
-
-**Solution:**
-- Default `kllm join` binds `rpc-server` to a **private interface IP** (check `kllm status` → `rpc_bind`), not `0.0.0.0`.
-- Prefer a dedicated 10GbE / Thunderbolt interface with **static IPs**.
-- Firewall TCP **50052** to cluster members only; never publish it to the internet. `kllm` best-effort creates/updates the `kllm-RPC` firewall rule.
-- Optional: `kllm start --overlay wireguard` / `kllm join --overlay wireguard` (WireGuard must be installed) so only join-key holders reach RPC on `10.66.87.0/24`.
-- Prefer the worker tensor cache (`-c`, enabled by `kllm` worker launch) so reconnects do not re-ship large tensors.
-- See [engine-decision.md](engine-decision.md).
-
-### WireGuard overlay fails on start/join
-
-**Cause:** `wg` / `wg-quick` (or WireGuard for Windows) not installed, or overlay mismatch (master `none`, worker `wireguard`).
-
-**Solution:**
-- Install WireGuard from https://www.wireguard.com/install/ and ensure `wg` is on `PATH` (or set `KLLM_WG`).
-- Use the same `--overlay` on master and workers.
-- Control plane stays on LAN — only RPC moves to the overlay. Verify with `kllm status` (`wg_address`, `overlay_status`).
-
-### macOS worker on a Vulkan master (Windows/Linux)
-
-**Cause:** Default macOS install uses **Metal** (`hw` probe + `install.py --backend auto`). A Vulkan master cluster expects workers to run **Vulkan** `rpc-server` binaries and to register `backend=vulkan` for layer split / distribute planning. Metal workers in a Vulkan-first cluster mis-report capacity and backend.
-
-**Solution:**
-```bash
-uv run python scripts/install.py --backend vulkan
-uv run python scripts/install.py --llama-only --backend vulkan
-export KLLM_ACCEL_BACKEND=vulkan   # add to shell profile for kllm-agent
-uv run kllm join --key '<key>' --master <windows-lan-ip>
-```
-Confirm on the master: `kllm status` shows the Mac member with `backend: vulkan`. GitHub macOS packs are Metal-only but still match the pinned RPC protocol. A Vulkan `rpc-server` source build needs Vulkan SDK / MoltenVK.
-
-### llama.cpp RPC HELLO / "Remote RPC server crashed or returned malformed response"
-
-**Cause:** Master and worker are on different llama.cpp builds. RPC HELLO (`RPC_CMD_HELLO`) is unversioned across nightlies; a Windows `b11026` `llama-server` talking to a Mac HEAD/`git pull` `rpc-server` closes the socket.
-
-**Solution:**
-1. Confirm the committed pin: `cat llama-release` (must be the same git revision on every node).
-2. On **every** node: `python scripts/install.py --llama-only` then `python scripts/install.py --check`.
-3. Do not TCP-probe port 50052 (a connect+close can hang or kill `rpc-server`).
-4. After binaries match: `kllm leave` on the worker, then `kllm join --key … --rpc-bind 0.0.0.0` if the master's LAN IP cannot bind the worker interface.
-5. Re-run `kllm run`. If HELLO still fails, `--force` the setup on both sides and confirm `vendor/bin/llama-release.txt` shows the same `tag=`.
-
-Do **not** mix `vendor/llama.cpp` HEAD with a GitHub nightly on the other machine.
-
-### "rpc-server.exe not found"
-
-**Cause:** Worker setup not completed.
-
-**Solution:**
 ```powershell
-.\worker-windows\setup_windows.ps1
+uv run kllm stop
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+Move-Item -LiteralPath "$env:USERPROFILE\.kllm\cluster.json" -Destination "$env:USERPROFILE\.kllm\cluster.json.corrupt-$stamp.bak"
+uv run kllm ui --no-open
 ```
 
-### "llama-server not found"
+macOS/Linux:
 
-**Cause:** Coordinator setup not completed.
-
-**Solution:**
 ```bash
-cd coordinator-macos && ./setup_mac.sh
+uv run kllm stop
+mv ~/.kllm/cluster.json ~/.kllm/cluster.json.corrupt-$(date +%Y%m%d-%H%M%S).bak
+uv run kllm ui --no-open
 ```
 
-### "ERROR: --model <path> is required"
+Confirm `http://127.0.0.1:18765/health`, then run `uv run kllm ui`. Re-create or rejoin the
+cluster as appropriate. Keep the renamed file until recovery is confirmed; the CLI never deletes
+or silently restores corrupt state.
 
-**Cause:** Missing required argument.
+### Start a master and join a worker
 
-**Solution:**
 ```bash
-./run_coordinator.sh --model /path/to/model.gguf --worker-ip 192.168.10.2
+# Master
+uv run kllm start
+
+# Worker
+uv run kllm join --key '<join-key>'
 ```
 
-### "ERROR: Model file not found"
+If mDNS discovery fails, specify the private master address:
 
-**Cause:** Model path is incorrect or file doesn't exist.
-
-**Solution:**
 ```bash
-# Verify model exists
-ls -lh /path/to/model.gguf
-
-# Use absolute path
-./run_coordinator.sh --model /absolute/path/to/model.gguf --worker-ip 192.168.10.2
+uv run kllm join --key '<join-key>' --master 192.168.10.1
 ```
 
----
+Run the full installer on every node before joining. A worker does not need a GGUF; it receives tensors over RPC.
 
-## Network Issues
+### No matching master or join returns 401
 
-### "Connection timed out"
+- Confirm the master is still running and copy its current join key.
+- Use `--master <private-ip>` to bypass mDNS.
+- Ensure the control port, normally 18765, is reachable between the nodes.
+- Do not reuse a key from a previous `kllm start` session.
 
-**Cause:** Worker not running, firewall blocking, or wrong IP.
+### RPC server is unreachable
 
-**Solution:**
+Inspect the selected bind address and member state:
+
 ```bash
-# Check worker is running (Windows)
-netstat -an | findstr 50052
-
-# Check firewall (Windows)
-Get-NetFirewallRule -Name "kllm-RPC" | Format-Table DisplayName, Enabled
-
-# Test connectivity
-ping -S 192.168.10.1 192.168.10.2
+uv run kllm status
+uv run python scripts/install.py --check
 ```
 
-### "Access is denied" creating `kllm-RPC` firewall rule
+The default bind prefers a local address on the app's private-network subnets
+(`10.10.10.0/24` first, then the documented fallbacks) when present, otherwise
+the default-route LAN IP. A running cluster keeps its persisted bind across
+agent restarts: stop and start the cluster, or pass
+`kllm start --rpc-bind <internal-ip>`, to move RPC onto the dedicated link.
 
-**Cause:** `New-NetFirewallRule` requires an elevated (Administrator) PowerShell. The agent runs without elevation and only best-effort creates the rule.
+RPC port 50052 must be reachable over a private LAN or WireGuard overlay. Test it from the master:
 
-**Solution:** Open **PowerShell as Administrator** once and run:
+```bash
+# Unix
+nc -vz <worker-ip> 50052
+```
+
+```powershell
+# Windows
+Test-NetConnection <worker-ip> -Port 50052
+```
+
+If Windows could not create the firewall rule automatically, run this once in an Administrator PowerShell session:
+
 ```powershell
 New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
 ```
-Then restart/join again. After the rule exists, non-elevated starts reuse it without prompting.
-### "No route to host" / join fails but `curl` works (macOS + Zscaler)
 
-**Cause:** The uv-managed Python running `kllm-agent` cannot open LAN sockets (`errno 65`: Local Network TCC and/or Zscaler), while `curl` / Homebrew Python can. The same restriction also hides mDNS, so Join-by-key with an empty Master host used to 404 even when the master was advertising.
+Never open RPC port 50052 to the public internet.
 
-**Solution:** Join automatically (1) browses mDNS under a helper interpreter when the agent Python sees no masters, then (2) starts a localhost control-plane TCP proxy for register/heartbeat. Status shows `cp_proxy_port` and a `netsec_warnings` line. RPC still uses your real LAN `--rpc-bind`. Dashboard Join with only the join key should work; fill **Master host** only if discovery still fails.
+A worker can keep heartbeating (the dashboard still shows it connected) while
+its `rpc-server` is not running; a Run starts it through the signed command
+channel. The worker retries a failed RPC start (cold GPU probe, immediate exit,
+or bind timeout) up to three bounded attempts inside that one command, and the
+master waits up to 60 seconds for the final result. A first Run after a fresh
+macOS runtime build can therefore recover on its own. If it still fails, the
+master shows `RPC startup failed` only after the retries are exhausted; inspect
+`kllm status` for that node: its `rpc_error` holds the real cause and the RPC
+logs hold the `rpc-server` output. Confirm the `rpc-server` binary and port are
+available, then retry.
+
+While a model is serving, one missed worker renewal does not reload it. A second
+consecutive miss does. The worker keeps the RPC process for 60 seconds without a
+renewal, so a short path blip does not expire it first. The local llama-server
+dying restarts the run immediately.
+
+### RPC handshake or malformed-response errors
+
+This usually means nodes have different llama.cpp builds. On every node:
 
 ```bash
-uv run kllm join --key '<key>'
-# if discovery still fails:
-uv run kllm join --key '<key>' --master <windows-lan-ip>
-# optional override:
-export KLLM_CP_PROXY_PYTHON=/opt/homebrew/bin/python3
+uv run python scripts/install.py --llama-only --force
+uv run python scripts/install.py --check
 ```
 
-Also grant **System Settings → Privacy & Security → Local Network** to Python/Cursor when prompted. Use `--master-port` for the remote control port — `--port` is only the **local** agent.
+Restart the cluster only after every node reports the same tag.
 
-### Cluster members show mismatched backends (Metal vs Vulkan)
+### WireGuard overlay fails
 
-**Cause:** Each node reports its accelerator via probe, optional `accel_backend` in `~/.kllm/config.toml`, or `KLLM_ACCEL_BACKEND`. Mixed Metal/Vulkan (or CUDA/Vulkan) labels are intentional when you pick **Backend** on the Cluster panel before Start/Join.
-
-**Solution:** Set the same Backend on every node (dashboard selector or `accel_backend = "vulkan"` / `export KLLM_ACCEL_BACKEND=vulkan`), then Stop/Start or Leave/Join.
-
-### "No route to host" (wrong subnet)
-
-**Cause:** IPs not in same subnet or interface disabled.
-
-**Solution:**
-```bash
-# Verify IPs (macOS)
-ifconfig thunderbolt1 | grep "inet "
-
-# Verify IPs (Windows)
-Get-NetIPAddress -InterfaceAlias "Ethernet1" | Format-Table IPAddress
-```
-
-### "High latency (>1 ms)"
-
-**Cause:** Using wrong network interface (Wi-Fi instead of Thunderbolt).
-
-**Solution:**
-```bash
-# Disable other interfaces (macOS)
-sudo networksetup -setairportpower airport off
-
-# Verify you're using Thunderbolt interface
-ping -S 192.168.10.1 192.168.10.2
-```
-
-### "DHCP reassignment mid-inference"
-
-**Cause:** DHCP lease renewal changed IP.
-
-**Solution:**
-```bash
-# Set static IPs (macOS)
-sudo networksetup -setstaticnetworksetup thunderbolt1 192.168.10.1 255.255.255.0 "" ""
-sudo networksetup -setdhcp thunderbolt1 off
-
-# Set static IPs (Windows)
-New-NetIPAddress -IPAddress 192.168.10.2 -PrefixLength 24 -InterfaceAlias "Ethernet1"
-Set-NetIPInterface -InterfaceAlias "Ethernet1" -Dhcp Disabled
-```
-
----
-
-## Memory Issues
-
-### "CUDA out of memory" or "Mach kernel reported"
-
-**Cause:** Model too large for available VRAM/RAM.
-
-**Solution:**
-```bash
-# Reduce context length
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --context 2048
-
-# Use smaller quantization (Q4_K_M instead of Q5_K_M)
-
-# Increase tensor-split to move more layers to Mac
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --tensor-split 0.75
-```
-
-### "OOM: Out of Memory"
-
-**Cause:** System RAM exceeded.
-
-**Solution:**
-```bash
-# Reduce micro-batch size
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --micro-batch 1
-
-# Close other applications to free RAM
-```
-
-### "Memory pressure exceeded threshold" (Prima.cpp)
-
-**Cause:** mmap threshold too low for model size.
-
-**Solution:**
-```bash
-# Increase mmap threshold
-./run_coordinator_prima.sh --model model.gguf --worker-ip 192.168.10.2 --mmap-threshold 0.15
-
-# Or switch to llama.cpp for manual control
-```
-
----
-
-## Performance Issues
-
-### "Slow inference"
-
-**Cause:** Layers spilling to CPU/RAM.
-
-**Solution:**
-```bash
-# Check layer placement (look for "→ CPU" in logs)
-kllm logs -f --source llama
-
-# Put more layers on GPU (cluster already up via kllm start / kllm join)
-kllm run --model model.gguf --device gpu --vram-percent 90
-# Or force a layer count: kllm run --model model.gguf --extra-arg "-ngl 40"
-
-# Use smaller model or smaller quantization
-```
-
-### "Tokens/sec much lower than expected"
-
-**Cause:** Not using GPU, or network bottleneck.
-
-**Solution:**
-```bash
-# Verify GPU utilization (Windows)
-# Task Manager → Performance → GPU
-
-# Verify network bandwidth
-iperf3 -c 192.168.10.1 -t 10
-
-# Check for other network traffic
-# Disable other interfaces
-```
-
-### "Inference speed drops after few minutes"
-
-**Cause:** Thermal throttling or memory pressure.
-
-**Solution:**
-```bash
-# Monitor temperature (macOS)
-sudo powermetrics -samplers thermal
-
-# Reduce context length
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --context 2048
-
-# Ensure adequate cooling
-```
-
----
-
-## Precision Issues
-
-### "Output quality degraded" or "precision drift"
-
-**Cause:** Using tensor-split mode instead of layer-split mode.
-
-**Solution:**
-```bash
-# Use layer-split mode (required for kllmgeneous hardware)
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --split-mode layer
-```
-
-### "Garbage output" or "nonsensical responses"
-
-**Cause:** Incorrect tensor-split ratio or model mismatch.
-
-**Solution:**
-```bash
-# Recalculate split ratio
-./calculate_split.sh --mac-memory 24 --worker-vram 12
-
-# Use calculated ratio
-./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2 --tensor-split 0.68
-```
-
----
-
-## Prima.cpp Issues
-
-### "Halda scheduler failed to initialize"
-
-**Cause:** Prima.cpp not compiled or worker unreachable.
-
-**Solution:**
-```bash
-# Recompile Prima.cpp
-cd coordinator-macos/../vendor/prima.cpp
-cmake -B build -DGGML_METAL=1 -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target prima-server -j$(sysctl -n hw.ncpu)
-
-# Verify worker is accessible
-ping 192.168.10.2
-```
-
-### "Variable performance" or "latency spikes"
-
-**Cause:** Automatic scheduling overhead.
-
-**Solution:**
-```bash
-# Enable verbose logging to see scheduler decisions
-./run_coordinator_prima.sh --model model.gguf --worker-ip 192.168.10.2 --verbose
-
-# Consider switching to llama.cpp for predictable performance
-```
-
----
-
-## Windows-Specific Issues
-
-### "rpc-server.exe access denied"
-
-**Cause:** Antivirus or Windows Defender blocking execution.
-
-**Solution:**
-```powershell
-# Add exception to Windows Defender
-Add-MpPreference -ExclusionPath "C:\path\to\worker-windows"
-
-# Or temporarily disable real-time protection
-Set-MpPreference -MapSchedulerEnabled $false
-```
-
-### "Firewall rule already exists"
-
-**Cause:** Rule created previously.
-
-**Solution:**
-```powershell
-# Remove existing rule
-Remove-NetFirewallRule -Name "kllm-RPC"
-
-# Re-create
-New-NetFirewallRule -Name "kllm-RPC" -DisplayName "Kluster LLM RPC Worker" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 50052 -Profile Any
-```
-
----
-
-## macOS-Specific Issues
-
-### "Permission denied" on network setup
-
-**Cause:** Need sudo for network configuration.
-
-**Solution:**
-```bash
-sudo ./run_coordinator.sh --model model.gguf --worker-ip 192.168.10.2
-```
-
-### "Thunderbolt interface not found"
-
-**Cause:** Interface name different on your system.
-
-**Solution:**
-```bash
-# List all interfaces
-networksetup -listnetworkserviceorder
-
-# Use correct interface name
-sudo networksetup -setstaticnetworksetup thunderbolt2 192.168.10.1 255.255.255.0 "" ""
-```
-
----
-
-## General Debugging Tips
-
-### Enable verbose logging
+Confirm WireGuard is installed on every node:
 
 ```bash
-# On the master (or any joined node — workers proxy to the master)
-kllm logs -f
-kllm logs -n 200 --source rpc
+wg --version
 ```
 
-Logs are stored under `~/.kllm/logs/` (`agent.log`, `llama-server.log`, `rpc-server.log`, and `cluster.jsonl` on the master).
+On Windows, also check `C:\Program Files\WireGuard\wg.exe`. Start and join with `--overlay wireguard` consistently; do not mix overlay and plain-LAN nodes in the same session.
 
-### Check system logs
+## Planning and inference
+
+### Model search or Hugging Face link failed
+
+Dashboard search and `kllm model download` share one resolver.
+
+- An empty result means the repository or folder was read and contained no standalone GGUF. Documentation, projectors (`mmproj`), importance matrices (`imatrix`), and split shards are not offered as models.
+- An error is a different outcome: unsupported page (dataset, Space, collection, profile), missing repository, revision, folder, or file, a file that is not a standalone GGUF, gated access, timeout, or rate limit. Correct the link or retry. Do not treat that error as an empty repository.
+- A keyword search can return usable rows plus a warning when some candidate repositories could not be inspected. If every candidate fails, the search errors instead of showing an empty list.
+- Gated or private repositories use the configured token (`kllm` token file, `HF_TOKEN`, or `HUGGING_FACE_HUB_TOKEN`). The dashboard does not print the token. A repository error does not prove that the repository does not exist.
+- File links are exact and case-sensitive. Encode a slash inside a revision as `%2F`. Repository and tree pages must be searched, then downloaded from a result; they are not file downloads.
+- CLI download still takes a file URL or `org/repo:file.gguf` / `org/repo:Q4_K_M`. Keyword search belongs to the dashboard, not the CLI.
+
+### Model not found
+
+List or download models through the CLI:
 
 ```bash
-# macOS
-log show --predicate 'process == "llama-server"' --last 10m
-
-# Windows
-Get-Content C:\Windows\System32\LogFiles\WMI\*.log | Select-String "rpc-server"
+uv run kllm model list
+uv run kllm model download 'ORG/REPO:Q4_K_M'
 ```
 
-### Verify hardware detection
+Pass a listed model name or an absolute GGUF path to both planning and execution:
 
 ```bash
-# macOS
-sysctl -n hw.memsize
-sysctl -n hw.ncpu
-sysctl -n hw.machine
-
-# Windows
-Get-WmiObject Win32_PnPEntity | Where-Object { $_.Name -match "AMD" } | ForEach-Object { $_.Name }
-Get-WmiObject Win32_Processor | Select-Object Name, NumberOfLogicalProcessors
+uv run kllm plan --model /absolute/path/model.gguf
+uv run kllm run --model /absolute/path/model.gguf
 ```
 
-### Test network independently
+### Out of memory
+
+Inspect the plan before launching:
 
 ```bash
-# From macOS
-iperf3 -s -B 192.168.10.1
-
-# From Windows (another terminal)
-iperf3 -c 192.168.10.1 -t 10
+uv run kllm plan --model model.gguf --context 2048 --micro-batch 1
 ```
 
----
+Then apply the same safe settings to the run:
 
-## Getting Help
+```bash
+uv run kllm run --model model.gguf --context 2048 --micro-batch 1
+```
 
-If issues persist:
+If the model still does not fit, use a smaller quantization or model, free memory on participating nodes, or lower the configured memory headroom. Placement and layer allocation are automatic; do not supply a manual `--tensor-split` override.
 
-1. **Check logs**: Run `kllm logs -f` on the master (or any joined node) and review output
-2. **Verify prerequisites**: Ensure all hardware and software requirements are met
-3. **Test components separately**: Run worker and coordinator independently
-4. **Check documentation**: Review [docs/layer-split-calculator.md](layer-split-calculator.md) and [docs/memory-constraints.md](memory-constraints.md)
-5. **File an issue**: Provide full error output and system info
+### No GPU is available
+
+Check what the installed llama.cpp binary reports:
+
+```bash
+vendor/bin/llama-server --list-devices
+```
+
+On Windows use `vendor\bin\llama-server.exe`. A saved backend preference cannot add a backend that was not compiled into the binary. Reinstall with the required backend, then restart the node.
+
+If Run fails with `no GPUs available` and `timed out` just after a llama.cpp runtime install, the first `llama-server --list-devices` probe was killed before a cold launch (macOS Gatekeeper or Metal init) could finish. The agent gives that first probe a longer budget. If it still times out, run the `llama-server --list-devices` command from the error once on that machine, then Run again. A node that misses heartbeats during the failed start is dropped from the cluster and must rejoin.
+
+### Slow inference
+
+- Run `kllm plan` and inspect CPU spill, selected devices, and warnings.
+- Confirm the high-speed interface is carrying RPC traffic.
+- Check GPU utilization and thermal throttling on every node.
+- Reduce context or choose a smaller quantization when memory pressure causes spill.
+- Prefer the default `layer` split for heterogeneous clusters.
+- A gap between chat requests reuses the agent's connection to the local llama-server, so the next completion does not open a new socket first.
+
+### Output quality or precision drift
+
+Use `layer` split mode across mixed Metal, CUDA, ROCm, or Vulkan backends:
+
+```bash
+uv run kllm config --split-mode layer
+uv run kllm run --model model.gguf
+```
+
+Row and tensor modes are only appropriate where the planner accepts the selected homogeneous/local backend combination.
+
+## Network diagnosis
+
+Use stable private addresses on dedicated links. Verify both directions with `ping`, then verify the control and RPC ports separately. High latency, packet loss, or DHCP address changes can interrupt inference even when cluster discovery succeeds.
+
+A worker marks the master unreachable after two consecutive failed heartbeats, not the first. The signed network channel reconnects on its own after a dropped socket and backs off up to 8 seconds. It re-runs pairing only when the master refuses the handshake.
+
+For 10GbE and Thunderbolt IP setup, see [../network-config/10gbe-bridging-guide.md](../network-config/10gbe-bridging-guide.md).
+
+## Logs and support
+
+### Local SQLite history or managed-network storage is unavailable
+
+The storage layer reports sanitized acquisition, checkout, closed-owner and
+unknown-commit errors. A timeout means the operation did not acquire its lease;
+an unknown commit outcome means SQLite did not confirm whether that transaction
+committed. For unknown outcomes, inspect the existing durable reading/request
+identifier before retrying. Usage ingestion can already be committed when a
+later retention pass fails, so a `503` does not imply that the submitted reading
+was rolled back.
+
+Check `KLLM_SQLITE_POOL_SIZE` (integer 1–4),
+`KLLM_SQLITE_WAIT_TIMEOUT` and `KLLM_SQLITE_SHUTDOWN_TIMEOUT` (positive finite
+seconds), then restart the agent after correcting settings. A failed shutdown
+keeps the owner unavailable while its outstanding work settles; wait for the
+agent to finish closing before changing its data directory. Keep the original
+SQLite files for diagnosis and recovery. Do not delete or recreate them as a
+timeout remedy.
+
+Use the cluster log command rather than launching child processes manually:
+
+```bash
+uv run kllm logs
+uv run kllm status
+```
+
+The dashboard **Logs** page (`/logs`) reads the same stream for master and workers. **Stop logging** on the master stops diagnostic collection and file output across updated nodes while inference continues. **Resume logging** records new output; the stopped interval is discarded. A partial result lists pending, unreachable, unsupported or failed nodes. Upgrade/relaunch an unsupported node once to attach its independent output drain. Interpret its status text before assuming a problem:
+
+- **Connected — no log entries** is a healthy empty poll, not an outage.
+- **No entries for the selected tag** or **No entries match the selected node and tag** means this visit still holds other rows. Change **All tags**, **UI**, **Inference**, or **Unclassified**, or the node filter. That empty selection is not an outage, a cleared display, or a history gap.
+- **Local only — master unreachable** means the page is showing only the serving worker's buffered records; the journal on the master is not being read. Confirm the control connection on port 18765.
+- **Disconnected / cached rows** keeps the last received rows readable after a failure; they are not fresh.
+- **Read error / timed out** keeps prior rows visible and reports the last successful read; a timed-out snapshot retries at the next selected interval. A stale warning clears when a later snapshot confirms recovery.
+- **Master log request returned HTTP …** means the master responded but rejected or failed the request; this is not treated as network unreachability. Check the master version, authorization, and control service before relying on local-only fallback.
+- **Cluster log journal is temporarily unavailable** means retained history could not be read. The master retries initialization; the logs endpoint reports 503 until the saved journal is readable. Check filesystem access and free disk space, then retry.
+- **history gap — older entries omitted** or **trimmed N** means bounded retention or the 2,000-row display cap dropped older rows. Nothing was deleted from `~/.kllm/logs/cluster.jsonl`.
+- **Log read timed out; retrying** means one snapshot read exceeded its five-second deadline; the page retries on the next selected interval. Repeated timeouts point at the control plane or an overloaded node.
+- Clearing the display ("Display cleared — waiting for a new entry") is display-only. Stored logs and other dashboards are unaffected. After a service restart or a switch between cluster and local-only coverage, the page reports the recovery window it cannot backfill; entries generated during that window may not appear.
+
+### Dashboard live updates
+
+- **Live** means the dashboard WebSocket is receiving application updates. It does not certify that every source reading is fresh; check the node's own reading status and observation age.
+- A worker's saved topology is shown as **disconnected** after an agent restart or a failed master heartbeat, even when the local dashboard is reachable. A successful heartbeat restores live membership; saved nodes and readings alone do not confirm a connection.
+- **Refresh** means socket delivery is interrupted. The dashboard retains the last accepted values, reads the aggregate snapshot every two seconds, and probes live delivery every 30 seconds. If ordinary reads also fail, the header shows **updates unavailable**.
+- **reconnecting** means a replacement live connection is being initialized. A healthy connection with unchanged values should remain labeled **live**.
+- An area labeled **denied** remains inaccessible; periodic refresh does not bypass access rules. The header shows its last successful update when available.
+- On a worker, **mirrored** status/usage means the worker view includes upstream cluster information; load/download progress remains local. Logs can switch to explicitly labeled **local only** if the master cannot be reached. Check the worker's private control connection and `kllm status` before treating local-only logs as the cluster trail.
+- A load/download outcome labeled **unknown** means the serving process no longer has a retained result for the operation. Check the model list and inference status; the dashboard will not infer success or replay the command.
+- For Vite development, use `http://localhost:5173` or `http://127.0.0.1:5173`; the `/v1` proxy forwards WebSocket upgrades with the browser Origin intact. Do not rewrite Origin or expose worker services to make an upgrade succeed.
+
+Inspect the snapshot without credentials when diagnosing the serving agent:
+
+```bash
+curl --get 'http://127.0.0.1:18765/v1/dashboard/live' \
+  --data-urlencode 'topics=status,usage,load,download'
+```
+
+The endpoint is a dashboard read, not an authentication mechanism. Keep it on the existing private control plane. RPC port 50052 remains private and must never be exposed publicly.
+
+### Native resource readings
+
+macOS GPU utilization and GPU-used shared RAM come from IORegistry PerformanceStatistics,
+matched to the Metal device's registry ID. Host available RAM describes the shared pool;
+it is not dedicated VRAM or GPU-free memory. Windows utilization uses PDH GPU Engine
+counters, summing process instances for each physical engine and reporting the busiest
+engine. Device totals still use the reconciled llama.cpp capacity. Unknown driver counters
+remain unsupported or failed with a source and reason in Details; zero is a measured value.
+Resource schema 2 carries utilization. Updated workers negotiate schema 1 with older masters
+and omit only the new field until the master is upgraded.
+
+Run real device acceptance after rebuilding on each M1/M5/RX 9070 node:
+`KLLM_TEST_HARDWARE=1 uv run python -m pytest -n 0 tests/test_native_usage.py`.
+On PowerShell set `$env:KLLM_TEST_HARDWARE='1'` before running the pytest command.
+The macOS reference test takes 30 paired IORegistry/native samples. A Windows compile check
+does not establish RX 9070 counter accuracy; that requires its driver and hardware tests.
+
+- **Initializing CPU** needs a second observation, normally two seconds later. Reset process
+  identity, suspended/discontinuous timing, and CPU-count changes invalidate old baselines.
+- **Unsupported** is not zero usage. Windows free RAM is distinct from available RAM; macOS
+  GPU-wide usage is unavailable when the public interface cannot establish that scope.
+- **GPU discovery error** with an empty list is not proof of a GPU-less machine. Check the
+  display driver and counter provider; valid host/process readings remain usable.
+- **Process identity unavailable** can occur for legacy saved records. The agent adopts an
+  identity only if its saved start time matches the actual process; otherwise a normal
+  managed-process relaunch is required before new process-attributed readings are trusted.
+- **Timeout / source quarantined** indicates an isolated collector exceeded its deadline.
+  The source is not replaced until its previous helper has exited; other sources can continue.
+- If an updated Python wrapper cannot find the native collector, rebuild with
+  `uv run python scripts/build.py --skip-ui`. Check the actual loaded file with
+  `uv run python -c "from kllm import native; print(native.require_native().__file__)"`.
+  Checkout tests use `src/` and can load an older in-tree `.pyd` instead of a rebuilt wheel.
+  For that specific editable-build mismatch, `uv run maturin develop` refreshes the in-tree
+  extension. Windows error 32 means a process still maps it: stop that owning agent safely
+  before rebuilding; do not force-delete or overwrite a loaded DLL.
+- Resource session conflicts require a fresh authenticated registration/reset handshake.
+  Retrying an old generation or changing a sequence number alone does not reset its watermark.
+
+### Information to include in reports
+
+Runtime logs live under `~/.kllm/logs`. Include:
+
+- Operating system, CPU, GPU, RAM, and VRAM for each node
+- The committed `llama-release` value and `install.py --check` output
+- `kllm status` and the relevant log excerpt
+- Network type, addresses, latency, and whether WireGuard is enabled
+- Model filename, quantization, context, and the `kllm plan` result
+
+See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-constraints.md](memory-constraints.md) for supported behavior.
+
+### Managed private-network preparation and recovery
+
+If adapter refresh reports HTTP 500 or a JSON parsing error, check `~/.kllm/logs/agent.log` for the failing `/v2/node/network-adapters` request. Older agents may abort macOS discovery on loopback or tunnel interfaces with no `networksetup` service; update and restart the agent to use discovery that skips uninspectable interfaces. The dashboard reports the request path and HTTP status when an error response is not JSON, and preserves structured prerequisite refusal codes.
+
+Show the panel first with `kllm flags private-network-setup --enable` (it is hidden by default), then use Home → Private 10GbE network → Refresh computers. Enable administrator access locally on each computer after reading the notice and approving the OS prompt. Updated joined nodes pair automatically; a sole safe dedicated adapter is selected automatically. Multiple eligible adapters require a choice. Advanced details retains manual pairing and selection. Network setup verifies connectivity independently of RPC. At inference startup, `RPC_PROTOCOL_UNSUPPORTED` requires a matching recorded TCP-only source installation on both ends (`uv run python scripts/install.py --llama-only --rpc-tcp-only`). A version prepared from a prebuilt release pack has no such evidence; prepare that version from source in Settings → llama.cpp (or install with `--from-source`) before using the private network. Stop the current model before installing; the next Run lets the master start fresh RPC processes and verify their capabilities.
+
+A connected worker showing **Joined · idle** has no running RPC process by design. Start the model on the master to allocate workers. An upgrade-required error means a selected worker cannot accept signed runtime commands; update its agent and rejoin. **Recovering** means the master is restarting the selected RPC workers and reloading the model. Stop cancels that retry loop. **Cleanup pending** retains ownership information after an unacknowledged stop: reconnect the worker and retry Stop before starting another run. A disconnected worker expires its RPC ownership after 60 seconds and stops the owned process without restarting it.
+
+`RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN/WireGuard.
+
+`INFERENCE_ACTIVE` blocks network stop/add/retry while a reservation, active run or unresolved admission owns its assignments. Stop inference first, then let the app obtain drain acknowledgements. Missing acknowledgements stay uncertain; they are not reported as successful cleanup. Cleanup pending on an unreachable worker is retained and retried after control connectivity returns.
+
+After an abrupt agent restart, prior address observations and readiness are invalid. Present addresses with lost ownership remain untouched. Open that node's local cleanup review: inspect the current exact address and adapter snapshot, then either keep the address and release app ownership or explicitly confirm that exact delta for removal. A changed snapshot refuses removal and requires another review. Never delete all addresses from an adapter to resolve one journal. Graceful shutdown stops a matching dependent managed inference before closing bridges; unrelated legacy inference is identified separately.
+
+A local node-label change (for example, `cluster.json` was reset or restored while `managed-network.sqlite` kept its pairing) is recoverable: the agent keeps the pinned signing key and adopts the current label, clearing superseded authority and channel fences, so rejoin the cluster to pair again. A worker that still holds a pinned master peer while the master rebuilt or restored its own network state (the reverse split) re-asserts the pairing automatically and throttles the mutual join-secret bootstrap it once trusted. Because the Ed25519 key is the cryptographic identity, a rotated master label or cluster binding is adopted the same way; adoption now proceeds even while a managed network is live or a local cleanup journal is unresolved, because the unchanged key proves the identity and owned addresses stay valid. Only a genuinely changed private key is still refused (`explicit re-pairing required`), because that is an identity swap rather than a label rotation. After adoption the master re-stamps a saved llama.cpp target whose master label changed under the same signing binding and re-sends it automatically; if the signing binding itself changed, Settings → **llama.cpp** reports that the target needs re-application and keeps the saved version selectable. Failed or interrupted preparation is retried automatically with a bounded backoff; a manual **Retry** stays immediate. Until a worker's signed channel is paired, Settings → **llama.cpp** shows *Runtime control channel not connected … re-pair it*, and forcing a sync returns `CHANNEL_UNAVAILABLE` instead of a bare conflict; use the manual identity pairing under Advanced details with *Explicitly replace an existing pairing* only for a changed key. While signed cluster control is unavailable, Settings → **llama.cpp** still lists, saves, builds and locally selects versions; setting or enforcing a cluster target and starting managed inference require the recovered agent.
+
+Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.
+
+### Guided setup and administrator support
+
+**Administrator access needed:** open Kluster on the named computer and use the local enable button. A remote master cannot open the OS approval prompt. Denial leaves the computer unconfigured; retry locally. The helper is installed by the supported build/install flow, while the agent remains in the original user account. A missing helper binary means update Kluster through [agent installation](agent-install.md).
+
+**No eligible dedicated Ethernet connection:** check the cable, switch, adapter and negotiated speed. Managed private-network setup requires a reported speed of at least 1 Gbps; 10 Gbps is preferred. Wi-Fi, virtual interfaces and adapters carrying the default or cluster-management connection are excluded. Unknown speed or DHCP/profile state requires fixing the OS configuration before setup.
+
+**Restoration needs attention:** reconnect the named computer and refresh. If the agent or helper lost ownership continuity, open its local panel and choose **Review network recovery**. Keep current settings preserves them and releases Kluster's claim; restore removes only the exact reviewed address and restores its owned configuration. Changed snapshots require another review. Active or uncertain inference reservations block recovery.
+
+**Linux configuration manager unsupported:** guided DHCP transitions support a readable NetworkManager connection or systemd-networkd network file. Custom DHCP plus static settings, ambiguous profiles or another configuration manager require manual review. Advanced/manual setup still supports already-configured dedicated interfaces.
+
+**Windows private traffic blocked:** the helper adds an inbound TCP rule limited to the dedicated address, interface, signed private peers and network ports. Existing firewall rules remain. Group-policy restrictions or externally changed rules are reported; Kluster does not open public RPC access.

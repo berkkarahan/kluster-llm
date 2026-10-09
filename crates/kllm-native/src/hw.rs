@@ -3,6 +3,9 @@ use std::process::Command;
 use sysinfo::System;
 
 /// Fixed share of unified memory reported as GPU VRAM on Apple Silicon (not the planner headroom slider).
+/// Planning budgets use 65% of total RAM (`KLLM_UNIFIED_VRAM_FRACTION`) instead of this reported figure.
+/// Unused on non-macOS builds, where the macOS probe that applies it is not compiled.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const METAL_VRAM_FRACTION: f64 = 0.80;
 
 /// Backend hint for inference offload.
@@ -11,10 +14,17 @@ pub const METAL_VRAM_FRACTION: f64 = 0.80;
 /// See `docs/engine-decision.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendHint {
+    /// Built only by the macOS probe. Other targets still name the variant so `as_str` stays exhaustive.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Metal,
+    /// Built only by the non-macOS probe.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Cuda,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Rocm,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Vulkan,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Cpu,
     #[allow(dead_code)]
     Unknown,
@@ -82,21 +92,83 @@ impl CapacitySnapshot {
 }
 
 pub fn probe_capacity() -> CapacitySnapshot {
+    probe_capacity_with_gpus().0
+}
+
+/// Probe host memory and GPU topology in one pass.  Python needs both views
+/// for a capacity refresh; returning them together avoids launching the
+/// platform GPU tools twice for the same observation.
+pub fn probe_capacity_with_gpus() -> (CapacitySnapshot, Vec<GpuDevice>, BackendHint) {
     let mut sys = System::new();
     sys.refresh_memory();
 
     let total_ram_bytes = sys.total_memory();
+    #[cfg(target_os = "macos")]
+    let available_ram_bytes = macos_available_ram(total_ram_bytes).unwrap_or(0);
+    #[cfg(not(target_os = "macos"))]
     let available_ram_bytes = sys.available_memory();
     let (devices, backend) = enumerate_gpus();
     let vram_bytes = sum_vram(&devices);
 
-    CapacitySnapshot {
+    let snapshot = CapacitySnapshot {
         total_ram_bytes,
         available_ram_bytes,
         vram_bytes,
         backend: backend.as_str().to_string(),
         hostname: hostname(),
+    };
+    (snapshot, devices, backend)
+}
+
+/// Free and inactive pages are allocatable. Compressed pages are already occupied;
+/// subtracting them again can turn a usable unified-memory pool into zero capacity.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_available_bytes(
+    free: u64,
+    inactive: u64,
+    page_size: u64,
+    total: u64,
+) -> Option<u64> {
+    if page_size == 0 {
+        return None;
     }
+    free.checked_add(inactive)?
+        .checked_mul(page_size)
+        .filter(|bytes| *bytes <= total)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn macos_available_ram(total: u64) -> Option<u64> {
+    let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let port = unsafe { libc::mach_host_self() };
+    let status = unsafe {
+        libc::host_statistics64(
+            port,
+            libc::HOST_VM_INFO64,
+            (&mut vm as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        )
+    };
+    unsafe extern "C" {
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+    unsafe {
+        mach_port_deallocate(libc::mach_task_self(), port);
+    }
+    if status != 0 {
+        return None;
+    }
+    macos_available_bytes(
+        vm.free_count as u64,
+        vm.inactive_count as u64,
+        unsafe { libc::vm_page_size } as u64,
+        total,
+    )
 }
 
 /// Enumerate local GPUs with index, name, and VRAM.
@@ -144,35 +216,39 @@ fn enumerate_gpus() -> (Vec<GpuDevice>, BackendHint) {
         sys.refresh_memory();
         let total_ram = sys.total_memory();
         let vram = (total_ram as f64 * METAL_VRAM_FRACTION) as u64;
-        return (
+        (
             vec![GpuDevice {
                 index: 0,
                 name: macos_gpu_name(),
                 vram_bytes: Some(vram),
             }],
             BackendHint::Metal,
-        );
+        )
     }
 
-    // Preference: CUDA > ROCm > Vulkan. Never report two backends for one card.
-    if let Some(devices) = list_nvidia_gpus() {
-        if !devices.is_empty() {
-            return (devices, BackendHint::Cuda);
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Preference: CUDA > ROCm > Vulkan. Never report two backends for one card.
+        if let Some(devices) = list_nvidia_gpus() {
+            if !devices.is_empty() {
+                return (devices, BackendHint::Cuda);
+            }
         }
-    }
-    if let Some(devices) = list_rocm_gpus() {
-        if !devices.is_empty() {
-            return (devices, BackendHint::Rocm);
+        if let Some(devices) = list_rocm_gpus() {
+            if !devices.is_empty() {
+                return (devices, BackendHint::Rocm);
+            }
         }
-    }
-    if let Some(devices) = list_windows_wmi_gpus() {
-        if !devices.is_empty() {
-            return (devices, BackendHint::Vulkan);
+        if let Some(devices) = list_windows_wmi_gpus() {
+            if !devices.is_empty() {
+                return (devices, BackendHint::Vulkan);
+            }
         }
+        (Vec::new(), BackendHint::Cpu)
     }
-    (Vec::new(), BackendHint::Cpu)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn list_nvidia_gpus() -> Option<Vec<GpuDevice>> {
     let output = Command::new("nvidia-smi")
         .args([
@@ -194,6 +270,7 @@ fn list_nvidia_gpus() -> Option<Vec<GpuDevice>> {
 }
 
 /// Parse `nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits`.
+#[cfg_attr(all(not(test), target_os = "macos"), allow(dead_code))]
 pub fn parse_nvidia_smi_csv(text: &str) -> Vec<GpuDevice> {
     let mut devices = Vec::new();
     for line in text.lines() {
@@ -223,6 +300,7 @@ pub fn parse_nvidia_smi_csv(text: &str) -> Vec<GpuDevice> {
     devices
 }
 
+#[cfg(not(target_os = "macos"))]
 fn list_rocm_gpus() -> Option<Vec<GpuDevice>> {
     let output = Command::new("rocm-smi")
         .args(["--showmeminfo", "vram", "--csv"])
@@ -313,7 +391,7 @@ exit 0
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
     None
 }
@@ -354,6 +432,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn available_pages_do_not_subtract_compressed_memory() {
+        assert_eq!(
+            macos_available_bytes(1, 9, 16384, 48 * 1024 * 1024 * 1024),
+            Some(163840)
+        );
+        assert_eq!(macos_available_bytes(0, 0, 16384, 1024 * 1024), Some(0));
+        assert_eq!(macos_available_bytes(1, 1, 0, 1024), None);
+        assert_eq!(macos_available_bytes(u64::MAX, 1, 4096, u64::MAX), None);
+        assert_eq!(macos_available_bytes(2, 2, 4096, 1024), None);
+    }
+
+    #[test]
     fn probe_returns_ram() {
         let snap = probe_capacity();
         assert!(snap.total_ram_bytes > 0);
@@ -379,7 +469,10 @@ device,VRAM Total Memory (B),VRAM Total Used Memory (B)
 card0,8589934592,0
 card1,17179869184,1024
 ";
-        assert_eq!(parse_rocm_smi_vram_csv(sample), Some(8589934592 + 17179869184));
+        assert_eq!(
+            parse_rocm_smi_vram_csv(sample),
+            Some(8589934592 + 17179869184)
+        );
         let devices = parse_rocm_smi_devices(sample);
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].index, 0);

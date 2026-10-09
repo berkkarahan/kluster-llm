@@ -3,6 +3,8 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+import kllm.gguf_meta as gguf_meta
+import kllm.model_defaults as model_defaults
 from kllm.model_defaults import (
     ModelDefaults,
     apply_defaults_to_chat_body,
@@ -95,6 +97,33 @@ def test_resolve_no_heuristic_for_plain_llama(tmp_path: Path):
     assert d.sampling == {}
     assert d.chat_template_kwargs == {}
     assert d.reasoning_format is None
+
+
+def test_defaults_cache_reuses_identical_file_and_invalidates_truncation(
+    tmp_path: Path, monkeypatch
+):
+    clear_defaults_cache()
+    gguf_meta._read_inference_metadata.cache_clear()
+    path = tmp_path / "cached-defaults.gguf"
+    path.write_bytes(_thinking_on_gguf())
+    original_reader = model_defaults.read_inference_metadata
+    reads = 0
+
+    def counted_reader(file_path, *, include_template=False):
+        nonlocal reads
+        reads += 1
+        return original_reader(file_path, include_template=include_template)
+
+    monkeypatch.setattr(model_defaults, "read_inference_metadata", counted_reader)
+    first = resolve_model_defaults(path)
+    second = resolve_model_defaults(path)
+    assert second == first
+    assert reads == 1
+
+    path.write_bytes(b"GGUF\x03\x00")
+    truncated = resolve_model_defaults(path)
+    assert truncated == ModelDefaults()
+    assert reads == 2
 
 
 def test_thinking_off_template_uses_instruct_heuristic(tmp_path: Path):

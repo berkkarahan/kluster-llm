@@ -44,6 +44,7 @@ def build_router(handlers: Mapping[str, Endpoint]) -> APIRouter:
         ("/models/chat-template/validation", "POST", "validate_chat_template"),
         ("/inference/capabilities", "GET", "run_capabilities"),
         ("/inference/models", "GET", "inference_models"),
+        ("/inference/connection", "GET", "connection_snapshot"),
         ("/inference/plans", "POST", "plan"),
         ("/inference/runs", "POST", "run"),
         ("/inference/runs/stop", "POST", "stop_inference"),

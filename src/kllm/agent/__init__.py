@@ -50,6 +50,7 @@ from kllm import (
     usage,
 )
 from kllm.auth import ensure_api_token, verify_api_token
+from kllm.connect import _served_model_id
 from kllm.hf_token import hf_token_status, save_hf_token
 from kllm import model_settings as model_settings_store
 from kllm.extra_args import sanitize_extra_args
@@ -1226,6 +1227,92 @@ async def inference_models(request: Request, _: None = Depends(_require_api_toke
     return await gateway.served_models(STATE.infer_port, request.app.state.inference_client)
 
 
+def _connection_url(host: str, port: int, scheme: str = "http") -> str:
+    """Format a reachable master endpoint, including IPv6 literals."""
+    address = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{scheme}://{address}:{port}"
+
+
+def _connection_request_url(request: Request) -> str | None:
+    """Keep a non-loopback production dashboard origin when it can reach this agent."""
+    host = request.url.hostname
+    if not host or _is_loopback(host) or ("." not in host and ":" not in host):
+        return None
+    try:
+        port = request.url.port
+    except ValueError:
+        return None
+    scheme = request.url.scheme if request.url.scheme in ("http", "https") else "http"
+    default_port = 443 if scheme == "https" else 80
+    address = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{scheme}://{address}" + (f":{port}" if port and port != default_port else "")
+
+
+async def connection_snapshot(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_kllm_key: str | None = Header(default=None),
+) -> JSONResponse:
+    """Return a no-store Connect snapshot sourced from the serving master."""
+    if STATE.role == "worker":
+        if not verify_api_token(authorization):
+            raise HTTPException(401, "invalid or missing API token")
+        if not STATE.master_host:
+            raise HTTPException(503, "worker has no reachable cluster master")
+        base = (
+            f"http://127.0.0.1:{int(STATE.cp_proxy_port)}"
+            if STATE.cp_proxy_port
+            else _connection_url(STATE.master_host, STATE.master_port)
+        )
+
+        def fetch_master() -> dict[str, Any]:
+            response = http_clients.control_client().get(
+                f"{base}/v2/inference/connection",
+                headers={"X-Kllm-Key": STATE.join_key or ""},
+                timeout=5.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("role") != "master":
+                raise ValueError("master returned an invalid Connect snapshot")
+            return payload
+
+        try:
+            payload = await asyncio.to_thread(fetch_master)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                raise HTTPException(503, "worker pairing cannot authenticate with the master") from exc
+            raise HTTPException(503, "master Connect details are unavailable") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(503, "master Connect details are unavailable") from exc
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    token_ok = verify_api_token(authorization)
+    cluster_key_ok = bool(STATE.role == "master" and STATE.join_key and x_kllm_key == STATE.join_key)
+    if not token_ok and not cluster_key_ok:
+        raise HTTPException(401, "invalid or missing API token")
+    if STATE.role != "master":
+        raise HTTPException(503, "start this node as the cluster master first")
+    activity = _inference_activity()
+    if not (STATE.process_pid and STATE.process_role == "master") or not activity.get("server_ready"):
+        raise HTTPException(503, "master inference is not ready; start a model before copying a command")
+    catalog = await gateway.served_models(STATE.infer_port, request.app.state.inference_client)
+    model = _served_model_id(catalog, STATE.model_name)
+    if not model:
+        raise HTTPException(503, "master has no uniquely identified served model")
+    return JSONResponse(
+        {
+            "role": "master",
+            "node_id": STATE.node_id,
+            "url": _connection_request_url(request)
+            or _connection_url(_master_lan_host(), STATE.control_port),
+            "model": model,
+            "api_token": ensure_api_token(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def get_logging() -> dict[str, Any]:
     return logging_control.overview(STATE)
 
@@ -2080,6 +2167,7 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "responses": responses,
     "response_tokens": response_tokens,
     "inference_models": inference_models,
+    "connection_snapshot": connection_snapshot,
     "get_logging": get_logging,
     "put_logging": put_logging,
     "apply_logging": apply_logging,

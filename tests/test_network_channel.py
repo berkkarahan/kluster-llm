@@ -39,8 +39,16 @@ class _Scheduler:
 
 def _hub(master_base, bootstrap):
     peer = SimpleNamespace(expected_role="master", node_id="master")
+
+    class _Store:
+        def peers(self):
+            return [peer]
+
+        async def arun(self, callback, *args, **kwargs):
+            return callback(*args, **kwargs)
+
     hub = NetworkChannelHub(
-        SimpleNamespace(peers=lambda: [peer]),
+        _Store(),
         SimpleNamespace(),
         lambda: SimpleNamespace(role="worker"),
         master_base,

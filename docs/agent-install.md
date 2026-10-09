@@ -266,6 +266,23 @@ python scripts/install.py --llama-only --backend metal    # macOS: Metal+Vulkan 
 python scripts/build.py
 ```
 
+### Local SQLite storage
+
+Usage history and managed-network records keep their existing SQLite files and
+schemas. The owner reads these optional settings when it opens a store; restart
+the agent after changing them:
+
+| Variable | Default | Accepted values |
+|---|---:|---|
+| `KLLM_SQLITE_POOL_SIZE` | `1` | Integer `1`–`4` connections per file |
+| `KLLM_SQLITE_WAIT_TIMEOUT` | `5` seconds | Positive finite number |
+| `KLLM_SQLITE_SHUTDOWN_TIMEOUT` | `10` seconds | Positive finite number |
+
+No overflow connections are created. Invalid settings prevent the owner from
+opening and the affected history/network feature reports unavailable; existing
+database files remain available for recovery. Install or rebuild through the
+normal `uv sync` and `python scripts/build.py` flow above.
+
 ## 4. Post-install: bring up a cluster
 
 Run install on **every** node. Then:

@@ -316,6 +316,24 @@ For 10GbE and Thunderbolt IP setup, see [../network-config/10gbe-bridging-guide.
 
 ## Logs and support
 
+### Local SQLite history or managed-network storage is unavailable
+
+The storage layer reports sanitized acquisition, checkout, closed-owner and
+unknown-commit errors. A timeout means the operation did not acquire its lease;
+an unknown commit outcome means SQLite did not confirm whether that transaction
+committed. For unknown outcomes, inspect the existing durable reading/request
+identifier before retrying. Usage ingestion can already be committed when a
+later retention pass fails, so a `503` does not imply that the submitted reading
+was rolled back.
+
+Check `KLLM_SQLITE_POOL_SIZE` (integer 1–4),
+`KLLM_SQLITE_WAIT_TIMEOUT` and `KLLM_SQLITE_SHUTDOWN_TIMEOUT` (positive finite
+seconds), then restart the agent after correcting settings. A failed shutdown
+keeps the owner unavailable while its outstanding work settles; wait for the
+agent to finish closing before changing its data directory. Keep the original
+SQLite files for diagnosis and recovery. Do not delete or recreate them as a
+timeout remedy.
+
 Use the cluster log command rather than launching child processes manually:
 
 ```bash

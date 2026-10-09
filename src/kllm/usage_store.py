@@ -1,7 +1,8 @@
-"""SQLite-backed usage history and bounded retention."""
+"""SQLite usage history, explicit atomic ingestion, and bounded retention."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import secrets
 import sqlite3
@@ -10,64 +11,55 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kllm.exceptions import ValidationError
-from kllm.usage_support import (
-    MAX_BYTES,
-    WINDOW,
-    utc,
-    validate,
-)
+from sqlalchemy import delete, func, inspect, literal, select, update
+from sqlalchemy.dialects.sqlite import insert
+
+from kllm.exceptions import PersistenceError, ValidationError
+from kllm.persistence import SQLiteOptions, SQLiteStore
+from kllm import usage_schema as s
+from kllm.usage_store_queries import UsageHistoryQueries
+from kllm.usage_support import MAX_BYTES, WINDOW, utc, validate
 
 
 class UsageStore:
-    def __init__(self, path: Path, *, max_bytes: int = MAX_BYTES) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
-        self.max_bytes = max_bytes
-        self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False)
-        self.db.execute("PRAGMA journal_mode=DELETE")
-        self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("PRAGMA auto_vacuum=FULL")
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS nodes (node_id TEXT PRIMARY KEY, host TEXT NOT NULL, role TEXT NOT NULL, context TEXT NOT NULL DEFAULT '{}');
-            CREATE TABLE IF NOT EXISTS lifetimes (
-                lifetime_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, pid INTEGER NOT NULL, role TEXT NOT NULL,
-                started_at TEXT NOT NULL, ended_at TEXT, state TEXT NOT NULL, model TEXT);
-            CREATE TABLE IF NOT EXISTS associations (
-                lifetime_id TEXT NOT NULL, model TEXT NOT NULL, observed_from TEXT NOT NULL,
-                observed_until TEXT, PRIMARY KEY(lifetime_id, observed_from));
-            CREATE TABLE IF NOT EXISTS readings (
-                id INTEGER PRIMARY KEY, lifetime_id TEXT NOT NULL, node_id TEXT NOT NULL,
-                observed_at TEXT NOT NULL, received_at TEXT NOT NULL, payload TEXT NOT NULL,
-                UNIQUE(lifetime_id, observed_at));
-            CREATE INDEX IF NOT EXISTS readings_time ON readings(observed_at, id);
-            CREATE INDEX IF NOT EXISTS readings_filter ON readings(node_id, lifetime_id, observed_at, id);
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        """)
-        if "context" not in {column[1] for column in self.db.execute("PRAGMA table_info(nodes)")}:
-            self.db.execute("ALTER TABLE nodes ADD COLUMN context TEXT NOT NULL DEFAULT '{}' ")
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO meta VALUES('cursor_secret', ?)", (secrets.token_hex(32),)
-            )
-        base_bytes = str(min(self._physical_bytes(), 64 * 1024))
-        with self.db:
-            self.db.execute("INSERT OR IGNORE INTO meta VALUES('base_bytes', ?)", (base_bytes,))
-        stored_base_bytes = self._meta("base_bytes")
-        self._base_bytes = int(stored_base_bytes) if stored_base_bytes is not None else 0
-        self.recording = "interrupted"
-        self.error: str | None = None
-        self.last_successful_save = self._meta("last_successful_save")
-        from kllm.usage_store_queries import UsageHistoryQueries
-
-        self._queries = UsageHistoryQueries(
-            self.db,
-            self.lock,
-            self._meta,
-            lambda: (self.recording, self.error, self.last_successful_save),
+    def __init__(
+        self, path: Path, *, max_bytes: int = MAX_BYTES, options: SQLiteOptions | None = None
+    ) -> None:
+        self.path, self.max_bytes = path, max_bytes
+        self.lock = threading.RLock()  # Short recorder metadata lock; never encloses SQL.
+        self.recording, self.error, self.last_successful_save = "interrupted", None, None
+        self._store = SQLiteStore(
+            path, s.metadata, profile="usage", options=options, upgrade=self._upgrade
         )
-        self._prune(datetime.now(timezone.utc))
+        try:
+            with self._store.connection(write=True) as db:
+                db.execute(
+                    insert(s.meta)
+                    .values(key="cursor_secret", value=secrets.token_hex(32))
+                    .on_conflict_do_nothing()
+                )
+            base_bytes = str(min(self._physical_bytes(), 64 * 1024))
+            with self._store.connection(write=True) as db:
+                db.execute(
+                    insert(s.meta)
+                    .values(key="base_bytes", value=base_bytes)
+                    .on_conflict_do_nothing()
+                )
+            self._base_bytes = int(self._meta("base_bytes") or 0)
+            self.last_successful_save = self._meta("last_successful_save")
+            with self._store.writer():
+                self._prune(datetime.now(timezone.utc))
+        except BaseException:
+            self._store.close()
+            raise
+
+    @staticmethod
+    def _upgrade(db) -> None:
+        if "nodes" in inspect(db).get_table_names():
+            if "context" not in {c["name"] for c in inspect(db).get_columns("nodes")}:
+                db.exec_driver_sql(
+                    "ALTER TABLE nodes ADD COLUMN context TEXT NOT NULL DEFAULT '{}' "
+                )
 
     def __enter__(self) -> UsageStore:
         return self
@@ -75,46 +67,107 @@ class UsageStore:
     def __exit__(self, *_: Any) -> None:
         self.close()
 
-    def close(self) -> None:
-        with self.lock:
-            self.db.close()
+    def close(self, *, deadline: float | None = None) -> None:
+        self._store.close(deadline=deadline)
+
+    async def aclose(self, *, deadline: float | None = None) -> None:
+        await self._store.aclose(deadline=deadline)
+
+    @contextmanager
+    def snapshot(self):
+        with self._store.connection():
+            yield self
+
+    def maintenance(self, *, write: bool = True):
+        """Scoped Core connection for known upgrades and test data/fault seeding."""
+        return self._store.connection(write=write)
 
     def _meta(self, name: str) -> str | None:
-        row = self.db.execute("SELECT value FROM meta WHERE key=?", (name,)).fetchone()
-        return row[0] if row else None
+        return self._store.read(
+            lambda db: db.execute(
+                select(s.meta.c.value).where(s.meta.c.key == name)
+            ).scalar_one_or_none()
+        )
+
+    @staticmethod
+    def _put_meta(db, key: str, value: str) -> None:
+        statement = insert(s.meta).values(key=key, value=value)
+        db.execute(
+            statement.on_conflict_do_update(
+                index_elements=[s.meta.c.key], set_={"value": statement.excluded.value}
+            )
+        )
+
+    def _status(self):
+        with self.lock:
+            return self.recording, self.error, self.last_successful_save
+
+    def _query(self, name, *args, **kwargs):
+        def query(db):
+            queries = UsageHistoryQueries(
+                db,
+                lambda key: db.execute(
+                    select(s.meta.c.value).where(s.meta.c.key == key)
+                ).scalar_one_or_none(),
+                self._status,
+            )
+            return getattr(queries, name)(*args, **kwargs)
+
+        return self._store.read(query)
 
     def count(self) -> int:
-        return self._queries.count()
+        return self._query("count")
 
     def latest(self, node_id: str) -> dict[str, Any] | None:
-        return self._queries.latest(node_id)
+        return self._query("latest", node_id)
 
     def known_nodes(self) -> dict[str, dict[str, Any]]:
-        return self._queries.known_nodes()
+        return self._query("known_nodes")
 
     def coverage(self, node_id: str | None = None) -> dict[str, Any]:
-        return self._queries.coverage(node_id)
+        return self._query("coverage", node_id)
 
     def lifetimes(self, node_id: str) -> list[dict[str, Any]]:
-        return self._queries.lifetimes(node_id)
+        return self._query("lifetimes", node_id)
 
     def end_node(self, node_id: str, *, state: str = "ended") -> None:
         if state not in ("ended", "unobserved"):
             raise ValidationError("invalid lifetime state")
-        with self.lock, self.db:
-            self.db.execute(
-                "UPDATE lifetimes SET state=?, ended_at=(SELECT MAX(observed_at) FROM readings WHERE readings.lifetime_id=lifetimes.lifetime_id) WHERE node_id=? AND state='running'",
-                (state, node_id),
+        with self._store.connection(write=True) as db:
+            ended = (
+                select(func.max(s.readings.c.observed_at))
+                .where(s.readings.c.lifetime_id == s.lifetimes.c.lifetime_id)
+                .scalar_subquery()
             )
-            self.db.execute(
-                "UPDATE associations SET observed_until=(SELECT ended_at FROM lifetimes WHERE lifetimes.lifetime_id=associations.lifetime_id) WHERE observed_until IS NULL AND lifetime_id IN (SELECT lifetime_id FROM lifetimes WHERE node_id=? AND state!= 'running')",
-                (node_id,),
+            db.execute(
+                update(s.lifetimes)
+                .where(s.lifetimes.c.node_id == node_id, s.lifetimes.c.state == "running")
+                .values(state=state, ended_at=ended)
+            )
+            observed_until = (
+                select(s.lifetimes.c.ended_at)
+                .where(s.lifetimes.c.lifetime_id == s.associations.c.lifetime_id)
+                .scalar_subquery()
+            )
+            db.execute(
+                update(s.associations)
+                .where(
+                    s.associations.c.observed_until.is_(None),
+                    s.associations.c.lifetime_id.in_(
+                        select(s.lifetimes.c.lifetime_id).where(
+                            s.lifetimes.c.node_id == node_id, s.lifetimes.c.state != "running"
+                        )
+                    ),
+                )
+                .values(observed_until=observed_until)
             )
 
     def series(
         self, node_id: str, life_id: str, window: str, *, now: datetime | None = None
     ) -> dict[str, Any]:
-        return self._queries.series(node_id, life_id, window, now=now)
+        return UsageHistoryQueries.aggregate_series(
+            *self._query("series_snapshot", node_id, life_id, window, now=now), window
+        )
 
     def readings(
         self,
@@ -126,7 +179,9 @@ class UsageStore:
         cursor: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        return self._queries.readings(node_id, life_id, window, limit=limit, cursor=cursor, now=now)
+        return self._query(
+            "readings", node_id, life_id, window, limit=limit, cursor=cursor, now=now
+        )
 
     def _physical_bytes(self) -> int:
         return sum(
@@ -149,115 +204,165 @@ class UsageStore:
         model: str | None,
         context: dict[str, Any] | None = None,
     ) -> bool:
-        before = self.db.total_changes
-        self.db.execute(
-            "INSERT OR IGNORE INTO readings(lifetime_id,node_id,observed_at,received_at,payload) VALUES(?,?,?,?,?)",
-            (
-                point["lifetime_id"],
-                node_id,
-                point["observed_at"],
-                received,
-                json.dumps(point, allow_nan=False),
-            ),
-        )
-        if self.db.total_changes == before:
+        # This helper belongs to the caller's insertion transaction; no checkout here.
+        db = self._store.current_connection
+        life_id = point["lifetime_id"]
+        accepted = db.execute(
+            insert(s.readings)
+            .values(
+                lifetime_id=life_id,
+                node_id=node_id,
+                observed_at=point["observed_at"],
+                received_at=received,
+                payload=json.dumps(point, allow_nan=False),
+            )
+            .on_conflict_do_nothing()
+        ).rowcount
+        if not accepted:
             return False
-        self.db.execute(
-            "INSERT INTO nodes VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET host=excluded.host,role=excluded.role,context=excluded.context",
-            (node_id, host, point["process_role"], json.dumps(context or {}, allow_nan=False)),
+        node = insert(s.nodes).values(
+            node_id=node_id,
+            host=host,
+            role=point["process_role"],
+            context=json.dumps(context or {}, allow_nan=False),
         )
-        prior = self.db.execute(
-            "SELECT lifetime_id,observed_at FROM readings WHERE node_id=? AND lifetime_id!=? ORDER BY observed_at DESC LIMIT 1",
-            (node_id, point["lifetime_id"]),
-        ).fetchone()
+        db.execute(
+            node.on_conflict_do_update(
+                index_elements=[s.nodes.c.node_id],
+                set_={name: node.excluded[name] for name in ("host", "role", "context")},
+            )
+        )
+        prior = db.execute(
+            select(s.readings.c.lifetime_id, s.readings.c.observed_at)
+            .where(s.readings.c.node_id == node_id, s.readings.c.lifetime_id != life_id)
+            .order_by(s.readings.c.observed_at.desc())
+            .limit(1)
+        ).first()
         if prior and prior[1] < point["observed_at"]:
-            self.db.execute(
-                "UPDATE lifetimes SET state='ended',ended_at=? WHERE lifetime_id=? AND state='running'",
-                (prior[1], prior[0]),
+            db.execute(
+                update(s.lifetimes)
+                .where(s.lifetimes.c.lifetime_id == prior[0], s.lifetimes.c.state == "running")
+                .values(state="ended", ended_at=prior[1])
             )
-            self.db.execute(
-                "UPDATE associations SET observed_until=? WHERE lifetime_id=? AND observed_until IS NULL",
-                (prior[1], prior[0]),
+            db.execute(
+                update(s.associations)
+                .where(
+                    s.associations.c.lifetime_id == prior[0],
+                    s.associations.c.observed_until.is_(None),
+                )
+                .values(observed_until=prior[1])
             )
-        self.db.execute(
-            "INSERT INTO lifetimes VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(lifetime_id) DO UPDATE SET model=COALESCE(excluded.model,lifetimes.model)",
-            (
-                point["lifetime_id"],
-                node_id,
-                point["pid"],
-                point["process_role"],
-                point["process_started_at"],
-                None,
-                "running",
-                model,
-            ),
+        lifetime = insert(s.lifetimes).values(
+            lifetime_id=life_id,
+            node_id=node_id,
+            pid=point["pid"],
+            role=point["process_role"],
+            started_at=point["process_started_at"],
+            ended_at=None,
+            state="running",
+            model=model,
         )
-        # A delayed observation may enrich an old lifetime, never make it current again.
-        later = self.db.execute(
-            "SELECT 1 FROM readings WHERE node_id=? AND lifetime_id!=? AND observed_at>? LIMIT 1",
-            (node_id, point["lifetime_id"], point["observed_at"]),
-        ).fetchone()
+        db.execute(
+            lifetime.on_conflict_do_update(
+                index_elements=[s.lifetimes.c.lifetime_id],
+                set_={"model": func.coalesce(lifetime.excluded.model, s.lifetimes.c.model)},
+            )
+        )
+        later = db.execute(
+            select(literal(1))
+            .where(
+                s.readings.c.node_id == node_id,
+                s.readings.c.lifetime_id != life_id,
+                s.readings.c.observed_at > point["observed_at"],
+            )
+            .limit(1)
+        ).first()
         if later:
-            self.db.execute(
-                "UPDATE lifetimes SET state='ended', ended_at=(SELECT MAX(observed_at) FROM readings WHERE lifetime_id=?) WHERE lifetime_id=? AND state='running'",
-                (point["lifetime_id"], point["lifetime_id"]),
+            latest = (
+                select(func.max(s.readings.c.observed_at))
+                .where(s.readings.c.lifetime_id == life_id)
+                .scalar_subquery()
             )
-            self.db.execute(
-                "UPDATE associations SET observed_until=(SELECT ended_at FROM lifetimes WHERE lifetimes.lifetime_id=associations.lifetime_id) WHERE lifetime_id=? AND observed_until IS NULL",
-                (point["lifetime_id"],),
+            db.execute(
+                update(s.lifetimes)
+                .where(s.lifetimes.c.lifetime_id == life_id, s.lifetimes.c.state == "running")
+                .values(state="ended", ended_at=latest)
             )
-        latest_observation = self.db.execute(
-            "SELECT MAX(observed_at) FROM readings WHERE lifetime_id=?", (point["lifetime_id"],)
-        ).fetchone()[0]
+            ended = (
+                select(s.lifetimes.c.ended_at)
+                .where(s.lifetimes.c.lifetime_id == s.associations.c.lifetime_id)
+                .scalar_subquery()
+            )
+            db.execute(
+                update(s.associations)
+                .where(
+                    s.associations.c.lifetime_id == life_id,
+                    s.associations.c.observed_until.is_(None),
+                )
+                .values(observed_until=ended)
+            )
+        latest_observation = db.execute(
+            select(func.max(s.readings.c.observed_at)).where(s.readings.c.lifetime_id == life_id)
+        ).scalar()
         if model and latest_observation == point["observed_at"]:
-            previous = self.db.execute(
-                "SELECT model FROM associations WHERE lifetime_id=? ORDER BY observed_from DESC LIMIT 1",
-                (point["lifetime_id"],),
-            ).fetchone()
+            previous = db.execute(
+                select(s.associations.c.model)
+                .where(s.associations.c.lifetime_id == life_id)
+                .order_by(s.associations.c.observed_from.desc())
+                .limit(1)
+            ).first()
             if previous is None or previous[0] != model:
-                self.db.execute(
-                    "UPDATE associations SET observed_until=? WHERE lifetime_id=? AND observed_until IS NULL",
-                    (point["observed_at"], point["lifetime_id"]),
+                db.execute(
+                    update(s.associations)
+                    .where(
+                        s.associations.c.lifetime_id == life_id,
+                        s.associations.c.observed_until.is_(None),
+                    )
+                    .values(observed_until=point["observed_at"])
                 )
-                self.db.execute(
-                    "INSERT INTO associations VALUES(?,?,?,NULL)",
-                    (point["lifetime_id"], model, point["observed_at"]),
+                db.execute(
+                    insert(s.associations).values(
+                        lifetime_id=life_id,
+                        model=model,
+                        observed_from=point["observed_at"],
+                        observed_until=None,
+                    )
                 )
-        self.db.execute(
-            "INSERT INTO meta VALUES('last_successful_save',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (received,),
-        )
+        self._put_meta(db, "last_successful_save", received)
         return True
 
     def _prune(self, now: datetime) -> None:
-        self.db.execute("DELETE FROM readings WHERE observed_at<?", (utc(now - WINDOW),))
-        self.db.commit()
-        # FULL auto-vacuum reclaims physical pages; leave headroom for rollback journal.
+        with self._store.connection(write=True) as db:
+            db.execute(delete(s.readings).where(s.readings.c.observed_at < utc(now - WINDOW)))
+        # Physical accounting follows commit/auto-vacuum, never an open transaction.
         while self._physical_bytes() > self.max_bytes:
-            oldest = self.db.execute(
-                "SELECT id,observed_at FROM readings ORDER BY observed_at,id LIMIT 1"
-            ).fetchone()
-            if oldest is None:
-                raise OSError("usage history budget cannot hold the database schema")
-            self.db.execute("DELETE FROM readings WHERE id=?", (oldest[0],))
-            self.db.execute(
-                "INSERT INTO meta VALUES('storage_truncated','1') ON CONFLICT(key) DO UPDATE SET value='1'"
+            with self._store.connection(write=True) as db:
+                oldest = db.execute(
+                    select(s.readings.c.id, s.readings.c.observed_at)
+                    .order_by(s.readings.c.observed_at, s.readings.c.id)
+                    .limit(1)
+                ).first()
+                if oldest is None:
+                    raise OSError("usage history budget cannot hold the database schema")
+                db.execute(delete(s.readings).where(s.readings.c.id == oldest[0]))
+                self._put_meta(db, "storage_truncated", "1")
+                self._put_meta(db, "storage_truncated_at", oldest[1])
+        with self._store.connection(write=True) as db:
+            db.execute(
+                delete(s.lifetimes).where(
+                    s.lifetimes.c.lifetime_id.not_in(select(s.readings.c.lifetime_id).distinct())
+                )
             )
-            self.db.execute(
-                "INSERT INTO meta VALUES('storage_truncated_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (oldest[1],),
+            db.execute(
+                delete(s.associations).where(
+                    s.associations.c.lifetime_id.not_in(select(s.lifetimes.c.lifetime_id))
+                )
             )
-            self.db.commit()
-        self.db.execute(
-            "DELETE FROM lifetimes WHERE lifetime_id NOT IN (SELECT DISTINCT lifetime_id FROM readings)"
-        )
-        self.db.execute(
-            "DELETE FROM associations WHERE lifetime_id NOT IN (SELECT lifetime_id FROM lifetimes)"
-        )
-        self.db.execute(
-            "DELETE FROM nodes WHERE node_id NOT IN (SELECT DISTINCT node_id FROM readings)"
-        )
-        self.db.commit()
+            db.execute(
+                delete(s.nodes).where(
+                    s.nodes.c.node_id.not_in(select(s.readings.c.node_id).distinct())
+                )
+            )
 
     def record(
         self,
@@ -312,34 +417,46 @@ class UsageStore:
         context_bytes = len(json.dumps(context or {}, allow_nan=False).encode())
         if context_bytes > 8192:
             raise ValidationError("node metadata exceeds 8 KiB")
-        with self.lock:
+        with self._store.writer():
             try:
-                # Reserve an index page so a point too large to retain alone cannot retire good history.
-                required = self._base_bytes + self.db.execute("PRAGMA page_size").fetchone()[0]
-                required += context_bytes + max(
-                    len(json.dumps(point, allow_nan=False).encode()) for point in points
+                page_bytes = self._store.read(
+                    lambda db: db.exec_driver_sql("PRAGMA page_size").scalar()
+                )
+                required = (
+                    self._base_bytes
+                    + page_bytes
+                    + context_bytes
+                    + max(len(json.dumps(point, allow_nan=False).encode()) for point in points)
                 )
                 if required > self.max_bytes:
                     raise OSError("usage history budget cannot hold this reading")
-                with self.db:
+                with self._store.connection(write=True):
                     accepted = sum(
                         self._write(node_id, host, point, utc(now), model, context)
                         for point in points
                     )
                 if accepted:
                     self._prune(now)
-                    if not any(
-                        self.db.execute(
-                            "SELECT 1 FROM readings WHERE lifetime_id=? AND observed_at=?",
-                            (point["lifetime_id"], point["observed_at"]),
-                        ).fetchone()
-                        for point in points
-                    ):
+                    retained = self._store.read(
+                        lambda db: any(
+                            db.execute(
+                                select(literal(1)).where(
+                                    s.readings.c.lifetime_id == point["lifetime_id"],
+                                    s.readings.c.observed_at == point["observed_at"],
+                                )
+                            ).first()
+                            for point in points
+                        )
+                    )
+                    if not retained:
                         raise OSError("usage history budget retired the entire new batch")
-                    self.last_successful_save = self._meta("last_successful_save")
-                    self.recording, self.error = "recording", None
+                    saved = self._meta("last_successful_save")
+                    with self.lock:
+                        self.last_successful_save = saved
+                        self.recording, self.error = "recording", None
                 return accepted
-            except (sqlite3.Error, OSError) as exc:
-                self.db.rollback()
-                self.recording, self.error = "failed", str(exc)
+            except (sqlite3.Error, OSError, PersistenceError) as exc:
+                # Earlier insertion/retention units may already be durable.
+                with self.lock:
+                    self.recording, self.error = "failed", str(exc)
                 raise

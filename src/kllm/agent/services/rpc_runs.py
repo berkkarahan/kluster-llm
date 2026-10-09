@@ -379,7 +379,9 @@ class RpcRunCoordinator:
             workers_serving = all(result.get("status") == "serving" for result in results.values())
             network_ready = True
             if self.body and self.body.network_id:
-                network = self.service.store.network(UUID(self.body.network_id))
+                network = await self.service.store.arun(
+                    self.service.store.network, UUID(self.body.network_id)
+                )
                 network_ready = bool(network and network.observed_state == "ready")
             decision = self.observe_health(
                 master_alive=master_alive,

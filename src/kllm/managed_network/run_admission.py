@@ -135,34 +135,37 @@ class RunAdmission:
 
     async def preview(self, network_id: UUID) -> dict:
         async with self.service.lock:
-            return self.inventory(network_id)[2]
+            return (await self.service.store.arun(self.inventory, network_id))[2]
 
     async def reserve(self, network_id: str | None, selected: list[str] | None = None):
         service = self.service
         await service.lock.acquire()
         reservation = None
         try:
-            if any(
-                run.state != "released"
-                for n in service.store.networks()
-                for run in service.store.runs(n.network_id)
-            ):
+            active_runs = []
+            for network in await service.store.arun(service.store.networks):
+                active_runs.extend(await service.store.arun(service.store.runs, network.network_id))
+            if any(run.state != "released" for run in active_runs):
                 raise PlatformRefusal(
                     "INFERENCE_ACTIVE",
                     "Stop and drain the current managed inference before starting another run",
                 )
             if network_id is None:
                 return None, deepcopy(service.state().members)
-            network, assignments, members = self.inventory(UUID(network_id), selected=selected)
-            operation = service.store.operation(network.current_operation_id)
+            network, assignments, members = await self.service.store.arun(
+                self.inventory, UUID(network_id), selected=selected
+            )
+            operation = await service.store.arun(
+                service.store.operation, network.current_operation_id
+            )
             if operation is None:
                 raise PlatformRefusal("STALE_REVISION", "Selected network has no current operation")
             # Network proof is independent of process readiness. RPC workers have
             # already been started by the master's runtime ownership context.
             await asyncio.wait_for(service._health(network, operation, assignments), 5)
             await service.prepare_rpc(network, operation, assignments)
-            network, assignments, members = self.inventory(
-                UUID(network_id), runtime=True, selected=selected
+            network, assignments, members = await self.service.store.arun(
+                self.inventory, UUID(network_id), runtime=True, selected=selected
             )
             workers = [a for a in assignments if a.node_id != service.identity.node_id]
             reservation = RunNetworkReservation(
@@ -181,7 +184,7 @@ class RunAdmission:
                 ],
                 state="reserved",
             )
-            service.store.reservation(reservation)
+            (await service.store.arun(service.store.reservation, reservation))
             await asyncio.wait_for(service._health(network, operation, assignments), 2)
             # Fresh probe admission precedes stopping the existing legacy child.
             if not await service.verify_idle(network, operation, assignments):
@@ -205,11 +208,11 @@ class RunAdmission:
                     kind="run",
                     run_id=reservation.run_id,
                     assignment_revision=assignment.assignment_revision,
-                    authority=service._authority(),
+                    authority=(await service.store.arun(service._authority)),
                     relay_instance_ids=[UUID(worker["instance_id"]), UUID(status["instance_id"])],
                     state="requested",
                 )
-                service.store.lease(lease)
+                (await service.store.arun(service.store.lease, lease))
                 leases[assignment.node_id] = lease
             granted = await service._phase(
                 operation,
@@ -222,13 +225,13 @@ class RunAdmission:
                 lease = leases[assignment.node_id]
                 if granted[assignment.node_id].get("grant_ack") is not True:
                     lease.state = "uncertain"
-                    service.store.lease(lease)
+                    (await service.store.arun(service.store.lease, lease))
                     raise PlatformRefusal("RPC_BUSY", "Worker run admission was not acknowledged")
                 service.master_bridges[(str(network.network_id), assignment.node_id)].grant(
                     lease.generation, 15000, False
                 )
                 lease.state, lease.grant_ack = "granted", True
-                service.store.lease(lease)
+                (await service.store.arun(service.store.lease, lease))
             return reservation, members
         except BaseException:
             try:
@@ -248,7 +251,7 @@ class RunAdmission:
                 token, _ = native._managed_native()._process_identity(pid)
                 reservation.child_pid, reservation.child_start_token = pid, token
                 reservation.state = "active"
-                service.store.reservation(reservation)
+                (await service.store.arun(service.store.reservation, reservation))
             else:
                 # A launch finisher may fail after recording the newly started
                 # child; stop only that process before releasing its bridges.
@@ -256,7 +259,7 @@ class RunAdmission:
                     await asyncio.to_thread(native.stop_process, pid, force=True)
                     if native.process_alive(pid):
                         reservation.state = "uncertain"
-                        service.store.reservation(reservation)
+                        (await service.store.arun(service.store.reservation, reservation))
                         raise PlatformRefusal(
                             "INFERENCE_ACTIVE", "Failed launch child has not stopped"
                         )
@@ -267,16 +270,18 @@ class RunAdmission:
     async def release(self, reservation):
         service = self.service
         reservation.state = "releasing"
-        service.store.reservation(reservation)
-        network = service.store.network(reservation.network_id)
-        operation = service.store.operation(network.current_operation_id)
+        (await service.store.arun(service.store.reservation, reservation))
+        network = await service.store.arun(service.store.network, reservation.network_id)
+        operation = await service.store.arun(service.store.operation, network.current_operation_id)
         leases = {
             item.node_id: item
-            for item in service.store.leases(reservation.network_id)
+            for item in (await service.store.arun(service.store.leases, reservation.network_id))
             if item.run_id == reservation.run_id and item.state != "released"
         }
         assignments = [
-            a for a in service.store.assignments(reservation.network_id) if a.node_id in leases
+            a
+            for a in (await service.store.arun(service.store.assignments, reservation.network_id))
+            if a.node_id in leases
         ]
         results = await service._phase(
             operation,
@@ -308,11 +313,11 @@ class RunAdmission:
             lease.state = "released" if acknowledged else "uncertain"
             lease.release_ack = results[assignment.node_id].get("drained") is not None
             lease.drain_ack = acknowledged
-            service.store.lease(lease)
+            (await service.store.arun(service.store.lease, lease))
             drained = drained and acknowledged
         participants = [
             a
-            for a in service.store.assignments(reservation.network_id)
+            for a in (await service.store.arun(service.store.assignments, reservation.network_id))
             if a.node_id in reservation.assignment_revisions
             and a.node_id != service.identity.node_id
         ]
@@ -322,7 +327,7 @@ class RunAdmission:
             )
             drained = all(result.get("drained") is True for result in closed.values())
         reservation.state = "released" if drained else "uncertain"
-        service.store.reservation(reservation)
+        (await service.store.arun(service.store.reservation, reservation))
         service.freshness.invalidate(
             reservation.network_id, "Run ended; obtain a new idle protocol proof"
         )
@@ -339,8 +344,12 @@ class RunAdmission:
                     service.master_bridges.pop(key, None)
                 assignment.launch_rpc_endpoint = None
                 assignment.rpc_child_identity = None
-                service.store.put_assignment(
-                    assignment, expected_revision=assignment.assignment_revision
+                (
+                    await service.store.arun(
+                        service.store.put_assignment,
+                        assignment,
+                        expected_revision=assignment.assignment_revision,
+                    )
                 )
 
     async def release_stopped(self, *, lock_held: bool = False):
@@ -348,8 +357,8 @@ class RunAdmission:
         if not lock_held:
             async with service.lock:
                 return await self.release_stopped(lock_held=True)
-        for network in service.store.networks():
-            for run in service.store.runs(network.network_id):
+        for network in await service.store.arun(service.store.networks):
+            for run in await service.store.arun(service.store.runs, network.network_id):
                 if run.state == "released":
                     continue
                 if (

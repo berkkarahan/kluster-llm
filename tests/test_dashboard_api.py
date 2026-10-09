@@ -265,10 +265,9 @@ def test_native_resources_without_process_and_replayed_generations(client, monke
         assert first.json()["accepted"] == 0
         assert first.json()["resources_accepted"] is True
         assert agent.app.state.usage_store.count() == 0
-        assert (
-            c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"]
-            is False
-        )
+        duplicate = c.post("/v1/usage/ingest", json=body, headers=headers)
+        assert duplicate.status_code == 200, duplicate.text
+        assert duplicate.json()["resources_accepted"] is False
         live = c.get("/v1/usage/live").json()
         assert live["nodes"]["r1"]["resources"]["snapshot_id"] == snapshot["snapshot_id"]
         assert live["nodes"]["r1"]["reading"] is None
@@ -844,10 +843,8 @@ def test_corrupt_saved_usage_is_server_failure_not_bad_browser_input(client):
         "availability": {"process_cpu": "measured", "process_rss": "measured"},
     }
     agent.app.state.usage_store.record("worker", "host", point, now=now)
-    with agent.app.state.usage_store.db:
-        agent.app.state.usage_store.db.execute(
-            "UPDATE readings SET payload='{' WHERE node_id='worker'"
-        )
+    with agent.app.state.usage_store.maintenance() as db:
+        db.exec_driver_sql("UPDATE readings SET payload='{' WHERE node_id='worker'")
     response = c.get(
         "/v1/usage/readings", params={"node_id": "worker", "lifetime_id": point["lifetime_id"]}
     )
@@ -877,16 +874,16 @@ def test_malformed_saved_usage_times_report_503_not_client_error(client):
     }
     store = agent.app.state.usage_store
     store.record(node, "master", point, now=now)
-    with store.db:
-        store.db.execute(
+    with store.maintenance() as db:
+        db.exec_driver_sql(
             "UPDATE readings SET payload=? WHERE node_id=?",
             (json.dumps({**point, "observed_at": "invalid"}), node),
         )
     safe = TestClient(agent.app, raise_server_exceptions=False)
     assert safe.get("/v1/usage/live").status_code == 503
-    with store.db:
-        store.db.execute("INSERT OR REPLACE INTO meta VALUES('storage_truncated','1')")
-        store.db.execute("INSERT OR REPLACE INTO meta VALUES('storage_truncated_at','invalid')")
+    with store.maintenance() as db:
+        db.exec_driver_sql("INSERT OR REPLACE INTO meta VALUES('storage_truncated','1')")
+        db.exec_driver_sql("INSERT OR REPLACE INTO meta VALUES('storage_truncated_at','invalid')")
     assert safe.get("/v1/usage/lifetimes", params={"node_id": node}).status_code == 503
 
 

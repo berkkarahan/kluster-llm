@@ -13,6 +13,8 @@ from kllm import usage
 from kllm.exceptions import ExternalServiceError
 from kllm.agent.services.usage_overview import UsageOverviewService
 from kllm.state import ClusterState
+from kllm.exceptions import PersistenceError
+from kllm.persistence.operations import initialize
 
 
 UsageWindow = Literal["15m", "1h", "24h"]
@@ -156,19 +158,20 @@ class UsageHistoryHandlers:
 
         def query() -> dict[str, Any]:
             store = self._store()
-            known = store.known_nodes()
-            member = state.members.get(node_id)
-            if node_id not in known and not member:
-                raise LookupError("unknown node")
-            meta = member or known[node_id]
-            return {
-                "node_id": node_id,
-                "host": meta.get("host") or node_id,
-                "connected": member is not None,
-                "lifetimes": store.lifetimes(node_id),
-                "retained_node_ids": sorted(known),
-                **store.coverage(node_id),
-            }
+            with store.snapshot():
+                known = store.known_nodes()
+                member = state.members.get(node_id)
+                if node_id not in known and not member:
+                    raise LookupError("unknown node")
+                meta = member or known[node_id]
+                return {
+                    "node_id": node_id,
+                    "host": meta.get("host") or node_id,
+                    "connected": member is not None,
+                    "lifetimes": store.lifetimes(node_id),
+                    "retained_node_ids": sorted(known),
+                    **store.coverage(node_id),
+                }
 
         return self._read(query)
 
@@ -210,7 +213,7 @@ class UsageHistoryHandlers:
             raise HTTPException(400, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, PersistenceError):
             raise HTTPException(
                 503, "usage history unavailable; previously saved records preserved"
             ) from None
@@ -239,7 +242,6 @@ class UsageIngestHandlers:
         state = self._state()
         if state.role != "master":
             raise HTTPException(400, "usage ingest requires master role")
-        self._resources.prune(state.members)
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
@@ -289,41 +291,59 @@ class UsageIngestHandlers:
                     expected_role="worker",
                 )
             model = self._assignment(node_id)
-            with self._resources.lock:
-                if snapshot is not None:
-                    self._resources.validate_session(node_id, snapshot)
-                accepted = (
-                    self._store().record_many(
-                        node_id,
-                        member.get("host") or node_id,
-                        points,
-                        now=now,
-                        expected_pid=member["process_pid"],
-                        expected_start=member["process_started_at"],
-                        expected_role="worker",
-                        model=model,
-                        context=self._node_context(member, model),
+            if points:
+                store = await initialize(self._store)
+
+                def persist():
+                    self._resources.prune(state.members)
+                    # State locks never span checkout or SQL.
+                    with store._store.writer():
+                        with self._resources.lock:
+                            if snapshot is not None:
+                                self._resources.validate_session(node_id, snapshot)
+                        accepted = store.record_many(
+                            node_id,
+                            member.get("host") or node_id,
+                            points,
+                            now=now,
+                            expected_pid=member["process_pid"],
+                            expected_start=member["process_started_at"],
+                            expected_role="worker",
+                            model=model,
+                            context=self._node_context(member, model),
+                        )
+                        with self._resources.lock:
+                            resources_accepted = (
+                                self._resources.install(node_id, snapshot)
+                                if snapshot is not None
+                                else False
+                            )
+                        return accepted, resources_accepted, store.last_successful_save
+
+                accepted, resources_accepted, last_save = await store._store.arun(persist)
+            else:
+                self._resources.prune(state.members)
+                with self._resources.lock:
+                    resources_accepted = (
+                        self._resources.install(node_id, snapshot)
+                        if snapshot is not None
+                        else False
                     )
-                    if points
-                    else 0
-                )
-                resources_accepted = (
-                    self._resources.install(node_id, snapshot) if snapshot is not None else False
-                )
+                accepted, last_save = 0, None
         except usage.ResourceConflict as exc:
             raise HTTPException(
                 409, {"message": str(exc), "resource_generation": exc.generation}
             ) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, PersistenceError):
             raise HTTPException(
                 503, "usage recording unavailable; previous history retained"
             ) from None
         result = {
             "accepted": accepted,
             "duplicates": len(points) - accepted,
-            "last_successful_save": self._store().last_successful_save if points else None,
+            "last_successful_save": last_save,
         }
         if snapshot is not None:
             result["resources_accepted"] = resources_accepted

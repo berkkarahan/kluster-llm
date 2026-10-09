@@ -23,7 +23,7 @@ async def review(service, journal_id: UUID) -> dict:
     journal = next(
         (
             j
-            for j in service.store.journals()
+            for j in (await service.store.arun(service.store.journals))
             if j.journal_id == journal_id and j.node_id == service.identity.node_id
         ),
         None,
@@ -33,7 +33,7 @@ async def review(service, journal_id: UUID) -> dict:
     assignment = next(
         (
             a
-            for a in service.store.assignments(journal.network_id)
+            for a in (await service.store.arun(service.store.assignments, journal.network_id))
             if a.node_id == service.identity.node_id
         ),
         None,
@@ -55,24 +55,36 @@ async def resolve(service, journal_id: UUID, decision: CleanupDecision) -> dict:
         inspected = await review(service, journal_id)
         if inspected["snapshot_digest"] != decision.snapshot_digest:
             raise StoreConflict("local snapshot changed; review it again")
-        journal = next(j for j in service.store.journals() if j.journal_id == journal_id)
+        journal = next(
+            j
+            for j in (await service.store.arun(service.store.journals))
+            if j.journal_id == journal_id
+        )
         if journal.phase == "removed_observed":
             return {"settled": True}
-        if any(r.state != "released" for r in service.store.runs(journal.network_id)) or any(
-            lease.state != "released" for lease in service.store.leases(journal.network_id)
+        if any(
+            r.state != "released"
+            for r in (await service.store.arun(service.store.runs, journal.network_id))
+        ) or any(
+            lease.state != "released"
+            for lease in (await service.store.arun(service.store.leases, journal.network_id))
         ):
             raise PlatformRefusal(
                 "INFERENCE_ACTIVE", "Reconcile dependent processes and leases before address review"
             )
         assignment = next(
             a
-            for a in service.store.assignments(journal.network_id)
+            for a in (await service.store.arun(service.store.assignments, journal.network_id))
             if a.node_id == service.identity.node_id
         )
         if decision.decision == "release_ownership":
             assignment.ownership = "user_owned"
-            service.store.put_assignment(
-                assignment, expected_revision=assignment.assignment_revision
+            (
+                await service.store.arun(
+                    service.store.put_assignment,
+                    assignment,
+                    expected_revision=assignment.assignment_revision,
+                )
             )
             journal.command_result = "Local review released app ownership; address preserved"
         else:
@@ -102,8 +114,8 @@ async def resolve(service, journal_id: UUID, decision: CleanupDecision) -> dict:
             await asyncio.to_thread(remove)
             journal.command_result = "Local review confirmed and removed exact owned address"
         journal.phase = "removed_observed"
-        service.store.journal(journal)
-        settle_local_replica(service, journal.network_id)
+        (await service.store.arun(service.store.journal, journal))
+        await service.store.arun(settle_local_replica, service, journal.network_id)
         return {"settled": True, "decision": decision.decision}
 
 
@@ -140,7 +152,7 @@ async def before_reset(service) -> None:
     if service.state().role == "master":
         from .allocation import OperationRequest
 
-        for network in service.store.networks():
+        for network in await service.store.arun(service.store.networks):
             if network.observed_state != "stopped":
                 from uuid import uuid4
 
@@ -160,36 +172,36 @@ async def before_reset(service) -> None:
                 native.stop_network_bridge, bridge, status["instance_id"], terminate=True
             )
             service.executor.bridges.pop(key)
-        for network in service.store.networks():
-            for lease in service.store.leases(network.network_id):
+        for network in await service.store.arun(service.store.networks):
+            for lease in await service.store.arun(service.store.leases, network.network_id):
                 child = lease.expected_rpc_child_identity
                 if lease.state != "released" and not native.process_alive(child.pid):
                     lease.state = "released"
                     lease.release_ack = lease.drain_ack = True
-                    service.store.lease(lease)
-        for journal in service.store.journals():
+                    (await service.store.arun(service.store.lease, lease))
+        for journal in await service.store.arun(service.store.journals):
             if journal.phase != "removed_observed":
                 prepared = service.executor.prepared.get(str(journal.network_id))
                 if prepared is None:
                     continue  # Absence or ambiguous ownership needs local review.
                 try:
                     journal.phase = "removal_intent"
-                    service.store.journal(journal)
+                    (await service.store.arun(service.store.journal, journal))
                     await asyncio.to_thread(
                         service.executor.platform.remove_owned, prepared, journal, lambda: None
                     )
                     journal.phase = "removed_observed"
-                    service.store.journal(journal)
+                    (await service.store.arun(service.store.journal, journal))
                 except (PlatformRefusal, StoreConflict):
                     journal.phase = "cleanup_pending"
-                    service.store.journal(journal)
+                    (await service.store.arun(service.store.journal, journal))
         for diagnostic in service.executor.diagnostics.values():
             await diagnostic.close()
         service.executor.diagnostics.clear()
         for prepared in service.executor.prepared.values():
             await asyncio.to_thread(service.executor.platform.close_prepared, prepared)
         service.executor.prepared.clear()
-        for network in service.store.networks():
+        for network in await service.store.arun(service.store.networks):
             if network.observed_state not in ("stopped", "cleanup_pending"):
                 before = network.revision
                 network.observed_state = (
@@ -197,5 +209,9 @@ async def before_reset(service) -> None:
                 )
                 network.desired_state = "stopped"
                 network.revision += 1
-                service.store.put_network(network, expected_revision=before)
-            settle_local_replica(service, network.network_id)
+                (
+                    await service.store.arun(
+                        service.store.put_network, network, expected_revision=before
+                    )
+                )
+            await service.store.arun(settle_local_replica, service, network.network_id)

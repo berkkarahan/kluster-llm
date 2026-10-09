@@ -186,12 +186,21 @@ class IdentityBootstrap:
                     {**master.model_dump(), "expected_role": "master"}
                 )
                 prior = next(
-                    (p for p in service.store.peers() if p.expected_role == "master"), None
+                    (
+                        p
+                        for p in (await service.store.arun(service.store.peers))
+                        if p.expected_role == "master"
+                    ),
+                    None,
                 )
                 if service.state().role != "worker" or service.channels.master_base() != base:
                     raise IdentityError("Cluster changed during pairing")
                 if prior is not None and prior != peer:
-                    adopt_rotated_master(service.store, prior, peer)
+                    (
+                        await self.service.store.arun(
+                            adopt_rotated_master, service.store, prior, peer
+                        )
+                    )
                 response = await client.post(
                     base + "/v2/node/network-bootstrap/commit",
                     json={
@@ -202,4 +211,4 @@ class IdentityBootstrap:
                     },
                 )
                 response.raise_for_status()
-                service.store.pair(peer, replace=prior is not None)
+                (await service.store.arun(service.store.pair, peer, replace=prior is not None))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
 import logging
 import sqlite3
 import threading
@@ -98,7 +100,7 @@ class MembershipMaintenance:
                                 break
                             if node_id not in current.members:
                                 store.end_node(node_id, state="unobserved")
-                    except (OSError, sqlite3.Error) as exc:
+                    except (OSError, sqlite3.Error, PersistenceError) as exc:
                         self._mark_store_failed(str(exc))
                     current = self._state()
                     if (
@@ -134,5 +136,5 @@ class MembershipMaintenance:
             store.recording = "failed"
             reason = "disk full" if "disk full" in error.lower() else "storage unavailable"
             store.error = f"usage lifetime close failed: {reason}"
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, PersistenceError):
             pass

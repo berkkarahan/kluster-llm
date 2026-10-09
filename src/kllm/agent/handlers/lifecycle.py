@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -123,7 +125,7 @@ class ClusterLifecycleHandlers:
         if state.process_pid:
             try:
                 self._end_usage(state.node_id)
-            except (OSError, sqlite3.Error):
+            except (OSError, sqlite3.Error, PersistenceError):
                 pass
             self._stop_process(state.process_pid, force=True)
             state.process_pid = None

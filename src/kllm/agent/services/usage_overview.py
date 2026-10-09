@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
 import sqlite3
 import time
 from collections.abc import Callable
@@ -130,7 +132,7 @@ class UsageOverviewService:
                 if resource_schema_supported
                 else [],
             }
-        except (OSError, sqlite3.Error) as exc:
+        except (OSError, sqlite3.Error, PersistenceError) as exc:
             with self._resources.lock:
                 retained = any(node_id in state.members for node_id in self._resources.latest)
             if not retained:

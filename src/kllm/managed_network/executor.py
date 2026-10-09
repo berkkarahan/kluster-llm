@@ -417,7 +417,7 @@ class LocalNetworkExecutor:
             await asyncio.to_thread(
                 self.platform.check_source_route, snapshot, prepared.assignment.address, peer
             )
-        self._fence(command, deadline)
+        (await self.store.arun(self._fence, command, deadline))
         if key not in self.diagnostics:
             diagnostic = DedicatedDiagnostics(
                 self.identity,
@@ -639,8 +639,12 @@ class LocalNetworkExecutor:
     async def _cleanup(self, command: SignedCommand, deadline: float) -> dict[str, Any]:
         CleanupBody.model_validate(command.body)
         key = str(command.network_id)
-        if any(run.state != "released" for run in self.store.runs(command.network_id)) or any(
-            lease.state != "released" for lease in self.store.leases(command.network_id)
+        if any(
+            run.state != "released"
+            for run in (await self.store.arun(self.store.runs, command.network_id))
+        ) or any(
+            lease.state != "released"
+            for lease in (await self.store.arun(self.store.leases, command.network_id))
         ):
             raise PlatformRefusal(
                 "INFERENCE_ACTIVE",
@@ -659,7 +663,7 @@ class LocalNetworkExecutor:
             await self.diagnostics.pop(key).close()
         journals = [
             j
-            for j in self.store.journals()
+            for j in (await self.store.arun(self.store.journals))
             if j.network_id == command.network_id
             and j.node_id == self.identity.node_id
             and j.phase != "removed_observed"
@@ -672,7 +676,7 @@ class LocalNetworkExecutor:
                 assignment = next(
                     (
                         a
-                        for a in self.store.assignments(command.network_id)
+                        for a in (await self.store.arun(self.store.assignments, command.network_id))
                         if a.node_id == self.identity.node_id
                     ),
                     None,
@@ -690,10 +694,10 @@ class LocalNetworkExecutor:
                         "Restart lost continuous ownership; local review required",
                     )
                 journal.phase = "removed_observed"
-                self.store.journal(journal)
+                (await self.store.arun(self.store.journal, journal))
             else:
                 journal.phase = "removal_intent"
-                self.store.journal(journal)
+                (await self.store.arun(self.store.journal, journal))
 
                 def remove() -> None:
                     with self.store.execution():
@@ -712,13 +716,17 @@ class LocalNetworkExecutor:
             await asyncio.to_thread(self.platform.close_prepared, prepared)
             self.prepared.pop(key, None)
         if self.state().role == "worker":
-            replica = self.store.network(command.network_id)
+            replica = await self.store.arun(self.store.network, command.network_id)
             if replica is not None and replica.observed_state != "stopped":
                 if replica.observed_state == "preparing":
                     revision = replica.revision
                     replica.observed_state = "failed"
                     replica.revision += 1
-                    self.store.put_network(replica, expected_revision=revision)
+                    (
+                        await self.store.arun(
+                            self.store.put_network, replica, expected_revision=revision
+                        )
+                    )
                 for state in (
                     ("failed",) if command.phase == "rollback" else ("stopping", "stopped")
                 ):
@@ -726,15 +734,23 @@ class LocalNetworkExecutor:
                     replica.desired_state = "active" if command.phase == "rollback" else "stopped"
                     replica.observed_state = cast(NetworkState, state)
                     replica.revision += 1
-                    self.store.put_network(replica, expected_revision=revision)
+                    (
+                        await self.store.arun(
+                            self.store.put_network, replica, expected_revision=revision
+                        )
+                    )
         if command.phase == "cleanup":
-            self.store.set_metadata(
-                f"stopped_network:{command.network_id}", str(command.operation_id)
+            (
+                await self.store.arun(
+                    self.store.set_metadata,
+                    f"stopped_network:{command.network_id}",
+                    str(command.operation_id),
+                )
             )
         return {"status": "stopped", "cleanup_pending": False}
 
     async def _reconcile(self, command: SignedCommand, deadline: float) -> dict[str, Any]:
-        self._fence(command, deadline)
+        (await self.store.arun(self._fence, command, deadline))
         if command.body:
             proposal = PrepareBody.model_validate(command.body)
             current = self.prepared.get(str(command.network_id))
@@ -752,7 +768,7 @@ class LocalNetworkExecutor:
                     "CLEANUP_PENDING",
                     "Reconcile requires an unchanged continuously observed assignment",
                 )
-            self.store.put_operation(proposal.operation)
+            (await self.store.arun(self.store.put_operation, proposal.operation))
             self.preparation[str(command.network_id)] = proposal
             diagnostic = self.diagnostics.get(str(command.network_id))
             if diagnostic:
@@ -765,15 +781,15 @@ class LocalNetworkExecutor:
             "status": "configured",
             "journals": [
                 j.model_dump(mode="json")
-                for j in self.store.journals()
+                for j in (await self.store.arun(self.store.journals))
                 if j.network_id == command.network_id
             ],
-            "local_revision": self.local_revision(command.network_id),
+            "local_revision": (await self.store.arun(self.local_revision, command.network_id)),
         }
 
     async def execute(self, command: SignedCommand, deadline: float) -> dict[str, Any]:
         async with self.lock:
-            self._fence(command, deadline)
+            (await self.store.arun(self._fence, command, deadline))
             if command.phase == "inspect":
                 if command.body:
                     raise PlatformRefusal(
@@ -785,7 +801,9 @@ class LocalNetworkExecutor:
                     inventory["setup"] = await asyncio.to_thread(setup)
                 return {
                     "status": "prepared",
-                    "local_revision": self.local_revision(command.network_id),
+                    "local_revision": (
+                        await self.store.arun(self.local_revision, command.network_id)
+                    ),
                     **inventory,
                 }
             key = "/".join(
@@ -807,14 +825,16 @@ class LocalNetworkExecutor:
                     "expected_local_revision": command.expected_local_revision,
                 }
             )
-            fresh, saved = self.store.begin_command(key, body_digest)
+            fresh, saved = await self.store.arun(self.store.begin_command, key, body_digest)
             if not fresh:
                 if not isinstance(saved, dict):
                     raise StoreConflict("stored command result is corrupt")
                 return saved
             result: dict[str, Any]
             try:
-                if self.local_revision(command.network_id) != command.expected_local_revision:
+                if (
+                    await self.store.arun(self.local_revision, command.network_id)
+                ) != command.expected_local_revision:
                     raise StoreConflict("local revision changed")
                 if command.phase in ("prepare", "apply"):
 
@@ -829,7 +849,7 @@ class LocalNetworkExecutor:
 
                     # Shield the OS operation so disconnect/cancellation cannot discard
                     # the observed outcome of a syscall that already started.
-                    task = asyncio.create_task(asyncio.to_thread(mutate))
+                    task = asyncio.create_task(self.store.arun(mutate, cancellable=False))
                     self.executing.add(task)
                     try:
                         result = await asyncio.shield(task)
@@ -847,10 +867,13 @@ class LocalNetworkExecutor:
                     "renew_admission",
                     "release_admission",
                 ):
-                    result = await asyncio.to_thread(self._admission, command, deadline)
+                    result = await self.store.arun(
+                        self._admission, command, deadline, cancellable=False
+                    )
                 elif command.phase == "release_runtime":
                     if command.body or any(
-                        lease.state != "released" for lease in self.store.leases(command.network_id)
+                        lease.state != "released"
+                        for lease in (await self.store.arun(self.store.leases, command.network_id))
                     ):
                         raise PlatformRefusal(
                             "RPC_BUSY", "Drain runtime admission before closing its relay"
@@ -888,10 +911,14 @@ class LocalNetworkExecutor:
                     if isinstance(error, (PlatformRefusal, StoreConflict))
                     else "Local network phase failed; inspect adapter and runtime prerequisites",
                 }
-            revision = self.local_revision(command.network_id) + 1
-            self.store.set_metadata(f"local_revision:{command.network_id}", str(revision))
+            revision = (await self.store.arun(self.local_revision, command.network_id)) + 1
+            (
+                await self.store.arun(
+                    self.store.set_metadata, f"local_revision:{command.network_id}", str(revision)
+                )
+            )
             result["local_revision"] = revision
-            self.store.finish_command(key, result)
+            (await self.store.arun(self.store.finish_command, key, result))
             return result
 
     async def close(self) -> None:

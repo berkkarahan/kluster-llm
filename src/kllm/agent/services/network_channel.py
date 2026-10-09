@@ -347,7 +347,7 @@ class NetworkChannelHub:
             await socket.close(code=1008)
             return
         try:
-            authority = self.master_authority()
+            authority = await self.store.arun(self.master_authority)
             await socket.accept()
             wire = SocketWire(socket, asgi=True)
 
@@ -364,7 +364,7 @@ class NetworkChannelHub:
                 raw = await wire.receive()
                 envelope = strict_json(raw, 8192)
                 untrusted = strict_json(envelope.get("payload", ""), 8192)
-                peer = self.store.peer(untrusted.get("sender_node_id", ""))
+                peer = await self.store.arun(self.store.peer, untrusted.get("sender_node_id", ""))
                 if (
                     peer is None
                     or peer.expected_role != "worker"
@@ -400,7 +400,7 @@ class NetworkChannelHub:
                     old = self.sessions.pop(peer.node_id, None)
                     if old:
                         await old.close()
-                    self.store.accept_authority(accepted, peer.node_id)
+                    (await self.store.arun(self.store.accept_authority, accepted, peer.node_id))
                     await wire.send(self.identity.sign(response.model_dump(mode="json"), 8192))
                 return peer, accepted
 
@@ -485,7 +485,7 @@ class NetworkChannelHub:
                 master_session_id=accepted.master_session_id,
                 accepted_channel_id=accepted.channel_id,
             )
-            self.store.accept_authority(authority, peer.node_id)
+            (await self.store.arun(self.store.accept_authority, authority, peer.node_id))
             return authority
 
         authority = await asyncio.wait_for(handshake(), 5)
@@ -515,7 +515,11 @@ class NetworkChannelHub:
         while not self.stopping:
             connected = False
             try:
-                peers = [p for p in self.store.peers() if p.expected_role == "master"]
+                peers = [
+                    p
+                    for p in (await self.store.arun(self.store.peers))
+                    if p.expected_role == "master"
+                ]
                 base = self.master_base()
                 bootstrap = getattr(self, "bootstrap", None)
                 now = time.monotonic()
@@ -535,7 +539,11 @@ class NetworkChannelHub:
                         await bootstrap()
                     except IdentityError as error:
                         logger.warning("network channel pairing rejected: %s", error)
-                    peers = [p for p in self.store.peers() if p.expected_role == "master"]
+                    peers = [
+                        p
+                        for p in (await self.store.arun(self.store.peers))
+                        if p.expected_role == "master"
+                    ]
                 if self.state().role != "worker" or len(peers) != 1 or not base:
                     await asyncio.sleep(1)
                     continue
@@ -582,7 +590,7 @@ class NetworkChannelHub:
     async def start(self) -> None:
         self.stopping = False
         if self.state().role == "master":
-            self.master_authority()
+            (await self.store.arun(self.master_authority))
         self.client_task = asyncio.create_task(self.client_loop(), name="kllm-network-control")
 
     async def close(self) -> None:

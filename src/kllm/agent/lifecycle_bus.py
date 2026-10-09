@@ -96,6 +96,18 @@ class LifecycleBus:
             if inspect.isawaitable(result):
                 await self._await(result, notice, isolate=isolate)
 
+    async def emit_collect(self, notice: LifecycleNotice) -> list[Exception]:
+        """Run every listener and return failures for lifecycle owners to report."""
+        failures: list[Exception] = []
+        for listener in self._snapshot(notice.event):
+            try:
+                result = listener(notice)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as error:
+                failures.append(error)
+        return failures
+
     def _snapshot(self, event: LifecycleEvent) -> tuple[Listener, ...]:
         with self._lock:
             return tuple(self._listeners.get(event, ()))

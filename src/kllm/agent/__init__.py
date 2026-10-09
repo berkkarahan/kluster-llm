@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
+from kllm.persistence.operations import initialize
+
 from collections.abc import AsyncIterator, Awaitable, Callable
 import os
 import asyncio
@@ -281,8 +285,10 @@ def _clear_resource_state() -> None:
     _usage_runtime().clear_resources()
 
 
-def _close_usage_store(app: FastAPI) -> None:
-    _usage_runtime().close_store(app)
+async def _close_usage_store(app: FastAPI) -> None:
+    await _usage_runtime().close_store(
+        app, deadline=getattr(app.state, "sqlite_shutdown_deadline", None)
+    )
 
 
 async def _start_managed_network(app: FastAPI) -> None:
@@ -290,8 +296,12 @@ async def _start_managed_network(app: FastAPI) -> None:
     from kllm.agent.services.worker_rpc import WorkerRpcService
     from kllm.agent.services.rpc_runs import RpcRunCoordinator
 
+    service = None
     try:
-        service = ManagedNetworkService(home_dir(), lambda: STATE, _master_control_base)
+        service = await initialize(
+            lambda: ManagedNetworkService(home_dir(), lambda: STATE, _master_control_base),
+            cleanup=lambda value: value.store.close(),
+        )
         registry = _runtime_registry()
         service.runtimes = RuntimeControlService(
             service,
@@ -319,7 +329,18 @@ async def _start_managed_network(app: FastAPI) -> None:
         if not STATE.process_pid and registry.data.get("running"):
             registry.running(None)
         app.state.managed_network = service
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+    except asyncio.CancelledError:
+        if service is not None:
+            deadline = time.monotonic() + service.store._store.options.shutdown_timeout
+            await asyncio.shield(service.aclose(deadline=deadline))
+        raise
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, PersistenceError) as error:
+        if service is not None:
+            deadline = time.monotonic() + service.store._store.options.shutdown_timeout
+            try:
+                await service.aclose(deadline=deadline)
+            except (OSError, RuntimeError, PersistenceError):
+                pass  # The closing owner remains quarantined for safe recovery.
         app.state.managed_network_error = (
             f"Signed node runtime control is unavailable ({str(error)[:200]}); "
             "restart or recover the local agent"
@@ -342,8 +363,9 @@ async def _stop_managed_network(app: FastAPI) -> None:
             pass  # Ambiguous ownership stays durable for the next reconciliation.
         # A managed run is coupled to these bridge instances. Legacy runs keep
         # their existing lifecycle when no durable network reservation exists.
-        for network in service.store.networks():
-            for run in service.store.runs(network.network_id):
+        for network in await service.store.arun(service.store.networks):
+            runs = await service.store.arun(service.store.runs, network.network_id)
+            for run in runs:
                 if run.state == "active" and run.child_pid == STATE.process_pid and run.child_pid:
                     registered = native.registered_process_identity(run.child_pid)
                     if registered and registered.get("start_token") == run.child_start_token:
@@ -354,7 +376,7 @@ async def _stop_managed_network(app: FastAPI) -> None:
             # Abrupt/ambiguous process ownership remains durable for review.
             pass
         finally:
-            await service.close()
+            await service.aclose(deadline=getattr(app.state, "sqlite_shutdown_deadline", None))
         del app.state.managed_network
 
 
@@ -390,7 +412,7 @@ def _network_directory() -> list[dict[str, Any]]:
     # lists its own identity; a worker sync is a no-op and reads its mirror.
     try:
         service.sync_directory()
-    except sqlite3.Error:
+    except (sqlite3.Error, PersistenceError):
         pass
     return service.directory_payload()
 
@@ -443,7 +465,7 @@ def _agent_lifespan() -> AgentLifespan:
             sample_diagnostics=_sample_diagnostics,
             close_clients=http_clients.close,
             close_usage_store=_close_usage_store,
-            stop_live_feed=lambda feed: feed.stop(),
+            stop_live_feed=lambda feed, *, deadline=None: feed.stop(deadline=deadline),
             platform=sys.platform,
             async_client_factory=httpx.AsyncClient,
         )
@@ -630,7 +652,7 @@ def _apply_directory_snapshot(value: Any) -> None:
             continue  # The master is trusted, but the boundary stays validated.
     try:
         service.store.put_directory_many(items, replace=True)
-    except sqlite3.Error:
+    except (sqlite3.Error, PersistenceError):
         pass  # The local identity mirror must not break membership heartbeats.
 
 

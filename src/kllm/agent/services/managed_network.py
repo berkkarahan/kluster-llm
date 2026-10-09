@@ -43,6 +43,7 @@ from kllm.managed_network.models import (
 from kllm.managed_network.platform.base import PlatformAdapter, PlatformRefusal, is_admin
 from kllm.managed_network.store import NetworkStore, StoreConflict, digest
 from kllm.managed_network.verification import Freshness
+from kllm.exceptions import PersistenceError
 from kllm.state import repo_root
 from .heartbeat_payload import local_hostname
 from .network_channel import NetworkChannelHub
@@ -60,51 +61,57 @@ class ManagedNetworkService:
     ):
         self.state, self.home = state, home
         self.store = NetworkStore(home)
-        self.identity = LocalIdentity(home, state().node_id, self.store)
-        from kllm.managed_network.bootstrap import IdentityBootstrap
-        from kllm.managed_network.guided_setup import GuidedSetup
+        try:
+            self.identity = LocalIdentity(home, state().node_id, self.store)
+            from kllm.managed_network.bootstrap import IdentityBootstrap
+            from kllm.managed_network.guided_setup import GuidedSetup
 
-        self.bootstrap = IdentityBootstrap(self)
-        self.guided = GuidedSetup(self)
-        self.executor = LocalNetworkExecutor(
-            self.store, self.identity, state, platform or platform_adapter(), repository
-        )
-        self.executor.guided_status = self.guided.local_status
-        if platform is None and not is_admin():
-            from kllm.managed_network.helper_platform import HelperPlatform
-
-            self.executor.platform = HelperPlatform(
-                self.executor.platform, self.guided.helper, self.guided.grant
+            self.bootstrap = IdentityBootstrap(self)
+            self.guided = GuidedSetup(self)
+            self.executor = LocalNetworkExecutor(
+                self.store, self.identity, state, platform or platform_adapter(), repository
             )
-        self.worker_rpc = None
-        self.runtimes = None
-        self.rpc_runs = None
-        self.rpc_monitor_task = None
-        self.worker_expiry_task = None
-        self.channels = NetworkChannelHub(
-            self.store, self.identity, state, master_base, self.execute_command
-        )
-        self.channels.bootstrap = self.bootstrap.connect
-        self.lock = asyncio.Lock()  # Shared by topology changes and run reservations.
-        self.tasks: dict[str, asyncio.Task] = {}
-        self.local_authority: MasterAuthority | None = None
-        self.phase_sequences: dict[str, int] = {}
-        self.local_revisions: dict[tuple[str, str], int] = {}
-        self.verified_results: dict[tuple[str, str], dict[str, Any]] = {}
-        self.results: dict[tuple[str, str], dict[str, Any]] = {}
-        self.master_bridges: dict[tuple[str, str], Any] = {}
-        self.freshness = Freshness()
-        self.probe_leases: dict[tuple[str, str], AdmissionLease] = {}
-        self.monitor_task: asyncio.Task | None = None
-        self.closed = False
-        from kllm.managed_network.run_admission import RunAdmission
+            self.executor.guided_status = self.guided.local_status
+            if platform is None and not is_admin():
+                from kllm.managed_network.helper_platform import HelperPlatform
 
-        self.admission = RunAdmission(self)
-        self.loop: asyncio.AbstractEventLoop | None = None
+                self.executor.platform = HelperPlatform(
+                    self.executor.platform, self.guided.helper, self.guided.grant
+                )
+            self.worker_rpc = None
+            self.runtimes = None
+            self.rpc_runs = None
+            self.rpc_monitor_task = None
+            self.worker_expiry_task = None
+            self.channels = NetworkChannelHub(
+                self.store, self.identity, state, master_base, self.execute_command
+            )
+            self.channels.bootstrap = self.bootstrap.connect
+            self.lock = asyncio.Lock()  # Shared by topology changes and run reservations.
+            self.tasks: dict[str, asyncio.Task] = {}
+            self.local_authority: MasterAuthority | None = None
+            self.phase_sequences: dict[str, int] = {}
+            self.local_revisions: dict[tuple[str, str], int] = {}
+            self.verified_results: dict[tuple[str, str], dict[str, Any]] = {}
+            self.results: dict[tuple[str, str], dict[str, Any]] = {}
+            self.master_bridges: dict[tuple[str, str], Any] = {}
+            self.freshness = Freshness()
+            self.probe_leases: dict[tuple[str, str], AdmissionLease] = {}
+            self.monitor_task: asyncio.Task | None = None
+            self.closed = False
+            self._close_complete = False
+            self._close_jobs: set[asyncio.Task] = set()
+            from kllm.managed_network.run_admission import RunAdmission
+
+            self.admission = RunAdmission(self)
+            self.loop: asyncio.AbstractEventLoop | None = None
+        except BaseException:
+            self.store.close()
+            raise
 
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
-        self.store.recover()
+        (await self.store.arun(self.store.recover))
         if self.state().role == "master":
             await asyncio.to_thread(self.sync_directory)
         await self.channels.start()
@@ -138,7 +145,7 @@ class ManagedNetworkService:
         try:
             # The channel already verifies signatures, authority and sequence.
             # Recheck its persisted fence immediately before local mutation.
-            def authorize() -> None:
+            def authorize_sync() -> None:
                 self.store.check_channel(
                     command.sender_node_id,
                     MasterAuthority(
@@ -161,8 +168,11 @@ class ManagedNetworkService:
                     raise ValueError("Upgrade this worker for runtime management")
                 if time.monotonic() >= deadline:
                     raise ValueError("Runtime command expired")
-                return await self.runtimes.execute(command, authorize)
-            return await asyncio.to_thread(self.worker_rpc.execute, command, deadline, authorize)
+                await self.store.arun(authorize_sync)
+                return await self.runtimes.execute(command, lambda: None)
+            return await asyncio.to_thread(
+                self.worker_rpc.execute, command, deadline, authorize_sync
+            )
         except (
             PlatformRefusal,
             IdentityError,
@@ -222,7 +232,7 @@ class ManagedNetworkService:
     async def inventories(self) -> dict[str, Any]:
         if self.state().role != "master":
             raise PlatformRefusal("NOT_MASTER", "Cluster inventories require master role")
-        authority = self._authority()
+        authority = await self.store.arun(self._authority)
         result = {
             self.identity.node_id: await asyncio.wait_for(
                 asyncio.to_thread(self.local_inventory), 5
@@ -230,7 +240,7 @@ class ManagedNetworkService:
         }
 
         async def worker(node_id: str) -> None:
-            peer = self.store.peer(node_id)
+            peer = await self.store.arun(self.store.peer, node_id)
             session = self.channels.sessions.get(node_id)
             if (
                 peer is None
@@ -275,18 +285,20 @@ class ManagedNetworkService:
 
     async def begin_start(self, request: StartRequest) -> dict[str, Any]:
         async with self.lock:
-            authority = self._authority()
-            prior = self.store.operation_for_request(
-                authority.cluster_binding_id, request.request_id
+            authority = await self.store.arun(self._authority)
+            prior = await self.store.arun(
+                self.store.operation_for_request, authority.cluster_binding_id, request.request_id
             )
             body_digest = digest(request.model_dump(mode="json"))
             if prior:
                 if prior.proposal_digest != body_digest:
                     raise StoreConflict("request ID reused with changed body")
-                network = self.store.network(prior.network_id)
+                network = await self.store.arun(self.store.network, prior.network_id)
                 assert network is not None
                 return self._accepted(prior, network)
-            if any(n.observed_state != "stopped" for n in self.store.networks()):
+            if any(
+                n.observed_state != "stopped" for n in (await self.store.arun(self.store.networks))
+            ):
                 raise PlatformRefusal(
                     "OPERATION_IN_PROGRESS",
                     "One non-stopped network is allowed per cluster binding",
@@ -316,8 +328,8 @@ class ManagedNetworkService:
                 deadline=utc_now() + timedelta(seconds=60),
             )
             network.current_operation_id = operation.operation_id
-            self.store.put_network(network)
-            self.store.put_operation(operation)
+            (await self.store.arun(self.store.put_network, network))
+            (await self.store.arun(self.store.put_operation, operation))
             task = asyncio.create_task(
                 self._start_operation(network, operation, request),
                 name=f"kllm-network-{operation.operation_id}",
@@ -358,7 +370,7 @@ class ManagedNetworkService:
         )
         try:
             if node_id == self.identity.node_id:
-                authority = self._authority()
+                authority = await self.store.arun(self._authority)
                 command = SignedCommand.model_validate(
                     {
                         **authority.model_dump(exclude={"accepted_channel_id"}),
@@ -422,7 +434,9 @@ class ManagedNetworkService:
                 current = next(
                     (
                         a
-                        for a in self.store.assignments(operation.network_id)
+                        for a in (
+                            await self.store.arun(self.store.assignments, operation.network_id)
+                        )
                         if a.node_id == node_id
                     ),
                     None,
@@ -434,8 +448,12 @@ class ManagedNetworkService:
                     if not preserve_error:
                         current.error_code = result.get("error_code")
                         current.message = result.get("message", "")
-                    self.store.put_assignment(
-                        current, expected_revision=current.assignment_revision
+                    (
+                        await self.store.arun(
+                            self.store.put_assignment,
+                            current,
+                            expected_revision=current.assignment_revision,
+                        )
                     )
             if phase == "verify" and result.get("status") != "failed":
                 self.verified_results[key] = {**self.verified_results.get(key, {}), **result}
@@ -451,7 +469,7 @@ class ManagedNetworkService:
                 ownership_journal_id=result.get("journal_id"),
                 error_code=result.get("error_code"),
             )
-            self.store.result(operation.operation_id, participant)
+            (await self.store.arun(self.store.result, operation.operation_id, participant))
             return result
         except (Exception, asyncio.CancelledError) as error:
             code = (
@@ -469,17 +487,20 @@ class ManagedNetworkService:
                 "message": "Participant phase did not complete with a current authenticated result",
             }
             self.results[key] = result
-            self.store.result(
-                operation.operation_id,
-                ParticipantResult(
-                    node_id=node_id,
-                    assignment_revision=assignment.assignment_revision,
-                    expected_local_revision=revision,
-                    stage=phase,
-                    phase_sequence=sequence,
-                    status=result["status"],
-                    error_code=code,
-                ),
+            (
+                await self.store.arun(
+                    self.store.result,
+                    operation.operation_id,
+                    ParticipantResult(
+                        node_id=node_id,
+                        assignment_revision=assignment.assignment_revision,
+                        expected_local_revision=revision,
+                        stage=phase,
+                        phase_sequence=sequence,
+                        status=result["status"],
+                        error_code=code,
+                    ),
+                )
             )
             return result
 
@@ -588,11 +609,14 @@ class ManagedNetworkService:
                     if assignment.node_id in old:
                         assignment.assignment_revision += 1
                         assignment.state = "preparing"
-                    self.store.put_assignment(
-                        assignment,
-                        expected_revision=old[assignment.node_id].assignment_revision - 1
-                        if assignment.node_id in old
-                        else None,
+                    (
+                        await self.store.arun(
+                            self.store.put_assignment,
+                            assignment,
+                            expected_revision=old[assignment.node_id].assignment_revision - 1
+                            if assignment.node_id in old
+                            else None,
+                        )
                     )
                 management_hosts = await asyncio.to_thread(self._management_hosts)
                 preparation_bodies = {
@@ -638,9 +662,13 @@ class ManagedNetworkService:
                         "INVALID_ADAPTER",
                         "A participant refused preparation; no addresses were applied",
                     )
-                self._publish(network, "applying")
+                (await self.store.arun(self._publish, network, "applying"))
                 operation.phase = "applying"
-                self.store.update_operation(operation, operation.operation_revision)
+                (
+                    await self.store.arun(
+                        self.store.update_operation, operation, operation.operation_revision
+                    )
+                )
                 commitment = digest(
                     {node: result["prepared_snapshot_digest"] for node, result in prepared.items()}
                 )
@@ -669,12 +697,20 @@ class ManagedNetworkService:
                     result = results[assignment.node_id]
                     assignment.state = "configured"
                     assignment.ownership = result["ownership"]
-                    self.store.put_assignment(
-                        assignment, expected_revision=assignment.assignment_revision
+                    (
+                        await self.store.arun(
+                            self.store.put_assignment,
+                            assignment,
+                            expected_revision=assignment.assignment_revision,
+                        )
                     )
-                self._publish(network, "verifying")
+                (await self.store.arun(self._publish, network, "verifying"))
                 operation.phase = "verifying"
-                self.store.update_operation(operation, operation.operation_revision)
+                (
+                    await self.store.arun(
+                        self.store.update_operation, operation, operation.operation_revision
+                    )
+                )
                 idle = await asyncio.wait_for(
                     self._verify_configuration(network, operation, assignments, request), 20
                 )
@@ -683,9 +719,13 @@ class ManagedNetworkService:
                     "state": network.observed_state,
                     "error_code": None if idle else "RPC_BUSY",
                 }
-                self.store.update_operation(operation, operation.operation_revision)
+                (
+                    await self.store.arun(
+                        self.store.update_operation, operation, operation.operation_revision
+                    )
+                )
             except (Exception, asyncio.CancelledError) as error:
-                current = self.store.operation(operation.operation_id)
+                current = await self.store.arun(self.store.operation, operation.operation_id)
                 if current:
                     operation = current
                 code = (
@@ -701,13 +741,16 @@ class ManagedNetworkService:
                         60,
                     )
                 pending = any(result["status"] != "stopped" for result in rollback.values())
-                self._publish(
-                    network,
-                    "cleanup_pending"
-                    if pending
-                    else "degraded"
-                    if operation.action == "add"
-                    else "failed",
+                (
+                    await self.store.arun(
+                        self._publish,
+                        network,
+                        "cleanup_pending"
+                        if pending
+                        else "degraded"
+                        if operation.action == "add"
+                        else "failed",
+                    )
                 )
                 operation.phase = "failed"
                 operation.terminal_result = {
@@ -715,7 +758,11 @@ class ManagedNetworkService:
                     "message": "Setup failed; review participant prerequisites and cleanup state",
                     "rollback": rollback,
                 }
-                self.store.update_operation(operation, operation.operation_revision)
+                (
+                    await self.store.arun(
+                        self.store.update_operation, operation, operation.operation_revision
+                    )
+                )
                 await asyncio.to_thread(self.sync_directory)
 
     async def _verify_configuration(
@@ -755,16 +802,28 @@ class ManagedNetworkService:
                 assignment.node_id,
                 {"assignment_revision": assignment.assignment_revision, "dedicated_proof": proof},
             )
-            self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
+            (
+                await self.store.arun(
+                    self.store.put_assignment,
+                    assignment,
+                    expected_revision=assignment.assignment_revision,
+                )
+            )
         self.freshness.publish(
             network.network_id,
             self.identity.node_id,
             {"assignment_revision": master.assignment_revision},
         )
-        self._publish(network, "ready")
+        (await self.store.arun(self._publish, network, "ready"))
         for assignment in assignments:
             assignment.state = "ready"
-            self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
+            (
+                await self.store.arun(
+                    self.store.put_assignment,
+                    assignment,
+                    expected_revision=assignment.assignment_revision,
+                )
+            )
         await asyncio.to_thread(self.sync_directory)
         return True
 
@@ -813,7 +872,13 @@ class ManagedNetworkService:
                 )
             self.master_bridges[(str(network.network_id), assignment.node_id)] = bridge
             assignment.launch_rpc_endpoint = native.network_bridge_status(bridge)["listener"]
-            self.store.put_assignment(assignment, expected_revision=assignment.assignment_revision)
+            (
+                await self.store.arun(
+                    self.store.put_assignment,
+                    assignment,
+                    expected_revision=assignment.assignment_revision,
+                )
+            )
 
     async def verify_idle(
         self,
@@ -840,11 +905,11 @@ class ManagedNetworkService:
                     generation=master_status["generation"] + 1,
                     kind="probe",
                     assignment_revision=assignment.assignment_revision,
-                    authority=self._authority(),
+                    authority=(await self.store.arun(self._authority)),
                     relay_instance_ids=[UUID(worker_bridge_id), UUID(master_status["instance_id"])],
                     state="requested",
                 )
-                self.store.lease(lease)
+                (await self.store.arun(self.store.lease, lease))
                 leases[assignment.node_id] = lease
                 self.probe_leases[key] = lease
             granted = await self._phase(
@@ -921,40 +986,43 @@ class ManagedNetworkService:
                     drained = local_drained and result.get("drained") is True
                     lease.state = "released" if drained else "uncertain"
                     lease.release_ack, lease.drain_ack = result.get("drained") is not None, drained
-                    self.store.lease(lease)
+                    (await self.store.arun(self.store.lease, lease))
                     evidence = self.freshness.live.get(
                         (str(network.network_id), assignment.node_id)
                     )
                     if evidence:
                         evidence["rpc_released"] = drained
                         if drained and assignment.rpc_child_identity is not None:
-                            authority = self._authority()
+                            authority = await self.store.arun(self._authority)
                             verified = self.verified_results[
                                 (str(network.network_id), assignment.node_id)
                             ]
-                            self.store.evidence(
-                                VerificationEvidence(
-                                    network_id=network.network_id,
-                                    node_id=assignment.node_id,
-                                    assignment_revision=assignment.assignment_revision,
-                                    master_term=authority.master_term,
-                                    master_session_id=authority.master_session_id,
-                                    adapter_fingerprint=assignment.identity_fingerprint,
-                                    address=assignment.address,
-                                    route_interface_source={
-                                        "worker": verified.get("routes_verified"),
-                                        "master_source": evidence["dedicated_proof"]["source"],
-                                    },
-                                    signed_bidirectional_proof={
-                                        "forward": evidence["dedicated_proof"],
-                                        "reverse": verified.get("dedicated_proof"),
-                                    },
-                                    idle_rpc_probe_result={
-                                        **evidence["rpc_result"],
-                                        "released": True,
-                                    },
-                                    runtime_identity=assignment.rpc_child_identity,
-                                    relay_instance_ids=lease.relay_instance_ids,
+                            (
+                                await self.store.arun(
+                                    self.store.evidence,
+                                    VerificationEvidence(
+                                        network_id=network.network_id,
+                                        node_id=assignment.node_id,
+                                        assignment_revision=assignment.assignment_revision,
+                                        master_term=authority.master_term,
+                                        master_session_id=authority.master_session_id,
+                                        adapter_fingerprint=assignment.identity_fingerprint,
+                                        address=assignment.address,
+                                        route_interface_source={
+                                            "worker": verified.get("routes_verified"),
+                                            "master_source": evidence["dedicated_proof"]["source"],
+                                        },
+                                        signed_bidirectional_proof={
+                                            "forward": evidence["dedicated_proof"],
+                                            "reverse": verified.get("dedicated_proof"),
+                                        },
+                                        idle_rpc_probe_result={
+                                            **evidence["rpc_result"],
+                                            "released": True,
+                                        },
+                                        runtime_identity=assignment.rpc_child_identity,
+                                        relay_instance_ids=lease.relay_instance_ids,
+                                    ),
                                 )
                             )
                 if any(lease.state != "released" for lease in leases.values()):
@@ -967,13 +1035,13 @@ class ManagedNetworkService:
 
     async def begin_operation(self, network_id: UUID, request: OperationRequest) -> dict[str, Any]:
         async with self.lock:
-            authority = self._authority()
-            network = self.store.network(network_id)
+            authority = await self.store.arun(self._authority)
+            network = await self.store.arun(self.store.network, network_id)
             if network is None:
                 raise KeyError("unknown network")
             body_digest = digest({"network_id": str(network_id), **request.model_dump(mode="json")})
-            prior = self.store.operation_for_request(
-                authority.cluster_binding_id, request.request_id
+            prior = await self.store.arun(
+                self.store.operation_for_request, authority.cluster_binding_id, request.request_id
             )
             if prior:
                 if prior.proposal_digest != body_digest:
@@ -981,17 +1049,21 @@ class ManagedNetworkService:
                 return self._accepted(prior, network)
             if network.revision != request.expected_revision:
                 raise StoreConflict("network revision changed")
-            if any(run.state != "released" for run in self.store.runs(network_id)) or any(
-                lease.state != "released" for lease in self.store.leases(network_id)
+            if any(
+                run.state != "released"
+                for run in (await self.store.arun(self.store.runs, network_id))
+            ) or any(
+                lease.state != "released"
+                for lease in (await self.store.arun(self.store.leases, network_id))
             ):
                 raise PlatformRefusal(
                     "INFERENCE_ACTIVE", "A reserved, active or uncertain run blocks network changes"
                 )
             if request.action in ("add", "retry"):
                 return await self._begin_reconfigure(network, request, authority, body_digest)
-            assignments = self.store.assignments(network_id)
+            assignments = await self.store.arun(self.store.assignments, network_id)
             previous = (
-                self.store.operation(network.current_operation_id)
+                (await self.store.arun(self.store.operation, network.current_operation_id))
                 if network.current_operation_id
                 else None
             )
@@ -1015,8 +1087,8 @@ class ManagedNetworkService:
             )
             network.desired_state = "stopped"
             network.current_operation_id = operation.operation_id
-            self.store.put_operation(operation)
-            self._publish(network, "stopping")
+            (await self.store.arun(self.store.put_operation, operation))
+            (await self.store.arun(self._publish, network, "stopping"))
             self.freshness.invalidate(network_id, "Stop requested")
             self.tasks[str(operation.operation_id)] = asyncio.create_task(
                 self._stop_operation(network, operation, assignments)
@@ -1032,7 +1104,7 @@ class ManagedNetworkService:
     ) -> dict[str, Any]:
         from kllm.managed_network.allocation import ParticipantSelection
 
-        existing = self.store.assignments(network.network_id)
+        existing = await self.store.arun(self.store.assignments, network.network_id)
         if not existing:
             raise PlatformRefusal(
                 "INVALID_ADAPTER", "No assignments to retry; stop the failed setup and start again"
@@ -1096,10 +1168,16 @@ class ManagedNetworkService:
             phase="preparing",
             deadline=utc_now() + timedelta(seconds=60),
         )
-        self.store.put_operation(operation)
+        (await self.store.arun(self.store.put_operation, operation))
         network.current_operation_id = operation.operation_id
         self.freshness.invalidate(network.network_id, "Topology verification requested")
-        self._publish(network, "preparing" if network.observed_state == "failed" else "verifying")
+        (
+            await self.store.arun(
+                self._publish,
+                network,
+                "preparing" if network.observed_state == "failed" else "verifying",
+            )
+        )
 
         async def reconfigure():
             if request.action == "retry":
@@ -1115,10 +1193,14 @@ class ManagedNetworkService:
                         60,
                     )
                     if any(r["status"] != "stopped" for r in cleaned.values()):
-                        self._publish(network, "cleanup_pending")
+                        (await self.store.arun(self._publish, network, "cleanup_pending"))
                         operation.phase = "failed"
                         operation.terminal_result = {"error_code": "CLEANUP_PENDING"}
-                        self.store.update_operation(operation, operation.operation_revision)
+                        (
+                            await self.store.arun(
+                                self.store.update_operation, operation, operation.operation_revision
+                            )
+                        )
                         return
                     for key, bridge in list(self.master_bridges.items()):
                         if key[0] == str(network.network_id):
@@ -1168,10 +1250,18 @@ class ManagedNetworkService:
                     if results[assignment.node_id]["status"] != "stopped"
                     else "stopped"
                 )
-                self.store.put_assignment(
-                    assignment, expected_revision=assignment.assignment_revision
+                (
+                    await self.store.arun(
+                        self.store.put_assignment,
+                        assignment,
+                        expected_revision=assignment.assignment_revision,
+                    )
                 )
-            self._publish(network, "cleanup_pending" if pending else "stopped")
+            (
+                await self.store.arun(
+                    self._publish, network, "cleanup_pending" if pending else "stopped"
+                )
+            )
             operation.phase = "failed" if pending else "complete"
             operation.terminal_result = {
                 "state": network.observed_state,
@@ -1179,7 +1269,11 @@ class ManagedNetworkService:
                     node for node, result in results.items() if result["status"] != "stopped"
                 ],
             }
-            self.store.update_operation(operation, operation.operation_revision)
+            (
+                await self.store.arun(
+                    self.store.update_operation, operation, operation.operation_revision
+                )
+            )
             await asyncio.to_thread(self.sync_directory)
 
     async def cancel(self, operation_id: UUID, request) -> dict[str, Any]:
@@ -1189,7 +1283,7 @@ class ManagedNetworkService:
             request.request_id,
             request.expected_operation_revision,
         )
-        network = self.store.network(operation.network_id)
+        network = await self.store.arun(self.store.network, operation.network_id)
         if network is None:
             raise KeyError("unknown network")
         if operation.terminal_result is None:
@@ -1384,12 +1478,13 @@ class ManagedNetworkService:
             await asyncio.sleep(5)
             pending_cleanup = []
             async with self.lock:
-                for network in self.store.networks():
+                for network in await self.store.arun(self.store.networks):
                     if (
                         network.desired_state == "stopped"
                         and network.observed_state == "cleanup_pending"
                         and not any(
-                            run.state != "released" for run in self.store.runs(network.network_id)
+                            run.state != "released"
+                            for run in (await self.store.arun(self.store.runs, network.network_id))
                         )
                     ):
                         pending_cleanup.append(network)
@@ -1399,36 +1494,40 @@ class ManagedNetworkService:
                     ):
                         continue
                     operation = (
-                        self.store.operation(network.current_operation_id)
+                        (await self.store.arun(self.store.operation, network.current_operation_id))
                         if network.current_operation_id
                         else None
                     )
                     if operation is None:
                         continue
-                    assignments = self.store.assignments(network.network_id)
+                    assignments = await self.store.arun(self.store.assignments, network.network_id)
                     runtime_stage = False
                     try:
                         await asyncio.wait_for(self._health(network, operation, assignments), 2)
                         active = [
                             run
-                            for run in self.store.runs(network.network_id)
+                            for run in (await self.store.arun(self.store.runs, network.network_id))
                             if run.state == "active"
                         ]
                         if (
                             not active
                             and not any(
                                 run.state != "released"
-                                for run in self.store.runs(network.network_id)
+                                for run in (
+                                    await self.store.arun(self.store.runs, network.network_id)
+                                )
                             )
                             and not any(
                                 lease.state != "released"
-                                for lease in self.store.leases(network.network_id)
+                                for lease in (
+                                    await self.store.arun(self.store.leases, network.network_id)
+                                )
                             )
                         ):
                             if network.observed_state == "degraded":
-                                self._publish(network, "verifying")
+                                (await self.store.arun(self._publish, network, "verifying"))
                             if network.observed_state == "verifying":
-                                self._publish(network, "ready")
+                                (await self.store.arun(self._publish, network, "ready"))
                         runtime_stage = True
                         for run in active:
                             if run.child_pid and (
@@ -1459,7 +1558,9 @@ class ManagedNetworkService:
                                     )
                             leases = {
                                 lease.node_id: lease
-                                for lease in self.store.leases(network.network_id)
+                                for lease in (
+                                    await self.store.arun(self.store.leases, network.network_id)
+                                )
                                 if lease.run_id == run.run_id and lease.state != "released"
                             }
                             workers = [a for a in assignments if a.node_id in leases]
@@ -1492,7 +1593,7 @@ class ManagedNetworkService:
                             "Dedicated route, identity or admission health failed",
                         )
                         if network.observed_state != "degraded":
-                            self._publish(network, "degraded")
+                            (await self.store.arun(self._publish, network, "degraded"))
 
             for network in pending_cleanup:
                 try:
@@ -1506,28 +1607,68 @@ class ManagedNetworkService:
                 except (PlatformRefusal, StoreConflict):
                     pass  # Pending state survives until the missing node reconciles.
 
-    async def close(self) -> None:
-        if self.closed:
+    async def close(self, *, deadline: float | None = None) -> None:
+        if self._close_complete:
             return
         self.closed = True
+        deadline = (
+            deadline
+            if deadline is not None
+            else time.monotonic() + self.store._store.options.shutdown_timeout
+        )
+        try:
+            await self._close_until(deadline)
+        except BaseException:
+            # Stop external admission even when an earlier producer phase runs
+            # past the deadline. Protected continuations keep their own ownership.
+            self.store._store.reject_new_work()
+            raise
+
+    async def _close_until(self, deadline: float) -> None:
         if self.runtimes is not None:
-            await self.runtimes.close()
+            await self._await_close(self.runtimes.close(), deadline)
         if self.rpc_runs is not None:
-            await self.rpc_runs.close()
+            await self._await_close(self.rpc_runs.close(), deadline)
         for task in (self.rpc_monitor_task, self.worker_expiry_task):
             if task:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await self._await_close(asyncio.gather(task, return_exceptions=True), deadline)
         if self.monitor_task:
             self.monitor_task.cancel()
-            await asyncio.gather(self.monitor_task, return_exceptions=True)
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
-        await self.channels.close()
-        await self.executor.close()
+            await self._await_close(
+                asyncio.gather(self.monitor_task, return_exceptions=True), deadline
+            )
+        pending = set(self.tasks.values())
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
+        if pending:
+            raise PersistenceError(
+                "managed network shutdown deadline expired; protected operations remain tracked"
+            )
+        await self._await_close(self.channels.close(), deadline)
+        await self._await_close(self.executor.close(), deadline)
         for bridge in list(self.master_bridges.values()):
             status = native.network_bridge_status(bridge)
-            await asyncio.to_thread(
-                native.stop_network_bridge, bridge, status["instance_id"], terminate=True
+            await self._await_close(
+                asyncio.to_thread(
+                    native.stop_network_bridge, bridge, status["instance_id"], terminate=True
+                ),
+                deadline,
             )
         self.master_bridges.clear()
-        self.store.close()
+        await self.store.aclose(deadline=deadline)
+        self._close_complete = True
+
+    async def _await_close(self, awaitable, deadline: float):
+        task = asyncio.ensure_future(awaitable)
+        self._close_jobs.add(task)
+        task.add_done_callback(self._close_jobs.discard)
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+        if not done:
+            raise PersistenceError(
+                "managed network shutdown deadline expired; cleanup remains tracked"
+            )
+        return task.result()
+
+    async def aclose(self, *, deadline: float | None = None) -> None:
+        await self.close(deadline=deadline)

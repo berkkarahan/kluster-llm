@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
 
 from kllm import http_clients
+from kllm.exceptions import PersistenceError
+from kllm.persistence import SQLiteOptions
 from kllm.agent.application_lifecycle import AgentLifecycleDependencies, AgentLifespan
 from kllm.agent.lifecycle_bus import LifecycleEvent, LifecycleNotice, lifecycle_bus
 from kllm.state import ClusterState
@@ -451,6 +454,10 @@ async def test_background_and_network_release_after_the_app_fails(monkeypatch):
     assert len(threads) == 1
     assert threads[0].kwargs == {"target": usage_loop, "name": "kllm-usage", "daemon": True}
     assert "usage-body" not in calls
+    assert calls[15].startswith("usage-join:")
+    remaining = float(calls[15].split(":", 1)[1])
+    assert 0 < remaining <= 10
+    calls[15] = "usage-join:deadline"
     assert calls == [
         "reset-usage",
         "clear-resources",
@@ -467,7 +474,7 @@ async def test_background_and_network_release_after_the_app_fails(monkeypatch):
         "diagnostics-start",
         "network-stop",
         "close-probes",
-        "usage-join:4",
+        "usage-join:deadline",
         "diagnostics-cancel",
         "close-clients",
         "close-store",
@@ -550,3 +557,63 @@ async def test_shutdown_continues_after_a_cleanup_listener_fails(monkeypatch):
     assert calls.index("close-clients") < calls.index("close-store")
     assert "stop-feed" in calls
     assert calls[-1] == "client-close"
+
+
+@pytest.mark.asyncio
+async def test_live_usage_producer_expiry_is_reported_after_remaining_cleanup(monkeypatch):
+    state = _quiet_state(monkeypatch, node_id="node-1")
+    calls: list[str] = []
+
+    class HungUsageThread(_UsageThread):
+        def is_alive(self) -> bool:
+            return True
+
+    lifespan, _feed, _stop = _lifespan(
+        state,
+        calls,
+        background_enabled=lambda: True,
+        thread_factory=lambda **kwargs: HungUsageThread(calls, **kwargs),
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    with pytest.raises(PersistenceError, match="application shutdown failed") as error:
+        async with lifespan.run(app):
+            pass
+    assert isinstance(error.value.__cause__, PersistenceError)
+    assert "usage collector remains active" in str(error.value.__cause__)
+    assert "close-store" in calls
+    assert "stop-feed" in calls
+    assert calls[-1] == "client-close"
+
+
+@pytest.mark.asyncio
+async def test_managed_network_stop_expiry_rejects_new_storage_work(monkeypatch):
+    state = _quiet_state(monkeypatch, node_id="node-1")
+    calls: list[str] = []
+    release, settled = asyncio.Event(), asyncio.Event()
+
+    class StoreOwner:
+        rejected = False
+        options = SQLiteOptions(shutdown_timeout=0.05)
+
+        def reject_new_work(self):
+            self.rejected = True
+
+    owner = StoreOwner()
+
+    async def stop_network(_app):
+        await release.wait()
+        settled.set()
+
+    lifespan, _feed, _stop = _lifespan(state, calls, stop_managed_network=stop_network)
+    app = SimpleNamespace(
+        state=SimpleNamespace(managed_network=SimpleNamespace(store=SimpleNamespace(_store=owner)))
+    )
+    started = time.monotonic()
+    with pytest.raises(PersistenceError, match="application shutdown failed"):
+        async with lifespan.run(app):
+            pass
+    assert time.monotonic() - started < 0.5
+    assert owner.rejected is True
+    assert "close-store" in calls
+    release.set()
+    await asyncio.wait_for(settled.wait(), timeout=1)

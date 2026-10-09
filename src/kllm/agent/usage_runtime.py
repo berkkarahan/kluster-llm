@@ -62,6 +62,7 @@ class UsageRuntime:
         self.resources = resources
         self.remote_resources = remote_resources
         self._worker_lock = threading.RLock()
+        self._store_lock = threading.Lock()
         self._worker_error: str | None = None
         self._worker_last_save: str | None = None
         self._worker_last_success_at: str | None = None
@@ -145,7 +146,7 @@ class UsageRuntime:
         """Open or reuse the process-local history store attached to app state."""
         app_state = self._app_state()
         path = self._home_dir() / "usage.sqlite3"
-        with self._worker_lock:
+        with self._store_lock:
             store = getattr(app_state, "usage_store", None)
             if store is None or store.path != path:
                 if store is not None:
@@ -154,11 +155,15 @@ class UsageRuntime:
                 app_state.usage_store = store
             return store
 
-    def close_store(self, app: Any) -> None:
-        with self._worker_lock:
+    async def close_store(self, app: Any, *, deadline: float | None = None) -> None:
+        with self._store_lock:
             store = getattr(app.state, "usage_store", None)
-            if store is not None:
-                store.close()
+        if store is None:
+            return
+        # Keep the old generation published until its owner confirms close.
+        await store.aclose(deadline=deadline)
+        with self._store_lock:
+            if getattr(app.state, "usage_store", None) is store:
                 del app.state.usage_store
 
     def clear_resources(self) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, Callable, TypeVar
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from kllm.managed_network.guided_setup import (
 )
 from kllm.agent.origin import _is_loopback, _origin_allowed, _request_origin
 from kllm.agent.services.managed_network import ManagedNetworkService
+from kllm.exceptions import PersistenceError
 
 T = TypeVar("T", bound=Record)
 
@@ -87,6 +89,12 @@ def build_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/v2", tags=["managed-network-v1"])
 
+    async def store_call(selected: ManagedNetworkService, callback, *args, **kwargs):
+        try:
+            return await selected.store.arun(callback, *args, **kwargs)
+        except (OSError, sqlite3.Error, PersistenceError, RuntimeError) as error:
+            raise error_response(error) from None
+
     def authorized(
         request: Request, *, local: bool = False, master: bool = False
     ) -> ManagedNetworkService:
@@ -124,8 +132,17 @@ def build_router(
             )
         value = await body(request, BootstrapRequest)
         try:
-            return service().bootstrap.challenge(value)
-        except (IdentityError, StoreConflict, PlatformRefusal) as error:
+            selected = service()
+            return await store_call(selected, selected.bootstrap.challenge, value)
+        except (
+            IdentityError,
+            StoreConflict,
+            PlatformRefusal,
+            sqlite3.Error,
+            PersistenceError,
+            RuntimeError,
+            OSError,
+        ) as error:
             raise error_response(error) from None
 
     @router.post("/node/network-bootstrap/commit")
@@ -136,14 +153,27 @@ def build_router(
             )
         value = await body(request, BootstrapCommit)
         try:
-            return service().bootstrap.commit(value)
-        except (IdentityError, StoreConflict, PlatformRefusal) as error:
+            selected = service()
+            return await store_call(selected, selected.bootstrap.commit, value)
+        except (
+            IdentityError,
+            StoreConflict,
+            PlatformRefusal,
+            sqlite3.Error,
+            PersistenceError,
+            RuntimeError,
+            OSError,
+        ) as error:
             raise error_response(error) from None
 
     @router.get("/node/network-setup")
     async def local_setup(request: Request) -> dict[str, Any]:
         selected = authorized(request)
-        return {**selected.guided.local_status(), "administrator_notice": ADMIN_NOTICE}
+        try:
+            status = await store_call(selected, selected.guided.local_status)
+            return {**status, "administrator_notice": ADMIN_NOTICE}
+        except (OSError, sqlite3.Error, PersistenceError, RuntimeError) as error:
+            raise error_response(error) from None
 
     @router.get("/node/network-setup/recovery/{network_id}")
     async def helper_review(network_id: UUID, request: Request) -> dict[str, Any]:
@@ -193,7 +223,11 @@ def build_router(
     @router.delete("/node/network-setup/administrator")
     async def disable_administrator(request: Request) -> dict[str, Any]:
         selected = authorized(request, local=True)
-        if any(n.observed_state != "stopped" for n in selected.store.networks()):
+        try:
+            networks = await store_call(selected, selected.store.networks)
+        except (OSError, sqlite3.Error, PersistenceError, RuntimeError) as error:
+            raise error_response(error) from None
+        if any(n.observed_state != "stopped" for n in networks):
             raise error_response(
                 PlatformRefusal(
                     "OPERATION_IN_PROGRESS",
@@ -229,7 +263,7 @@ def build_router(
         try:
             from kllm.managed_network.guided_setup import MESSAGES
 
-            view = selected.operation_view(operation_id)
+            view = await store_call(selected, selected.operation_view, operation_id)
             terminal = view.get("terminal_result") or {}
             view["message"] = MESSAGES.get(
                 terminal.get("error_code") or "", terminal.get("message", "")
@@ -246,12 +280,21 @@ def build_router(
     @router.get("/node/network-identity")
     async def identity(request: Request) -> dict[str, Any]:
         selected = authorized(request)
-        peers = selected.store.peers()
-        binding = (
-            selected._authority().cluster_binding_id
-            if selected.state().role == "master"
-            else next((p.cluster_binding_id for p in peers if p.expected_role == "master"), None)
-        )
+        try:
+            peers = await store_call(selected, selected.store.peers)
+            state = selected.state()
+            authority = (
+                await store_call(selected, selected._authority) if state.role == "master" else None
+            )
+            binding = (
+                authority.cluster_binding_id
+                if authority is not None
+                else next(
+                    (p.cluster_binding_id for p in peers if p.expected_role == "master"), None
+                )
+            )
+        except (OSError, sqlite3.Error, PersistenceError, RuntimeError) as error:
+            raise error_response(error) from None
         return {
             **selected.identity.public(binding).model_dump(mode="json"),
             "paired_peers": [p.model_dump(mode="json") for p in peers],
@@ -272,7 +315,8 @@ def build_router(
             if (
                 value.expected_role != "worker"
                 or node_id not in state.members
-                or value.cluster_binding_id != selected._authority().cluster_binding_id
+                or value.cluster_binding_id
+                != (await store_call(selected, selected._authority)).cluster_binding_id
             ):
                 raise HTTPException(
                     409,
@@ -291,17 +335,32 @@ def build_router(
             )
         try:
             peer = PeerIdentity.model_validate(value.model_dump(exclude={"replace"}))
-            selected.store.pair(peer, replace=value.replace)
+            await store_call(selected, selected.store.pair, peer, replace=value.replace)
             return peer.model_dump(mode="json")
-        except (ValueError, StoreConflict) as error:
+        except (
+            ValueError,
+            StoreConflict,
+            OSError,
+            sqlite3.Error,
+            PersistenceError,
+            RuntimeError,
+        ) as error:
             raise error_response(error) from None
 
     @router.get("/node/network-adapters")
     async def adapters(request: Request) -> dict[str, Any]:
         selected = authorized(request)
         try:
-            return selected.local_inventory()
-        except (OSError, ValueError, PlatformRefusal, StoreConflict) as error:
+            return await store_call(selected, selected.local_inventory)
+        except (
+            OSError,
+            ValueError,
+            PlatformRefusal,
+            StoreConflict,
+            sqlite3.Error,
+            PersistenceError,
+            RuntimeError,
+        ) as error:
             raise error_response(error) from None
 
     @router.put("/node/network-selection")
@@ -309,7 +368,7 @@ def build_router(
         selected = authorized(request, local=True)
         value = await body(request, AdapterSelection)
         try:
-            return selected.select_adapter(value)
+            return await store_call(selected, selected.select_adapter, value)
         except (OSError, ValueError, PlatformRefusal, StoreConflict) as error:
             raise error_response(error) from None
 
@@ -321,8 +380,12 @@ def build_router(
     @router.get("/cluster/networks")
     async def networks(request: Request) -> dict[str, Any]:
         selected = authorized(request)
+        try:
+            summaries = await store_call(selected, selected.summaries)
+        except (OSError, sqlite3.Error, PersistenceError, RuntimeError) as error:
+            raise error_response(error) from None
         return {
-            "networks": selected.summaries(),
+            "networks": summaries,
             "subnet_proposals": [
                 "10.10.10.0/24",
                 "192.168.234.0/24",
@@ -344,7 +407,7 @@ def build_router(
     async def network(network_id: UUID, request: Request) -> dict[str, Any]:
         selected = authorized(request)
         try:
-            return selected.network_view(network_id)
+            return await store_call(selected, selected.network_view, network_id)
         except KeyError as error:
             raise error_response(error) from None
 
@@ -361,19 +424,23 @@ def build_router(
     async def operation_status(operation_id: UUID, request: Request) -> dict[str, Any]:
         selected = authorized(request)
         try:
-            return selected.operation_view(operation_id)
+            return await store_call(selected, selected.operation_view, operation_id)
         except KeyError as error:
             raise error_response(error) from None
 
     @router.get("/node/network-cleanup")
     async def cleanup(request: Request) -> dict[str, Any]:
         selected = authorized(request, local=True)
+        try:
+            journals = await store_call(selected, selected.store.journals)
+        except (OSError, sqlite3.Error, PersistenceError, RuntimeError) as error:
+            raise error_response(error) from None
         return {
             "journals": [
                 j.model_dump(
                     mode="json", exclude={"pre_snapshot", "intended_delta", "command_result"}
                 )
-                for j in selected.store.journals()
+                for j in journals
                 if j.phase != "removed_observed"
             ]
         }

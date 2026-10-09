@@ -9,6 +9,7 @@ from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
     TimeoutError as FutureTimeout,
+    wait as wait_futures,
 )
 from typing import Any, Callable
 
@@ -71,12 +72,20 @@ class LiveFeed:
         )
         self._scheduler.start()
 
-    def stop(self) -> None:
+    def stop(self, *, deadline: float | None = None) -> None:
+        deadline = deadline if deadline is not None else time.monotonic() + self._wait_budget
         self._stop.set()
         if self._scheduler is not None:
-            self._scheduler.join(timeout=1)
+            self._scheduler.join(timeout=max(0.0, deadline - time.monotonic()))
+            if self._scheduler.is_alive():
+                raise TimeoutError("dashboard live-feed scheduler did not stop before deadline")
             self._scheduler = None
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        with self._lock:
+            jobs = set(self._futures.values()) | set(self._log_futures.values())
+        _, pending = wait_futures(jobs, timeout=max(0.0, deadline - time.monotonic()))
+        if pending:
+            raise TimeoutError("dashboard live-feed source jobs remain active")
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def subscribe(self, viewer_id: str, topics: list[str]) -> None:
         with self._lock:

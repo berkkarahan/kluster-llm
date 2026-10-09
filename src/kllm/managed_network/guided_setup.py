@@ -132,13 +132,16 @@ class GuidedSetup:
         async with self.enabling:
             if self.service.state().role == "worker":
                 await self.service.bootstrap.connect()
-            grant = self.grant()
+            grant = await self.service.store.arun(self.grant)
             repo = self.service.executor.repository()
             if grant is None or repo is None:
                 raise PlatformRefusal(
                     "UNSUPPORTED_CAPABILITY", "Join the intended cluster and update Kluster first"
                 )
-            if any(n.observed_state != "stopped" for n in self.service.store.networks()):
+            if any(
+                n.observed_state != "stopped"
+                for n in (await self.service.store.arun(self.service.store.networks))
+            ):
                 raise PlatformRefusal(
                     "OPERATION_IN_PROGRESS",
                     "Stop the private network before changing administrator authorization",
@@ -155,8 +158,10 @@ class GuidedSetup:
     async def resolve(self, network_id: UUID, request: RecoveryRequest) -> dict[str, Any]:
         async with self.service.lock:
             store = self.service.store
-            if any(run.state != "released" for run in store.runs(network_id)) or any(
-                lease.state != "released" for lease in store.leases(network_id)
+            if any(
+                run.state != "released" for run in (await store.arun(store.runs, network_id))
+            ) or any(
+                lease.state != "released" for lease in (await store.arun(store.leases, network_id))
             ):
                 raise PlatformRefusal("INFERENCE_ACTIVE", MESSAGES["INFERENCE_ACTIVE"])
             result = await asyncio.to_thread(
@@ -166,10 +171,10 @@ class GuidedSetup:
                 decision=request.decision,
                 snapshot_digest=request.snapshot_digest,
             )
-            for journal in store.journals():
+            for journal in await store.arun(store.journals):
                 if journal.network_id == network_id:
                     journal.phase = "removed_observed"
-                    store.journal(journal)
+                    (await store.arun(store.journal, journal))
             return cast(dict[str, Any], result)
 
     @staticmethod
@@ -264,10 +269,10 @@ class GuidedSetup:
         from .store import digest, StoreConflict
 
         async with self.requests:
-            binding = self.service._authority().cluster_binding_id
+            binding = (await self.service.store.arun(self.service._authority)).cluster_binding_id
             key = f"guided:{binding}:{request.request_id}"
             body_digest = digest(request.model_dump(mode="json"))
-            saved = self.service.store.metadata(key)
+            saved = await self.service.store.arun(self.service.store.metadata, key)
             if saved:
                 record = json.loads(saved)
                 if record["digest"] != body_digest:
@@ -339,29 +344,37 @@ class GuidedSetup:
             resolved = StartRequest(
                 request_id=request.request_id, subnet=subnet, participants=selections
             )
-            self.service.store.set_metadata(
-                key,
-                json.dumps(
-                    {
-                        "digest": body_digest,
-                        "action": "start",
-                        "request": resolved.model_dump(mode="json"),
-                    }
-                ),
+            (
+                await self.service.store.arun(
+                    self.service.store.set_metadata,
+                    key,
+                    json.dumps(
+                        {
+                            "digest": body_digest,
+                            "action": "start",
+                            "request": resolved.model_dump(mode="json"),
+                        }
+                    ),
+                )
             )
             return await self.service.begin_start(resolved)
         if request.network_id is None or request.expected_revision is None:
             raise PlatformRefusal(
                 "INVALID_INPUT", "Refresh the existing network before changing it"
             )
-        network = self.service.store.network(request.network_id)
+        network = await self.service.store.arun(self.service.store.network, request.network_id)
         if network is None:
             raise KeyError("unknown network")
         if request.subnet and request.subnet != network.subnet:
             raise PlatformRefusal(
                 "SUBNET_CONFLICT", "An existing network keeps its private address range"
             )
-        existing = {a.node_id: a for a in self.service.store.assignments(request.network_id)}
+        existing = {
+            a.node_id: a
+            for a in (
+                await self.service.store.arun(self.service.store.assignments, request.network_id)
+            )
+        }
         if not set(existing).issubset(request.nodes) or any(
             p.node_id in existing and p.adapter_id != existing[p.node_id].adapter_id
             for p in selections
@@ -377,15 +390,18 @@ class GuidedSetup:
             if request.action == "add"
             else [],
         )
-        self.service.store.set_metadata(
-            key,
-            json.dumps(
-                {
-                    "digest": body_digest,
-                    "action": request.action,
-                    "network_id": str(request.network_id),
-                    "request": resolved_operation.model_dump(mode="json"),
-                }
-            ),
+        (
+            await self.service.store.arun(
+                self.service.store.set_metadata,
+                key,
+                json.dumps(
+                    {
+                        "digest": body_digest,
+                        "action": request.action,
+                        "network_id": str(request.network_id),
+                        "request": resolved_operation.model_dump(mode="json"),
+                    }
+                ),
+            )
         )
         return await self.service.begin_operation(request.network_id, resolved_operation)

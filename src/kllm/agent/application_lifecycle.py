@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
+from kllm.persistence.operations import drain_initializations, initialize
+
 import asyncio
+import inspect
 import os
 import sqlite3
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -52,7 +58,7 @@ class AgentLifecycleDependencies:
     close_resource_probes: Callable[[], None]
     sample_diagnostics: Callable[[], Any]
     close_clients: Callable[[], None]
-    close_usage_store: Callable[[Any], None]
+    close_usage_store: Callable[[Any], Any]
     stop_live_feed: Callable[[Any], Any]
     start_managed_network: Callable[[Any], Awaitable[None]] | None = None
     stop_managed_network: Callable[[Any], Awaitable[None]] | None = None
@@ -69,6 +75,22 @@ class _LifespanSequence:
         self.usage_thread: threading.Thread | None = None
         self.diagnostics_task: asyncio.Task[Any] | None = None
         self._inference_client: Any = None
+        self._lifecycle_jobs: set[asyncio.Task[Any]] = set()
+
+    async def _await_until(self, awaitable: Awaitable[Any], deadline: float, message: str):
+        task = asyncio.ensure_future(awaitable)
+        self._lifecycle_jobs.add(task)
+
+        def observe(job):
+            self._lifecycle_jobs.discard(job)
+            if not job.cancelled():
+                job.exception()
+
+        task.add_done_callback(observe)
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+        if not done:
+            raise PersistenceError(message)
+        return task.result()
 
     def inference_client_open(self) -> bool:
         return self._inference_client is not None
@@ -90,6 +112,7 @@ class _LifespanSequence:
             bus.subscribe(started, listener)
         for listener in (
             self._signal_stop,
+            self._drain_initializers,
             self._stop_network,
             self._join_usage,
             self._cancel_diagnostics,
@@ -120,10 +143,10 @@ class _LifespanSequence:
             mark_master_unreachable(deps.state())
         deps.control_client()
 
-    def _open_usage_store(self, _notice: LifecycleNotice) -> None:
+    async def _open_usage_store(self, _notice: LifecycleNotice) -> None:
         try:
-            self._deps.open_usage_store()
-        except (OSError, sqlite3.Error):
+            await initialize(self._deps.open_usage_store)
+        except (OSError, sqlite3.Error, PersistenceError):
             return  # The private history API reports 503 while inference can still start.
 
     def _prepare_membership(self, _notice: LifecycleNotice) -> None:
@@ -172,33 +195,87 @@ class _LifespanSequence:
     def _signal_stop(self, _notice: LifecycleNotice) -> None:
         self._deps.background_stop.set()
 
+    async def _drain_initializers(self, _notice: LifecycleNotice) -> None:
+        deadline = getattr(self._app.state, "sqlite_shutdown_deadline", None)
+        if deadline is not None:
+            await drain_initializations(deadline)
+
     async def _stop_network(self, _notice: LifecycleNotice) -> None:
         if self._deps.stop_managed_network is not None:
-            await self._deps.stop_managed_network(self._app)
+            deadline = getattr(self._app.state, "sqlite_shutdown_deadline", time.monotonic())
+            try:
+                await self._await_until(
+                    self._deps.stop_managed_network(self._app),
+                    deadline,
+                    "managed network lifecycle deadline expired",
+                )
+            except PersistenceError:
+                service = getattr(self._app.state, "managed_network", None)
+                if service is not None:
+                    service.store._store.reject_new_work()
+                raise
 
     async def _join_usage(self, _notice: LifecycleNotice) -> None:
         if self.usage_thread is None:
             return
-        await asyncio.to_thread(self._deps.close_resource_probes)
-        await asyncio.to_thread(self.usage_thread.join, 4)
+        deadline = getattr(self._app.state, "sqlite_shutdown_deadline", time.monotonic())
+        await self._await_until(
+            asyncio.to_thread(self._deps.close_resource_probes),
+            deadline,
+            "resource probe shutdown deadline expired",
+        )
+        await self._await_until(
+            asyncio.to_thread(self.usage_thread.join, max(0.0, deadline - time.monotonic())),
+            deadline,
+            "usage collector shutdown deadline expired",
+        )
+        if self.usage_thread.is_alive():
+            raise PersistenceError("usage collector remains active after shutdown deadline")
 
     async def _cancel_diagnostics(self, _notice: LifecycleNotice) -> None:
         task = self.diagnostics_task
         if task is None:
             return
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        deadline = getattr(self._app.state, "sqlite_shutdown_deadline", time.monotonic())
+        await self._await_until(
+            asyncio.gather(task, return_exceptions=True),
+            deadline,
+            "diagnostics shutdown deadline expired",
+        )
 
     def _close_clients(self, _notice: LifecycleNotice) -> None:
         self._deps.close_clients()
 
-    def _close_usage_store(self, _notice: LifecycleNotice) -> None:
-        self._deps.close_usage_store(self._app)
+    async def _close_usage_store(self, _notice: LifecycleNotice) -> None:
+        result = self._deps.close_usage_store(self._app)
+        deadline = getattr(self._app.state, "sqlite_shutdown_deadline", None)
+        if inspect.isawaitable(result):
+            if deadline is None:
+                await result
+            else:
+                await self._await_until(
+                    result, deadline, "application storage shutdown deadline expired"
+                )
 
     async def _stop_live_feed(self, _notice: LifecycleNotice) -> None:
         if not hasattr(self._app.state, "live_feed"):
             return
-        await asyncio.to_thread(self._deps.stop_live_feed, self._app.state.live_feed)
+        deadline = getattr(self._app.state, "sqlite_shutdown_deadline", None)
+
+        def stop_feed():
+            callback = self._deps.stop_live_feed
+            parameters = inspect.signature(callback).parameters
+            if "deadline" in parameters:
+                callback(self._app.state.live_feed, deadline=deadline)
+            else:
+                callback(self._app.state.live_feed)
+
+        await self._await_until(
+            asyncio.to_thread(stop_feed),
+            deadline if deadline is not None else time.monotonic() + 10,
+            "dashboard live-feed shutdown deadline expired",
+        )
         del self._app.state.live_feed
 
     async def _close_inference_client(self, _notice: LifecycleNotice) -> None:
@@ -206,7 +283,12 @@ class _LifespanSequence:
         if client is None:
             return
         self._inference_client = None
-        await client.__aexit__(None, None, None)
+        deadline = getattr(self._app.state, "sqlite_shutdown_deadline", time.monotonic())
+        await self._await_until(
+            client.__aexit__(None, None, None),
+            deadline,
+            "inference client shutdown deadline expired",
+        )
 
 
 class AgentLifespan:
@@ -228,9 +310,26 @@ class AgentLifespan:
             publish_lifecycle(LifecycleEvent.APP_STARTED, _node_id(self._deps))
             yield
         finally:
+            timeouts = [10.0]
+            for name in ("usage_store", "managed_network"):
+                owner = getattr(app.state, name, None)
+                options = getattr(getattr(owner, "_store", None), "options", None)
+                if options is None:
+                    options = getattr(getattr(owner, "store", None), "_store", None)
+                    options = getattr(options, "options", None)
+                if options is not None:
+                    timeouts.append(float(options.shutdown_timeout))
+            app.state.sqlite_shutdown_deadline = time.monotonic() + min(timeouts)
             if ready:
-                await bus.emit(LifecycleNotice(LifecycleEvent.APP_STOPPED), isolate=True)
+                failures = await bus.emit_collect(LifecycleNotice(LifecycleEvent.APP_STOPPED))
                 publish_lifecycle(LifecycleEvent.APP_STOPPED, _node_id(self._deps), isolate=True)
+                if failures:
+                    active = sys.exc_info()[1]
+                    message = f"application shutdown failed in {len(failures)} cleanup step(s)"
+                    if active is not None:
+                        active.add_note(message)
+                    else:
+                        raise PersistenceError(message) from failures[0]
             elif sequence.inference_client_open():
                 # Startup failed after the inference client opened. Close that
                 # client only; the earlier steps have no matching rollback.

@@ -99,7 +99,7 @@ class DedicatedDiagnostics:
                 node_id = untrusted.get("sender_node_id")
                 if not isinstance(node_id, str):
                     raise ValueError("invalid dedicated sender")
-                peer = self.store.peer(node_id)
+                peer = await self.store.arun(self.store.peer, node_id)
                 if (
                     peer is None
                     or peer.cluster_binding_id != self.authority.cluster_binding_id
@@ -144,7 +144,7 @@ class DedicatedDiagnostics:
     async def challenge(
         self, peer_node_id: str, peer_revision: int, peer_port: int
     ) -> dict[str, Any]:
-        peer = self.store.peer(peer_node_id)
+        peer = await self.store.arun(self.store.peer, peer_node_id)
         if peer is None or peer_node_id not in self.peers:
             raise PlatformRefusal("UNPAIRED_IDENTITY", "Dedicated peer is not paired and selected")
         frame = EchoFrame(
@@ -188,7 +188,10 @@ class DedicatedDiagnostics:
                 )
                 if response != expected:
                     raise ValueError("diagnostic response context mismatch")
-                self.store.check_authority(self.authority)
+                current_peer = await self.store.arun(self.store.peer, peer_node_id)
+                if current_peer is None or current_peer.public_key != peer.public_key:
+                    raise ValueError("dedicated peer identity changed during challenge")
+                await self.store.arun(self.store.check_authority, self.authority)
                 return {
                     "request_digest": expected.request_digest,
                     "response_digest": digest(response.model_dump(mode="json")),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
 import sqlite3
 import sys
 import threading
@@ -190,7 +192,7 @@ class UsageCollector:
             if state.role == "master":
                 try:
                     self._deps.store().end_node(state.node_id)
-                except (OSError, sqlite3.Error):
+                except (OSError, sqlite3.Error, PersistenceError):
                     pass
             state.process_pid = None
             state.active_config = None
@@ -206,7 +208,7 @@ class UsageCollector:
                 if store.recording != "failed":
                     store.recording = "interrupted"
                     store.error = f"collection interrupted: {type(exc).__name__}"
-            except (OSError, sqlite3.Error):
+            except (OSError, sqlite3.Error, PersistenceError):
                 pass
         elif state.role == "worker":
             self._deps.set_worker_error(

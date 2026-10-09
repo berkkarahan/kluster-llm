@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kllm.exceptions import PersistenceError
+
 import time
 from collections.abc import Callable
 import sqlite3
@@ -72,14 +74,14 @@ class MembershipHandlers:
             return
         try:
             self._directory_sync()
-        except sqlite3.Error:
+        except (sqlite3.Error, PersistenceError):
             pass  # Liveness stays independent of the identity read model.
 
     def _with_directory(self, response: dict[str, Any]) -> dict[str, Any]:
         if self._directory_snapshot is not None:
             try:
                 response["node_directory"] = self._directory_snapshot()
-            except sqlite3.Error:
+            except (sqlite3.Error, PersistenceError):
                 response["node_directory"] = []
         return response
 
@@ -234,7 +236,7 @@ class MembershipHandlers:
             if not update.get("process_pid") and state.members[body.node_id].get("process_pid"):
                 try:
                     self._store().end_node(body.node_id)
-                except (OSError, sqlite3.Error):
+                except (OSError, sqlite3.Error, PersistenceError):
                     pass
             state.members[body.node_id].update(update)
             peer = observed_control_source(request)

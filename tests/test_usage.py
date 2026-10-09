@@ -13,6 +13,7 @@ import pytest
 
 from kllm import usage, usage_devices
 from kllm.state import ClusterState
+from kllm.persistence import SQLiteOptions
 
 
 def reading(at, *, node="worker", pid=12, started=None, cpu=12.5, rss=2 * 1024**3):
@@ -29,6 +30,21 @@ def reading(at, *, node="worker", pid=12, started=None, cpu=12.5, rss=2 * 1024**
         "devices": [],
         "availability": {"process_cpu": "measured", "process_rss": "measured"},
     }
+
+
+@pytest.mark.parametrize("capacity", [1, 4])
+def test_compound_usage_read_uses_scoped_snapshot(tmp_path, capacity):
+    now = datetime.now(timezone.utc)
+    point = reading(now)
+    with usage.UsageStore(
+        tmp_path / "usage.sqlite3", options=SQLiteOptions(pool_size=capacity)
+    ) as store:
+        store.record("worker", "host", point, now=now)
+        with store.snapshot():
+            assert store.known_nodes()["worker"]["host"] == "host"
+            assert store.count() == 1
+            assert store.coverage("worker")["earliest_retained"] == point["observed_at"]
+            assert store.lifetimes("worker")[0]["lifetime_id"] == point["lifetime_id"]
 
 
 def test_sampler_process_identity_scope_and_first_cpu(monkeypatch):
@@ -526,8 +542,8 @@ def test_corrupt_history_reports_read_failure_but_other_node_stays_readable(tmp_
     with usage.UsageStore(tmp_path / "usage.sqlite3") as store:
         store.record("worker", "host", reading(now), now=now)
         store.record("other", "host", reading(now, node="other"), now=now)
-        with store.db:
-            store.db.execute("UPDATE readings SET payload='{' WHERE node_id='worker'")
+        with store.maintenance() as db:
+            db.exec_driver_sql("UPDATE readings SET payload='{' WHERE node_id='worker'")
         with pytest.raises(sqlite3.DatabaseError, match="damaged reading"):
             store.latest("worker")
         assert store.latest("other")["process"]["rss_bytes"] == 2 * 1024**3
@@ -570,16 +586,16 @@ def test_usage_history_queries_match_retained_scale_and_record_plans(tmp_path):
     ]
     with usage.UsageStore(tmp_path / "usage-matrix.sqlite3") as store:
         lifetime_id = points[0]["lifetime_id"]
-        with store.db:
-            store.db.execute(
+        with store.maintenance() as db:
+            db.exec_driver_sql(
                 "INSERT INTO nodes(node_id,host,role,context) VALUES(?,?,?,?)",
                 ("worker", "host", "worker", "{}"),
             )
-            store.db.execute(
+            db.exec_driver_sql(
                 "INSERT INTO lifetimes VALUES(?,?,?,?,?,?,?,?)",
                 (lifetime_id, "worker", 12, "worker", usage.utc(started), None, "running", None),
             )
-            store.db.executemany(
+            db.exec_driver_sql(
                 "INSERT INTO readings(id,lifetime_id,node_id,observed_at,received_at,payload) "
                 "VALUES(?,?,?,?,?,?)",
                 [
@@ -629,11 +645,12 @@ def test_usage_history_queries_match_retained_scale_and_record_plans(tmp_path):
             assert series["window_start"] == usage.utc(lower)
             assert series["window_end"] == usage.utc(now)
 
-        plan = store.db.execute(
-            "EXPLAIN QUERY PLAN SELECT payload,received_at FROM readings WHERE node_id=? "
-            "ORDER BY observed_at DESC,id DESC LIMIT 1",
-            ("worker",),
-        ).fetchall()
+        with store.maintenance(write=False) as db:
+            plan = db.exec_driver_sql(
+                "EXPLAIN QUERY PLAN SELECT payload,received_at FROM readings WHERE node_id=? "
+                "ORDER BY observed_at DESC,id DESC LIMIT 1",
+                ("worker",),
+            ).fetchall()
         details = " | ".join(str(row[3]) for row in plan)
         assert "readings_filter" in details, details
         assert "USE TEMP B-TREE FOR ORDER BY" in details, details
@@ -698,6 +715,24 @@ def test_oldest_first_retention_and_failure_keeps_good_points(tmp_path, monkeypa
         assert store.recording == "failed"  # An old duplicate is not a successful new save.
 
 
+def test_committed_batch_survives_later_retention_failure(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    point = reading(now, started=now - timedelta(minutes=1))
+    with usage.UsageStore(tmp_path / "usage.sqlite3") as store:
+        prune = store._prune
+        monkeypatch.setattr(
+            store, "_prune", lambda *_: (_ for _ in ()).throw(OSError("retention unavailable"))
+        )
+        with pytest.raises(OSError, match="retention unavailable"):
+            store.record("worker", "host", point, now=now)
+        assert store.count() == 1
+        assert store.recording == "failed"
+        assert "retention unavailable" in store.error
+        monkeypatch.setattr(store, "_prune", prune)
+        assert not store.record("worker", "host", point, now=now)
+        assert store.count() == 1
+
+
 def test_physical_budget_prunes_oldest_without_losing_latest(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     with usage.UsageStore(tmp_path / "usage.sqlite3", max_bytes=96 * 1024) as store:
@@ -713,8 +748,8 @@ def test_physical_budget_prunes_oldest_without_losing_latest(tmp_path):
         assert store._physical_bytes() <= store.max_bytes
         assert store._meta("storage_truncated") == "1"
         assert store.coverage()["storage_truncated"] is True
-        with store.db:
-            store.db.execute(
+        with store.maintenance() as db:
+            db.exec_driver_sql(
                 "UPDATE meta SET value=? WHERE key='storage_truncated_at'",
                 (usage.utc(now - timedelta(hours=25)),),
             )

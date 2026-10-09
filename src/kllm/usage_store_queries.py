@@ -7,8 +7,10 @@ import binascii
 import hashlib
 import hmac
 import json
-import sqlite3
-import threading
+from contextlib import nullcontext
+
+from sqlalchemy import Connection, and_, func, literal, or_, select
+from kllm import usage_schema as s
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -25,30 +27,31 @@ from kllm.usage_support import (
 
 
 class UsageHistoryQueries:
-    """Bounded, read-only views over one thread-safe SQLite connection."""
+    """Bounded read views over an operation-owned Core connection."""
 
     def __init__(
         self,
-        db: sqlite3.Connection,
-        lock: threading.RLock,
+        db: Connection,
         meta: Callable[[str], str | None],
         status: Callable[[], tuple[str, str | None, str | None]],
     ) -> None:
         self.db = db
-        self.lock = lock
+        self.lock = nullcontext()
         self._meta = meta
         self._status = status
 
     def count(self) -> int:
         with self.lock:
-            row = self.db.execute("SELECT COUNT(*) FROM readings").fetchone()
+            row = self.db.execute(select(func.count()).select_from(s.readings)).fetchone()
             return int(row[0]) if row else 0
 
     def latest(self, node_id: str) -> dict[str, Any] | None:
         with self.lock:
             row = self.db.execute(
-                "SELECT payload, received_at FROM readings WHERE node_id=? ORDER BY observed_at DESC,id DESC LIMIT 1",
-                (node_id,),
+                select(s.readings.c.payload, s.readings.c.received_at)
+                .where(s.readings.c.node_id == node_id)
+                .order_by(s.readings.c.observed_at.desc(), s.readings.c.id.desc())
+                .limit(1)
             ).fetchone()
             return {**_decode_reading(row[0]), "received_at": row[1]} if row else None
 
@@ -57,17 +60,18 @@ class UsageHistoryQueries:
             return {
                 nid: {"host": host, "role": role, **json.loads(context)}
                 for nid, host, role, context in self.db.execute(
-                    "SELECT node_id,host,role,context FROM nodes"
+                    select(s.nodes.c.node_id, s.nodes.c.host, s.nodes.c.role, s.nodes.c.context)
                 )
             }
 
     def coverage(self, node_id: str | None = None) -> dict[str, Any]:
         with self.lock:
-            condition = "WHERE node_id=?" if node_id is not None else ""
-            row = self.db.execute(
-                f"SELECT MIN(observed_at),MAX(observed_at) FROM readings {condition}",
-                (node_id,) if node_id is not None else (),
-            ).fetchone()
+            statement = select(
+                func.min(s.readings.c.observed_at), func.max(s.readings.c.observed_at)
+            )
+            if node_id is not None:
+                statement = statement.where(s.readings.c.node_id == node_id)
+            row = self.db.execute(statement).one()
             recording, error, last_successful_save = self._status()
             evicted_at = self._meta("storage_truncated_at")
             return {
@@ -87,8 +91,17 @@ class UsageHistoryQueries:
     def lifetimes(self, node_id: str) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.db.execute(
-                "SELECT lifetime_id,pid,role,started_at,ended_at,state,model FROM lifetimes WHERE node_id=? ORDER BY started_at DESC",
-                (node_id,),
+                select(
+                    s.lifetimes.c.lifetime_id,
+                    s.lifetimes.c.pid,
+                    s.lifetimes.c.role,
+                    s.lifetimes.c.started_at,
+                    s.lifetimes.c.ended_at,
+                    s.lifetimes.c.state,
+                    s.lifetimes.c.model,
+                )
+                .where(s.lifetimes.c.node_id == node_id)
+                .order_by(s.lifetimes.c.started_at.desc())
             ).fetchall()
             result = []
             for row in rows:
@@ -101,8 +114,13 @@ class UsageHistoryQueries:
                 life["associations"] = [
                     dict(zip(("model", "observed_from", "observed_until"), entry))
                     for entry in self.db.execute(
-                        "SELECT model,observed_from,observed_until FROM associations WHERE lifetime_id=? ORDER BY observed_from",
-                        (row[0],),
+                        select(
+                            s.associations.c.model,
+                            s.associations.c.observed_from,
+                            s.associations.c.observed_until,
+                        )
+                        .where(s.associations.c.lifetime_id == row[0])
+                        .order_by(s.associations.c.observed_from)
                     )
                 ]
                 result.append(life)
@@ -112,7 +130,9 @@ class UsageHistoryQueries:
         if window not in WINDOWS:
             raise ValidationError("window must be 15m, 1h or 24h")
         if not self.db.execute(
-            "SELECT 1 FROM lifetimes WHERE node_id=? AND lifetime_id=?", (node_id, life_id)
+            select(literal(1))
+            .select_from(s.lifetimes)
+            .where(s.lifetimes.c.node_id == node_id, s.lifetimes.c.lifetime_id == life_id)
         ).fetchone():
             raise LookupError("unknown node or process lifetime")
         return utc(now - WINDOWS[window]), utc(now)
@@ -124,21 +144,29 @@ class UsageHistoryQueries:
             raise RuntimeError("usage cursor secret is missing")
         return hmac.new(bytes.fromhex(secret), content, hashlib.sha256).hexdigest()
 
-    def series(
+    def series_snapshot(
         self, node_id: str, life_id: str, window: str, *, now: datetime | None = None
     ) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
         with self.lock:
             start, end = self._filters(node_id, life_id, window, now)
             rows = self.db.execute(
-                "SELECT observed_at,payload FROM readings WHERE node_id=? AND lifetime_id=? AND observed_at>=? AND observed_at<=? ORDER BY observed_at,id",
-                (node_id, life_id, start, end),
+                select(s.readings.c.observed_at, s.readings.c.payload)
+                .where(
+                    s.readings.c.node_id == node_id,
+                    s.readings.c.lifetime_id == life_id,
+                    s.readings.c.observed_at >= start,
+                    s.readings.c.observed_at <= end,
+                )
+                .order_by(s.readings.c.observed_at, s.readings.c.id)
             ).fetchall()
             coverage = self.coverage(node_id)
 
-        # JSON decoding and aggregation can be expensive at 24-hour scale; do
-        # it after the immutable query snapshot is fetched so ingestion and
-        # live reads are not blocked on chart preparation.
+        return rows, coverage, start, end
+
+    @staticmethod
+    def aggregate_series(rows, coverage, start, end, window):
+        # Consume a materialized snapshot after the store releases its lease.
         step = {"15m": 2, "1h": 5, "24h": 120}[window]
         length = int(WINDOWS[window].total_seconds() / step)
         start_at = parse_utc(start)
@@ -250,16 +278,38 @@ class UsageHistoryQueries:
                         not start <= seek[0] <= end
                         or seek[1] <= 0
                         or not self.db.execute(
-                            "SELECT 1 FROM readings WHERE node_id=? AND lifetime_id=? AND observed_at=? AND id=?",
-                            (node_id, life_id, *seek),
+                            select(literal(1))
+                            .select_from(s.readings)
+                            .where(
+                                s.readings.c.node_id == node_id,
+                                s.readings.c.lifetime_id == life_id,
+                                s.readings.c.observed_at == seek[0],
+                                s.readings.c.id == seek[1],
+                            )
                         ).fetchone()
                     ):
                         raise ValidationError("cursor position invalid")
                 except (ValueError, KeyError, TypeError, UnicodeDecodeError, binascii.Error):
                     raise ValidationError("invalid or mismatched history cursor") from None
             rows = self.db.execute(
-                "SELECT id,observed_at,payload,received_at FROM readings WHERE node_id=? AND lifetime_id=? AND observed_at>=? AND observed_at<=? AND (observed_at>? OR (observed_at=? AND id>?)) ORDER BY observed_at,id LIMIT ?",
-                (node_id, life_id, start, end, seek[0], seek[0], seek[1], limit + 1),
+                select(
+                    s.readings.c.id,
+                    s.readings.c.observed_at,
+                    s.readings.c.payload,
+                    s.readings.c.received_at,
+                )
+                .where(
+                    s.readings.c.node_id == node_id,
+                    s.readings.c.lifetime_id == life_id,
+                    s.readings.c.observed_at >= start,
+                    s.readings.c.observed_at <= end,
+                    or_(
+                        s.readings.c.observed_at > seek[0],
+                        and_(s.readings.c.observed_at == seek[0], s.readings.c.id > seek[1]),
+                    ),
+                )
+                .order_by(s.readings.c.observed_at, s.readings.c.id)
+                .limit(limit + 1)
             ).fetchall()
             page = rows[:limit]
             next_cursor = None

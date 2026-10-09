@@ -32,6 +32,7 @@ def plan_from_settings(
     node_shares: dict[str, float] | None = None,
     required_nodes: Sequence[str] = (),
     node_priority: Sequence[str] = (),
+    just_enough_master: bool = False,
 ) -> DevicePlacementPlan:
     """Build a complete structured placement plan from a public request."""
     settings_data = dict(launch_settings)
@@ -61,6 +62,7 @@ def plan_from_settings(
             node_shares=node_shares,
             required_nodes=required_nodes,
             node_priority=node_priority,
+            just_enough_master=just_enough_master,
         )
         if not isinstance(result, DevicePlacementPlan):
             raise RuntimeError("device planner returned invalid data")

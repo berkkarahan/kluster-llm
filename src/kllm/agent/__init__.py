@@ -689,6 +689,9 @@ def _apply_cluster_snapshot(data: dict[str, Any]) -> None:
     if "inference_activity" in data:
         activity = data.get("inference_activity")
         STATE.inference_activity = dict(activity) if isinstance(activity, dict) else None
+    if "model_name" in data:
+        model_name = data.get("model_name")
+        STATE.model_name = model_name if isinstance(model_name, str) and model_name else None
 
 
 def _inference_activity() -> dict[str, Any]:
@@ -727,6 +730,7 @@ def _worker_local_leave() -> None:
     STATE.role = "idle"
     STATE.join_key = None
     STATE.master_host = None
+    STATE.model_name = None
     STATE.gpu_ids = None
     STATE.save()
 

@@ -355,6 +355,29 @@ def test_hermes_plan_omits_runtime_dir_without_pm_store(monkeypatch, tmp_path):
             shutil.rmtree(directory, ignore_errors=True)
 
 
+def test_served_model_id_matches_llama_server_extensionless_alias():
+    assert (
+        connect._served_model_id(
+            {"data": [{"id": "openai_gpt-oss-120b-MXFP4"}]},
+            "openai_gpt-oss-120b-MXFP4.gguf",
+        )
+        == "openai_gpt-oss-120b-MXFP4"
+    )
+    # Windows path served from a different platform still matches by stem.
+    assert (
+        connect._served_model_id(
+            {"data": [{"id": "C:/models/Foo.gguf"}]},
+            r"D:\models\foo.gguf",
+        )
+        == "C:/models/Foo.gguf"
+    )
+
+
+def test_served_model_id_rejects_unknown_requested_model():
+    with pytest.raises(typer.BadParameter, match="uniquely"):
+        connect._served_model_id({"data": [{"id": "other.gguf"}]}, "requested.gguf")
+
+
 def test_response_instructions_coalesce_only_leading_text_and_preserve_tools():
     from kllm.gateway import _coalesce_response_instructions
 

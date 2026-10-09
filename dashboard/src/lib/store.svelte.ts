@@ -199,6 +199,7 @@ class AppStore {
   flashAttention = $state<'auto' | 'on' | 'off'>('auto');
   nodeShares = $state<Record<string, number> | null>(null);
   nodePriority = $state<string[] | null>(null);
+  justEnoughMaster = $state(false);
   requiredNodes = $state<string[]>([]);
   threadsMax = $state(8);
   templateEmbedded = $state(false);
@@ -847,6 +848,7 @@ class AppStore {
     if (typeof ps.advanced_open === 'boolean') this.advancedOpen = ps.advanced_open;
     if (typeof ps.vram_weight === 'number') this.vramWeight = ps.vram_weight;
     if (typeof ps.latency_weight === 'number') this.latencyWeight = ps.latency_weight;
+    if (typeof ps.just_enough_master === 'boolean') this.justEnoughMaster = ps.just_enough_master;
     if (typeof ps.temperature === 'number') this.temperature = ps.temperature;
     else this.temperature = null;
     if (typeof ps.top_p === 'number') this.topP = ps.top_p;
@@ -1039,6 +1041,7 @@ class AppStore {
     this.flashAttention = 'auto';
     this.nodeShares = null;
     this.nodePriority = null;
+    this.justEnoughMaster = false;
     this.requiredNodes = [];
     this.speculative = 'auto';
     this.draftModel = '';
@@ -1182,6 +1185,7 @@ class AppStore {
       else if (typeof value !== 'object') tokens.push(`${item.cli} ${shellQuote(value)}`);
     }
     if (this.selectedNetworkId) tokens.push(`--network-id ${shellQuote(this.selectedNetworkId)}`);
+    if (this.justEnoughMaster) tokens.push('--just-enough-master');
     for (const flag of parseArgumentText(this.extraArgsText)) tokens.push(`--extra-arg=${shellQuote(JSON.stringify(flag))}`);
     return tokens.join(' ');
   }
@@ -1203,6 +1207,7 @@ class AppStore {
       flash_attention: this.flashAttention,
       node_shares: this.nodeShares,
       node_priority: this.nodePriority ? [...new Set([...this.nodePriority, ...Object.keys(this.status?.members ?? {})])] : [],
+      just_enough_master: this.justEnoughMaster,
       required_nodes: this.nodeShares ? [] : [...this.requiredNodes],
       vision: this.vision,
       mmproj: this.mmproj || null,

@@ -90,6 +90,9 @@ class RunSettingsFields(BaseModel):
     node_shares: dict[str, float] | None = None
     required_nodes: list[str] = Field(default_factory=list)
     node_priority: list[str] = Field(default_factory=list)
+    # Automatic placement: fill workers before the master and give the master
+    # only the trailing layers workers cannot hold.
+    just_enough_master: bool = False
     mmap_mlock: MmapMlock = "auto"
     checkpoints: NonnegativeAutoInt = "auto"
     cache_ram: NonnegativeAutoInt = "auto"
@@ -189,6 +192,10 @@ class RunSettingsFields(BaseModel):
             self.node_shares is not None or self.split_mode not in (None, "layer")
         ):
             raise ValueError("node_priority requires automatic layer placement")
+        if self.just_enough_master and (
+            self.node_shares is not None or self.split_mode not in (None, "layer")
+        ):
+            raise ValueError("just_enough_master requires automatic layer placement")
         if self.tensor_split is not None:
             raise ValueError(
                 "tensor_split is not supported on the primary path; use automatic placement"
@@ -248,6 +255,7 @@ class RunSettingsFields(BaseModel):
             "node_shares": self.node_shares,
             "required_nodes": list(self.required_nodes),
             "node_priority": list(self.node_priority),
+            "just_enough_master": bool(self.just_enough_master),
             "mmap_mlock": self.mmap_mlock,
             "checkpoints": norm_auto_int(self.checkpoints),
             "cache_ram": norm_auto_int(self.cache_ram),

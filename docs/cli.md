@@ -134,6 +134,7 @@ Commands load the model's saved configuration by default. Explicit flags overrid
 | `--flash-attention` | `auto` | `auto`, `on`, or `off` |
 | `--node-share NODE=FRACTION` (repeatable) | automatic | Manual GPU layer workload shares; give every current node, fractions totaling 1. Example: `--node-share worker=0.4 --node-share master=0.6`. No CPU spill in manual mode. |
 | `--require-node NODE` (repeatable) | none | Require at least one model layer on each node in automatic layer placement. The planner chooses GPU/RAM amounts. Incompatible with manual shares and row/tensor modes. |
+| `--just-enough-master` / `--no-just-enough-master` | off | Automatic layer placement fills worker GPUs first and gives the master only the trailing layers they cannot hold, instead of filling the master's whole budget. Inert with manual shares or priority order. |
 | `--chat-template` / `--chat-template-file` | `default` / — | Auto embedded GGUF, `chatml`, or a `preset:…` ID; file uploads custom Jinja text to the master. `kllm model templates --model NAME` lists choices. |
 | `--vision`, `--mmproj` | off / — | Vision requires a usable mmproj on run |
 | `--load-mode` | `auto` | mmap / mlock mapping |

@@ -116,6 +116,7 @@ def _run_settings_options(
     reasoning_format: str | None = None,
     gpu_id: list[int] | None = None,
     node_priority: list[str] | None = None,
+    just_enough_master: bool | None = None,
     network_id: str | None = None,
     chat_template_text: str | None = None,
 ) -> dict[str, object]:
@@ -180,6 +181,7 @@ def _run_settings_options(
         reasoning_format=reasoning_format,
         gpu_ids=gpu_id,
         node_priority=node_priority,
+        just_enough_master=just_enough_master,
         network_id=network_id,
     )
     if ctx is not None:
@@ -337,6 +339,11 @@ def plan_cmd(
     node_priority: list[str] = typer.Option(
         [], "--node-priority", help="NODE in priority order; repeat"
     ),
+    just_enough_master: bool = typer.Option(
+        False,
+        "--just-enough-master/--no-just-enough-master",
+        help="Automatic placement: fill workers first; give the master only the trailing layers",
+    ),
     network_id: Optional[str] = typer.Option(None, "--network-id"),
     chat_template_text: Optional[str] = typer.Option(
         None, "--chat-template-text", help="Inline custom Jinja template"
@@ -395,6 +402,7 @@ def plan_cmd(
         reasoning_format=reasoning_format,
         gpu_id=gpu_id,
         node_priority=node_priority,
+        just_enough_master=just_enough_master,
         network_id=network_id,
         chat_template_text=chat_template_text,
     )
@@ -502,6 +510,11 @@ def run(
     node_priority: list[str] = typer.Option(
         [], "--node-priority", help="NODE in priority order; repeat"
     ),
+    just_enough_master: bool = typer.Option(
+        False,
+        "--just-enough-master/--no-just-enough-master",
+        help="Automatic placement: fill workers first; give the master only the trailing layers",
+    ),
     network_id: Optional[str] = typer.Option(None, "--network-id"),
     chat_template_text: Optional[str] = typer.Option(
         None, "--chat-template-text", help="Inline custom Jinja template"
@@ -560,6 +573,7 @@ def run(
         reasoning_format=reasoning_format,
         gpu_id=gpu_id,
         node_priority=node_priority,
+        just_enough_master=just_enough_master,
         network_id=network_id,
         chat_template_text=chat_template_text,
     )

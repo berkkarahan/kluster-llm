@@ -191,6 +191,11 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     assert.doesNotMatch(render(RunPage).body, /share-worker/);
     appStore.status = { ...appStore.status, members: { master: { node_id: 'master' } } };
     appStore.setPriorityPlanning(false);
+    assert.equal(appStore.planPayload().just_enough_master, false);
+    assert.match(render(RunPage).body, /Just Enough Master Allocation/);
+    appStore.justEnoughMaster = true;
+    assert.equal(appStore.planPayload().just_enough_master, true);
+    appStore.justEnoughMaster = false;
 
     gpuInventory = { gpus: [
       { index: 2, name: 'new first', vram_bytes: 16 * 1024 ** 3 },

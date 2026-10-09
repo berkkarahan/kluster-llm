@@ -1196,6 +1196,7 @@ def test_worker_status_uses_master_activity_snapshot(client):
     agent.STATE.role = "worker"
     agent._apply_cluster_snapshot(
         {
+            "model_name": "openai_gpt-oss-120b-MXFP4.gguf",
             "inference_activity": {
                 "phase": "processing_input",
                 "active_requests": 1,
@@ -1204,11 +1205,12 @@ def test_worker_status_uses_master_activity_snapshot(client):
                 "output_tokens": 0,
                 "slots": 1,
                 "server_ready": True,
-            }
+            },
         }
     )
     status = c.get("/v1/status").json()
     assert status["inference_activity"]["phase"] == "processing_input"
+    assert status["model_name"] == "openai_gpt-oss-120b-MXFP4.gguf"
 
 
 def test_connect_plan_claude_no_launch(tmp_path, monkeypatch):

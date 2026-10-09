@@ -316,6 +316,7 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             node_shares=body.node_shares,
             required_nodes=body.required_nodes,
             node_priority=body.node_priority,
+            just_enough_master=body.just_enough_master,
         )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc

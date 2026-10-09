@@ -1,42 +1,27 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   import { goto } from '$app/navigation';
   import { appStore } from '$lib/store.svelte';
   import DownloadPanel from '$lib/components/DownloadPanel.svelte';
   import LoadProgressPanel from '$lib/components/LoadProgressPanel.svelte';
   import { formatGb } from '$lib/format-transfer';
-  import type {
-    DistributeProgress,
-    DownloadProgress,
-    ModelSearchFit,
-    ModelSearchHit,
-    ReceiveProgress,
-  } from '$lib/types';
+  import type { ModelSearchFit, ModelSearchHit } from '$lib/types';
 
   let modalOpen = $state(false);
+  let searchDialog = $state<HTMLDivElement | null>(null);
+  let libraryTab = $state<'local' | 'discover'>('discover');
+  let family = $state('');
+  let libraryQuery = $state('');
 
-  function downloadLabel(d: DownloadProgress | ReceiveProgress) {
-    const pct = Math.round(d.pct);
-    if (d.total == null) return `${pct}% · ${formatGb(d.bytes)}`;
-    return `${pct}% · ${formatGb(d.bytes)} / ${formatGb(d.total)}`;
+  function familyOf(id: string): string {
+    return id.match(/^[A-Za-z]+/)?.[0] ?? 'Other';
   }
 
-  function transferLabel(d: DistributeProgress) {
-    const pct = Math.round(d.pct);
-    const phase = d.phase ?? 'pulling';
-    if (phase === 'hashing' && d.total != null && d.bytes != null) {
-      return `hashing ${pct}% · ${formatGb(d.bytes)} / ${formatGb(d.total)}`;
-    }
-    return `distribute ${pct}%`;
-  }
-
-  function workerLabel(w: DistributeProgress['workers'][number]) {
-    const pct = Math.round(w.pct);
-    const host = w.host || w.node_id || 'worker';
-    if (w.phase === 'skipped') return `${host} · skipped`;
-    if (w.phase === 'error') return `${host} · error${w.error ? `: ${w.error}` : ''}`;
-    if (w.total == null) return `${host} · ${w.phase} ${pct}%`;
-    return `${host} · ${w.phase} ${pct}% · ${formatGb(w.bytes)} / ${formatGb(w.total)}`;
-  }
+  const families = $derived([...new Set(appStore.models.map((model) => familyOf(model.id)))].sort());
+  const visibleModels = $derived(appStore.models.filter((model) => {
+    const text = `${model.id} ${model.filename ?? ''}`.toLowerCase();
+    return (!family || familyOf(model.id) === family) && (!libraryQuery || text.includes(libraryQuery.toLowerCase()));
+  }));
 
   function fitChip(fit: ModelSearchFit) {
     if (fit === 'fits') return 'chip-ok';
@@ -44,27 +29,64 @@
     return 'chip-muted';
   }
 
-  function fitLabel(row: ModelSearchHit) {
-    const size = row.size_bytes ? formatGb(row.size_bytes, 1) : '—';
-    const vram = appStore.searchTotalVram != null ? formatGb(appStore.searchTotalVram, 1) : '—';
-    return `${size} / ${vram}`;
+  function sizeLabel(row: ModelSearchHit) {
+    if (!row.size_bytes) return 'unknown size';
+    return formatGb(row.size_bytes, 1);
   }
 
-  const dist = $derived(appStore.status?.distribute ?? null);
-  const recv = $derived(appStore.status?.receive ?? null);
-  const isMaster = $derived(appStore.status?.role === 'master');
+  function fitText(fit: ModelSearchFit) {
+    if (fit === 'fits') return 'fits (weight-size heuristic)';
+    if (fit === 'overflow') return 'overflow (weight-size heuristic)';
+    return 'unknown fit';
+  }
+
+  function displayPath(row: ModelSearchHit) {
+    return row.path || row.filename;
+  }
+
+  function closeSearch() {
+    modalOpen = false;
+  }
 
   $effect(() => {
     if (!modalOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') modalOpen = false;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const node = searchDialog;
+    queueMicrotask(() => {
+      const first = node?.querySelector<HTMLElement>('button, [href], input, select, textarea');
+      (first ?? node)?.focus();
+    });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        modalOpen = false;
+        return;
+      }
+      if (event.key !== 'Tab' || !searchDialog) return;
+      const focusable = [...searchDialog.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea'
+      )].filter((el) => !el.hasAttribute('disabled'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !searchDialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      previous?.focus();
+    };
   });
 
   async function runSearch() {
-    if (!appStore.modelSource.trim() || appStore.busy) return;
+    if (!appStore.modelSource.trim() || appStore.busy || appStore.searching) return;
     modalOpen = true;
     try {
       await appStore.searchModels();
@@ -85,11 +107,18 @@
   }
 </script>
 
-<div class="max-w-4xl mx-auto p-4">
-  <h1 class="mono text-[12px] uppercase tracking-wider mb-1" style="color: var(--muted)">Models</h1>
-  <p class="mono text-[11px] mb-3" style="color: var(--muted)">
-    Search Hugging Face GGUFs, download without blocking the UI, then Load into VRAM/RAM from Plan &amp; Run.
-  </p>
+<div class="stack">
+  <header class="page-heading">
+    <div>
+      <p class="eyebrow">Models</p>
+      <h1 id="page-title">Model library</h1>
+      <p>Search Hugging Face GGUFs, download on the master, then deploy a local model.</p>
+    </div>
+  </header>
+  <div class="tabs" role="tablist">
+    <button class="tab" class:active={libraryTab === 'local'} type="button" role="tab" aria-selected={libraryTab === 'local'} onclick={() => libraryTab = 'local'}>Local library</button>
+    <button class="tab" class:active={libraryTab === 'discover'} type="button" role="tab" aria-selected={libraryTab === 'discover'} onclick={() => libraryTab = 'discover'}>Discover</button>
+  </div>
 
   <div class="flex flex-col gap-3 mb-4">
     {#if appStore.downloadJob && appStore.downloadJob.state !== 'idle'}
@@ -102,7 +131,7 @@
     <LoadProgressPanel />
   </div>
 
-  <div class="panel p-3 mb-4 flex flex-col gap-2" style="border-color: var(--border)">
+  <div class="panel panel-pad stack-sm" hidden={libraryTab !== 'discover'}>
     <label class="mono text-[11px]" style="color: var(--muted)" for="model-source">Search</label>
     <form
       class="flex gap-2"
@@ -122,60 +151,11 @@
       >
     </form>
 
-    {#if dist}
-      <div class="flex flex-col gap-2 mt-1">
-        <div class="mono text-[11px]" style="color: var(--muted)">
-          {transferLabel(dist)}{#if dist.filename}<span> · {dist.filename}</span>{/if}
-        </div>
-        <div
-          class="progress"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(dist.pct)}
-          aria-label={dist.phase === 'hashing' ? 'Model hashing' : 'Model distribute'}
-        >
-          <span style:width={`${Math.min(100, Math.max(0, dist.pct))}%`}></span>
-        </div>
-        {#each dist.workers as w (w.host + (w.node_id ?? ''))}
-          <div class="flex flex-col gap-1">
-            <div
-              class="progress"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(w.pct)}
-              aria-label={`Distribute to ${w.host}`}
-            >
-              <span style:width={`${Math.min(100, Math.max(0, w.pct))}%`}></span>
-            </div>
-            <div class="mono text-[11px]" style="color: var(--muted)">{workerLabel(w)}</div>
-          </div>
-        {/each}
-      </div>
-    {:else if appStore.busy === '/v1/models/distribute'}
-      <div class="mono text-[11px]" style="color: var(--muted)">distributing…</div>
+    {#if appStore.status?.rpc_cache}
+      <p class="mono text-[11px]" style="color: var(--muted)">
+        RPC tensor cache: {appStore.status.rpc_cache.exists ? 'available' : 'created on worker startup'} · {appStore.status.rpc_cache.path}
+      </p>
     {/if}
-
-    {#if recv}
-      <div class="flex flex-col gap-1 mt-1">
-        <div
-          class="progress"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(recv.pct)}
-          aria-label="Model receive"
-        >
-          <span style:width={`${Math.min(100, Math.max(0, recv.pct))}%`}></span>
-        </div>
-        <div class="mono text-[11px]" style="color: var(--muted)">
-          receive {downloadLabel(recv)}{#if recv.filename}<span> · {recv.filename}</span>{/if}
-          {#if recv.phase}<span> · {recv.phase}</span>{/if}
-        </div>
-      </div>
-    {/if}
-
     <label class="mono text-[11px] mt-2 flex items-center gap-2" style="color: var(--muted)" for="hf-token">
       Hugging Face token
       {#if appStore.hfTokenConfigured}
@@ -208,8 +188,24 @@
     </div>
   </div>
 
-  <div class="panel overflow-hidden" style="border-color: var(--border)">
-    <table class="w-full text-left">
+  <div hidden={libraryTab !== 'local'}>
+    <div class="toolbar">
+      <label class="search-field">
+        <span class="sr-only">Search local models</span>
+        <input bind:value={libraryQuery} placeholder="Search local models" />
+      </label>
+      <label class="field">
+        Family
+        <select class="field" bind:value={family}>
+          <option value="">All families</option>
+          {#each families as name}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
+  <div class="panel table-scroll model-table-scroll">
+    <table class="data-table">
       <thead>
         <tr class="mono text-[11px]" style="color: var(--muted)">
           <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">name</th>
@@ -219,7 +215,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each appStore.models as m}
+        {#each visibleModels as m}
           <tr class="mono" class:bg-selected={appStore.selectedModel === m.id}>
             <td class="px-3 py-2 border-b" style="border-color: var(--border)">{m.id}</td>
             <td class="px-3 py-2 border-b" style="border-color: var(--border)">{formatGb(m.size_bytes ?? null)}</td>
@@ -237,15 +233,8 @@
                 <button
                   class="btn btn-accent"
                   disabled={!!appStore.busy}
-                  onclick={() => void useModel(m.id)}>Load</button
+                  onclick={() => void useModel(m.id)}>Deploy</button
                 >
-                {#if isMaster}
-                  <button
-                    class="btn"
-                    disabled={!!appStore.busy}
-                    onclick={() => void appStore.distributeModel(m.id)}>Distribute</button
-                  >
-                {/if}
                 <button
                   class="btn btn-danger"
                   disabled={!!appStore.busy}
@@ -262,6 +251,7 @@
       </tbody>
     </table>
   </div>
+  </div>
 </div>
 
 {#if modalOpen}
@@ -272,79 +262,70 @@
       if (e.target === e.currentTarget) modalOpen = false;
     }}
   >
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="model-search-title">
-      <div
-        class="flex items-center justify-between gap-2 px-3 py-2 border-b"
-        style="border-color: var(--border)"
-      >
-        <h2 id="model-search-title" class="mono text-[12px] uppercase tracking-wider" style="color: var(--muted)">
-          Hugging Face GGUFs
-        </h2>
-        <button class="btn" type="button" onclick={() => (modalOpen = false)}>Close</button>
+    <div
+      bind:this={searchDialog}
+      class="panel modal p-4 max-w-2xl w-full mx-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="model-search-title"
+      tabindex="-1"
+    >
+      <div class="flex items-center justify-between mb-3">
+        <h2 id="model-search-title" class="mono text-[12px] uppercase tracking-wider" style="color: var(--muted)">Search results</h2>
+        <button class="btn" type="button" onclick={closeSearch}>Close</button>
       </div>
-      <div class="overflow-auto flex-1 min-h-0">
-        <table class="w-full text-left">
-          <thead>
-            <tr class="mono text-[11px]" style="color: var(--muted)">
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">repo</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">file / quant</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">size</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)">fit</th>
-              <th class="px-3 py-2 border-b font-medium" style="border-color: var(--border)"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#if appStore.searching}
-              <tr>
-                <td colspan="5" class="px-3 py-6 mono" style="color: var(--muted)">searching…</td>
-              </tr>
-            {:else if appStore.searchError}
-              <tr>
-                <td colspan="5" class="px-3 py-6 mono" style="color: var(--danger)">{appStore.searchError}</td>
-              </tr>
-            {:else}
-              {#each appStore.searchResults as row}
-                <tr class="mono">
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
-                    <div>{row.repo_id}</div>
-                    {#if row.gated}
-                      <span class="chip chip-warn">gated</span>
-                    {/if}
-                  </td>
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
-                    <div>{row.filename}</div>
-                    {#if row.quant}
-                      <div class="text-[11px]" style="color: var(--muted)">{row.quant}</div>
-                    {/if}
-                  </td>
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)"
-                    >{formatGb(row.size_bytes)}</td
-                  >
-                  <td class="px-3 py-2 border-b align-top" style="border-color: var(--border)">
-                    <div class="flex flex-col gap-1 items-start">
-                      <span class="chip {fitChip(row.fit)}"
-                        >{row.fit === 'overflow' ? 'OOM risk' : row.fit}</span
-                      >
-                      <span class="text-[11px]" style="color: var(--muted)">{fitLabel(row)}</span>
-                    </div>
-                  </td>
-                  <td class="px-3 py-2 border-b text-right align-top" style="border-color: var(--border)">
-                    <button
-                      class="btn btn-accent"
-                      disabled={!!appStore.busy}
-                      onclick={() => void downloadRow(row.source)}>Download</button
-                    >
-                  </td>
-                </tr>
-              {:else}
-                <tr>
-                  <td colspan="5" class="px-3 py-6 mono" style="color: var(--muted)">No matching GGUFs</td>
-                </tr>
-              {/each}
-            {/if}
-          </tbody>
-        </table>
+      {#if appStore.searchQuery}
+        <dl class="mono text-[11px] mb-3 grid gap-x-2" style="grid-template-columns: auto minmax(0, 1fr)">
+          <dt style="color: var(--muted)">Latest search</dt>
+          <dd class="min-w-0" style="overflow-wrap:anywhere">{appStore.searchQuery}</dd>
+        </dl>
+      {/if}
+      <div role="status" aria-live="polite">
+        {#if appStore.searching}
+          <p class="mono text-[12px]" style="color: var(--muted)">Searching…</p>
+        {:else if appStore.searchError}
+          <ErrorMessage source="search" message={appStore.searchError} snapshot={false} />
+        {:else if appStore.searchResults.length === 0}
+          <p class="mono text-[12px]" style="color: var(--muted)">No supported downloadable options were found.</p>
+        {/if}
       </div>
+      {#if !appStore.searching && !appStore.searchError && appStore.searchWarnings.length}
+        <ul class="mono text-[11px] mb-3" style="color: var(--warn)" aria-label="Partial search warnings">
+          {#each appStore.searchWarnings as warning}
+            <li style="overflow-wrap:anywhere">{warning}</li>
+          {/each}
+        </ul>
+      {/if}
+      {#if !appStore.searching && !appStore.searchError && appStore.searchResults.length}
+        <ul class="flex flex-col gap-2 max-h-[60vh] overflow-auto">
+          {#each appStore.searchResults as row (row.source)}
+            <li class="flex items-start justify-between gap-2 panel p-2" style="border-color: var(--border)">
+              <div class="min-w-0">
+                <div class="mono text-[12px]" style="overflow-wrap:anywhere">{displayPath(row)}</div>
+                <div class="mono text-[11px]" style="color: var(--muted); overflow-wrap:anywhere">
+                  {row.repo_id ?? row.source}
+                  {#if row.revision}
+                    · revision {row.revision}
+                  {/if}
+                  {#if row.quant}
+                    · {row.quant}
+                  {/if}
+                  · {sizeLabel(row)}
+                </div>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <span class={`chip ${fitChip(row.fit)}`}>{fitText(row.fit)}</span>
+                <button
+                  class="btn btn-accent"
+                  type="button"
+                  aria-label={`Download ${displayPath(row)}`}
+                  onclick={() => void downloadRow(row.source)}>Download</button
+                >
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
   </div>
 {/if}

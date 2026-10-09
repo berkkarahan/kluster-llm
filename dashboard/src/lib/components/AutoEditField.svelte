@@ -20,8 +20,9 @@
 
 <div class="flex flex-col gap-1">
   <div class="flex items-center gap-2">
-    <label class="mono text-[11px] flex-1" style="color: var(--muted)">{label}</label>
+    <span class="mono text-[11px] flex-1" style="color: var(--muted)">{label}</span>
     <select
+      aria-label={`${label} mode`}
       class="field mono"
       style="width: auto; min-width: 5.5rem"
       value={mode}

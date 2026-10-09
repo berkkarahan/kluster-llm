@@ -60,6 +60,7 @@
   <div class="flex items-center gap-2">
     <input
       {id}
+      aria-label={label || id}
       class="flex-1"
       type="range"
       {min}
@@ -72,6 +73,7 @@
     />
     <input
       class="field mono"
+      aria-label={`${label || id || 'Value'} value`}
       style:width={numberWidth}
       type="number"
       {min}

@@ -1,0 +1,205 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createSsrServer } from './ssr-server.mjs';
+
+const GIB = 1024 ** 3;
+
+function reading(over = {}) {
+  return {
+    lifetime_id: 'l1',
+    pid: 42,
+    process_role: 'worker',
+    process_started_at: '2026-09-29T00:00:00Z',
+    observed_at: '2026-09-29T00:00:02Z',
+    process: { cpu_percent_machine: 3, rss_bytes: 2 * GIB },
+    host: { cpu_percent: 25, used_bytes: 8 * GIB, total_bytes: 16 * GIB },
+    devices: [],
+    availability: {
+      process_cpu: 'measured', process_rss: 'measured',
+      host_cpu: 'measured', host_memory: 'measured'
+    },
+    ...over
+  };
+}
+
+function node(id, over = {}) {
+  return {
+    node_id: id, host: id, role: 'worker', connected: true, freshness: 'fresh',
+    reading: reading(), ...over
+  };
+}
+
+test('native topology shows measured GPU counters and separates shared pools', async () => {
+  const cwd = process.cwd();
+  process.chdir(fileURLToPath(new URL('..', import.meta.url)));
+  const server = await createSsrServer();
+  const metric = (value, unit = 'bytes') => ({ value, unit, scope: 'device', status: value === null ? 'unsupported' : 'measured',
+    reason: value === null ? 'unsupported_counter' : null, source: 'test.driver', observed_at: '2026-09-29T00:00:02Z' });
+  try {
+    const { render } = await server.ssrLoadModule('svelte/server');
+    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/components/NodeMap.svelte');
+    const { default: Details } = await server.ssrLoadModule('/src/lib/components/NodeUsageDetails.svelte');
+    const resources = {
+      schema_version: 2, host: { cpu: metric(11, 'percent_machine'), memory: {
+        used: metric(16 * GIB), total: metric(32 * GIB), available: metric(12 * GIB), free: metric(8 * GIB) } },
+      devices: [{ device_key: 'metal:1', name: 'Apple M5 Pro', memory_kind: 'shared', utilization: metric(0, 'percent_device'),
+        memory: [{ kind: 'shared', backing_pool_id: 'host:ram', used: metric(.5 * GIB), free: metric(null), total: metric(null) }] },
+      { device_key: 'dxgi:2', name: 'AMD Radeon RX 9070 XT', memory_kind: 'dedicated', utilization: metric(43, 'percent_device'),
+        memory: [{ kind: 'dedicated', used: metric(15 * GIB), free: metric(1 * GIB), total: metric(16 * GIB) }] }],
+      processes: [], device_discovery: { status: 'measured', reason: null }, totals: { physical_capacity: metric(48 * GIB) }
+    };
+    const native = node('native', { resources, resource_freshness: 'fresh', resource_age_seconds: 1 });
+    const map = render(NodeMap, { props: { nodes: { native }, relationships: [], selectedId: '', onselect: () => {} } }).body;
+    assert.match(map, /GPU utilization/);
+    assert.match(map, /0%/);
+    assert.match(map, /43%/);
+    assert.match(map, /GPU shared RAM/);
+    assert.match(map, /0\.5 GiB used/);
+    assert.match(map, /Host available/);
+    assert.match(map, /12\.0 GiB · shared pool/);
+    assert.match(map, /15\.0 GiB \/ 16\.0 GiB · 1\.0 GiB free/);
+    assert.doesNotMatch(map, /unsupported_counter|unavailable|— free/);
+    const details = render(Details, { props: { node: native, assignment: false, activity: null } }).body;
+    assert.match(details, /test\.driver/);
+    assert.match(details, /unsupported_counter/);
+  } finally {
+    await server.close();
+    process.chdir(cwd);
+  }
+});
+
+test('node summaries expose host CPU, RAM and per-device readings before selection', async () => {
+  const cwd = process.cwd();
+  process.chdir(fileURLToPath(new URL('..', import.meta.url)));
+  let server;
+  try {
+    server = await createSsrServer();
+    const { render } = await server.ssrLoadModule('svelte/server');
+    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/components/NodeMap.svelte');
+    const { default: NodeUsageDetails } = await server.ssrLoadModule('/src/lib/components/NodeUsageDetails.svelte');
+
+    const nodes = {
+      // Multi-GPU union: device 0 has capacity but no usage sensor; device 1 has measured zero.
+      master: node('master', {
+        host: 'same-host', role: 'master', assignment: 'model.gguf',
+        devices: [{ index: 0, name: 'Radeon RX', vram_bytes: 8 * GIB }, { index: 1, name: 'Radeon RX 2' }],
+        reading: reading({
+          host: { cpu_percent: 25, used_bytes: 8 * GIB, total_bytes: 16 * GIB },
+          devices: [{ device_id: '0', scope: 'device', utilization_percent: null, used_bytes: null,
+            total_bytes: 8 * GIB, temperature_c: null, power_w: null, unavailable_reason: 'device sensor unavailable' },
+            { device_id: '1', scope: 'device', utilization_percent: 0, used_bytes: 0,
+              total_bytes: 4 * GIB, temperature_c: null, power_w: null, unavailable_reason: 'temp unsupported' }]
+        })
+      }),
+      // Duplicate host name, distinct identity; zero CPU; stale/disconnected; shared memory.
+      w1: node('w1', {
+        host: 'same-host', connected: false, freshness: 'stale', age_seconds: 11,
+        unified_memory: true, devices: [{ index: 0, name: 'Apple M5 Pro', vram_bytes: 8 * GIB }],
+        reading: reading({
+          process: { cpu_percent_machine: 0, rss_bytes: 0 },
+          host: { cpu_percent: 0, used_bytes: 0, total_bytes: 8 * GIB },
+          devices: []
+        })
+      }),
+      // Field-level errors with no reading.
+      w2: node('w2', { connected: true, freshness: 'unavailable', backend: 'cpu', reading: null }),
+      // Unknown backend with no devices.
+      w3: node('w3', { backend: null, reading: reading({ host: { cpu_percent: null, used_bytes: null, total_bytes: 8 * GIB },
+        availability: { process_cpu: 'measured', process_rss: 'measured', host_cpu: 'error', host_memory: 'initializing' } }) })
+    };
+
+    const map = render(NodeMap, { props: {
+      nodes, relationships: [{ from_node_id: 'master', to_node_id: 'w1', kind: 'master-worker' }],
+      selectedId: 'w1', onselect: () => {}
+    } }).body;
+
+    // Host metrics appear on every node before selection, with binary GiB and derived percentage.
+    assert.match(map, /Host CPU/);
+    assert.match(map, /Host RAM/);
+    assert.match(map, /25%/);
+    assert.match(map, /8\.0 GiB \/ 16\.0 GiB · 50%/);
+    assert.match(map, /same-host/);
+
+    // Process measurements stay out of the node summary (they belong to Details scope).
+    assert.doesNotMatch(map, /2\.0 GiB/);
+
+    // Unsupported usage reports capacity without suggesting a measured zero; measured zero remains numeric.
+    assert.match(map, /GPU 0 · Radeon RX/);
+    assert.match(map, /reported 8\.0 GiB capacity/);
+    assert.doesNotMatch(map, /— \/ 8\.0 GiB/);
+    assert.match(map, /GPU 1/);
+    assert.match(map, /0% · 0\.0 GiB \/ 4\.0 GiB/);
+    assert.match(map, /temp unsupported/);
+
+    // Zero is measured; null with an availability state is explanatory text.
+    assert.match(map, /0\.0 GiB \/ 8\.0 GiB · 0%/);
+    assert.match(map, /error/);
+    assert.match(map, /initializing/);
+
+    // Shared memory is labeled, disconnected/stale/age are textual.
+    assert.match(map, /reported 8\.0 GiB capacity · shared with host RAM/);
+    assert.match(map, /disconnected · stale · 11s ago/);
+
+    // Qualified GPU absence for CPU versus unknown backend.
+    assert.match(map, /CPU backend · no GPUs reported/);
+    assert.match(map, /GPU information unavailable/);
+
+    // Duplicate host names stay distinguishable by stable node identity.
+    assert.match(map, /w1/);
+    assert.match(map, /master/);
+
+    // Relationships stay limited to supplied membership edges.
+    assert.match(map, /master → w1/);
+    assert.doesNotMatch(map, /worker–worker/);
+
+    // Cards let their visible summary name them instead of an overriding identity-only label.
+    assert.match(map, /aria-pressed=/);
+    assert.doesNotMatch(map, /aria-label="[^"]*connected/);
+
+    // Details keeps process scope separate from host/device scope.
+    const details = render(NodeUsageDetails, { props: { node: nodes.master, assignment: false, activity: null } }).body;
+    assert.match(details, /usage unavailable · reported 8\.0 GiB capacity/);
+    assert.match(details, /0\.0 GiB used \/ 4\.0 GiB capacity/);
+    assert.match(details, /3%/);
+    assert.match(details, /2\.0 GiB/);
+    assert.match(details, /25%/);
+    assert.match(details, /8\.0 GiB/);
+
+    const measure = (value, unit = 'bytes', scope = 'host') => ({ value, unit, scope,
+      status: value == null ? 'unsupported' : 'measured', reason: value == null ? 'unsupported_counter' : null,
+      observed_at: '2026-09-30T00:00:00Z', source: 'fixture' });
+    const resources = {
+      snapshot_id: 'native-host-only', host: { cpu: measure(12.5, 'percent_machine'),
+        memory: { total: measure(16 * GIB), used: measure(4 * GIB), available: measure(12 * GIB), free: measure(null) } },
+      processes: [], devices: [], device_discovery: { status: 'error', reason: 'source_error' },
+      totals: { physical_capacity: { value: 16 * GIB, status: 'partial' } }
+    };
+    const nativeNode = node('native', { reading: null, backend: 'cpu', freshness: 'unavailable',
+      resources, resource_freshness: 'fresh', resource_age_seconds: 1, process_state: 'no managed process' });
+    const nativeMap = render(NodeMap, { props: { nodes: { native: nativeNode }, relationships: [], selectedId: null, onselect: () => {} } }).body;
+    assert.match(nativeMap, /GPU discovery error: source_error/);
+    assert.doesNotMatch(nativeMap, /no GPUs reported/);
+    assert.match(nativeMap, /4\.0 GiB \/ 16\.0 GiB/);
+    const nativeDetails = render(NodeUsageDetails, { props: { node: nativeNode, assignment: false, activity: null } }).body;
+    assert.match(nativeDetails, /Native resources/);
+    assert.match(nativeDetails, /12\.5%/);
+    assert.match(nativeDetails, /available 12\.0 GiB/);
+    assert.match(nativeDetails, /unsupported_counter/);
+    assert.match(nativeDetails, /partial/);
+    assert.doesNotMatch(nativeDetails, /Process and host measurements unavailable/);
+    const canonical = 17095983104;
+    const dedicatedNode = node('native', { ...nativeNode, resources: { ...resources, devices: [{
+      device_key: 'win:0', name: 'AMD Radeon RX 9070 XT', memory: [{
+        kind: 'dedicated', backing_pool_id: null,
+        used: measure(5 * GIB), total: measure(canonical), free: measure(canonical - 5 * GIB)
+      }]
+    }] } });
+    const dedicatedMap = render(NodeMap, { props: { nodes: { native: dedicatedNode }, relationships: [], selectedId: null, onselect: () => {} } }).body;
+    assert.match(dedicatedMap, /5\.0 GiB \/ 15\.9 GiB/);
+  } finally {
+    try { await server?.watcher?.close(); } catch { /* no watcher */ }
+    await server?.close();
+    process.chdir(cwd);
+  }
+});

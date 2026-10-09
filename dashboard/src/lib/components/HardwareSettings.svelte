@@ -1,12 +1,13 @@
 <script lang="ts">
+  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
   /**
    * System / hardware settings: device (CPU|GPU), accel backend (CUDA/Vulkan/…),
-   * multi-GPU selection, and VRAM/RAM budget. Persists via PUT /v1/config —
+   * multi-GPU selection, and VRAM/RAM budget. Persists via PUT /v2/node/config —
    * no hard reload required (mirrors Unsloth's hardware info + engine toggles).
    */
   import SliderField from '$lib/components/SliderField.svelte';
   import { appStore } from '$lib/store.svelte';
-  import { formatGb } from '$lib/format-transfer';
+  import { formatGib, selectedCapacity } from '$lib/format-memory';
 
   type Props = {
     /** When true, backend switch is locked (cluster already live). */
@@ -16,6 +17,21 @@
   };
 
   let { lockBackend = false, onChanged }: Props = $props();
+  const sharedMemory = $derived(
+    appStore.gpuUnifiedMemory ?? (
+      appStore.status?.capacity?.unified_memory === true ||
+      appStore.status?.members?.[appStore.status?.node_id ?? '']?.unified_memory === true
+    )
+  );
+  // "Selected VRAM capacity" counts discrete accelerators; an integrated
+  // adapter shares system RAM, so it is listed but not counted as VRAM when a
+  // discrete card is selected. An integrated-only machine falls back to it.
+  const selectedVram = $derived.by(() => {
+    const selected = appStore.gpus.filter((g) => appStore.selectedGpuIds.includes(g.index));
+    const discrete = selected.filter((g) => !g.integrated);
+    const counted = discrete.length > 0 ? discrete : selected;
+    return formatGib(selectedCapacity(counted, counted.map((g) => g.index)));
+  });
 
   function afterChange() {
     onChanged?.();
@@ -46,22 +62,36 @@
       <select
         id="hw-backend"
         class="field mono"
-        value={appStore.accelBackend ?? appStore.allowedBackends[0]}
+        value={appStore.accelBackend ?? ''}
         disabled={lockBackend || !!appStore.busy}
         onchange={(e) => {
           const v = (e.currentTarget as HTMLSelectElement).value;
-          if (v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan') {
+          if (v === '') {
+            void appStore.setAccelBackend(null).then(afterChange);
+          } else if (v === 'metal' || v === 'cuda' || v === 'rocm' || v === 'vulkan') {
             void appStore.setAccelBackend(v).then(afterChange);
           }
         }}
       >
+        <option value="">auto (all devices)</option>
         {#each appStore.allowedBackends as b}
           <option value={b}>{appStore.accelBackendLabel(b)}</option>
         {/each}
       </select>
       <p class="mono text-[10px]" style="color: var(--muted)">
-        Probed {appStore.probedBackend}
-        {#if lockBackend} · switch before Start{/if}
+        Probed {appStore.probedBackend}. RPC clusters may mix Metal, CUDA, ROCm, and Vulkan.
+        {#if lockBackend} Switch before Start.{/if}
+      </p>
+    {/if}
+
+    {#if appStore.gpuBackendWarning}
+      <p class="mono text-[11px]" style="color: var(--warn, #b80)">
+        {appStore.gpuBackendWarning}
+      </p>
+    {/if}
+    {#if appStore.installedBackends.length > 0}
+      <p class="mono text-[10px]" style="color: var(--muted)">
+        Installed on this node: {appStore.installedBackends.join(', ')}
       </p>
     {/if}
 
@@ -84,14 +114,45 @@
             />
             <span>
               [{g.index}] {g.name}
-              <span style="color: var(--muted)"> {formatGb(g.vram_bytes ?? null, 1)}</span>
+              {#if g.integrated}
+                <span style="color: var(--muted)">
+                  · integrated · shares system RAM{appStore.selectedGpuIds.includes(g.index) ? '' : ' · not configured'}
+                </span>
+              {:else if sharedMemory}
+                <span style="color: var(--muted)">
+                  · shared capacity {formatGib(selectedCapacity([g], [g.index]))}
+                </span>
+              {:else}
+                <span style="color: var(--muted)">
+                  · VRAM capacity {formatGib(selectedCapacity([g], [g.index]))}
+                </span>
+              {/if}
             </span>
           </label>
         {/each}
       </div>
-    {:else}
+      {#if sharedMemory}
+        <p class="mono text-[10px]" style="color: var(--muted)">
+          Shared GPU capacity uses system RAM; it is not additional VRAM.
+        </p>
+      {:else}
+        <p class="mono text-[11px]" style="color: var(--muted)">
+          Selected VRAM capacity: {selectedVram}
+        </p>
+      {/if}
+    {:else if !appStore.gpuBackendWarning}
       <p class="mono text-[11px]" style="color: var(--muted)">
         No local GPUs detected — inference will fall back to CPU layers.
+      </p>
+      {#if appStore.gpuProbeError}
+        <ErrorMessage source="gpu-probe" message={appStore.gpuProbeError} />
+        <p class="mono text-[10px]" style="color: var(--muted)">
+          Run: {appStore.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'}
+        </p>
+      {/if}
+    {:else}
+      <p class="mono text-[10px]" style="color: var(--muted)">
+        Run: {appStore.gpuInstallHint || 'python scripts/install.py && python scripts/install.py --check'}
       </p>
     {/if}
 

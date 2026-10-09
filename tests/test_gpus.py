@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 import typer
+from fastapi.testclient import TestClient
+
+from kllm.agent.services.gpus import ResolvedGpuSelection
+from kllm.core.gpu_selection import GpuDeviceInput, GpuSelection
 
 
 @pytest.fixture()
@@ -12,15 +16,17 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.state as state_mod
     import kllm.agent as agent_mod
+    import kllm.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
     if not agent_mod.STATE.node_id:
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
-    return TestClient(agent_mod.app), agent_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod
+    test_client.close()
 
 
 FAKE_GPUS = {
@@ -55,11 +61,9 @@ def test_get_gpus(client, monkeypatch):
     data = r.json()
     assert data["backend"] == "cuda"
     assert data["probed_backend"] == "cuda"
-    from kllm.accel import allowed_accel_backends
+    from kllm.accel import selectable_accel_backends
 
-    assert data["allowed_backends"] == allowed_accel_backends(
-        data["probed_backend"], data["gpus"]
-    )
+    assert data["allowed_backends"] == selectable_accel_backends()
     assert len(data["gpus"]) == 2
 
 
@@ -74,11 +78,6 @@ def test_put_config_accel_backend(client, monkeypatch):
         }
 
     monkeypatch.setattr(agent.native, "list_gpus", fake_list)
-    monkeypatch.setattr(
-        agent,
-        "allowed_accel_backends",
-        lambda probed, gpus=None, platform=None: ["metal", "vulkan"],
-    )
     r = c.put("/v1/config", json={"device": "gpu", "accel_backend": "vulkan"})
     assert r.status_code == 200
     assert r.json()["accel_backend"] == "vulkan"
@@ -88,7 +87,8 @@ def test_put_config_accel_backend(client, monkeypatch):
     assert r.json()["accel_backend"] == "vulkan"
 
     r = c.put("/v1/config", json={"device": "gpu", "accel_backend": "cuda"})
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.json()["accel_backend"] == "cuda"
 
     r = c.put("/v1/config", json={"device": "gpu", "accel_backend": None})
     assert r.status_code == 200
@@ -203,6 +203,215 @@ def test_start_rejects_unknown_gpu(client, monkeypatch):
     assert "unknown gpu_ids" in r.json()["detail"]
 
 
+MIXED_GPUS = {
+    "backend": "vulkan",
+    "probed_backend": "vulkan",
+    "gpus": [
+        {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": 16 * 1024**3},
+        {"index": 1, "name": "AMD Radeon(TM) Graphics", "vram_bytes": 48 * 1024**3},
+    ],
+}
+
+
+def test_start_defaults_to_discrete_gpus_only(client, monkeypatch):
+    c, agent = client
+    with (
+        patch.object(agent.native, "list_gpus", return_value=MIXED_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 64 * 1024**3,
+                "available_ram_bytes": 32 * 1024**3,
+                "vram_bytes": 16 * 1024**3,
+                "vram_physical_bytes": 64 * 1024**3,
+                "backend": "vulkan",
+                "unified_memory": False,
+            },
+        ),
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="10.0.0.1"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.discovery, "MasterAdvertiser") as Adv,
+    ):
+        Adv.return_value.start = lambda: None
+        Adv.return_value.stop = lambda: None
+        r = c.post("/v1/start", json={"overlay": "none"})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == [0]
+    assert agent.STATE.gpu_ids == [0]
+    mem = agent.STATE.members[agent.STATE.node_id]
+    assert mem["vram_bytes"] == 16 * 1024**3
+    assert [device["index"] for device in mem["devices"]] == [0]
+
+
+EMPTY_GPUS = {
+    "backend": "cpu",
+    "gpus": [],
+    "error": "llama-server is not installed",
+}
+
+
+def test_start_ignores_config_gpu_ids_when_inventory_empty(client, monkeypatch):
+    c, agent = client
+    import importlib
+
+    import kllm.config as config_mod
+
+    importlib.reload(config_mod)
+    config_mod.save_config({"device": "gpu", "gpu_ids": [0]})
+
+    with (
+        patch.object(agent.native, "list_gpus", return_value=EMPTY_GPUS),
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 16 * 1024**3,
+                "vram_bytes": None,
+                "backend": "metal",
+            },
+        ),
+        patch.object(agent.netsec, "pick_rpc_bind_host", return_value="10.0.0.1"),
+        patch.object(
+            agent.netsec,
+            "ensure_rpc_firewall",
+            return_value={"ok": True, "applied": False, "warning": None},
+        ),
+        patch.object(agent.discovery, "MasterAdvertiser") as Adv,
+    ):
+        Adv.return_value.start = lambda: None
+        Adv.return_value.stop = lambda: None
+        r = c.post("/v1/start", json={"overlay": "none"})
+    assert r.status_code == 200
+    assert r.json()["gpu_ids"] == []
+    assert agent.STATE.gpu_ids == []
+
+
+def test_install_recovery_command_matches_platform(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod.sys, "platform", "win32")
+    windows = native_mod.install_recovery_command()
+    assert windows == "python scripts/install.py && python scripts/install.py --check"
+    assert "metal" not in windows
+
+    monkeypatch.setattr(native_mod.sys, "platform", "darwin")
+    macos = native_mod.install_recovery_command()
+    assert macos.startswith("python scripts/install.py --backend metal && ")
+
+
+def test_list_gpus_reports_missing_native(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "_NATIVE", None)
+    monkeypatch.setattr(native_mod, "_IMPORT_ERROR", ImportError("cannot import name '_native'"))
+    data = native_mod.list_gpus()
+    assert data["gpus"] == []
+    assert data["backend"] == "cpu"
+    assert "kllm._native extension is not built" in data["error"]
+    assert "cannot import name '_native'" in data["error"]
+
+
+def test_start_rejects_explicit_gpu_ids_when_inventory_empty(client, monkeypatch):
+    c, agent = client
+    with patch.object(agent.native, "list_gpus", return_value=EMPTY_GPUS):
+        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [0]})
+    assert r.status_code == 503
+    detail = r.json()["detail"]
+    assert "no GPUs available" in detail
+    assert "llama-server is not installed" in detail
+    assert "install.py" in detail
+
+
+def test_list_gpus_empty_metal_inventory_sets_error(monkeypatch, tmp_path):
+    import kllm.native as native_mod
+
+    binary = tmp_path / "llama-server"
+    binary.write_text("stub", encoding="utf-8")
+
+    class FakeDev:
+        index = 0
+        name = "Apple M1 Pro"
+        vram_bytes = 16 * 1024**3
+
+    class FakeNative:
+        @staticmethod
+        def list_gpus():
+            return ([FakeDev()], "metal")
+
+    monkeypatch.setattr(native_mod, "_NATIVE", FakeNative())
+    monkeypatch.setattr(native_mod, "resolve_llama_server", lambda rr=None: str(binary))
+    monkeypatch.setattr(
+        native_mod,
+        "binary_capabilities",
+        lambda *a, **k: {
+            "devices": [],
+            "binary_version": "test",
+            "metal_init_failed": True,
+        },
+    )
+    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setenv("KLLM_ACCEL_BACKEND", "metal")
+
+    data = native_mod.list_gpus()
+    assert data["gpus"] == []
+    assert "error" in data
+    assert "Metal" in data["error"]
+
+
+def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
+    import kllm.native as native_mod
+
+    binary = tmp_path / "llama-server"
+    binary.write_text("stub", encoding="utf-8")
+
+    class FakeDev:
+        index = 0
+        name = "Apple GPU"
+        vram_bytes = 16 * 1024**3
+
+    class FakeNative:
+        @staticmethod
+        def list_gpus():
+            return ([FakeDev()], "metal")
+
+    monkeypatch.setattr(native_mod, "_NATIVE", FakeNative())
+    monkeypatch.setattr(native_mod, "resolve_llama_server", lambda rr=None: str(binary))
+    monkeypatch.setattr(
+        native_mod,
+        "binary_capabilities",
+        lambda *a, **k: {
+            "devices": [
+                {
+                    "index": 0,
+                    "device": "MTL0",
+                    "name": "Apple GPU",
+                    "backend": "metal",
+                    "vram_bytes": 16 * 1024**3,
+                    "free_bytes": 8 * 1024**3,
+                }
+            ],
+            "binary_version": "test",
+            "metal_init_failed": False,
+        },
+    )
+    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setenv("KLLM_ACCEL_BACKEND", "vulkan")
+
+    data = native_mod.list_gpus()
+    assert len(data["gpus"]) == 1
+    assert data["gpus"][0]["backend"] == "metal"
+    assert data["actual_backend"] == "metal"
+    assert data["requested_backend"] == "vulkan"
+    assert data["backend_warning"]
+    assert "using metal" in data["backend_warning"]
+
+
 def test_gpu_visibility_env():
     from kllm.agent import _gpu_visibility_env
 
@@ -215,14 +424,17 @@ def test_gpu_visibility_env():
     assert _gpu_visibility_env("cuda", []) == {}
 
 
-def test_join_passes_gpu_env(client, monkeypatch):
+@pytest.mark.unit
+def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monkeypatch):
     c, agent = client
+    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent, "_worker_post_heartbeat", lambda: None)
     from kllm.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")
     captured: dict = {}
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765):
         return [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
 
     class FakeResp:
@@ -244,6 +456,17 @@ def test_join_passes_gpu_env(client, monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def get(self, *a, **k):
+            return type(
+                "HealthResponse",
+                (),
+                {
+                    "status_code": 200,
+                    "raise_for_status": lambda self: None,
+                    "json": lambda self: {"control_protocol": 2},
+                },
+            )()
+
         def post(self, url, *a, **k):
             captured["payload"] = k.get("json")
             return FakeResp()
@@ -260,7 +483,14 @@ def test_join_passes_gpu_env(client, monkeypatch):
             "ensure_rpc_firewall",
             return_value={"ok": True, "applied": False, "warning": None},
         ),
-        patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS),
+        patch.object(
+            agent.native,
+            "list_gpus",
+            return_value={
+                **FAKE_GPUS,
+                "gpus": [{**gpu, "device": f"CUDA{gpu['index']}"} for gpu in FAKE_GPUS["gpus"]],
+            },
+        ),
         patch.object(
             agent.native,
             "probe_capacity",
@@ -274,9 +504,392 @@ def test_join_passes_gpu_env(client, monkeypatch):
         patch.object(agent.native, "start_worker", side_effect=fake_start_worker),
         patch("httpx.Client", FakeClient),
     ):
-        r = c.post("/v1/join", json={"key": "secret", "overlay": "none", "gpu_ids": [0]})
-    assert r.status_code == 200
+        tc = TestClient(agent.app)
+        r = tc.post("/v1/join", json={"key": "secret", "overlay": "none", "gpu_ids": [0]})
+    assert r.status_code == 200, r.text
     assert r.json()["gpu_ids"] == [0]
     assert captured["payload"]["gpu_ids"] == [0]
     assert captured["payload"]["vram_bytes"] == 24 * 1024**3
-    assert captured["worker_kwargs"]["env"] == {"CUDA_VISIBLE_DEVICES": "0"}
+    assert "worker_kwargs" not in captured
+    assert agent.STATE.process_pid is None
+    assert agent.STATE.members[agent.STATE.node_id]["rpc_devices"] == []
+    assert agent.STATE.members[agent.STATE.node_id]["rpc_capabilities"] == [
+        {"index": 0, "device": "CUDA0", "backend": "cuda", "memory_kind": "gpu"},
+        {"index": 1, "device": "CPU", "backend": "cpu", "memory_kind": "ram"},
+    ]
+
+
+LLAMA_VRAM = 17_095_983_104
+REGISTRY_VRAM = LLAMA_VRAM + 536_870_912
+
+
+def _snap():
+    return SimpleNamespace(
+        backend="vulkan",
+        total_ram_bytes=32 * 1024**3,
+        available_ram_bytes=8 * 1024**3,
+        vram_bytes=REGISTRY_VRAM,
+        hostname="box",
+    )
+
+
+def test_probe_capacity_vram_is_the_llama_device_total(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
+    monkeypatch.setattr(
+        native_mod,
+        "list_gpus",
+        lambda: {
+            "backend": "vulkan",
+            "gpus": [
+                {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_bytes": LLAMA_VRAM},
+            ],
+        },
+    )
+    assert native_mod.probe_capacity()["vram_bytes"] == LLAMA_VRAM
+
+
+def test_probe_capacity_reuses_one_native_gpu_observation(monkeypatch):
+    import kllm.native as native_mod
+
+    calls = []
+
+    class Native:
+        def _probe_capacity_and_gpus(self):
+            calls.append("bundle")
+            return _snap(), [SimpleNamespace(index=0)], "vulkan"
+
+        def list_gpus(self):
+            raise AssertionError("bundle must avoid a second native GPU probe")
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: Native())
+    monkeypatch.setattr(
+        native_mod,
+        "_list_gpus_from_probe",
+        lambda devices, backend: {
+            "backend": backend,
+            "gpus": [{"vram_bytes": LLAMA_VRAM}],
+        },
+    )
+    result = native_mod.probe_capacity()
+    assert calls == ["bundle"]
+    assert result["vram_bytes"] == LLAMA_VRAM
+
+
+def test_probe_capacity_without_a_gpu_is_unknown(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
+    monkeypatch.setattr(native_mod, "list_gpus", lambda: {"backend": "cpu", "gpus": []})
+    assert native_mod.probe_capacity()["vram_bytes"] is None
+
+
+def test_probe_capacity_keeps_the_registry_sum_when_inventory_fails(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
+    monkeypatch.setattr(
+        native_mod,
+        "list_gpus",
+        lambda: {
+            "backend": "cpu",
+            "gpus": [],
+            "error": "llama-server is not installed",
+        },
+    )
+    assert native_mod.probe_capacity()["vram_bytes"] == REGISTRY_VRAM
+
+
+def test_probe_capacity_classifies_registry_adapters_when_inventory_fails(monkeypatch):
+    import kllm.native as native_mod
+
+    class Native:
+        def _probe_capacity_and_gpus(self):
+            return (
+                _snap(),
+                [
+                    SimpleNamespace(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=16 * 1024**3),
+                    SimpleNamespace(
+                        index=1, name="AMD Radeon(TM) Graphics", vram_bytes=48 * 1024**3
+                    ),
+                ],
+                "vulkan",
+            )
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: Native())
+    monkeypatch.setattr(
+        native_mod,
+        "_list_gpus_from_probe",
+        lambda devices, backend: {
+            "backend": "cpu",
+            "gpus": [],
+            "error": "llama-server is not installed",
+        },
+    )
+    result = native_mod.probe_capacity()
+    assert result["vram_bytes"] == 16 * 1024**3
+    assert result["vram_physical_bytes"] == 64 * 1024**3
+
+
+def test_probe_capacity_reports_effective_total_for_mixed_devices(monkeypatch):
+    import kllm.native as native_mod
+
+    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": None})
+
+    class Native:
+        def _probe_capacity_and_gpus(self):
+            return (
+                _snap(),
+                [
+                    SimpleNamespace(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=16 * 1024**3),
+                    SimpleNamespace(
+                        index=1, name="AMD Radeon(TM) Graphics", vram_bytes=48 * 1024**3
+                    ),
+                ],
+                "vulkan",
+            )
+
+    monkeypatch.setattr(native_mod, "require_native", lambda: Native())
+    monkeypatch.setattr(
+        native_mod,
+        "_list_gpus_from_probe",
+        lambda devices, backend: {
+            "backend": "vulkan",
+            "probed_backend": "vulkan",
+            "requested_backend": None,
+            "gpus": [
+                {
+                    "index": 0,
+                    "device": "Vulkan0",
+                    "name": "AMD Radeon RX 9070 XT",
+                    "backend": "vulkan",
+                    "vram_bytes": 16 * 1024**3,
+                    "integrated": False,
+                },
+                {
+                    "index": 1,
+                    "device": "Vulkan1",
+                    "name": "AMD Radeon(TM) Graphics",
+                    "backend": "vulkan",
+                    "vram_bytes": 48 * 1024**3,
+                    "integrated": True,
+                },
+            ],
+        },
+    )
+    result = native_mod.probe_capacity()
+    assert result["vram_bytes"] == 16 * 1024**3
+    assert result["vram_physical_bytes"] == 64 * 1024**3
+    assert result["gpu_ids"] == [0]
+    assert result["unified_memory"] is False
+
+
+def test_list_gpus_from_probe_flags_integrated_adapters(monkeypatch, tmp_path):
+    import kllm.native as native_mod
+
+    monkeypatch.delenv("KLLM_ACCEL_BACKEND", raising=False)
+    monkeypatch.setattr(
+        "kllm.config.load_config", lambda: {"unified_memory": None, "accel_backend": None}
+    )
+    binary = tmp_path / "llama-server"
+    binary.write_text("stub", encoding="utf-8")
+
+    class FakeDev:
+        def __init__(self, index: int, name: str, vram: int) -> None:
+            self.index = index
+            self.name = name
+            self.vram_bytes = vram
+
+    class FakeNative:
+        @staticmethod
+        def list_gpus():
+            return (
+                [
+                    FakeDev(0, "AMD Radeon RX 9070 XT", 16 * 1024**3),
+                    FakeDev(1, "AMD Radeon(TM) Graphics", 48 * 1024**3),
+                ],
+                "vulkan",
+            )
+
+    monkeypatch.setattr(native_mod, "_NATIVE", FakeNative())
+    monkeypatch.setattr(native_mod, "resolve_llama_server", lambda rr=None: str(binary))
+    monkeypatch.setattr(
+        native_mod,
+        "binary_capabilities",
+        lambda *args, **kwargs: {
+            "devices": [
+                {
+                    "index": 0,
+                    "device": "Vulkan0",
+                    "name": "AMD Radeon RX 9070 XT",
+                    "backend": "vulkan",
+                    "vram_bytes": 16 * 1024**3,
+                    "free_bytes": 16 * 1024**3,
+                },
+                {
+                    "index": 1,
+                    "device": "Vulkan1",
+                    "name": "AMD Radeon(TM) Graphics",
+                    "backend": "vulkan",
+                    "vram_bytes": 48 * 1024**3,
+                    "free_bytes": 48 * 1024**3,
+                },
+            ],
+            "binary_version": "test",
+            "metal_init_failed": False,
+        },
+    )
+    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+
+    data = native_mod.list_gpus()
+    assert [device["integrated"] for device in data["gpus"]] == [False, True]
+    assert data["unified_memory"] is False
+
+
+def test_refresh_local_capacity_updates_member_vram(client):
+    c, agent = client
+    agent.STATE.role = "master"
+    agent.STATE.members[agent.STATE.node_id] = {
+        "role": "master",
+        "node_id": agent.STATE.node_id,
+        "vram_bytes": None,
+        "devices": [],
+    }
+    with (
+        patch.object(
+            agent.native,
+            "probe_capacity",
+            return_value={
+                "total_ram_bytes": 32 * 1024**3,
+                "available_ram_bytes": 8 * 1024**3,
+                "requested_backend": None,
+                "unified_memory": False,
+                "binary_version": "v",
+            },
+        ),
+        patch.object(
+            agent,
+            "_resolve_gpu_selection",
+            return_value=ResolvedGpuSelection(
+                GpuSelection((0,), "vulkan", LLAMA_VRAM),
+                (GpuDeviceInput(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=LLAMA_VRAM),),
+            ),
+        ) as resolve,
+    ):
+        agent._refresh_local_capacity()
+    assert resolve.call_args.kwargs["listed"]["binary_version"] == "v"
+    member = agent.STATE.members[agent.STATE.node_id]
+    assert member["vram_bytes"] == LLAMA_VRAM
+    assert member["devices"][0]["vram_bytes"] == LLAMA_VRAM
+    assert "capacity_probe_error" not in member
+
+
+def test_refresh_local_capacity_records_probe_failure(client):
+    from fastapi import HTTPException
+
+    _client, agent = client
+    node_id = agent.STATE.node_id
+    agent.STATE.role = "worker"
+    agent.STATE.members[node_id] = {"role": "worker", "node_id": node_id}
+    detail = (
+        "no GPUs available; cannot select [0] (timed out). "
+        "run `llama-server --list-devices` once manually"
+    )
+    with (
+        patch.object(agent.native, "probe_capacity", return_value={"error": "timed out"}),
+        patch.object(agent, "_resolve_gpu_selection", side_effect=HTTPException(503, detail)),
+    ):
+        agent._refresh_local_capacity()
+    assert agent.STATE.members[node_id]["capacity_probe_error"] == detail
+
+
+def test_capacity_service_rederives_auto_selection_without_integrated(tmp_path, monkeypatch):
+    """An auto selection recorded by an older build drops its integrated adapter."""
+    from kllm.agent.services.capacity import CapacityService
+    from kllm.agent.services.gpus import GpuSelectionService
+    from kllm.state import ClusterState
+
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
+    state = ClusterState.load()
+    state.node_id = "box"
+    state.role = "master"
+    state.gpu_ids = [0, 1]
+    member: dict = {"role": "master", "node_id": "box", "vram_bytes": None, "devices": []}
+    state.members["box"] = member
+
+    probe = {
+        "total_ram_bytes": 64 * 1024**3,
+        "available_ram_bytes": 32 * 1024**3,
+        "vram_bytes": 16 * 1024**3,
+        "vram_physical_bytes": 64 * 1024**3,
+        "backend": "vulkan",
+        "unified_memory": False,
+        "gpus": MIXED_GPUS["gpus"],
+    }
+    gpu_service = GpuSelectionService(
+        list_gpus=lambda: MIXED_GPUS,
+        configured_gpu_ids=lambda: None,
+        install_recovery_command=lambda: "install",
+    )
+    service = CapacityService(
+        state=lambda: state,
+        list_gpus=lambda: MIXED_GPUS,
+        probe_capacity=lambda: probe,
+        resolve_gpu_selection=gpu_service.resolve,
+        pick_rpc_bind_host=lambda *_args, **_kwargs: "10.0.0.1",
+        tracked_process_start=lambda: None,
+        configured_gpu_ids=lambda: None,
+    )
+
+    service.refresh_local()
+
+    assert state.gpu_ids == [0]
+    assert member["vram_bytes"] == 16 * 1024**3
+    assert [device["index"] for device in member["devices"]] == [0]
+    assert member["unified_memory"] is False
+
+
+def test_capacity_service_keeps_explicit_selection_including_integrated(tmp_path, monkeypatch):
+    """An explicitly saved gpu_ids list is honored even when it includes an iGPU."""
+    from kllm.agent.services.capacity import CapacityService
+    from kllm.agent.services.gpus import GpuSelectionService
+    from kllm.state import ClusterState
+
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
+    state = ClusterState.load()
+    state.node_id = "box"
+    state.role = "master"
+    state.gpu_ids = [0, 1]
+    member: dict = {"role": "master", "node_id": "box", "vram_bytes": None, "devices": []}
+    state.members["box"] = member
+
+    probe = {
+        "total_ram_bytes": 64 * 1024**3,
+        "available_ram_bytes": 32 * 1024**3,
+        "vram_bytes": 16 * 1024**3,
+        "vram_physical_bytes": 64 * 1024**3,
+        "backend": "vulkan",
+        "unified_memory": False,
+        "gpus": MIXED_GPUS["gpus"],
+    }
+    gpu_service = GpuSelectionService(
+        list_gpus=lambda: MIXED_GPUS,
+        configured_gpu_ids=lambda: [0, 1],
+        install_recovery_command=lambda: "install",
+    )
+    service = CapacityService(
+        state=lambda: state,
+        list_gpus=lambda: MIXED_GPUS,
+        probe_capacity=lambda: probe,
+        resolve_gpu_selection=gpu_service.resolve,
+        pick_rpc_bind_host=lambda *_args, **_kwargs: "10.0.0.1",
+        tracked_process_start=lambda: None,
+        configured_gpu_ids=lambda: [0, 1],
+    )
+
+    service.refresh_local()
+
+    assert state.gpu_ids == [0, 1]
+    assert member["vram_bytes"] == 64 * 1024**3
+    assert [device["index"] for device in member["devices"]] == [0, 1]

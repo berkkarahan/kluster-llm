@@ -2,20 +2,11 @@
 
 **Repository:** https://github.com/berkkarahan/kluster-llm
 
-Distributed LLM inference across **Windows, Linux, and macOS**, pooling Metal / CUDA / ROCm / Vulkan (and CPU spill) so a single GGUF can span heterogeneous nodes.
+Distributed LLM inference across Windows, Linux, and macOS. Kluster LLM pools Metal, CUDA, ROCm, Vulkan, and CPU memory through llama.cpp RPC so a GGUF model can span heterogeneous nodes.
 
----
+llama.cpp RPC is the supported inference engine. It uses pipeline layer splitting between a master and one or more `rpc-server` workers. See [docs/engine-decision.md](docs/engine-decision.md) for the engine and security rationale.
 
-## Engine Tiers
-
-| Tier | Engine | Status | Architecture |
-|------|--------|--------|--------------|
-| Stable | `llama.cpp` RPC | Production | Layer-pipeline split via coordinator + `rpc-server` workers |
-| Experimental | `Prima.cpp` (Halda scheduler) | Alpha | Automatic workload distribution across mixed CPUs/GPUs, mmap offload, <10% memory pressure |
-
-**Decision:** llama.cpp RPC remains the production engine for the full OS × backend matrix. See [docs/engine-decision.md](docs/engine-decision.md).
-
-### Supported platforms
+## Supported platforms
 
 | | Metal | CUDA | ROCm | Vulkan | CPU |
 |--|-------|------|------|--------|-----|
@@ -23,226 +14,165 @@ Distributed LLM inference across **Windows, Linux, and macOS**, pooling Metal / 
 | **Linux** | — | yes | yes | fallback | yes |
 | **Windows** | — | yes | not required | yes (AMD default) | yes |
 
-Preference per node: NVIDIA → CUDA then Vulkan; AMD → ROCm (Linux) then Vulkan; Apple → Metal.
+Backend preference per node is NVIDIA CUDA then Vulkan, AMD ROCm on Linux then Vulkan, and Apple Metal.
 
----
+## Repository structure
 
-## Repository Structure
-
-```
+```text
 kllm/
-├── python/kllm/              # Cross-platform CLI + agent (Python)
-├── crates/kllm-native/       # HW probe, planner, process supervisor (Rust)
-├── coordinator-macos/          # Legacy macOS scripts (fallback)
-├── worker-windows/             # Legacy Windows scripts (fallback)
-├── network-config/             # High-speed link setup guides
-├── docs/                       # Guides (includes docs/cli.md)
+├── src/kllm/                 # Cross-platform CLI and control agent
+├── crates/kllm-native/       # Hardware probe, planner, and process supervisor
+├── scripts/                  # Python installer, builder, and validation tools
+├── dashboard/                # Svelte dashboard
+├── network-config/           # High-speed link setup guides
+├── docs/                     # Operations and CLI documentation
+├── tests/                    # Python test suite
 ├── pyproject.toml
-├── .gitignore
-├── LICENSE
-└── README.md
+└── llama-release             # Pinned stable llama.cpp release
 ```
 
----
+## Quick start
 
-## Quick Start
-
-### Cluster CLI (recommended)
-
-One-shot install ([uv](https://docs.astral.sh/uv/) pins Python via `.python-version`). Pulls Rust/Node if missing, builds `kllm`, fetches/builds `llama-server` + `rpc-server`, and installs WireGuard for optional overlay:
+Run the installer on every node. It installs the CLI, builds the native extension and dashboard, fetches or builds the pinned llama.cpp binaries, and optionally installs WireGuard:
 
 ```bash
 uv run python scripts/install.py
-# Or: python scripts/install.py  (uses uv for .venv when available)
-
-# CLI without activating .venv:
-uv run kllm start
-# Ephemeral (from repo checkout):
-uvx --from . kllm status
-
-# Optional: source .venv/bin/activate  (Windows: .\.venv\Scripts\Activate.ps1)
-
-# Master
-kllm start
-kllm model download 'org/repo:Q4_K_M'
-
-# Worker (another machine — run install.py there too)
-kllm join --key '<join-key-from-master>'
-
-# Master
-kllm model distribute model.Q4_K_M.gguf
-# LAN pull tree: finished workers seed others
-kllm run --model model.Q4_K_M.gguf
-kllm ui
-# optional: coding harness against the cluster API
-kllm connect claude
-# optional RPC overlay (WireGuard installed by install.py):
-# kllm start --overlay wireguard
+# Or, when uv is not yet available:
+python scripts/install.py
 ```
 
-CLI/UI-only rebuild: `python scripts/build.py`. Flags: `--backend vulkan|cuda|metal|cpu`, `--skip-wireguard`, `--prefer-prebuilt`.
+The installer stages `llama-server`, `rpc-server`, and their shared libraries in `vendor/bin`. To rebuild only the CLI and dashboard, run `uv run python scripts/build.py`.
 
-Dashboard is built by `install.py`; or manually `cd dashboard && npm install && npm run build`, then `kllm ui` → `http://127.0.0.1:18765/`.
+Start the master:
 
-See [docs/cli.md](docs/cli.md) for the full command reference. **LLM agents:** follow [docs/agent-install.md](docs/agent-install.md) (also linked from [AGENTS.md](AGENTS.md)) for the full install checklist. Low-level shell scripts below remain available as a fallback.
-
-### Prerequisites
-
-- **OS**: Windows, Linux, and/or macOS nodes in one cluster (mixed OS supported)
-- **macOS**: Apple Silicon with Metal (≥16 GB unified memory recommended)
-- **Linux**: NVIDIA (CUDA preferred) and/or AMD (ROCm preferred, Vulkan fallback)
-- **Windows**: NVIDIA (CUDA preferred) and/or AMD (**Vulkan** default); ROCm not required
-- **Network**: Dedicated 10GbE link or Thunderbolt IP bridge (sub-millisecond latency); keep RPC on a private LAN
-- **Model**: GGUF quantized LLM (Q4_K_M or Q5_K_M recommended)
-
----
-
-### Step 1 — Network Setup
-
-Set static IPs on your dedicated high-speed link. DHCP reassignments during long inference runs can collapse the RPC state machine.
-
-**macOS (dedicated interface `enX`):**
 ```bash
-sudo networksetup -setstaticnetworksetup enX 192.168.10.1 255.255.255.0 "" ""
+uv run kllm start
 ```
 
-**Windows (dedicated NIC `Ethernet1`):**
+Install the project on each worker, then join it using the key printed by the master:
+
+```bash
+uv run kllm join --key '<join-key-from-master>'
+```
+
+If mDNS discovery is unavailable, add `--master <master-lan-ip>`. For shared networks, start and join with `--overlay wireguard` on every node.
+
+Download and run a model on the master:
+
+```bash
+uv run kllm model download 'org/repo:Q4_K_M'
+uv run kllm plan --model model.Q4_K_M.gguf
+uv run kllm run --model model.Q4_K_M.gguf
+uv run kllm ui
+```
+
+The GGUF remains on the master. Workers contribute memory and compute through `rpc-server`; tensors are transferred automatically. The dashboard is served at `http://127.0.0.1:18765/`.
+
+On Home, select a node to inspect measured process/host/device usage and recorded 15-minute, one-hour or 24-hour history. See [node usage monitor](docs/node-usage-monitor.md) for retention, availability and private-cluster access details.
+
+Optional coding-harness integration:
+
+```bash
+uv run kllm connect claude
+```
+
+See [docs/cli.md](docs/cli.md) for the complete command reference. Automated agents should follow [docs/agent-install.md](docs/agent-install.md).
+
+Portable [agent skills](skills/README.md) cover operations and repository development,
+including guided Windows/macOS/Linux 10GbE networking. Install project discovery
+copies for supported agents with `python3 scripts/install_skills.py`; preview with
+`--dry-run`. CONNECT sessions load the library through `--kllm-skills`.
+
+## Network requirements
+
+- Keep RPC port 50052 on a private LAN or WireGuard overlay. Upstream llama.cpp RPC has no authentication.
+- Prefer a dedicated 10GbE or Thunderbolt IP link for multi-node inference.
+- Use stable IP addresses on dedicated links; DHCP changes interrupt active RPC sessions.
+- Never expose port 50052 publicly.
+
+Example static addresses for a dedicated link:
+
+```bash
+# macOS; replace enX with the dedicated interface
+sudo networksetup -setmanual "Thunderbolt Bridge" 192.168.10.1 255.255.255.0 ""
+```
+
 ```powershell
+# Windows; replace Ethernet1 with the dedicated interface
 New-NetIPAddress -IPAddress 192.168.10.2 -PrefixLength 24 -InterfaceAlias "Ethernet1"
 ```
 
-See [network-config/10gbe-bridging-guide.md](network-config/10gbe-bridging-guide.md) for full Thunderbolt bridging and 10GbE instructions.
+See [network-config/10gbe-bridging-guide.md](network-config/10gbe-bridging-guide.md) for detailed network setup.
 
----
+## Runtime behavior
 
-### Step 2 — Worker Initialization (Windows)
+Automatic placement prefers master-local accelerators when the model fits, then a single remote accelerator, then pooled devices. Layer counts, GPU offload, and RPC endpoints are calculated from probed capacity and GGUF metadata. Use `kllm plan` to inspect the resolved placement before launching.
 
-On the Windows host:
+Common controls are available through `kllm run` and the dashboard:
 
-```powershell
-# One-time setup
-.\worker-windows\setup_windows.ps1
+- Context length and KV-cache precision
+- CPU threads, batch size, and micro-batch size
+- MoE expert offload (`--moe-offload`): scatter a mixture-of-experts model's expert weights across nodes when it cannot fit in GPU memory, keeping attention layers local
+- Accelerator backend and GPU selection
+- Memory budgets and placement weights
+- Additional llama.cpp arguments with validation of planner-owned flags
 
-# Launch worker (legacy script; prefer `kllm join` which binds a private IP)
-.\worker-windows\run_worker.ps1 -IP "192.168.10.2" -Port 50052
-```
+The dashboard always uses `layer` split for RPC workloads; explicit local-only CLI/API requests may use `row` or `tensor` where supported. System Settings reports measured GPU capacity and planner budgets/estimates in GiB, distinguishing GPU memory, CPU RAM, and total memory. See [docs/layer-split-calculator.md](docs/layer-split-calculator.md) and [docs/memory-constraints.md](docs/memory-constraints.md) for placement and memory details.
 
-This downloads the Vulkan/ROCm runtime, fetches the pre-compiled `rpc-server.exe`, and opens TCP 50052 in the Windows Firewall.
+## Development
 
----
-
-### Step 3 — Model Acquisition
-
-Download a quantized GGUF model (example: Llama 3.1 8B Q4_K_M):
+The Makefile is a small convenience wrapper around the maintained workflows:
 
 ```bash
-# From the coordinator host
-cd /path/to/models
-curl -L -o llama3.1-8b-q4_k_m.gguf \
-  "https://huggingface.co/TheBloke/Llama-3.1-8B-Instruct-GGUF/resolve/main/llama-3.1-8b-instruct.Q4_K_M.gguf"
+make install
+make build
+make test
+make hooks
 ```
 
-Model size budget (rough guide):
-| Quant | 8B params | 13B params | 70B params |
-|-------|-----------|------------|------------|
-| Q4_K_M | ~4.7 GB   | ~7.8 GB    | ~41 GB     |
-| Q5_K_M | ~5.5 GB   | ~9.1 GB    | ~48 GB     |
-
----
-
-### Step 4 — Coordinator Execution (macOS)
-
-#### Stable Tier (llama.cpp RPC)
+Equivalent direct commands are preferred on systems without Make:
 
 ```bash
-cd coordinator-macos
-chmod +x setup_mac.sh run_coordinator.sh
-./setup_mac.sh
-
-# Launch coordinator (example: 8B model, worker at 192.168.10.2)
-./run_coordinator.sh \
-  --model /path/to/llama3.1-8b-q4_k_m.gguf \
-  --worker-ip 192.168.10.2 \
-  --worker-port 50052
+npm --prefix dashboard test
+uv run python -m pytest -q
+PYO3_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" cargo test --manifest-path crates/kllm-native/Cargo.toml
+npm --prefix dashboard run check
 ```
 
-The script auto-calculates layer splits based on your Mac's unified memory and the worker's VRAM.
+Python tests use four pytest-xdist workers by default and keep each file on one worker. Run
+them serially with `uv run python -m pytest -n 0`. Dashboard tests run non-browser files with four Node
+workers and the two Chrome-backed files serially to isolate their browser profiles and shared
+SvelteKit state; compare the full suite serially with `npm --prefix dashboard run test:serial`.
+`make test` runs the test suites sequentially before the Rust suite and dashboard check.
 
-#### Experimental Tier (Prima.cpp / Halda)
+Python is managed with uv. After packaging changes, rebuild with `uv run python scripts/build.py` or the full installer rather than relying on `pip install -e .` alone.
+
+`git push` runs Ruff through pre-commit on the Python files in the commits being pushed. Install that hook once per clone:
 
 ```bash
-./run_coordinator_prima.sh \
-  --model /path/to/llama3.1-8b-q4_k_m.gguf \
-  --worker-ip 192.168.10.2 \
-  --worker-port 50052
+uv sync
+uv run pre-commit install
 ```
-
-Halda scheduler automatically distributes layers across Mac CPU+GPU and Windows GPU with mmap disk offload. No manual split calculation needed.
-
----
-
-## Configuration Reference
-
-### Key Flags (Stable Tier — `run_coordinator.sh`)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--split-mode layer` | enforced | Pipeline parallelism — prevents precision drift between Apple Silicon and AMD |
-| `--tensor-split` | auto-calculated | Ratio of layers on Mac vs Windows (see [docs/layer-split-calculator.md](docs/layer-split-calculator.md)) |
-| `--cache-type-k q8_0` | enforced | 8-bit KV cache key quantization — halves KV memory footprint |
-| `--cache-type-v q8_0` | enforced | 8-bit KV cache value quantization — halves KV memory footprint |
-| `-ngl` | auto-calculated | GPU layers. Excess layers spill to system RAM + CPU |
-| `-t` (threads) | `sysctl -n hw.perflevel_sustained.performance` | CPU threads for RAM-spilled layers |
-| `-c` (context) | `4096` | Context window in tokens |
-| `-ub` (micro-batch) | `2` | Micro-batch size — kept small to avoid Apple GPU driver timeouts |
-
-### Key Flags (Experimental Tier — `run_coordinator_prima.sh`)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--scheduler halda` | enforced | Automatic workload distribution |
-| `--mmap-threshold 0.10` | enforced | Keep memory pressure below 10% via mmap offload |
-| `--worker-ip` | required | Windows worker address |
-| `--worker-port` | `50052` | Windows worker port |
-
----
 
 ## Documentation
 
-- **[docs/engine-decision.md](docs/engine-decision.md)** — Why llama.cpp RPC; OS × backend matrix; when to revisit
-- **[docs/cli.md](docs/cli.md)** — Cross-platform `kllm` CLI (start/join, models, planner)
-- **[docs/layer-split-calculator.md](docs/layer-split-calculator.md)** — How to calculate tensor splits between nodes
-- **[docs/memory-constraints.md](docs/memory-constraints.md)** — VRAM/RAM budgeting for common model sizes
-- **[network-config/10gbe-bridging-guide.md](network-config/10gbe-bridging-guide.md)** — Full network setup for 10GbE and Thunderbolt IP bridges
-- **[docs/troubleshooting.md](docs/troubleshooting.md)** — Common failures and RPC notes
+- [Control API v2](docs/control-api-v2.md)
 
----
+- [CLI reference](docs/cli.md)
+- [Agent installation guide](docs/agent-install.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Engine decision and RPC security](docs/engine-decision.md)
+- [Placement and inference](docs/inference-distribution.md)
+- [Memory constraints](docs/memory-constraints.md)
+- [Network configuration](network-config/10gbe-bridging-guide.md)
 
-## Architecture Overview
+## Known limitations
 
-```
-┌─────────────────────┐          10GbE / Thunderbolt          ┌─────────────────────┐
-│  Coordinator (any OS)│ ◄────────── llama.cpp RPC ────────── │  Worker (any OS)     │
-│                     │                                       │                     │
-│  Metal / CUDA /     │   Pipeline-parallel layer split       │  CUDA / ROCm /      │
-│  ROCm / Vulkan / CPU│  (split-mode: layer)                  │  Vulkan / CPU       │
-└─────────────────────┘                                       └─────────────────────┘
-```
-
-Layers are split by pipeline parallelism across mixed backends. KV cache is 8-bit quantized on both sides. See [docs/engine-decision.md](docs/engine-decision.md).
-
----
-
-## Known Limitations
-
-- **Split-mode `layer` is required** across mixed backends (Metal / CUDA / ROCm / Vulkan) — do not use tensor split mode; precision handling differs between backends and can cause output drift.
-- **RPC is LAN-only by default** — upstream llama.cpp RPC has no auth; `kllm` binds a private interface IP and firewalls 50052. Optional `--overlay wireguard` (CLI/dashboard) for join-key gated mesh. Never expose 50052 publicly.
-- **Thunderbolt bridging requires `networksetup` privileges** — run coordinator scripts with `sudo` if your network interface is locked.
-- **Prima.cpp is experimental** — the Halda scheduler may not handle all model architectures; test with Q4_K_M or Q5_K_M quantizations first.
-- **Context length > 8192** with 8-bit KV cache may still exceed memory on smaller systems; reduce `-c` or use a smaller quantization.
-
----
+- Every node must use the same pinned llama.cpp tag; mixed tags break the RPC handshake.
+- RPC is unauthenticated upstream and must remain private.
+- Planning is an estimate for unknown architectures and runtime execution buffers; inspect warnings before launching a tight fit.
+- Large contexts can exhaust KV-cache memory even when model weights fit. Reduce context or use a smaller quantization when needed.
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE).

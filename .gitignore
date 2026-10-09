@@ -1,9 +1,3 @@
-# Build artifacts
-coordinator-macos/llama-server
-worker-windows/rpc-server
-worker-windows/rpc-server.exe
-worker-windows/src/
-
 # Model files (download separately)
 *.gguf
 
@@ -13,7 +7,11 @@ Thumbs.db
 
 # Logs
 *.log
-logs/
+/logs/
+
+# Local benchmark / validation artifacts (compare_inference.py --output)
+/benchmark-*.json
+/artifacts/
 
 # Temp
 *.tmp
@@ -33,23 +31,48 @@ venv/
 dist/
 *.egg-info/
 .pytest_cache/
+.test-tmp-*/
+.upstream-reference/
 target/
 *.pyd
 *.pdb
 *.so
+*.exe
+*.dll
+*.o
+*.a
 .mypy_cache/
 
 # Vendored third-party (cloned by scripts/install.py)
 vendor/
 
 # Editor / agent
+/.codegraph/codegraph.db
 .cursor/
+.opencode/
+.spec-kit-memory/
+.vscode/
+.idea/
 
 # Dashboard
+node_modules/
+build/
+.svelte-kit/
+.vite/
 dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
 
-# Specify
-.specify/
-specs/
+.specify
+.agents
+.claude
+
+# Generated native skill installations and recovery metadata
+/.hermes/
+/.pi/
+/.agents/.kllm-skills-*/
+/.claude/.kllm-skills-*/
+/.cursor/.kllm-skills-*/
+/.opencode/.kllm-skills-*/
+
+worker-windows

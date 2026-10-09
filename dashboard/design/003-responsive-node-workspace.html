@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kluster LLM — Responsive Node Workspace (feature 003 design reference)</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface: #12151a;
+    --surface-2: #181c22;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #2a3038;
+    --accent: #f5c653;
+    --warn: #d29922;
+    --danger: #f85149;
+    --good: #3dd68c;
+    --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.4 var(--font-ui);
+    background-image:
+      linear-gradient(rgba(42, 48, 56, 0.35) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(42, 48, 56, 0.35) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .page { max-width: 1360px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; margin: 26px 0 8px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 18px; max-width: 78ch; }
+  .note { color: var(--muted); font-size: 11px; margin: 8px 0 0; }
+  .frame { border: 1px solid var(--border); background: var(--surface); overflow: hidden; }
+  .frame-label { padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--muted);
+    font: 10px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;
+    display: flex; justify-content: space-between; }
+
+  /* --- App shell: header + remaining-height workspace (matches app.css .app-shell/.app-main) --- */
+  .shell { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+  .topbar { display: flex; align-items: center; gap: 16px; min-height: 33px; padding: 0 12px;
+    border-bottom: 1px solid var(--border); background: var(--surface); }
+  .brand { font: 600 13px var(--font-mono); color: var(--accent); }
+  nav { display: flex; gap: 12px; }
+  nav span { font: 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  nav span[aria-current] { color: var(--fg); }
+  .chips { margin-left: auto; display: flex; gap: 6px; }
+  .chip { border: 1px solid var(--border); padding: 2px 6px; font: 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
+  .chip.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--border)); }
+  .main { min-height: 0; overflow: hidden; }
+  .workspace { height: 100%; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+
+  .toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .btn { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 9px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--fg);
+    font: 11px var(--font-ui); cursor: pointer; }
+  .btn.accent { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); color: var(--accent); }
+  .toolbar .title { font: 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
+  .toolbar .status { font: 11px var(--font-mono); color: var(--muted); }
+  .toolbar .danger { font: 11px var(--font-mono); color: var(--danger); }
+  .actions { margin-left: auto; display: flex; gap: 6px; }
+
+  .topology { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .activity { display: flex; gap: 8px; padding: 5px 10px; color: var(--muted); font: 11px var(--font-mono); }
+
+  /* --- Node map fills the remaining height (no 420px cap, no permanent rails) --- */
+  .map { flex: 1 1 auto; min-height: 200px; display: flex; flex-direction: column; padding: 10px; }
+  .map-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .map-controls .label { font: 11px var(--font-mono); margin-right: 2px; }
+  .graph { flex: 1 1 auto; min-height: 180px; position: relative; overflow: hidden;
+    border: 1px solid var(--border); background-color: var(--bg);
+    background-image: radial-gradient(circle, #424955 0.8px, transparent 0.8px); background-size: 18px 18px; }
+  .world { position: absolute; inset: 0; }
+  .edges { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .node { position: absolute; width: 264px; padding: 8px 10px; background: var(--surface);
+    border: 1px solid var(--border); text-align: left; overflow: hidden; }
+  .node.active { border-color: var(--accent); }
+  .node .fill { position: absolute; left: 0; right: 0; bottom: 0; height: var(--fill, 0%);
+    background: color-mix(in srgb, var(--accent) 14%, transparent); border-top: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); }
+  .node > * { position: relative; z-index: 1; }
+  .row { display: flex; justify-content: space-between; gap: 8px; font: 11px var(--font-mono); overflow-wrap: anywhere; }
+  .row .k { color: var(--muted); flex: 0 0 auto; }
+  .row .v { text-align: right; }
+  .head { display: flex; align-items: baseline; gap: 6px; }
+  .name { font-weight: 600; overflow-wrap: anywhere; }
+  .role { font: 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .ident { font: 10px var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+  .state { font: 10px var(--font-mono); color: var(--muted); }
+  .assign { font: 10px var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+  .node.stale { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
+  .node.stale .state { color: var(--warn); }
+  .node.offline { border-style: dashed; opacity: 0.72; }
+  .node.offline .state { color: var(--danger); }
+  .rels { font: 11px var(--font-mono); color: var(--muted); padding: 8px 2px 0; }
+
+  .list { display: none; }
+  .list-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+    border: 1px solid var(--border); background: var(--surface); padding: 8px 10px; color: var(--fg); }
+  .list-item.active { border-color: var(--accent); }
+
+  .dialog { border: 1px solid var(--border); background: var(--surface); margin: 0; width: min(720px, 100%); }
+  .dialog-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .dialog-head h3 { margin: 0; font: 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .dialog-body { padding: 10px; color: var(--muted); font-size: 12px; }
+
+  /* --- Narrow: equivalent full-width list, graph hidden --- */
+  .narrow .map-controls .btn { display: none; }
+  .narrow .graph { display: none; }
+  .narrow .list { display: grid; gap: 8px; }
+  .narrow .list-item { min-height: 44px; }
+  .narrow .actions { margin-left: 0; width: 100%; }
+
+  .states { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+  .state-card { border: 1px solid var(--border); background: var(--surface); padding: 10px; }
+  .state-card b { display: block; font: 11px var(--font-mono); margin-bottom: 4px; }
+  .state-card p { margin: 0; color: var(--muted); font-size: 11px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font: 11px var(--font-mono); margin-top: 10px; }
+  .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 5px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Responsive node workspace — feature 003 design reference</h1>
+  <p class="sub">
+    Reviewed direction for feature <span class="mono">003-responsive-node-workspace</span>. Reuses the
+    established OpenDesign <span class="mono">tech-utility</span> direction (graphite panels, hairline
+    borders, amber selection/focus, IBM Plex) and replaces the permanent 212/356px rails with a
+    full-area workspace. Values shown are review fixtures, not live cluster data.
+  </p>
+
+  <h2>Desktop 1280×720 — populated, node-local telemetry, no permanent inspector</h2>
+  <div class="frame shell" style="height: 520px">
+    <div class="topbar">
+      <span class="brand">kllm</span>
+      <nav><span aria-current>Home</span><span>Models</span><span>Plan &amp; Run</span><span>Connect</span><span>Settings</span></nav>
+      <span class="chips"><span class="chip ok">online</span><span class="chip">master</span></span>
+    </div>
+    <div class="main">
+      <div class="workspace">
+        <div class="toolbar">
+          <span class="btn">Cluster · master</span>
+          <span class="title">Live topology</span>
+          <span class="status">4 nodes</span>
+          <span class="status">Recording: recording · last saved 14:32:10</span>
+          <span class="actions">
+            <span class="btn">Details</span>
+            <span class="btn">History</span>
+            <span class="btn">Chat</span>
+          </span>
+        </div>
+        <div class="topology">
+          <div class="activity">cluster inference · generating · 1 request</div>
+          <div class="map">
+            <div class="map-controls">
+              <span class="label">Cluster nodes</span>
+              <span class="btn">+</span><span class="btn">−</span><span class="btn">Fit</span>
+              <span class="btn">←</span><span class="btn">→</span><span class="btn">↑</span><span class="btn">↓</span>
+            </div>
+            <div class="graph">
+              <div class="world">
+                <svg class="edges" viewBox="0 0 560 400" preserveAspectRatio="none" aria-hidden="true">
+                  <line x1="96" y1="56" x2="420" y2="56" stroke="#8b949e" stroke-width="1.5" />
+                  <line x1="96" y1="56" x2="420" y2="170" stroke="#8b949e" stroke-width="1.5" />
+                  <line x1="96" y1="56" x2="420" y2="290" stroke="#8b949e" stroke-width="1.5" />
+                </svg>
+
+                <div class="node active" style="left: 12px; top: 12px; --fill: 48%">
+                  <span class="head"><span class="name">master-host</span><span class="role">master</span></span>
+                  <span class="ident">master</span>
+                  <span class="state">connected · fresh · 2s ago</span>
+                  <span class="row"><span class="k">Host CPU</span><span class="v">37%</span></span>
+                  <span class="row"><span class="k">Host RAM</span><span class="v">61.8 GiB / 128.0 GiB · 48%</span></span>
+                  <span class="row"><span class="k">GPU 0 · Radeon RX 7900</span><span class="v">75% · 6.0 GiB / 24.0 GiB</span></span>
+                  <span class="assign">Assigned: alpha.gguf</span>
+                </div>
+
+                <div class="node" style="left: 336px; top: 12px; --fill: 72%">
+                  <span class="head"><span class="name">worker-a2</span><span class="role">worker</span></span>
+                  <span class="ident">node_4fe9</span>
+                  <span class="state">connected · fresh · 5s ago</span>
+                  <span class="row"><span class="k">Host CPU</span><span class="v">88%</span></span>
+                  <span class="row"><span class="k">Host RAM</span><span class="v">184.2 GiB / 256.0 GiB · 72%</span></span>
+                  <span class="row"><span class="k">GPU 0 · RTX 4090</span><span class="v">91% · 21.4 GiB / 24.0 GiB</span></span>
+                  <span class="row"><span class="k">GPU 1 · RTX 4090</span><span class="v">0% · 0.0 GiB / 24.0 GiB</span></span>
+                  <span class="assign">Assigned: alpha.gguf</span>
+                </div>
+
+                <div class="node stale" style="left: 336px; top: 196px; --fill: 63%">
+                  <span class="head"><span class="name">worker-b7</span><span class="role">worker</span></span>
+                  <span class="ident">node_09d2</span>
+                  <span class="state">connected · stale · 14s ago</span>
+                  <span class="row"><span class="k">Host CPU</span><span class="v">41%</span></span>
+                  <span class="row"><span class="k">Host RAM</span><span class="v">80.4 GiB / 128.0 GiB · 63%</span></span>
+                  <span class="row"><span class="k">GPU 0 · M3 Max</span><span class="v">unavailable · shared</span></span>
+                  <span class="assign">Assigned: alpha.gguf</span>
+                </div>
+
+                <div class="node offline" style="left: 12px; top: 262px">
+                  <span class="head"><span class="name">worker-c4</span><span class="role">worker</span></span>
+                  <span class="ident">node_7bb0</span>
+                  <span class="state">disconnected · unavailable</span>
+                  <span class="row"><span class="k">Host CPU</span><span class="v">unavailable</span></span>
+                  <span class="row"><span class="k">Host RAM</span><span class="v">reported 64.0 GiB</span></span>
+                  <span class="row"><span class="k">GPU</span><span class="v">GPU information unavailable</span></span>
+                  <span class="assign">Last known assignment: —</span>
+                </div>
+              </div>
+            </div>
+            <p class="rels">master → w1 (master–worker membership) · master → w2 · master → w3</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="note">
+    The graph takes all height below the toolbar; there is no 420px cap and no left/right rail.
+    Every node shows Host CPU, Host RAM used/total/percent and one row per reported GPU before selection.
+  </p>
+
+  <h2>1920×1080 — 16-node overview (Fit contains all cards; pan/zoom reads detail)</h2>
+  <div class="frame" style="height: 300px">
+    <div class="graph" style="height: 100%; border: 0">
+      <div class="world" style="transform: scale(0.42); transform-origin: top left">
+        <div class="node" style="left: 12px; top: 12px"><span class="name">master-host</span><span class="state">connected · fresh</span><span class="row"><span class="k">Host CPU</span><span class="v">37%</span></span><span class="row"><span class="k">GPU 0</span><span class="v">75%</span></span></div>
+        <div class="node" style="left: 336px; top: 12px"><span class="name">worker-a2</span><span class="state">connected · fresh</span><span class="row"><span class="k">Host CPU</span><span class="v">88%</span></span><span class="row"><span class="k">GPU 0</span><span class="v">91%</span></span></div>
+        <div class="node" style="left: 336px; top: 160px"><span class="name">worker-b7</span><span class="state">connected · fresh</span><span class="row"><span class="k">Host CPU</span><span class="v">41%</span></span></div>
+        <div class="node" style="left: 336px; top: 308px"><span class="name">worker-c4</span><span class="state">connected · fresh</span><span class="row"><span class="k">Host CPU</span><span class="v">12%</span></span></div>
+        <div class="node" style="left: 336px; top: 456px"><span class="name">worker-d9</span><span class="state">connected · fresh</span><span class="row"><span class="k">Host CPU</span><span class="v">57%</span></span></div>
+        <div class="node" style="left: 660px; top: 12px"><span class="name">worker-e1</span><span class="state">connected · fresh</span></div>
+        <div class="node" style="left: 660px; top: 160px"><span class="name">worker-f6</span><span class="state">connected · fresh</span></div>
+        <div class="node" style="left: 660px; top: 308px"><span class="name">worker-g3</span><span class="state">connected · fresh</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="note">Overview scale keeps all cards inside the graph; zoom reaches readable text rather than shrinking it.</p>
+
+  <h2>390×844 — equivalent full-width list (no horizontal overflow)</h2>
+  <div class="frame" style="width: 390px; height: 480px">
+    <div class="shell" style="height: 100%">
+      <div class="topbar"><span class="brand">kllm</span><span class="chips"><span class="chip ok">online</span></span></div>
+      <div class="main">
+        <div class="workspace narrow">
+          <div class="toolbar">
+            <span class="btn">Cluster · master</span>
+            <span class="status">4 nodes</span>
+            <span class="actions"><span class="btn">Details</span><span class="btn">History</span><span class="btn">Chat</span></span>
+          </div>
+          <div class="map" style="overflow: auto">
+            <div class="list">
+              <button class="list-item active">
+                <span class="head"><span class="name">master-host</span><span class="role">master</span></span>
+                <span class="state">connected · fresh · 2s ago</span>
+                <span class="row"><span class="k">Host CPU</span><span class="v">37%</span></span>
+                <span class="row"><span class="k">Host RAM</span><span class="v">61.8 GiB / 128.0 GiB · 48%</span></span>
+                <span class="row"><span class="k">GPU 0 · Radeon RX 7900</span><span class="v">75% · 6.0 GiB / 24.0 GiB</span></span>
+              </button>
+              <button class="list-item">
+                <span class="head"><span class="name">worker-a2</span><span class="role">worker</span></span>
+                <span class="state">connected · fresh · 5s ago</span>
+                <span class="row"><span class="k">Host CPU</span><span class="v">88%</span></span>
+                <span class="row"><span class="k">Host RAM</span><span class="v">184.2 GiB / 256.0 GiB · 72%</span></span>
+                <span class="row"><span class="k">GPU 1 · RTX 4090</span><span class="v">0% · 0.0 GiB / 24.0 GiB</span></span>
+              </button>
+              <button class="list-item">
+                <span class="head"><span class="name">worker-c4</span><span class="role">worker</span></span>
+                <span class="state">disconnected · unavailable</span>
+                <span class="row"><span class="k">Host RAM</span><span class="v">reported 64.0 GiB</span></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="note">Same metrics, same identity, vertical scrolling only. Graph and zoom controls are hidden.</p>
+
+  <h2>On-demand inspection and states</h2>
+  <div class="states">
+    <div class="state-card">
+      <b>Details dialog (native modal)</b>
+      <p>Opened from the selected node. Process CPU/RSS, PID, timestamps and sensor reasons stay scoped separately from Host CPU/RAM/GPU.</p>
+    </div>
+    <div class="state-card">
+      <b>History dialog (native modal)</b>
+      <p>Fetched only when opened. Lifetime selector, 15m/1h/24h windows, UTC exact readings, gaps distinct from measured zero.</p>
+    </div>
+    <div class="state-card">
+      <b>Recording failure</b>
+      <p class="mono" style="color: var(--danger)">Recording: failed · last saved never</p>
+      <p>Stays in the toolbar even with cluster controls collapsed; prior history remains readable.</p>
+    </div>
+    <div class="state-card">
+      <b>Empty / offline</b>
+      <p>“No members — Start as master or Join a cluster.” and “Disconnected — keeping last cluster view; readings are not live.” occupy the same workspace.</p>
+    </div>
+  </div>
+  <div class="legend">
+    <span><i class="swatch" style="background: var(--accent)"></i>selected / focus</span>
+    <span><i class="swatch" style="background: var(--warn)"></i>stale (≥10s)</span>
+    <span><i class="swatch" style="background: var(--danger)"></i>disconnected</span>
+    <span><i class="swatch" style="background: var(--muted)"></i>unavailable / measured zero is numeric</span>
+  </div>
+  <p class="note">
+    Fixture values only. Keyboard focus is visible, status is textual (not colour-only), and
+    nonessential motion respects reduced-motion. Real cluster values come from feature 002 telemetry.
+  </p>
+</div>
+</body>
+</html>

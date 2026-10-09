@@ -28,7 +28,6 @@ llama.cpp is the only mainstream stack that exposes those backends as GGML devic
 | ExLlamaV2/V3 | CUDA-only |
 | exo | macOS/MLX-first; Windows unsupported |
 | mesh-llm | Same llama.cpp-family kernels; control-plane product swap, not a speed upgrade |
-| Prima.cpp | Remains Experimental (Halda / mmap) |
 
 ## OS × backend support matrix
 
@@ -47,20 +46,22 @@ Supported cells to ship and test:
 3. AMD → `rocm` (Linux), else `vulkan` (Windows or ROCm-less)
 4. else → `cpu`
 
-Do not double-bind one physical GPU (e.g. both CUDA and Vulkan for the same NVIDIA card).
+Do not double-bind one physical GPU (e.g. both CUDA and Vulkan for the same NVIDIA card). On macOS, the default install builds **one** binary with Metal **and** Vulkan (MoltenVK); runtime preference (`KLLM_ACCEL_BACKEND` / `accel_backend`) selects a single backend per process so the same Apple GPU is not double-bound.
 
-**Binary flavors:** ship/build per cell (Metal macOS; CUDA Linux/Windows; ROCm Linux; Vulkan Windows/Linux), not one universal binary.
+**Binary flavors:** ship/build per cell on Windows/Linux (CUDA; ROCm Linux; Vulkan). On **macOS**, the install must produce a **multi-backend** binary (`Metal+Vulkan`, CPU always available) — it aborts rather than accepting a Metal-only result, and `--prefer-prebuilt` is rejected there because GitHub macOS packs lack Vulkan; `--backend cpu` is CPU-only.
 
 ## Split policy
 
-Always use `--split-mode layer` when devices span different backends (Metal / CUDA / ROCm / Vulkan). Tensor/row splits risk precision drift across backends. See [layer-split-calculator.md](layer-split-calculator.md).
+Use `--split-mode layer` when devices span different backends (Metal / CUDA / ROCm / Vulkan). Tensor/row splits risk precision drift across backends. The system setting also exposes `row` for supported local split-buffer backends and experimental homogeneous-backend `tensor` mode; both are validated before launch. See [layer-split-calculator.md](layer-split-calculator.md).
 
 ## RPC operational rules
 
-- **Default:** bind `rpc-server` to a **private LAN / 10GbE / Thunderbolt** interface IP (not `0.0.0.0`). `kllm` picks a private IPv4 unless `--rpc-bind` overrides. DHCP mid-run can still collapse the RPC state machine — prefer static IPs.
+- **Default:** bind `rpc-server` to a **private LAN / 10GbE / Thunderbolt** interface IP (not `0.0.0.0`). `kllm` prefers a local address on the app's private-network subnets (`10.10.10.0/24` first, then `192.168.234.0/24`, `172.29.234.0/24`, `10.234.234.0/24`) when one is present, otherwise the default-route private IPv4, unless `--rpc-bind` overrides. DHCP mid-run can still collapse the RPC state machine — prefer static IPs.
+- **One node identity:** durable per-node network identity (hostname, LAN host, RPC bind, dedicated private address, link speed) lives in `managed-network.sqlite` (`node_directory`) on the master and is mirrored to workers through the membership snapshot. The cluster view and Settings → llama.cpp both render from that directory; `rpc_bind` remains the advertised RPC address, while the managed-network assignment is the preferred display and inference address once applied.
 - Treat `rpc-server` as **LAN-only**. Upstream llama.cpp RPC has **no auth/TLS** and maintainers do not plan to add it ([discussion #14932](https://github.com/ggml-org/llama.cpp/discussions/14932)); HTTP `--api-key` on `llama-server` does **not** protect port **50052**. Firewall TCP 50052; never expose on the public internet. Reachability equals compromise (see e.g. CVE-2026-34159).
 - **Optional:** `--overlay wireguard` (CLI/dashboard) builds a join-key-derived WireGuard mesh and rebinds RPC to overlay IPs (`10.66.87.0/24`). Requires system WireGuard tooling (`wg` / `wg-quick` or WireGuard for Windows). Control-plane HTTP stays on the LAN.
 - Prefer worker **tensor cache** (`rpc-server -c`) to avoid re-shipping large tensors on reconnect.
+- Pass **`--threads`** on `rpc-server` from the same physical-core count as master `--threads-batch`. The binary's own default is 8, which leaves CPU layers idle on larger machines. Generation threads on `llama-server` stay capped at 8 so GPU decode is not oversubscribed.
 - Optional RDMA only when both ends support it (typically Linux RoCE); do not require it for baseline support.
 
 ## When to re-evaluate
@@ -73,7 +74,7 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 
 ## Related code
 
-- Process argv / enforced layer split: `crates/kllm-native/src/process.rs`
+- Process argv / split-mode propagation: `crates/kllm-native/src/process.rs`
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
-- RPC bind / optional WireGuard overlay: `python/kllm/netsec.py`
+- RPC bind / optional WireGuard overlay: `src/kllm/netsec.py`

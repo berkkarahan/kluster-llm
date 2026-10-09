@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ from kllm.cluster_log import (
     make_event,
     reset_for_tests,
 )
-from kllm.run_planning import build_master_launch
+from kllm.run_launch import build_master_launch
 from kllm.run_settings import RunBody
 
 
@@ -35,7 +36,29 @@ def client(tmp_path, monkeypatch):
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
     log_mod.reset_for_tests()
-    return TestClient(agent_mod.app), agent_mod, log_mod
+    test_client = TestClient(agent_mod.app)
+    yield test_client, agent_mod, log_mod
+    test_client.close()
+
+
+def _fail_master_log_request(monkeypatch, agent):
+    import httpx
+
+    class OfflineClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, **_kwargs):
+            request = httpx.Request("GET", url)
+            raise httpx.ConnectError("controlled master outage", request=request)
+
+    monkeypatch.setattr(agent.httpx, "Client", OfflineClient)
 
 
 def test_ring_cap_and_filter(tmp_path, monkeypatch):
@@ -162,20 +185,11 @@ def test_worker_relay_posts_to_master(tmp_path, monkeypatch):
         status_code = 200
 
     class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def post(self, url, json=None, headers=None):
+        def post(self, url, json=None, headers=None, timeout=None):
             posted.append({"url": url, "json": json, "headers": headers})
             return _Resp()
 
-    with patch("kllm.cluster_log.httpx.Client", _Client):
+    with patch("kllm.cluster_log.http_clients.control_client", return_value=_Client()):
         HUB.relay_tick(
             node_id="w1",
             role="worker",
@@ -234,6 +248,8 @@ def test_master_ingest_and_get_snapshot(client):
     assert snap.status_code == 200
     body = snap.json()
     assert body["source"] == "cluster"
+    assert {"lines", "source", "cursor", "reset", "gap", "gap_reason"} <= body.keys()
+    assert all(str(uuid.UUID(event["event_id"])) == event["event_id"] for event in body["lines"])
     lines = [ev["line"] for ev in body["lines"]]
     assert "hello rpc" in lines
     filtered = c.get("/v1/logs", params={"source": "rpc"})
@@ -245,9 +261,12 @@ def test_master_ingest_and_get_snapshot(client):
     assert "hello rpc" in journal.read_text(encoding="utf-8")
 
 
-def test_worker_get_falls_back_to_local(client):
+@pytest.mark.unit
+def test_worker_get_falls_back_to_local(client, monkeypatch):
     c, agent, log_mod = client
+    _fail_master_log_request(monkeypatch, agent)
     agent.STATE.role = "worker"
+    agent.STATE.node_id = "w1"
     agent.STATE.master_host = "127.0.0.1"
     agent.STATE.master_port = 1
     agent.STATE.join_key = "secret-key"
@@ -258,6 +277,248 @@ def test_worker_get_falls_back_to_local(client):
     assert body["source"] == "local"
     assert "unreachable" in (body.get("warning") or "")
     assert body["lines"][0]["line"] == "local-only"
+
+
+def test_identical_messages_get_distinct_ids_and_preserve_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    hub = LogHub()
+    hub.ingest([make_event("n", "agent", "same"), make_event("n", "agent", "same")], persist=False)
+    ids = [ev["event_id"] for ev in hub.recent(10)]
+    assert len(set(ids)) == 2, "distinct events must not share an identity"
+    supplied = "11111111-2222-3333-4444-555555555555"
+    hub.ingest([make_event("n", "agent", "same", event_id=supplied)], persist=False)
+    assert hub.recent(10)[-1]["event_id"] == supplied
+
+
+def test_snapshot_incremental_empty_checkpoint_and_gap(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    hub = LogHub(ring_max=10)
+    from kllm.cluster_log import CursorError
+
+    hub.ingest([make_event("n", "agent", f"line-{i}") for i in range(5)], persist=False)
+    first = hub.snapshot(2)
+    assert [ev["line"] for ev in first["lines"]] == ["line-3", "line-4"]
+    assert first["reset"] is None and first["gap"] is True and first["gap_reason"] == "batch_limit"
+    epoch, seq = first["cursor"].split(":")
+    empty = hub.snapshot(10, after=f"{epoch}:{seq}")
+    assert empty["lines"] == [] and empty["gap"] is False and empty["cursor"] == first["cursor"]
+    hub.ingest([make_event("n", "agent", "line-5")], persist=False)
+    nxt = hub.snapshot(10, after=first["cursor"])
+    assert [ev["line"] for ev in nxt["lines"]] == ["line-5"]
+    with pytest.raises(CursorError):
+        hub.snapshot(10, after="not-a-cursor")
+    with pytest.raises(CursorError):
+        hub.snapshot(10, after=f"{epoch}:{int(seq) + 99}")
+    assert str(uuid.UUID(epoch)) == epoch, "emitted feed epoch must be canonical UUID text"
+    with pytest.raises(CursorError, match="canonical UUID"):
+        hub.snapshot(10, after=f"{uuid.uuid4().hex}:0")
+    foreign = hub.snapshot(10, after=f"{uuid.uuid4()}:3")
+    assert foreign["reset"] == "origin_changed" and foreign["gap_reason"] == "feed_reset"
+
+
+def test_snapshot_retention_gap(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    hub = LogHub(ring_max=2)
+    hub.ingest([make_event("n", "agent", f"e{i}") for i in range(5)], persist=False)
+    epoch, _ = hub.snapshot(1)["cursor"].split(":")
+    snap = hub.snapshot(10, after=f"{epoch}:1")
+    assert snap["gap"] is True and snap["gap_reason"] == "retention"
+
+
+def test_journal_merge_keeps_history_when_ring_prefilled(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    reset_for_tests()
+    HUB.ingest([make_event("n", "agent", "persisted")], persist=True)
+    HUB.reset()
+    # Simulate a startup-local record arriving before the journal is loaded.
+    HUB.ingest([make_event("n", "agent", "startup")], persist=False)
+    HUB.ensure_journal_loaded()
+    hub = HUB
+    assert [ev["line"] for ev in hub.recent(10)] == ["persisted", "startup"]
+    assert "persisted" in cluster_journal_path().read_text(encoding="utf-8")
+
+
+def test_journal_read_failure_remains_retryable(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    reset_for_tests()
+    HUB.ingest([make_event("n", "agent", "persisted")], persist=True)
+    HUB.reset()
+    journal = cluster_journal_path()
+    original = Path.read_text
+    attempts = 0
+
+    def fail_once(path, *args, **kwargs):
+        nonlocal attempts
+        if path == journal and attempts == 0:
+            attempts += 1
+            raise OSError("temporary read failure")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_once)
+    with pytest.raises(OSError, match="temporary read failure"):
+        HUB.ensure_journal_loaded()
+    assert HUB._journal_loaded is False
+    HUB.ensure_journal_loaded()
+    assert HUB._journal_loaded is True
+    assert [event["line"] for event in HUB.recent(10)] == ["persisted"]
+
+
+def test_master_log_read_surfaces_journal_failure(client, monkeypatch):
+    c, agent, log_mod = client
+    agent.STATE.role = "master"
+    monkeypatch.setattr(
+        log_mod.HUB,
+        "ensure_journal_loaded",
+        lambda: (_ for _ in ()).throw(OSError("temporary journal failure")),
+    )
+    response = c.get("/v1/logs")
+    assert response.status_code == 503
+    assert "journal" in response.json()["detail"]
+
+
+def test_relay_carries_event_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    reset_for_tests()
+    from kllm.cluster_log import agent_log_path
+
+    log = agent_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("relay-me\n", encoding="utf-8")
+    posted: list[dict] = []
+
+    class _Resp:
+        status_code = 200
+
+    class _Client:
+        def post(self, url, json=None, headers=None, timeout=None):
+            posted.append(json)
+            return _Resp()
+
+    with patch("kllm.cluster_log.http_clients.control_client", return_value=_Client()):
+        HUB.relay_tick(node_id="w1", role="worker", master_base="http://x:1", join_key="k")
+    line = posted[0]["lines"][0]
+    assert line["event_id"]
+    assert HUB.recent(1)[0]["event_id"] == line["event_id"]
+
+
+def test_get_logs_incremental_and_cursor_validation(client):
+    c, agent, _log = client
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "secret-key"
+    c.post(
+        "/v1/logs",
+        json={"node_id": "w1", "lines": [{"source": "rpc", "line": "one"}]},
+        headers={"X-Kllm-Key": "secret-key"},
+    )
+    first = c.get("/v1/logs", params={"n": 10}).json()
+    assert first["cursor"] and first["reset"] is None
+    assert first["lines"][0]["event_id"]
+    c.post(
+        "/v1/logs",
+        json={"node_id": "w1", "lines": [{"source": "rpc", "line": "two"}]},
+        headers={"X-Kllm-Key": "secret-key"},
+    )
+    nxt = c.get("/v1/logs", params={"n": 10, "after": first["cursor"]}).json()
+    assert [ev["line"] for ev in nxt["lines"]] == ["two"]
+    assert c.get("/v1/logs", params={"after": "bad"}).status_code == 400
+    assert c.get("/v1/logs", params={"after": first["cursor"], "follow": "true"}).status_code == 400
+    # Legacy unversioned read still works.
+    legacy = c.get("/v1/logs", params={"n": 1}).json()
+    assert legacy["lines"] and "source" in legacy
+
+
+@pytest.mark.unit
+def test_worker_local_fallback_reports_cursor(client, monkeypatch):
+    c, agent, log_mod = client
+    _fail_master_log_request(monkeypatch, agent)
+    agent.STATE.role = "worker"
+    agent.STATE.node_id = "w1"
+    agent.STATE.master_host = "127.0.0.1"
+    agent.STATE.master_port = 1
+    agent.STATE.join_key = "secret-key"
+    log_mod.HUB.ingest([make_event("w1", "rpc", "local-only")], persist=False)
+    body = c.get("/v1/logs").json()
+    assert body["source"] == "local"
+    assert body["cursor"]
+    assert body["lines"][0]["event_id"]
+
+
+def test_worker_local_snapshot_defaults_to_own_node(client):
+    c, agent, log_mod = client
+    agent.STATE.role = "worker"
+    agent.STATE.node_id = "w1"
+    agent.STATE.master_host = None
+    log_mod.HUB.ingest(
+        [make_event("former-remote", "rpc", "remote"), make_event("w1", "rpc", "local")],
+        persist=False,
+    )
+    body = c.get("/v1/logs").json()
+    assert body["source"] == "local"
+    assert [row["line"] for row in body["lines"]] == ["local"]
+    explicit = c.get("/v1/logs", params={"node": "w1"}).json()
+    assert [row["line"] for row in explicit["lines"]] == ["local"]
+
+
+def test_worker_proxy_reports_reachable_http_error_not_local_fallback(client, monkeypatch):
+    c, agent, _log_mod = client
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "127.0.0.1"
+    agent.STATE.master_port = 18765
+    agent.STATE.join_key = "secret-key"
+
+    class Response:
+        status_code = 401
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(agent, "_master_control_base", lambda: "http://127.0.0.1:18765")
+    with patch("httpx.Client", Client):
+        response = c.get("/v1/logs")
+    assert response.status_code == 401
+    assert "master log request" in response.json()["detail"]
+
+
+def test_worker_detects_old_master_missing_initial_cursor(client, monkeypatch):
+    c, agent, _log_mod = client
+    agent.STATE.role = "worker"
+    agent.STATE.master_host = "master"
+    agent.STATE.join_key = "secret-key"
+    monkeypatch.setattr(
+        agent, "_try_proxy_master_logs", lambda *args: {"lines": [], "source": "cluster"}
+    )
+    response = c.get("/v1/logs")
+    assert response.status_code == 502
+    assert "incremental log" in response.json()["detail"]
+
+
+def test_ingest_rejects_invalid_event_id_and_nonfinite_timestamp(client):
+    c, agent, _log = client
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "secret-key"
+    headers = {"X-Kllm-Key": "secret-key"}
+    invalid_id = c.post(
+        "/v1/logs",
+        json={"node_id": "w1", "lines": [{"event_id": "not-a-uuid", "line": "bad id"}]},
+        headers=headers,
+    )
+    assert invalid_id.status_code == 422
+    invalid_ts = c.post(
+        "/v1/logs",
+        content=b'{"node_id":"w1","lines":[{"ts":Infinity,"line":"bad time"}]}',
+        headers={**headers, "Content-Type": "application/json"},
+    )
+    assert invalid_ts.status_code == 422
 
 
 def test_build_master_launch_includes_log_path(tmp_path, monkeypatch):
@@ -275,3 +536,108 @@ def test_build_master_launch_includes_log_path(tmp_path, monkeypatch):
     )
     assert launch["log_path"].endswith("llama-server.log")
     assert str(tmp_path) in launch["log_path"]
+
+
+def test_producer_tag_follows_source_and_legacy_journal(tmp_path, monkeypatch):
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    reset_for_tests()
+    from kllm.cluster_log import (
+        agent_log_path,
+        cluster_journal_path,
+        llama_server_log_path,
+        rpc_server_log_path,
+    )
+
+    for path, source, text in (
+        (agent_log_path(), "agent", "starting inference\n"),
+        (llama_server_log_path(), "llama", "dashboard asked for a slot\n"),
+        (rpc_server_log_path(), "rpc", "worker connected\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    tailed = {event["source"]: event for event in HUB.tail_new_events("n1")}
+    assert tailed["agent"]["tag"] == "ui"
+    assert tailed["agent"]["line"] == "starting inference"
+    assert tailed["llama"]["tag"] == "inference"
+    assert tailed["llama"]["line"] == "dashboard asked for a slot"
+    assert tailed["rpc"]["tag"] == "inference"
+
+    reset_for_tests()
+    hub = LogHub()
+    assert (
+        hub.ingest(
+            [
+                {
+                    "node_id": "n",
+                    "source": "agent",
+                    "line": "starting inference",
+                    "tag": "inference",
+                },
+                {"node_id": "n", "line": "missing"},
+                {"node_id": "n", "source": "", "line": "empty"},
+                {"node_id": "n", "source": "bogus", "line": "bogus", "tag": "ui"},
+            ],
+            persist=True,
+        )
+        == 4
+    )
+    by_line = {event["line"]: event for event in hub.recent(10)}
+    assert by_line["starting inference"]["source"] == "agent"
+    assert by_line["starting inference"]["tag"] == "ui"
+    for line in ("missing", "empty", "bogus"):
+        assert by_line[line]["source"] == "unknown"
+        assert by_line[line]["tag"] == "unclassified"
+    assert [event["line"] for event in hub.recent(10, source="agent")] == ["starting inference"]
+
+    reloaded = LogHub()
+    reloaded.ensure_journal_loaded()
+    again = {event["line"]: event for event in reloaded.recent(10)}
+    assert again["starting inference"]["tag"] == "ui"
+    assert again["bogus"]["source"] == "unknown"
+    assert again["bogus"]["tag"] == "unclassified"
+
+    reset_for_tests()
+    legacy_id = str(uuid.uuid4())
+    missing_id = str(uuid.uuid4())
+    journal = cluster_journal_path()
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_id": legacy_id,
+                        "ts": 1,
+                        "node_id": "n",
+                        "source": "agent",
+                        "line": "legacy",
+                    }
+                ),
+                json.dumps({"event_id": missing_id, "ts": 2, "node_id": "n", "line": "nosource"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    HUB.ensure_journal_loaded()
+    loaded = {event["line"]: event for event in HUB.recent(10)}
+    assert loaded["legacy"]["event_id"] == legacy_id
+    assert loaded["legacy"]["tag"] == "ui"
+    assert loaded["nosource"]["source"] == "unknown"
+    assert loaded["nosource"]["tag"] == "unclassified"
+
+
+def test_cli_log_line_ignores_tag_and_rejects_other_source_flags():
+    from typer import BadParameter
+
+    from kllm.cli import _format_log_event, logs_cmd
+
+    plain = _format_log_event(
+        {"ts": 0, "node_id": "n1", "source": "agent", "tag": "ui", "line": "hello"}
+    ).plain
+    assert "n1" in plain
+    assert "agent" in plain
+    assert "hello" in plain
+    assert "ui" not in plain
+    with pytest.raises(BadParameter, match="agent, llama, or rpc"):
+        logs_cmd(source="unclassified")

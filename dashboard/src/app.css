@@ -1,19 +1,28 @@
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 @import 'tailwindcss';
 
 :root {
+  color-scheme: dark;
   --bg: #0b0d10;
   --surface: #12151a;
-  --surface-2: #181c22;
-  --fg: #e6edf3;
-  --muted: #8b949e;
-  --border: #2a3038;
+  --raised: #181c22;
+  --surface-2: var(--raised);
+  --text: #e6edf3;
+  --fg: var(--text);
+  --muted: #a3adb8;
+  --line: #2a3038;
+  --border: var(--line);
+  --control: #647181;
   --accent: #3dd68c;
-  --warn: #d29922;
-  --danger: #f85149;
-  --info: #58a6ff;
-  --font-ui: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+  --accent-ink: #082116;
+  --warning: #f2c76a;
+  --warn: var(--warning);
+  --danger: #ff8582;
+  --info: #82baff;
+  --green-wash: #132b22;
+  --font-ui: Plex, 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: PlexMono, 'IBM Plex Mono', ui-monospace, monospace;
+  --font: var(--font-ui);
+  --mono: var(--font-mono);
 }
 
 * {
@@ -27,16 +36,8 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-ui);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-body {
-  background-image:
-    linear-gradient(rgba(42, 48, 56, 0.35) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(42, 48, 56, 0.35) 1px, transparent 1px);
-  background-size: 24px 24px;
-  background-attachment: fixed;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
 a {
@@ -65,6 +66,53 @@ textarea {
   border: 1px solid var(--border);
 }
 
+.error-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.error-message > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.error-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.error-dismiss:hover {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+.error-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.toast-stack {
+  width: min(360px, calc(100vw - 24px));
+  overflow-wrap: anywhere;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -80,8 +128,12 @@ textarea {
 }
 
 .btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--button-hover-color, var(--accent));
+  color: var(--button-hover-color, var(--accent));
+}
+
+.btn:active:not(:disabled) {
+  background: var(--bg);
 }
 
 .btn:disabled {
@@ -95,11 +147,14 @@ textarea {
 }
 
 .btn-danger {
+  --button-hover-color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
   color: var(--danger);
 }
 
-.field {
+/* The prototype uses .field for groups too; control chrome belongs only on inputs. */
+:is(input, select, textarea).field {
+  min-width: 0;
   width: 100%;
   height: 28px;
   padding: 0 8px;
@@ -108,9 +163,110 @@ textarea {
   color: var(--fg);
 }
 
-.field:focus {
+:is(input, select, textarea).field:focus {
   outline: 1px solid var(--accent);
   outline-offset: 0;
+}
+
+.btn:focus-visible,
+.field:focus-visible,
+a:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+input[type='range']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.page-frame {
+  min-width: 0;
+}
+
+.page-title {
+  margin: 0 0 4px;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--fg);
+}
+
+.page-description {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.page-frame :is(code, pre, dd, .nums) {
+  overflow-wrap: anywhere;
+}
+
+.page-frame .nums {
+  min-width: 0;
+}
+
+.dashboard-header nav {
+  align-items: center;
+}
+
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  transition: border-color 120ms, color 120ms;
+}
+
+.nav-link[aria-current='page'] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.dashboard-header .nav-link:hover {
+  color: var(--fg);
+}
+
+.model-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.model-table-scroll table {
+  min-width: 560px;
+}
+
+.model-table-scroll td:first-child {
+  min-width: 240px;
+  max-width: 460px;
+  overflow-wrap: anywhere;
+}
+
+.model-table-scroll tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.model-table-scroll .bg-selected {
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.connect-row {
+  flex-wrap: wrap;
+}
+
+.connect-command {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 4px 0;
+}
+
+.error-message pre {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .chip {
@@ -134,6 +290,12 @@ textarea {
 .chip-warn {
   color: var(--warn);
   background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.chip-info {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--border));
 }
 
 .chip-danger {
@@ -166,9 +328,22 @@ textarea {
   animation: spin 800ms linear infinite;
 }
 
+.activity-spinner {
+  width: 11px;
+  height: 11px;
+  border-width: 1px;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn, .nav-link { transition: none; }
+  .spinner {
+    animation: none;
   }
 }
 
@@ -229,4 +404,275 @@ input[type='range']:disabled {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* Viewport shell: intrinsic header, remaining height for the active route. */
+.app-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.app-main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Node monitor accent is local: existing navigation, controls and chat keep the global palette. */
+.usage-workspace {
+  --monitor-accent: #f5c653;
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Clips the off-screen closed chat drawer so it cannot add scrollable overflow. */
+  overflow: hidden;
+}
+
+.usage-workspace :is(button, select, input):focus-visible {
+  outline: 2px solid var(--monitor-accent);
+  outline-offset: 2px;
+}
+
+.usage-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: relative;
+  z-index: 2;
+}
+
+.usage-toolbar-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.usage-toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.cluster-controls { position: relative; flex: 0 0 auto; }
+.cluster-controls > summary { list-style: none; cursor: pointer; }
+.cluster-controls > summary::-webkit-details-marker { display: none; }
+.cluster-controls > summary::marker { content: ''; }
+
+.cluster-controls-body {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: min(330px, calc(100vw - 24px));
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usage-topology {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.usage-topology-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.usage-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  color: var(--muted);
+}
+
+/* Node map fills the remaining workspace instead of a fixed height cap. */
+.usage-workspace .node-map {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.usage-workspace .node-map-graph {
+  flex: 1 1 auto;
+  min-height: 200px;
+  height: auto;
+  cursor: grab;
+  touch-action: none;
+  background-color: var(--bg);
+  background-image: radial-gradient(circle, #424955 0.8px, transparent 0.8px);
+  background-size: 18px 18px;
+}
+
+.usage-workspace .node-map-graph:active { cursor: grabbing; }
+
+.usage-workspace .node-map-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  pointer-events: none;
+}
+
+.usage-workspace .node-map-edges {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.usage-workspace .node-map-card {
+  position: absolute;
+  min-height: 0;
+  padding: 8px 10px;
+  border-color: var(--border);
+  color: var(--fg);
+  overflow: hidden;
+  background: var(--surface);
+  pointer-events: auto;
+}
+
+.usage-workspace .node-map-card::before { display: none; }
+
+.usage-workspace .node-map-card.memory-known::before {
+  content: '';
+  display: block;
+  position: absolute;
+  inset: auto 0 0;
+  height: var(--memory-fill, 0%);
+  background: color-mix(in srgb, var(--monitor-accent) 14%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--monitor-accent) 50%, transparent);
+  pointer-events: none;
+}
+
+.usage-workspace .node-map-card > * { position: relative; z-index: 1; }
+.usage-workspace .node-map-card.active { border-color: var(--monitor-accent); }
+
+.usage-workspace .node-summary { display: flex; flex-direction: column; gap: 3px; }
+.usage-workspace .node-summary-head { display: flex; align-items: baseline; gap: 6px; }
+.usage-workspace .node-name { font-weight: 600; overflow-wrap: anywhere; }
+.usage-workspace .node-role-chip {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+}
+.usage-workspace .node-id { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.usage-workspace .node-state { color: var(--muted); font-size: 10px; }
+.usage-workspace .node-metric {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.usage-workspace .node-metric .k {
+  color: var(--muted);
+  /* Shrinkable and wrap-capable so a very long device label cannot push the value out of
+     the card; the cap reserves room so measured values stay readable. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow-wrap: anywhere;
+}
+.usage-workspace .node-metric .v { min-width: 0; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.usage-workspace .node-metric:not(.node-metric-device) .k { flex: 0 0 auto; max-width: none; }
+.usage-workspace .node-device-name { margin-top: 5px; color: var(--muted); overflow-wrap: anywhere; }
+.usage-workspace .node-assignment { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.usage-workspace .node-map-list { display: none; }
+
+.usage-workspace .usage-bars .usage-bar:not(.missing)::before { background: var(--monitor-accent); }
+.usage-workspace .usage-bars .usage-bar:focus-visible { outline: 2px solid var(--monitor-accent); }
+
+/* Contextual inspector: native modal dialog, on demand only. */
+.usage-dialog {
+  width: min(720px, calc(100vw - 24px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  margin: auto;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.usage-dialog:not([open]) { display: none; }
+.usage-dialog::backdrop { background: rgb(0 0 0 / 72%); }
+
+.usage-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-dialog-head h2 { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.usage-dialog-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px; }
+
+.usage-chat-drawer {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(380px, 100%);
+  min-height: 0;
+  transform: translateX(101%);
+  transition: transform 160ms ease;
+  box-shadow: -15px 0 35px #0008;
+}
+
+.usage-chat-drawer.open { transform: translateX(0); }
+
+@media (max-width: 700px) {
+  .connect-command { flex-basis: 100%; order: 2; }
+  .dashboard-header { height: auto; min-height: 40px; flex-wrap: wrap; gap: 4px; padding: 6px 10px; }
+  .dashboard-header nav { order: 3; width: 100%; flex: 0 0 100%; white-space: nowrap; }
+  .dashboard-header > div:last-child { flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+  .usage-toolbar { gap: 6px; }
+  .usage-toolbar-actions { margin-left: 0; width: 100%; justify-content: flex-start; }
+  .cluster-controls-body { width: calc(100vw - 24px); }
+  .usage-chat-drawer { width: 100%; }
+  .usage-workspace .node-map { overflow: auto; }
+  .usage-workspace .node-map-graph { display: none; }
+  .usage-workspace .node-map-controls button { display: none; }
+  .usage-workspace .node-map-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .usage-workspace .node-map-list button { min-height: 44px; justify-content: flex-start; white-space: normal; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-workspace *, .usage-workspace *::before, .usage-workspace *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

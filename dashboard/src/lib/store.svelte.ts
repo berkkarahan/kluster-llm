@@ -1266,6 +1266,16 @@ class AppStore {
     }
   }
 
+  /**
+   * Auto selection keeps discrete accelerators. Integrated adapters (iGPU /
+   * APU graphics) share host RAM and must not inflate the VRAM total while a
+   * discrete card is present; a machine with only integrated devices keeps them.
+   */
+  private defaultGpuIds(): number[] {
+    const discrete = this.gpus.filter((g) => !g.integrated).map((g) => g.index);
+    return discrete.length > 0 ? discrete : this.gpus.map((g) => g.index);
+  }
+
   /** One-shot GPU checkbox init. Never re-applied after hydrate (avoids fighting toggles). */
   private hydrateGpuSelection() {
     if (this.selectionHydrated || !this.gpusLoaded || this.gpus.length === 0) return;
@@ -1280,9 +1290,9 @@ class AppStore {
     }
     if (this.configGpuIds && this.configGpuIds.length > 0) {
       const picked = this.configGpuIds.filter((i) => available.has(i));
-      this.selectedGpuIds = picked.length > 0 ? picked : this.gpus.map((g) => g.index);
+      this.selectedGpuIds = picked.length > 0 ? picked : this.defaultGpuIds();
     } else {
-      this.selectedGpuIds = this.gpus.map((g) => g.index);
+      this.selectedGpuIds = this.defaultGpuIds();
     }
     this.selectionHydrated = true;
   }
@@ -1354,7 +1364,7 @@ class AppStore {
       await this.saveConfig({ gpu_ids: kept });
       return;
     }
-    const all = this.gpus.map((g) => g.index);
+    const all = this.defaultGpuIds();
     this.selectedGpuIds = all;
     await this.saveConfig({ gpu_ids: all });
   }
@@ -1534,7 +1544,7 @@ class AppStore {
     };
     if (this.gpus.length > 0) {
       body.gpu_ids =
-        this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.gpus.map((g) => g.index);
+        this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.defaultGpuIds();
     }
     await this.post('/v2/cluster', body);
   }
@@ -1599,7 +1609,7 @@ class AppStore {
     if (masterHost) body.master_host = masterHost;
     if (this.gpus.length > 0) {
       body.gpu_ids =
-        this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.gpus.map((g) => g.index);
+        this.selectedGpuIds.length > 0 ? this.selectedGpuIds : this.defaultGpuIds();
     }
     await this.post('/v2/cluster/membership', body);
   }

@@ -24,17 +24,25 @@ def _prompt_gpu_ids(gpus: list[dict[str, object]], backend: str) -> list[int] | 
     """Prompt for selected GPUs when multiple devices and stdin is a TTY."""
     if len(gpus) <= 1 or not sys.stdin.isatty():
         return None
+    from kllm.core.gpu_selection import GpuDeviceInput, default_gpu_ids
+
+    devices: list[GpuDeviceInput] = []
     console.print(f"[bold]Select GPUs[/bold] (backend={backend})")
     for gpu in gpus:
+        if gpu.get("index") is None:
+            continue
+        device = GpuDeviceInput.from_mapping(gpu)
+        devices.append(device)
         index = gpu.get("index")
         name = gpu.get("name", "GPU")
         vram_bytes = gpu.get("vram_bytes")
         vram = vram_bytes if type(vram_bytes) is int else None
-        console.print(f"  [{index}] {name}  {format_vram(vram)}")
-    default = ",".join(str(gpu["index"]) for gpu in gpus)
+        note = "  (integrated, shares system RAM)" if device.integrated else ""
+        console.print(f"  [{index}] {name}  {format_vram(vram)}{note}")
+    default_ids = default_gpu_ids(devices)
     raw = typer.prompt(
-        "GPU indices (comma-separated, Enter = all)",
-        default=default,
+        "GPU indices (comma-separated, Enter = default)",
+        default=",".join(str(index) for index in default_ids),
         show_default=True,
     )
     return parse_gpu_ids(raw)

@@ -136,6 +136,17 @@ test('dashboard always requests Layer and normalizes legacy hardware saves', asy
     const shared = render(HardwareSettings).body;
     assert.match(shared, /shared capacity/);
     assert.doesNotMatch(shared, /Selected VRAM capacity:/);
+    // A mixed discrete + integrated node keeps discrete VRAM and flags the iGPU.
+    appStore.status = { ...appStore.status, capacity: { unified_memory: false } };
+    appStore.gpus = [
+      { index: 0, name: 'AMD Radeon RX 9070 XT', vram_bytes: 16 * 1024 ** 3 },
+      { index: 1, name: 'AMD Radeon(TM) Graphics', vram_bytes: 48 * 1024 ** 3, integrated: true }
+    ];
+    appStore.selectedGpuIds = [0];
+    const mixed = render(HardwareSettings).body;
+    assert.match(mixed, /integrated · shares system RAM · not configured/);
+    assert.match(mixed, /Selected VRAM capacity: 16\.0 GiB/);
+    assert.doesNotMatch(mixed, /Selected VRAM capacity: 64\.0 GiB/);
     appStore.device = 'cpu';
     const cpu = render(RunPage).body;
     assert.match(cpu, /8\.0 GiB.*Estimated total memory/s);

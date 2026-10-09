@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from kllm.accel import is_integrated_gpu
 from kllm.exceptions import ResourceUnavailableError, ValidationError
 
 
@@ -30,6 +31,9 @@ class GpuDeviceInput:
     vram_bytes: int | None = None
     free_bytes: int | None = None
     reclaimable_bytes: int = 0
+    # Shares host RAM (iGPU / APU graphics). Integrated adapters never inflate
+    # the default VRAM total while a discrete card is present.
+    integrated: bool = False
     additional: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -39,15 +43,24 @@ class GpuDeviceInput:
             raise ValidationError("GPU inventory entry is missing index")
         raw_vram = value.get("vram_bytes")
         raw_free = value.get("free_bytes")
+        name = str(value["name"]) if value.get("name") is not None else None
+        backend = str(value["backend"]) if value.get("backend") is not None else None
+        raw_integrated = value.get("integrated")
+        integrated = (
+            raw_integrated
+            if isinstance(raw_integrated, bool)
+            else is_integrated_gpu(name, backend)
+        )
         try:
             return cls(
                 index=int(raw_index),
                 device=str(value["device"]) if value.get("device") is not None else None,
-                name=str(value["name"]) if value.get("name") is not None else None,
-                backend=str(value["backend"]) if value.get("backend") is not None else None,
+                name=name,
+                backend=backend,
                 vram_bytes=int(raw_vram) if raw_vram is not None else None,
                 free_bytes=int(raw_free) if raw_free is not None else None,
                 reclaimable_bytes=int(value.get("reclaimable_bytes") or 0),
+                integrated=integrated,
                 additional=MappingProxyType(
                     {
                         key: item
@@ -61,6 +74,7 @@ class GpuDeviceInput:
                             "vram_bytes",
                             "free_bytes",
                             "reclaimable_bytes",
+                            "integrated",
                         }
                     }
                 ),
@@ -78,6 +92,8 @@ class GpuDeviceInput:
                 value[key] = item
         if self.reclaimable_bytes:
             value["reclaimable_bytes"] = self.reclaimable_bytes
+        if self.integrated:
+            value["integrated"] = True
         return value
 
 
@@ -109,6 +125,19 @@ def parse_gpu_ids(value: str | None) -> list[int] | None:
     return selected
 
 
+def default_gpu_ids(devices: Iterable[GpuDeviceInput]) -> tuple[int, ...]:
+    """Auto selection: discrete accelerators, falling back to every device.
+
+    An integrated adapter shares host RAM; it must not inflate the node's
+    advertised VRAM when the machine also has a discrete card. A machine whose
+    only accelerator is integrated keeps it.
+    """
+    ordered = list(devices)
+    all_ids = tuple(sorted(device.index for device in ordered))
+    discrete = tuple(sorted(device.index for device in ordered if not device.integrated))
+    return discrete or all_ids
+
+
 def select_gpu_devices(
     requested_ids: Sequence[int] | None,
     devices: Iterable[GpuDeviceInput],
@@ -127,7 +156,7 @@ def select_gpu_devices(
         return GpuSelection(gpu_ids=(), backend=normalized_backend, vram_bytes=None)
 
     if requested_ids is None:
-        selected_ids = tuple(sorted(by_index))
+        selected_ids = default_gpu_ids(by_index.values())
     else:
         if not requested_ids:
             raise ValidationError("gpu_ids must be non-empty when provided")

@@ -9,11 +9,13 @@ from typing import Any
 from kllm.accel import (
     binary_capabilities,
     devices_for_backend,
+    is_integrated_gpu,
     is_unified_memory,
     requested_backend,
     resolve_effective_backend,
     selectable_accel_backends,
 )
+from kllm.core.memory import build_snapshot
 from kllm.core.placement_api import plan_from_settings
 from kllm.runtimes.selection import selected_binary
 from pathlib import Path
@@ -111,24 +113,14 @@ def require_native() -> Any:
     return _NATIVE
 
 
-def _inventory_vram_bytes(devices: dict[str, Any], fallback: int | None) -> int | None:
-    """Canonical VRAM is the llama.cpp device total, not the OS adapter sum.
-
-    A failed inventory keeps the Rust registry/SMI sum. A successful inventory with
-    no GPU for the selected backend is unknown (``None``), so an integrated adapter
-    the engine did not expose cannot inflate the node total.
-    """
-    if devices.get("error"):
-        return fallback
-    total: int | None = None
-    for gpu in devices.get("gpus") or []:
-        value = gpu.get("vram_bytes") if isinstance(gpu, dict) else None
-        if type(value) is int and value >= 0:
-            total = (total or 0) + value
-    return total
-
-
 def probe_capacity() -> dict[str, Any]:
+    """Return the node's canonical RAM + VRAM capacity payload.
+
+    ``vram_bytes`` is the *effective* total the runtime will use (configured
+    or auto-discrete devices). ``vram_physical_bytes`` keeps every
+    engine-visible device so an integrated adapter stays visible without
+    inflating the advertised total.
+    """
     n = require_native()
     hardware_devices: Any = []
     if hasattr(n, "_probe_capacity_and_gpus"):
@@ -138,15 +130,40 @@ def probe_capacity() -> dict[str, Any]:
         # Compatibility with an older installed extension during source upgrades.
         snap = n.probe_capacity()
         devices = list_gpus()
-    listed = devices.get("gpus") or hardware_devices
+    engine_devices = tuple(devices.get("gpus") or ())
+    registry_fallback: int | None = None
+    if engine_devices:
+        source = engine_devices
+    elif devices.get("error"):
+        # The capability probe failed; classify the OS-enumerated adapters so
+        # an integrated adapter still cannot inflate the node total.
+        source = tuple(hardware_devices or ())
+        if not source:
+            registry_fallback = snap.vram_bytes
+    else:
+        # A successful inventory with no GPU for the selected backend is
+        # unknown (``None``), not the OS adapter sum.
+        source = ()
+    snapshot = build_snapshot(
+        total_ram_bytes=snap.total_ram_bytes,
+        available_ram_bytes=snap.available_ram_bytes,
+        devices=source,
+        backend=snap.backend,
+        probed_backend=devices.get("probed_backend"),
+        requested_backend=devices.get("requested_backend"),
+        hostname=snap.hostname,
+        registry_vram_bytes=registry_fallback,
+    )
     return {
         **devices,
-        "unified_memory": is_unified_memory(snap.backend, listed),
-        "total_ram_bytes": snap.total_ram_bytes,
-        "available_ram_bytes": snap.available_ram_bytes,
-        "vram_bytes": _inventory_vram_bytes(devices, snap.vram_bytes),
+        "unified_memory": snapshot.unified_memory,
+        "total_ram_bytes": snapshot.total_ram_bytes,
+        "available_ram_bytes": snapshot.available_ram_bytes,
+        "vram_bytes": snapshot.vram_bytes,
+        "vram_physical_bytes": snapshot.vram_physical_bytes,
+        "gpu_ids": list(snapshot.gpu_ids),
         "backend": devices["backend"],
-        "hostname": snap.hostname,
+        "hostname": snapshot.hostname,
     }
 
 
@@ -174,7 +191,10 @@ def _list_gpus_from_probe(devices: Any, backend: Any) -> dict[str, Any]:
             requested=requested,
         )
         selected = devices_for_backend(installed, actual)
-        selected = [dict(d, index=i) for i, d in enumerate(selected)]
+        selected = [
+            dict(d, index=i, integrated=is_integrated_gpu(d.get("name"), actual))
+            for i, d in enumerate(selected)
+        ]
         probe_error: str | None = None
         wants_metal = probed == "metal" or requested == "metal"
         if capabilities.get("metal_init_failed"):
@@ -402,12 +422,21 @@ def start_worker(**kwargs: Any) -> dict[str, Any]:
     if "devices" not in kwargs:
         # Deferred import: config reads ~/.kllm only when the caller omitted devices.
         from kllm import config
+        from kllm.core.gpu_selection import GpuDeviceInput, default_gpu_ids
 
         selected = config.get_gpu_ids()
         inventory = list_gpus().get("devices", [])
-        kwargs["devices"] = [
-            d["device"] for d in inventory if selected is None or d["index"] in selected
-        ]
+        if selected is None:
+            # Auto mode: the same discrete-first default every other surface uses.
+            selected = list(
+                default_gpu_ids(
+                    GpuDeviceInput.from_mapping(entry)
+                    for entry in inventory
+                    if isinstance(entry, dict) and entry.get("index") is not None
+                )
+            )
+        chosen = set(selected)
+        kwargs["devices"] = [d["device"] for d in inventory if d["index"] in chosen]
     # Explicit device names preserve the probed order; visibility masks renumber them.
     if kwargs.get("devices"):
         kwargs.pop("env", None)

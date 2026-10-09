@@ -887,6 +887,7 @@ def _capacity_service() -> CapacityService:
         resolve_gpu_selection=_resolve_gpu_selection,
         pick_rpc_bind_host=netsec.pick_rpc_bind_host,
         tracked_process_start=_tracked_process_start,
+        configured_gpu_ids=kllm_config.get_gpu_ids,
     )
 
 

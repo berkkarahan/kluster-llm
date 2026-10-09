@@ -1026,6 +1026,94 @@ def test_api_token_endpoint(client):
     assert r.json()["api_token"] == token
 
 
+def test_connect_snapshot_uses_reachable_master_address_served_id_and_no_store(client, monkeypatch):
+    c, agent, token = client
+    agent.STATE.role = "master"
+    agent.STATE.node_id = "master-node"
+    agent.STATE.control_port = 18888
+    agent.STATE.process_pid = 123
+    agent.STATE.process_role = "master"
+    agent.STATE.model_name = "requested.gguf"
+    agent.STATE.members["master-node"] = {"role": "master", "lan_host": "192.168.1.20"}
+    monkeypatch.setattr(agent, "_inference_activity", lambda: {"server_ready": True})
+
+    async def served_models(_port, _client):
+        return {"data": [{"id": "/models/requested.gguf"}]}
+
+    monkeypatch.setattr(agent.gateway, "served_models", served_models)
+    response = c.get("/v2/inference/connection", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "role": "master", "node_id": "master-node", "url": "http://192.168.1.20:18888",
+        "model": "/models/requested.gguf", "api_token": token,
+    }
+
+
+def test_connect_snapshot_requires_master_authentication_and_ready_inference(client, monkeypatch):
+    c, agent, _token = client
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "cluster-key"
+    response = c.get("/v2/inference/connection")
+    assert response.status_code == 401
+
+    response = c.get("/v2/inference/connection", headers={"X-Kllm-Key": "cluster-key"})
+    assert response.status_code == 503
+    assert "not ready" in response.text
+
+
+def test_connect_snapshot_keeps_a_reachable_dashboard_origin(client, monkeypatch):
+    c, agent, token = client
+    agent.STATE.role = "master"
+    agent.STATE.process_pid = 123
+    agent.STATE.process_role = "master"
+    agent.STATE.model_name = "served.gguf"
+    monkeypatch.setattr(agent, "_inference_activity", lambda: {"server_ready": True})
+
+    async def served_models(_port, _client):
+        return {"data": [{"id": "served.gguf"}]}
+
+    monkeypatch.setattr(agent.gateway, "served_models", served_models)
+    response = c.get(
+        "/v2/inference/connection",
+        headers={"Authorization": f"Bearer {token}", "Host": "kluster.example:9443"},
+    )
+    assert response.status_code == 200
+    assert response.json()["url"] == "http://kluster.example:9443"
+
+
+def test_worker_connect_snapshot_relays_with_cluster_key(client, monkeypatch):
+    c, agent, token = client
+    agent.STATE.role = "worker"
+    agent.STATE.node_id = "worker-node"
+    agent.STATE.master_host = "192.168.1.20"
+    agent.STATE.master_port = 18888
+    agent.STATE.join_key = "cluster-key"
+    calls = []
+    payload = {"role": "master", "node_id": "master-node", "url": "http://192.168.1.20:18888",
+               "model": "served.gguf", "api_token": "master-token"}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class ControlClient:
+        def get(self, url, *, headers, timeout):
+            calls.append((url, headers, timeout))
+            return Response()
+
+    monkeypatch.setattr(agent.http_clients, "control_client", lambda: ControlClient())
+
+    response = c.get("/v2/inference/connection", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.json() == payload
+    assert calls == [("http://192.168.1.20:18888/v2/inference/connection",
+                      {"X-Kllm-Key": "cluster-key"}, 5.0)]
+
+
 def test_anthropic_to_openai_mapping():
     from kllm.gateway import _anthropic_to_openai
 

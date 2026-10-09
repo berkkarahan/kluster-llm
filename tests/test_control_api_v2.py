@@ -38,6 +38,7 @@ def test_resource_routes_are_registered_with_expected_methods() -> None:
     assert set(paths["/v2/inference/plans"]) == {"post"}
     assert set(paths["/v2/inference/runs"]) == {"post"}
     assert set(paths["/v2/models/downloads"]) == {"post"}
+    assert set(paths["/v2/inference/connection"]) == {"get"}
 
 
 def test_legacy_v1_routes_are_bound_outside_the_agent_module() -> None:

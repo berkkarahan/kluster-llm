@@ -3,7 +3,7 @@
   import { pushToast } from '$lib/toast';
   import { onMount } from 'svelte';
   import ChatPanel from '$lib/components/ChatPanel.svelte';
-  import { connectCommand, shellQuote, type CommandShell } from '$lib/connect-command';
+  import { connectCommand, type CommandShell } from '$lib/connect-command';
 
   const agents = [
     { id: 'claude', name: 'Claude' },
@@ -16,27 +16,68 @@
 
   let shell = $state<CommandShell>('bash');
   let harness = $state('codex');
-  let origin = $state('');
-  onMount(() => { origin = window.location.origin; shell = /Win/.test(navigator.platform) ? 'powershell' : 'bash'; });
-  const model = $derived((appStore.status?.process_pid || appStore.status?.inference_up)
-    ? appStore.status.model_name || '' : appStore.selectedModel || '');
-  const endpoint = $derived(appStore.status?.role === 'worker' && appStore.status.master_host
-    ? `http://${appStore.status.master_host}:${appStore.status.master_port ?? 18765}` : origin);
+  type ConnectionSnapshot = { role: 'master'; node_id: string; url: string; model: string; api_token: string };
+  let connection = $state<ConnectionSnapshot | null>(null);
+  let connectionError = $state('');
+  let loading = $state(true);
+  let generation = 0;
+  let disposed = false;
   const remoteMaster = $derived(appStore.status?.role === 'worker');
+  const connectionIdentity = $derived([
+    appStore.status?.role,
+    appStore.status?.node_id,
+    appStore.status?.master_host,
+    appStore.status?.process_pid,
+    appStore.status?.inference_up,
+    appStore.status?.model_name,
+    appStore.status?.active_config?.run_id
+  ].join(':'));
 
-  function cmd(agent: string, noLaunch = false) {
-    return connectCommand(agent, model, endpoint, shell, noLaunch);
+  async function refreshConnection(): Promise<ConnectionSnapshot | null> {
+    const current = ++generation;
+    loading = true;
+    connectionError = '';
+    try {
+      const result = await appStore.networkRequest<ConnectionSnapshot>('/v2/inference/connection');
+      if (disposed || current !== generation) return null;
+      if (result.role !== 'master' || !result.url || !result.model || !result.api_token) {
+        throw new Error('Master returned incomplete Connect details');
+      }
+      connection = result;
+      return result;
+    } catch (failure) {
+      if (!disposed && current === generation) {
+        connection = null;
+        connectionError = String(failure).replace(/^Error:\s*/, '');
+      }
+      return null;
+    } finally {
+      if (!disposed && current === generation) loading = false;
+    }
   }
 
-  function tokenCommand() {
-    const token = shellQuote(appStore.apiToken || '', shell);
-    return shell === 'powershell' ? `$env:KLLM_API_KEY = ${token}` : `export KLLM_API_KEY=${token}`;
+  function cmd(snapshot: ConnectionSnapshot | null, agent = harness, noLaunch = false, redact = true) {
+    return snapshot
+      ? connectCommand(agent, snapshot.model, snapshot.url, snapshot.api_token, shell, noLaunch, redact)
+      : '';
   }
 
-  async function copy(text: string) {
-    await navigator.clipboard.writeText(text);
+  async function copy(noLaunch = false) {
+    const snapshot = await refreshConnection();
+    if (!snapshot) return;
+    await navigator.clipboard.writeText(cmd(snapshot, harness, noLaunch, false));
     pushToast('ok', 'copied');
   }
+
+  onMount(() => {
+    shell = /Win/.test(navigator.platform) ? 'powershell' : 'bash';
+    void refreshConnection();
+    return () => { disposed = true; generation += 1; };
+  });
+
+  $effect(() => {
+    if (connectionIdentity !== '::::::') void refreshConnection();
+  });
 </script>
 
 <div class="stack">
@@ -51,9 +92,9 @@
   <section class="panel panel-pad stack-sm">
     <div class="od-stat">
       <span class="stat-label">Endpoint</span>
-      <strong class="mono">{endpoint || '—'}</strong>
+      <strong class="mono">{connection?.url || '—'}</strong>
     </div>
-    <p>Model: {model || 'Select or run a model first'}</p>
+    <p>Model: {connection?.model || (loading ? 'Checking master…' : 'Start a model on the master first')}</p>
     <label class="field" style="max-width: 240px">
       Shell
       <select class="field" bind:value={shell}>
@@ -62,11 +103,10 @@
       </select>
     </label>
     <div class="actions">
-      <button class="btn" type="button" disabled={!appStore.apiToken || remoteMaster} onclick={() => copy(appStore.apiToken || '')}>Copy token</button>
-      <button class="btn" type="button" onclick={() => appStore.loadToken()}>Refresh</button>
-      <button class="btn" type="button" disabled={!appStore.apiToken || remoteMaster} onclick={() => copy(tokenCommand())}>Copy token setup</button>
+      <button class="btn" type="button" disabled={loading} onclick={() => refreshConnection()}>Refresh</button>
     </div>
-    {#if remoteMaster}<p>Get KLLM_API_KEY from the <a href={endpoint}>master dashboard</a>. This worker token cannot authenticate inference.</p>{/if}
+    {#if remoteMaster}<p>Commands use the master’s inference endpoint, model, and token.</p>{/if}
+    {#if connectionError}<p role="status">{connectionError}</p>{/if}
   </section>
 
   <div class="connection-grid">
@@ -82,9 +122,9 @@
   </div>
 
   <div class="code-row">
-    <code>{cmd(harness) || 'Select or run a model first'}</code>
-    <button class="btn" type="button" disabled={!model || !endpoint} onclick={() => copy(cmd(harness))}>Copy</button>
-    <button class="btn" type="button" disabled={!model || !endpoint} onclick={() => copy(cmd(harness, true))}>--no-launch</button>
+    <code>{cmd(connection) || (loading ? 'Checking master…' : 'Connect command unavailable')}</code>
+    <button class="btn" type="button" disabled={loading || !connection} onclick={() => copy()}>Copy command</button>
+    <button class="btn" type="button" disabled={loading || !connection} onclick={() => copy(true)}>--no-launch</button>
   </div>
 
   <ChatPanel />

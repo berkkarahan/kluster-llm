@@ -158,13 +158,31 @@ def _models(port: int) -> list[dict[str, Any]]:
         return list(r.json().get("data") or [])
 
 
+def _served_model_key(value: str) -> str:
+    """Normalize a served/requested model name for comparison.
+
+    llama-server reports its model id without the ``.gguf`` extension (and on
+    some builds as a full path), so basename + extension + case folding is the
+    only stable way to match a locally requested file against it.
+    """
+    name = Path(str(value).replace("\\", "/")).name
+    if name.lower().endswith(".gguf"):
+        name = name[: -len(".gguf")]
+    return name.lower()
+
+
 def _served_model_id(catalog: dict[str, Any], requested: str | None) -> str | None:
     data = catalog.get("data")
     if not isinstance(data, list):
         raise typer.BadParameter("invalid served-model catalog")
     ids = [item.get("id") for item in data if isinstance(item, dict)]
     ids = [item for item in ids if isinstance(item, str) and item]
-    matches = [item for item in ids if requested and Path(item).name == Path(requested).name]
+    requested_key = _served_model_key(requested) if requested else None
+    matches = [
+        item
+        for item in ids
+        if requested_key is not None and _served_model_key(item) == requested_key
+    ]
     if len(matches) == 1:
         return matches[0]
     if len(ids) == 1 and not requested:
@@ -197,7 +215,7 @@ def _ensure_inference(
         if st.get("role") != "master":
             raise typer.BadParameter("cluster master required — run `kllm start` first")
         running = st.get("model_name") if st.get("process_pid") or st.get("inference_up") else None
-        if running and model and Path(model).name != Path(running).name:
+        if running and model and _served_model_key(model) != _served_model_key(running):
             raise typer.BadParameter(
                 f"inference is using {running}; stop it before selecting --model {model}"
             )

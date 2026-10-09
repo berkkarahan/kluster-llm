@@ -336,6 +336,7 @@ def plan_devices(
     node_shares: dict[str, float] | None = None,
     required_nodes: Sequence[str] = (),
     node_priority: Sequence[str] = (),
+    just_enough_master: bool = False,
 ) -> DevicePlacementPlan:
     required = frozenset(required_nodes)
     unknown = required - {n.node_id for n in nodes}
@@ -580,9 +581,30 @@ def plan_devices(
                 if single is not None:
                     solution, routing_mode, devices = single, "single_remote", [remote]
                     break
+        min_master_devices: list[Device] | None = None
+        workers_only: list[Device] = []
+        if (
+            just_enough_master
+            and not node_priority
+            and split_mode == "layer"
+            and any(d.local for d in gpu_devices)
+            and any(not d.local for d in gpu_devices)
+        ):
+            # Prefer the workers alone; when they cannot hold the model, fall
+            # back to a workers-first order with the master scored last so it
+            # keeps only the trailing layers workers cannot hold.
+            workers_only = [d for d in gpu_devices if not d.local]
+            min_master_devices = workers_only + [
+                replace(d, score=0.0) for d in gpu_devices if d.local
+            ]
         if solution is None:
             devices = gpu_devices
-            solution = allocate(devices, spill=False)
+            if workers_only:
+                solution = allocate(workers_only, spill=False)
+            if solution is None and min_master_devices is not None:
+                solution = allocate(min_master_devices, spill=False)
+            if solution is None:
+                solution = allocate(gpu_devices, spill=False)
         if solution is None and memory.expert_bytes > 0 and settings.moe_offload != 0:
             solution, expert_meta = _expert_offload(
                 costs,
@@ -618,10 +640,15 @@ def plan_devices(
                 )
         if solution is None:
             devices = gpu_devices + cpu_devices
-            solution = allocate(devices, spill=True)
+            if workers_only or min_master_devices is not None:
+                solution = allocate(workers_only + cpu_devices, spill=True)
+                if solution is None and min_master_devices is not None:
+                    solution = allocate(min_master_devices + cpu_devices, spill=True)
+            if solution is None:
+                solution = allocate(devices, spill=True)
             # Try GPU and CPU orders in both directions; CPU devices may need to
             # precede a GPU to host an expensive early layer without CPU-prefix spill.
-            if cpu_devices and gpu_devices:
+            if cpu_devices and gpu_devices and min_master_devices is None:
                 alternate = allocate(cpu_devices + gpu_devices, spill=True)
                 if alternate is not None and (
                     solution is None

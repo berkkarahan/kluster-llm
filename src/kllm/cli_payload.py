@@ -59,6 +59,7 @@ def build_plan_run_payload(
     reasoning_format: str | None = None,
     gpu_ids: list[int] | None = None,
     node_priority: list[str] | None = None,
+    just_enough_master: bool | None = None,
     network_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -127,6 +128,7 @@ def build_plan_run_payload(
         "reasoning_format": reasoning_format,
         "gpu_ids": gpu_ids,
         "node_priority": node_priority,
+        "just_enough_master": just_enough_master,
         "network_id": network_id,
     }.items():
         if value is not None:

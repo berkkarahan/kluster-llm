@@ -181,6 +181,21 @@ def test_run_settings_rejects_zero_weights():
         assert "zero" in str(exc).lower()
 
 
+def test_just_enough_master_requires_automatic_layer_placement():
+    assert RunSettingsFields(model="x.gguf", just_enough_master=True).just_enough_master is True
+    with pytest.raises(ValueError, match="automatic layer placement"):
+        RunSettingsFields(model="x.gguf", just_enough_master=True, split_mode="row")
+    with pytest.raises(ValueError, match="automatic layer placement"):
+        RunSettingsFields(model="x.gguf", just_enough_master=True, node_shares={"master": 1.0})
+    # Remembered per-model defaults carry the placement preference.
+    assert (
+        RunSettingsFields(model="x.gguf", just_enough_master=True).snapshot_for_remember()[
+            "just_enough_master"
+        ]
+        is True
+    )
+
+
 def test_snapshot_includes_latency_ms():
     snap = cluster_snapshot(
         {"n1": {"node_id": "n1", "host": "h", "role": "worker", "latency_ms": 3.5}}

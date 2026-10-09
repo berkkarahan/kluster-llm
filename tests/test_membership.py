@@ -224,6 +224,7 @@ def test_register_keeps_member_count_adds_cluster_members(client):
     assert "last_plan" in body
     assert "apply_error" in body
     assert "apply_warning" in body
+    assert "model_name" in body
     assert body["cluster_members"]["w1"]["role"] == "worker"
     assert body["cluster_members"]["w1"]["host"]
 
@@ -245,6 +246,7 @@ def test_heartbeat_snapshot_contract(client):
     assert "last_plan" in body
     assert "apply_error" in body
     assert "apply_warning" in body
+    assert "model_name" in body
 
 
 def test_heartbeat_saves_cluster_state_once(client, monkeypatch):

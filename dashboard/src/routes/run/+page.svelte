@@ -128,6 +128,10 @@
               </select>
             </label>
             <p class="small muted">Automatic placement prefers local GPUs, then remote and pooled devices. Checked nodes must host at least one model layer; unchecked nodes remain eligible.</p>
+            {#if !appStore.nodePriority}
+              <label class="check-row"><input type="checkbox" bind:checked={appStore.justEnoughMaster} onchange={() => appStore.scheduleEstimate()} />Just Enough Master Allocation</label>
+              <p class="small muted">Fill worker GPUs first and give the master only the trailing layers they cannot hold, instead of filling the master's whole budget.</p>
+            {/if}
             {#if appStore.runGpuIds !== null}
               <p class="small">Saved local GPU selection: {appStore.runGpuIds.join(', ') || 'CPU only'}.
                 <button class="text-button" onclick={() => appStore.setParameter('gpu_ids', null)}>Use node selection</button></p>

@@ -290,6 +290,7 @@ def plan_split(
     node_shares: dict[str, float] | None = None,
     required_nodes: Sequence[str] = (),
     node_priority: Sequence[str] = (),
+    just_enough_master: bool = False,
 ) -> dict[str, Any]:
     if launch_settings is not None:
         return plan_from_settings(
@@ -309,8 +310,9 @@ def plan_split(
             node_shares=node_shares,
             required_nodes=required_nodes,
             node_priority=node_priority,
+            just_enough_master=just_enough_master,
         ).to_payload()
-    if required_nodes or node_priority or node_shares:
+    if required_nodes or node_priority or node_shares or just_enough_master:
         raise ValueError("node placement constraints require resolved launch settings")
     n = require_native()
     req: dict[str, Any] = {

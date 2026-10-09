@@ -9,6 +9,8 @@ export type GpuInfo = {
   device?: string;
   backend?: string;
   free_bytes?: number;
+  /** Shares host RAM (iGPU / APU graphics); not counted as discrete VRAM. */
+  integrated?: boolean;
 };
 
 export type Member = {

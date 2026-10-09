@@ -329,6 +329,23 @@ def test_unified_memory_heuristic_matches_known_shared_pools(monkeypatch):
     assert is_unified_memory("cuda", [{"name": "NVIDIA GeForce RTX 4090"}]) is False
 
 
+def test_unified_memory_requires_every_device_integrated():
+    from kllm.accel import detect_unified_memory, is_integrated_gpu
+
+    assert is_integrated_gpu("AMD Radeon(TM) Graphics", "vulkan") is True
+    assert is_integrated_gpu("AMD Radeon RX 9070 XT", "vulkan") is False
+    assert is_integrated_gpu("Apple M5 Pro", "metal") is False
+    assert is_integrated_gpu(None, "vulkan") is False
+
+    mixed = [
+        {"name": "AMD Radeon RX 9070 XT"},
+        {"name": "AMD Radeon(TM) Graphics"},
+    ]
+    assert detect_unified_memory("vulkan", mixed) is False
+    assert detect_unified_memory("vulkan", mixed[1:]) is True
+    assert detect_unified_memory("vulkan", []) is False
+
+
 def test_unified_memory_config_override_beats_heuristic(monkeypatch):
     from kllm.accel import is_unified_memory
 

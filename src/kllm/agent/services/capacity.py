@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from kllm import netsec
@@ -22,6 +22,7 @@ class CapacityService:
         resolve_gpu_selection: Callable[..., ResolvedGpuSelection],
         pick_rpc_bind_host: Callable[[str | None], str],
         tracked_process_start: Callable[[], str | None],
+        configured_gpu_ids: Callable[[], list[int] | None],
     ) -> None:
         self._state = state
         self._list_gpus = list_gpus
@@ -29,10 +30,33 @@ class CapacityService:
         self._resolve_gpu_selection = resolve_gpu_selection
         self._pick_rpc_bind_host = pick_rpc_bind_host
         self._tracked_process_start = tracked_process_start
+        self._configured_gpu_ids = configured_gpu_ids
+
+    def _selection(
+        self, state: ClusterState, listed: Mapping[str, Any]
+    ) -> ResolvedGpuSelection:
+        """Resolve the local GPU selection, re-applying auto mode.
+
+        A selection recorded by an older build can include an integrated
+        adapter that the default rule no longer picks. Auto mode (no saved
+        ``gpu_ids`` in config) is therefore re-derived from the inventory; an
+        explicit saved selection is always honored.
+        """
+        selection = self._resolve_gpu_selection(state.gpu_ids, listed=listed)
+        if (
+            state.gpu_ids
+            and self._configured_gpu_ids() is None
+            and any(device.integrated for device in selection.devices)
+        ):
+            default = self._resolve_gpu_selection(None, listed=listed)
+            if default.has_devices:
+                state.gpu_ids = list(default.gpu_ids)
+                selection = default
+        return selection
 
     def master_member_record(self, lan_host: str) -> dict[str, Any]:
         state = self._state()
-        gpu_selection = self._resolve_gpu_selection(state.gpu_ids, listed=self._list_gpus())
+        gpu_selection = self._selection(state, self._list_gpus())
         capacity = self._probe_capacity()
         vram = gpu_selection.vram_bytes if gpu_selection.has_devices else capacity.get("vram_bytes")
         backend = (
@@ -102,7 +126,10 @@ class CapacityService:
             return
         try:
             capacity = self._probe_capacity()
-            selection = self._resolve_gpu_selection(state.gpu_ids, listed=capacity)
+            previous_ids = state.gpu_ids
+            selection = self._selection(state, capacity)
+            if state.gpu_ids != previous_ids:
+                state.save()
             member.update(
                 {
                     key: capacity[key]

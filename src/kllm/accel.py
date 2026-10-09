@@ -65,7 +65,7 @@ UNIFIED_VRAM_FRACTION_MAX = 0.95
 
 # Substrings of GPU names that share host RAM (AMD APUs such as Strix Halo, Intel iGPU).
 # Apple Silicon is detected from the metal backend, not from these names.
-_UNIFIED_GPU_NAME_MARKERS: tuple[str, ...] = (
+INTEGRATED_GPU_NAME_MARKERS: tuple[str, ...] = (
     "radeon(tm) graphics",
     "radeon 780m",
     "radeon 880m",
@@ -97,15 +97,9 @@ def unified_vram_fraction() -> float:
     return min(UNIFIED_VRAM_FRACTION_MAX, max(UNIFIED_VRAM_FRACTION_MIN, value))
 
 
-def _gpu_names(gpus: Sequence[Any] | None) -> str:
-    if not gpus:
-        return ""
-    parts: list[str] = []
-    for gpu in gpus:
-        name = gpu.get("name") if isinstance(gpu, dict) else getattr(gpu, "name", None)
-        if name:
-            parts.append(str(name).lower())
-    return " ".join(parts)
+def _gpu_name(gpu: Any) -> str:
+    name = gpu.get("name") if isinstance(gpu, dict) else getattr(gpu, "name", None)
+    return str(name).strip().lower() if name else ""
 
 
 def unified_memory_override() -> bool | None:
@@ -121,12 +115,34 @@ def unified_memory_override() -> bool | None:
     return None
 
 
+def is_integrated_gpu(name: str | None, backend: str | None = None) -> bool:
+    """True when one adapter shares host RAM (iGPU / APU graphics).
+
+    A discrete card keeps its own VRAM even when the same machine also exposes
+    an integrated adapter, so callers classify per device instead of labelling
+    the whole node from any single name. ``metal`` is one unified device, not an
+    integrated one for selection purposes.
+    """
+    if str(backend or "").strip().lower() == "metal":
+        return False
+    text = str(name or "").strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in INTEGRATED_GPU_NAME_MARKERS)
+
+
 def detect_unified_memory(backend: str | None, gpus: Sequence[Any] | None = None) -> bool:
-    """True for Metal, or for known unified-memory GPU names. Ignores config."""
+    """True when the node's usable GPU pool *is* host RAM. Ignores config.
+
+    Metal is always unified. Otherwise every reported device must be an
+    integrated adapter: a machine that also has a discrete card keeps
+    dedicated VRAM, so it is planned as a discrete node even when an iGPU is
+    also present.
+    """
     if str(backend or "").strip().lower() == "metal":
         return True
-    names = _gpu_names(gpus)
-    return any(marker in names for marker in _UNIFIED_GPU_NAME_MARKERS)
+    devices = list(gpus or ())
+    return bool(devices) and all(is_integrated_gpu(_gpu_name(gpu), backend) for gpu in devices)
 
 
 def is_unified_memory(backend: str | None, gpus: Sequence[Any] | None = None) -> bool:

@@ -84,8 +84,8 @@ kllm start --gpus 0,1
 kllm join --key <key> --gpus 0
 ```
 
-- **Default:** all discovered GPUs (summed VRAM for planning). On Apple Silicon, **reported** GPU VRAM is **80% of unified memory** (fixed probe convention; independent of the VRAM budget slider). Planning treats unified-memory nodes — Apple Silicon, and detected unified APUs such as AMD Strix Halo — as having **65% of total RAM** as effective VRAM before `vram_percent` / headroom. Override that share with `KLLM_UNIFIED_VRAM_FRACTION` (clamped to 0.10–0.95). Set `unified_memory = true` or `false` in `~/.kllm/config.toml` to force this node's classification.
-- **Interactive:** if multiple GPUs are present, `--gpus` is omitted, and stdin is a TTY, the CLI prompts for a comma-separated list (Enter = all).
+- **Default:** every discrete GPU, summed for planning. An integrated adapter (iGPU / APU graphics) shares host RAM and stays unselected while a discrete card is present; a machine whose only accelerator is integrated keeps it. On Apple Silicon, **reported** GPU VRAM is **80% of unified memory** (fixed probe convention; independent of the VRAM budget slider). Planning treats unified-memory nodes — Apple Silicon, and detected unified APUs such as AMD Strix Halo — as having **65% of total RAM** as effective VRAM before `vram_percent` / headroom. A machine that also has a discrete card is planned as a discrete node. Override that share with `KLLM_UNIFIED_VRAM_FRACTION` (clamped to 0.10–0.95). Set `unified_memory = true` or `false` in `~/.kllm/config.toml` to force this node's classification.
+- **Interactive:** if multiple GPUs are present, `--gpus` is omitted, and stdin is a TTY, the CLI prompts for a comma-separated list (Enter = default selection; integrated adapters are labelled).
 - **Dashboard:** Cluster and Plan & Run checkboxes share the same selection; Plan & Run also persists `gpu_ids` / percents via `PUT /v1/config`.
 - Selection sets `CUDA_VISIBLE_DEVICES` (CUDA) or `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (ROCm) when launching `llama-server` / `rpc-server`. Metal has a single logical device and needs no env remap.
 
@@ -95,7 +95,7 @@ Default is **GPU**. Preference is stored on the master in `~/.kllm/config.toml`:
 
 ```toml
 device = "gpu"
-gpu_ids = [0, 1]      # optional; omitted = all local GPUs at Start/Join
+gpu_ids = [0, 1]      # optional; omitted = all discrete local GPUs at Start/Join
 vram_percent = 80     # used when device = gpu (scales selected VRAM)
 ram_percent = 80      # used when device = cpu (scales total RAM)
 accel_backend = "vulkan"  # optional; Cluster Backend selector (metal|cuda|rocm|vulkan)
@@ -201,7 +201,7 @@ Windows and macOS agents can collect resource readings through the Rust extensio
 details distinguish host CPU/RAM, managed-process CPU/resident RAM, and device-wide memory.
 Host/device readings continue without a managed child. CPU uses total logical processor
 capacity as 100%; its first observation initializes a baseline instead of reporting zero.
-Memory values are bytes at the native boundary and one-decimal GiB in the CLI and dashboard. Device capacity is the engine-reported `llama-server --list-devices` total for the selected GPUs. An integrated adapter the engine does not expose is not added to that total.
+Memory values are bytes at the native boundary and one-decimal GiB in the CLI and dashboard. Device capacity is the engine-reported `llama-server --list-devices` total for the selected GPUs. An integrated adapter that shares host RAM is listed separately (with an `integrated` flag) and is not added to the node's VRAM total while a discrete card is selected.
 
 For an on-demand host/device snapshot from the repository environment:
 

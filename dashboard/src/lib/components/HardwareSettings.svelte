@@ -23,6 +23,15 @@
       appStore.status?.members?.[appStore.status?.node_id ?? '']?.unified_memory === true
     )
   );
+  // "Selected VRAM capacity" counts discrete accelerators; an integrated
+  // adapter shares system RAM, so it is listed but not counted as VRAM when a
+  // discrete card is selected. An integrated-only machine falls back to it.
+  const selectedVram = $derived.by(() => {
+    const selected = appStore.gpus.filter((g) => appStore.selectedGpuIds.includes(g.index));
+    const discrete = selected.filter((g) => !g.integrated);
+    const counted = discrete.length > 0 ? discrete : selected;
+    return formatGib(selectedCapacity(counted, counted.map((g) => g.index)));
+  });
 
   function afterChange() {
     onChanged?.();
@@ -105,9 +114,19 @@
             />
             <span>
               [{g.index}] {g.name}
-              <span style="color: var(--muted)">
-                · {sharedMemory ? 'shared capacity' : 'VRAM capacity'} {formatGib(selectedCapacity([g], [g.index]))}
-              </span>
+              {#if g.integrated}
+                <span style="color: var(--muted)">
+                  · integrated · shares system RAM{appStore.selectedGpuIds.includes(g.index) ? '' : ' · not configured'}
+                </span>
+              {:else if sharedMemory}
+                <span style="color: var(--muted)">
+                  · shared capacity {formatGib(selectedCapacity([g], [g.index]))}
+                </span>
+              {:else}
+                <span style="color: var(--muted)">
+                  · VRAM capacity {formatGib(selectedCapacity([g], [g.index]))}
+                </span>
+              {/if}
             </span>
           </label>
         {/each}
@@ -118,7 +137,7 @@
         </p>
       {:else}
         <p class="mono text-[11px]" style="color: var(--muted)">
-          Selected VRAM capacity: {formatGib(selectedCapacity(appStore.gpus, appStore.selectedGpuIds))}
+          Selected VRAM capacity: {selectedVram}
         </p>
       {/if}
     {:else if !appStore.gpuBackendWarning}

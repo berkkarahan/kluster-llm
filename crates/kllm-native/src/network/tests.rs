@@ -1,5 +1,25 @@
 use super::{address_events, relay::{BridgeConfig, NetworkBridge}, rpc_probe};
-use std::{io::{Read, Write}, net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream, UdpSocket}, thread, time::{Duration, Instant}};
+use std::{io::{Read, Write}, net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket}, thread, time::{Duration, Instant}};
+
+// Supervised children deliver signals that interrupt blocking socket syscalls
+// (EINTR); retry instead of failing the assertion.
+fn accept_blocking(listener: &TcpListener) -> std::io::Result<(TcpStream, SocketAddr)> {
+    loop {
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
+fn read_blocking(stream: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match stream.read(buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
 
 fn local_private_address() -> Ipv4Addr {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
@@ -16,7 +36,7 @@ fn source_bound_forwarding_half_close_and_refusal() {
     let upstream = TcpListener::bind((source,0)).unwrap();
     let target_port = upstream.local_addr().unwrap().port();
     let upstream_thread = thread::spawn(move || {
-        let (mut stream, peer) = upstream.accept().unwrap();
+        let (mut stream, peer) = accept_blocking(&upstream).unwrap();
         assert_eq!(peer.ip(), std::net::IpAddr::V4(source));
         stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let mut body = Vec::new(); stream.read_to_end(&mut body).unwrap();
@@ -36,7 +56,7 @@ fn source_bound_forwarding_half_close_and_refusal() {
     // An unadmitted connection closes without ever opening the upstream.
     let mut rejected = TcpStream::connect(listener).unwrap();
     rejected.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    assert_eq!(rejected.read(&mut [0;1]).unwrap(),0);
+    assert_eq!(read_blocking(&mut rejected, &mut [0;1]).unwrap(),0);
     bridge.grant_native(1,15000,false).unwrap();
     bridge.grant_native(1,15000,true).unwrap();
     let mut client = TcpStream::connect(listener).unwrap();

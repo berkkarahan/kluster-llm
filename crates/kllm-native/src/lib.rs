@@ -15,7 +15,7 @@ use process::{LaunchConfig, LaunchResult, ProcessHandle};
 
 #[pyfunction]
 fn _process_identity(py: Python<'_>, pid: u32) -> PyResult<(String, String)> {
-    py.allow_threads(|| usage::process_counters(pid))
+    py.detach(|| usage::process_counters(pid))
         .map(|p| (p.token, p.started))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
@@ -31,17 +31,17 @@ fn _read_gguf_metadata_json(
     path: String,
     include_template: bool,
 ) -> Option<String> {
-    py.allow_threads(|| gguf::inference_metadata_json(&path, include_template))
+    py.detach(|| gguf::inference_metadata_json(&path, include_template))
 }
 
 #[pyfunction]
 fn probe_capacity(py: Python<'_>) -> PyResult<CapacitySnapshot> {
-    Ok(py.allow_threads(hw::probe_capacity))
+    Ok(py.detach(hw::probe_capacity))
 }
 
 #[pyfunction]
 fn list_gpus(py: Python<'_>) -> PyResult<(Vec<GpuDevice>, String)> {
-    let (devices, backend) = py.allow_threads(hw::list_gpus);
+    let (devices, backend) = py.detach(hw::list_gpus);
     Ok((devices, backend.as_str().to_string()))
 }
 
@@ -49,7 +49,7 @@ fn list_gpus(py: Python<'_>) -> PyResult<(Vec<GpuDevice>, String)> {
 fn _probe_capacity_and_gpus(
     py: Python<'_>,
 ) -> PyResult<(CapacitySnapshot, Vec<GpuDevice>, String)> {
-    let (snapshot, devices, backend) = py.allow_threads(hw::probe_capacity_with_gpus);
+    let (snapshot, devices, backend) = py.detach(hw::probe_capacity_with_gpus);
     Ok((snapshot, devices, backend.as_str().to_string()))
 }
 
@@ -75,25 +75,25 @@ fn resolve_rpc_server(repo_root: Option<String>) -> PyResult<Option<String>> {
 #[pyfunction]
 fn start_master(py: Python<'_>, config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::master_from_pydict(config)?;
-    py.allow_threads(|| process::start_process(&cfg))
+    py.detach(|| process::start_process(&cfg))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pyfunction]
 fn start_worker(py: Python<'_>, config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::worker_from_pydict(config)?;
-    py.allow_threads(|| process::start_process(&cfg))
+    py.detach(|| process::start_process(&cfg))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pyfunction]
 fn stop_process(py: Python<'_>, pid: u32, force: bool) -> PyResult<bool> {
-    Ok(py.allow_threads(|| process::stop_process(pid, force)))
+    Ok(py.detach(|| process::stop_process(pid, force)))
 }
 
 #[pyfunction]
 fn process_alive(py: Python<'_>, pid: u32) -> PyResult<bool> {
-    Ok(py.allow_threads(|| process::process_alive(pid)))
+    Ok(py.detach(|| process::process_alive(pid)))
 }
 
 #[pymodule]

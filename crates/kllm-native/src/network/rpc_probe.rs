@@ -61,6 +61,6 @@ pub fn probe_network_rpc(py: Python<'_>, endpoint: String, source: String, insta
     let target: SocketAddrV4 = endpoint.parse().map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 endpoint required"))?;
     let source: Ipv4Addr = source.parse().map_err(|_| pyo3::exceptions::PyValueError::new_err("literal IPv4 source required"))?;
     if !(super::relay::private(*target.ip()) || target.ip().is_loopback()) || !(super::relay::private(source) || source.is_loopback()) { return Err(pyo3::exceptions::PyValueError::new_err("private RPC source/endpoint required")); }
-    let result = py.allow_threads(|| probe(target, source, timeout_ms)).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let result = py.detach(|| probe(target, source, timeout_ms)).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     serde_json::to_string(&result).map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("probe result encoding failed"))
 }

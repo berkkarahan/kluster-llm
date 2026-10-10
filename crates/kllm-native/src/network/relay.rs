@@ -270,7 +270,7 @@ impl NetworkBridge {
     fn release(&self, generation: u64) -> PyResult<bool> { self.release_native(generation).map_err(pyo3::exceptions::PyRuntimeError::new_err) }
     fn stop(&self, py: Python<'_>, instance_id: String, terminate: bool) -> PyResult<bool> {
         if instance_id != self.inner.config.instance_id { return Err(pyo3::exceptions::PyValueError::new_err("stale bridge instance")); }
-        py.allow_threads(|| self.inner.stop(terminate)).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+        py.detach(|| self.inner.stop(terminate)).map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
 }
 
@@ -278,5 +278,5 @@ impl NetworkBridge {
 pub fn start_network_bridge(py: Python<'_>, config: String) -> PyResult<NetworkBridge> {
     if config.len() > 8192 { return Err(pyo3::exceptions::PyValueError::new_err("bridge configuration too large")); }
     let parsed: BridgeConfig = serde_json::from_str(&config).map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid bridge configuration"))?;
-    py.allow_threads(|| NetworkBridge::start(parsed)).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    py.detach(|| NetworkBridge::start(parsed)).map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }

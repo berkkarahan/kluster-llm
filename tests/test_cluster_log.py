@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import json
 import uuid
 from pathlib import Path
@@ -10,15 +12,15 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from kllm.cluster_log import (
+from kllm.modules.logs.interactors.cluster_log import (
     HUB,
     LogHub,
     cluster_journal_path,
     make_event,
     reset_for_tests,
 )
-from kllm.run_launch import build_master_launch
-from kllm.run_settings import RunBody
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.entities import RunBody
 
 
 @pytest.fixture()
@@ -27,8 +29,8 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.cluster_log as log_mod
-    import kllm.state as state_mod
+    import kllm.modules.logs.interactors.cluster_log as log_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -94,7 +96,7 @@ def test_journal_rotate(tmp_path, monkeypatch):
 def test_tail_new_and_partial_lines(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     reset_for_tests()
-    from kllm.cluster_log import agent_log_path
+    from kllm.modules.logs.interactors.cluster_log import agent_log_path
 
     log = agent_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +117,7 @@ def test_tail_new_and_partial_lines(tmp_path, monkeypatch):
 def test_prime_offsets_skips_existing(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     reset_for_tests()
-    from kllm.cluster_log import rpc_server_log_path
+    from kllm.modules.logs.interactors.cluster_log import rpc_server_log_path
 
     log = rpc_server_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -132,7 +134,7 @@ def test_prime_offsets_skips_existing(tmp_path, monkeypatch):
 def test_truncate_resets_offset(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     reset_for_tests()
-    from kllm.cluster_log import llama_server_log_path
+    from kllm.modules.logs.interactors.cluster_log import llama_server_log_path
 
     log = llama_server_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -174,7 +176,7 @@ def test_iter_sse_snapshot():
 def test_worker_relay_posts_to_master(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     reset_for_tests()
-    from kllm.cluster_log import agent_log_path
+    from kllm.modules.logs.interactors.cluster_log import agent_log_path
 
     log = agent_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +191,7 @@ def test_worker_relay_posts_to_master(tmp_path, monkeypatch):
             posted.append({"url": url, "json": json, "headers": headers})
             return _Resp()
 
-    with patch("kllm.cluster_log.http_clients.control_client", return_value=_Client()):
+    with patch("kllm.modules.logs.interactors.cluster_log.http_clients.control_client", return_value=_Client()):
         HUB.relay_tick(
             node_id="w1",
             role="worker",
@@ -293,7 +295,7 @@ def test_identical_messages_get_distinct_ids_and_preserve_identity(tmp_path, mon
 def test_snapshot_incremental_empty_checkpoint_and_gap(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     hub = LogHub(ring_max=10)
-    from kllm.cluster_log import CursorError
+    from kllm.modules.logs.interactors.cluster_log import CursorError
 
     hub.ingest([make_event("n", "agent", f"line-{i}") for i in range(5)], persist=False)
     first = hub.snapshot(2)
@@ -379,7 +381,7 @@ def test_master_log_read_surfaces_journal_failure(client, monkeypatch):
 def test_relay_carries_event_id(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     reset_for_tests()
-    from kllm.cluster_log import agent_log_path
+    from kllm.modules.logs.interactors.cluster_log import agent_log_path
 
     log = agent_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -394,7 +396,7 @@ def test_relay_carries_event_id(tmp_path, monkeypatch):
             posted.append(json)
             return _Resp()
 
-    with patch("kllm.cluster_log.http_clients.control_client", return_value=_Client()):
+    with patch("kllm.modules.logs.interactors.cluster_log.http_clients.control_client", return_value=_Client()):
         HUB.relay_tick(node_id="w1", role="worker", master_base="http://x:1", join_key="k")
     line = posted[0]["lines"][0]
     assert line["event_id"]
@@ -482,7 +484,7 @@ def test_worker_proxy_reports_reachable_http_error_not_local_fallback(client, mo
         def get(self, *args, **kwargs):
             return Response()
 
-    monkeypatch.setattr(agent, "_master_control_base", lambda: "http://127.0.0.1:18765")
+    monkeypatch.setattr(agent_runtime, "_master_control_base", lambda: "http://127.0.0.1:18765")
     with patch("httpx.Client", Client):
         response = c.get("/v1/logs")
     assert response.status_code == 401
@@ -494,8 +496,7 @@ def test_worker_detects_old_master_missing_initial_cursor(client, monkeypatch):
     agent.STATE.role = "worker"
     agent.STATE.master_host = "master"
     agent.STATE.join_key = "secret-key"
-    monkeypatch.setattr(
-        agent, "_try_proxy_master_logs", lambda *args: {"lines": [], "source": "cluster"}
+    monkeypatch.setattr(agent_runtime, "_try_proxy_master_logs", lambda *args: {"lines": [], "source": "cluster"}
     )
     response = c.get("/v1/logs")
     assert response.status_code == 502
@@ -541,12 +542,7 @@ def test_build_master_launch_includes_log_path(tmp_path, monkeypatch):
 def test_producer_tag_follows_source_and_legacy_journal(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     reset_for_tests()
-    from kllm.cluster_log import (
-        agent_log_path,
-        cluster_journal_path,
-        llama_server_log_path,
-        rpc_server_log_path,
-    )
+    from kllm.modules.logs.interactors.cluster_log import agent_log_path, cluster_journal_path, llama_server_log_path, rpc_server_log_path
 
     for path, source, text in (
         (agent_log_path(), "agent", "starting inference\n"),
@@ -630,7 +626,7 @@ def test_producer_tag_follows_source_and_legacy_journal(tmp_path, monkeypatch):
 def test_cli_log_line_ignores_tag_and_rejects_other_source_flags():
     from typer import BadParameter
 
-    from kllm.cli import _format_log_event, logs_cmd
+    from kllm.modules.logs.router_cli import _format_log_event, logs_cmd
 
     plain = _format_log_event(
         {"ts": 0, "node_id": "n1", "source": "agent", "tag": "ui", "line": "hello"}

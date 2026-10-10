@@ -15,7 +15,7 @@ import uvicorn
 from fastapi import FastAPI
 from starlette.responses import Response
 
-from kllm import connect
+from kllm.modules.connect.interactors import connect
 
 pytestmark = [
     pytest.mark.integration,
@@ -28,8 +28,9 @@ pytestmark = [
 
 @pytest.fixture
 def private_gateway(tmp_path, monkeypatch):
-    from kllm import agent, auth
-    from kllm.state import ClusterState
+    from kllm import agent
+    from kllm.shared import auth
+    from kllm.shared.state import ClusterState
 
     infer_port = int(os.environ.get("KLLM_TEST_INFER_PORT", "8080"))
     with httpx.Client(trust_env=False) as client:

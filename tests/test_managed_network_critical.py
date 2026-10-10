@@ -5,16 +5,16 @@ from uuid import uuid4
 
 import pytest
 
-from kllm.managed_network.models import ManagedNetwork, PeerIdentity
-from kllm.managed_network.store import NetworkStore, StoreConflict, digest
+from kllm.modules.managed_network.entities import ManagedNetwork, PeerIdentity
+from kllm.modules.managed_network.gateways.store import NetworkStore, StoreConflict, digest
 
 
 @pytest.mark.parametrize("platform_name", ["macos", "linux"])
 def test_inventory_skips_uninspectable_interfaces(platform_name, monkeypatch):
     from importlib import import_module
-    from kllm.managed_network.platform.inspection import NetworkError
+    from kllm.shared.platform.inspection import NetworkError
 
-    module = import_module(f"kllm.managed_network.platform.{platform_name}")
+    module = import_module(f"kllm.shared.platform.{platform_name}")
     platform = module.MacOSAdapter() if platform_name == "macos" else module.LinuxAdapter()
     monkeypatch.setattr(
         module.socket, "if_nameindex", lambda: [(1, "lo0"), (2, "ethernet"), (3, "utun0")]
@@ -31,12 +31,7 @@ def test_inventory_skips_uninspectable_interfaces(platform_name, monkeypatch):
 
 
 def test_signed_authority_replay_and_changed_identity(tmp_path):
-    from kllm.managed_network.identity import (
-        ChannelFence,
-        IdentityError,
-        LocalIdentity,
-        SignedCommand,
-    )
+    from kllm.modules.managed_network.interactors.identity import ChannelFence, IdentityError, LocalIdentity, SignedCommand
 
     master_store = NetworkStore(tmp_path / "master")
     worker_store = NetworkStore(tmp_path / "worker")
@@ -102,7 +97,7 @@ def test_signed_authority_replay_and_changed_identity(tmp_path):
 
 
 def test_rebuilt_node_label_keeps_the_pinned_key_and_drops_stale_fences(tmp_path):
-    from kllm.managed_network.identity import LocalIdentity
+    from kllm.modules.managed_network.interactors.identity import LocalIdentity
 
     store = NetworkStore(tmp_path)
     try:
@@ -122,7 +117,7 @@ def test_rebuilt_node_label_keeps_the_pinned_key_and_drops_stale_fences(tmp_path
 
 def test_changed_private_key_still_requires_explicit_recovery(tmp_path):
     import secrets
-    from kllm.managed_network.identity import LocalIdentity
+    from kllm.modules.managed_network.interactors.identity import LocalIdentity
 
     store = NetworkStore(tmp_path)
     try:
@@ -135,12 +130,7 @@ def test_changed_private_key_still_requires_explicit_recovery(tmp_path):
 
 
 def test_durable_idempotency_and_restart_no_stale_ready(tmp_path):
-    from kllm.managed_network.models import (
-        LocalMutationJournal,
-        NetworkOperation,
-        RunNetworkReservation,
-        utc_now,
-    )
+    from kllm.modules.managed_network.entities import LocalMutationJournal, NetworkOperation, RunNetworkReservation, utc_now
 
     store = NetworkStore(tmp_path)
     binding = store.cluster_binding()
@@ -221,12 +211,12 @@ def test_durable_idempotency_and_restart_no_stale_ready(tmp_path):
 async def test_all_node_preparation_refusal_makes_no_host_changes(tmp_path, monkeypatch):
     """Hardware/privilege facts are controlled; refused preparation never adds."""
     from types import SimpleNamespace
-    from kllm.agent.services.managed_network import ManagedNetworkService
-    from kllm.managed_network.allocation import StartRequest
-    from kllm.managed_network.platform.base import AdapterSnapshot, PlatformAdapter
-    from kllm.managed_network.platform.inspection import InterfaceState
-    from kllm.managed_network.platform import base
-    from kllm import native
+    from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+    from kllm.modules.managed_network.interactors.allocation import StartRequest
+    from kllm.shared.platform.base import AdapterSnapshot, PlatformAdapter
+    from kllm.shared.platform.inspection import InterfaceState
+    from kllm.shared.platform import base
+    from kllm.shared import native
 
     mutations = []
 
@@ -297,10 +287,10 @@ async def test_all_node_preparation_refusal_makes_no_host_changes(tmp_path, monk
     ],
 )
 def test_platform_eligibility_uses_one_gigabit_floor(speed, expected_code, monkeypatch):
-    from kllm import native
-    from kllm.managed_network.helper_platform import HelperPlatform
-    from kllm.managed_network.platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal
-    from kllm.managed_network.platform.inspection import InterfaceState
+    from kllm.shared import native
+    from kllm.modules.managed_network.interactors.helper_platform import HelperPlatform
+    from kllm.shared.platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal
+    from kllm.shared.platform.inspection import InterfaceState
 
     class Candidate(PlatformAdapter):
         def inventory(self):
@@ -318,7 +308,7 @@ def test_platform_eligibility_uses_one_gigabit_floor(speed, expected_code, monke
         def check_source_route(self, snapshot, source, peer):
             raise NotImplementedError
 
-    monkeypatch.setattr("kllm.managed_network.platform.base.is_admin", lambda: True)
+    monkeypatch.setattr("kllm.shared.platform.base.is_admin", lambda: True)
     monkeypatch.setattr(native, "managed_network_available", lambda: True)
     snapshot = AdapterSnapshot(
         "eth-test",
@@ -347,16 +337,11 @@ async def test_run_reservation_freezes_inventory_and_blocks_stop(tmp_path, monke
     """
     import time
     from types import SimpleNamespace
-    from kllm import native
-    from kllm.agent.services.managed_network import ManagedNetworkService
-    from kllm.managed_network.allocation import OperationRequest
-    from kllm.managed_network.models import (
-        NodeAssignment,
-        NetworkOperation,
-        RPCChildIdentity,
-        utc_now,
-    )
-    from kllm.managed_network.platform.base import PlatformRefusal
+    from kllm.shared import native
+    from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+    from kllm.modules.managed_network.interactors.allocation import OperationRequest
+    from kllm.modules.managed_network.entities import NodeAssignment, NetworkOperation, RPCChildIdentity, utc_now
+    from kllm.shared.platform.base import PlatformRefusal
 
     state = SimpleNamespace(
         role="master",
@@ -510,7 +495,7 @@ async def test_run_reservation_freezes_inventory_and_blocks_stop(tmp_path, monke
     assert service.store.runs(network.network_id)[0].launch_endpoints == ["127.0.0.1:34567"]
     await service.admission.release_stopped()
     assert service.store.runs(network.network_id)[0].state == "released"
-    from kllm.run_settings import RunBody
+    from kllm.modules.inference.entities import RunBody
 
     body = RunBody(model="model.gguf", network_id=str(network.network_id))
     assert "network_id" not in body.snapshot_for_remember()
@@ -525,11 +510,11 @@ async def test_local_review_preserves_ambiguous_address_and_requires_current_sna
     from types import SimpleNamespace
     import asyncio
     import ipaddress
-    from kllm.managed_network.identity import LocalIdentity
-    from kllm.managed_network.models import LocalMutationJournal, NodeAssignment
-    from kllm.managed_network.platform.base import AdapterSnapshot
-    from kllm.managed_network.platform.inspection import InterfaceState
-    from kllm.managed_network.recovery import CleanupDecision, resolve, review
+    from kllm.modules.managed_network.interactors.identity import LocalIdentity
+    from kllm.modules.managed_network.entities import LocalMutationJournal, NodeAssignment
+    from kllm.shared.platform.base import AdapterSnapshot
+    from kllm.shared.platform.inspection import InterfaceState
+    from kllm.modules.managed_network.interactors.recovery import CleanupDecision, resolve, review
 
     store = NetworkStore(tmp_path)
     identity = LocalIdentity(tmp_path, "local", store)
@@ -594,7 +579,7 @@ async def test_local_review_preserves_ambiguous_address_and_requires_current_sna
         phase="ownership_conflict",
         authority_fence=authority,
     )
-    from kllm.managed_network.models import NetworkOperation, utc_now
+    from kllm.modules.managed_network.entities import NetworkOperation, utc_now
 
     store.put_operation(
         NetworkOperation(
@@ -644,7 +629,7 @@ async def test_local_review_preserves_ambiguous_address_and_requires_current_sna
     )
     assert removed == [str(exact)]
     assert addresses == [unrelated]
-    from kllm.managed_network.allocation import ParticipantSelection, assign
+    from kllm.modules.managed_network.interactors.allocation import ParticipantSelection, assign
 
     local_inventory = platform.inspect("test").public()
     worker_inventory = AdapterSnapshot(

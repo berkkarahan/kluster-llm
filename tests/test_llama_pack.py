@@ -39,7 +39,7 @@ def install():
 @pytest.fixture
 def pack(install, monkeypatch):
     """llama_pack wired to the real install.py module under test control."""
-    from kllm import llama_pack
+    from kllm.shared import llama_pack
 
     monkeypatch.setattr(llama_pack, "_load_install", lambda root: install)
     monkeypatch.setattr(install, "read_pinned_release", lambda override=None: "v0.5.0")
@@ -161,7 +161,7 @@ def test_non_macos_still_installs_cached_pack(pack, install, tmp_path, monkeypat
 
 def test_legacy_state_without_llama_warnings_loads(tmp_path, monkeypatch):
     """state.json written before llama_warnings existed must still load."""
-    from kllm import state
+    from kllm.shared import state
 
     state_file = tmp_path / "cluster.json"
     state_file.write_text(

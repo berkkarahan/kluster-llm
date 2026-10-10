@@ -20,15 +20,24 @@ Backend preference per node is NVIDIA CUDA then Vulkan, AMD ROCm on Linux then V
 
 ```text
 kllm/
-├── src/kllm/                 # Cross-platform CLI and control agent
-├── crates/kllm-native/       # Hardware probe, planner, and process supervisor
-├── scripts/                  # Python installer, builder, and validation tools
-├── dashboard/                # Svelte dashboard
-├── network-config/           # High-speed link setup guides
-├── docs/                     # Operations and CLI documentation
-├── tests/                    # Python test suite
+├── src/kllm/                         # Cross-platform CLI and control agent
+│   ├── modules/<feature>/            # Python feature modules
+│   ├── shared/                       # Shared gateways
+│   ├── agent/                        # Composition root (kllm.agent)
+│   └── cli.py                        # Composition root (kllm.cli)
+├── crates/kllm-native/               # Hardware probe, planner, and process supervisor
+├── scripts/                          # Python installer, builder, and validation tools
+├── dashboard/                        # Svelte 5 dashboard
+│   └── src/lib/
+│       ├── app.svelte.ts             # createApp() composition root
+│       ├── modules/<feature>/        # Dashboard feature modules
+│       ├── shared/                   # Shared UI, HTTP, and navigation
+│       └── live/                     # Live feed
+├── network-config/                   # High-speed link setup guides
+├── docs/                             # Operations and CLI documentation
+├── tests/                            # Python test suite
 ├── pyproject.toml
-└── llama-release             # Pinned stable llama.cpp release
+└── llama-release                     # Pinned stable llama.cpp release
 ```
 
 ## Quick start

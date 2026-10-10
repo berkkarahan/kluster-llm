@@ -1,3 +1,4 @@
+import kllm.agent.runtime as agent_runtime
 import importlib
 import json
 import socket
@@ -12,9 +13,9 @@ import httpx
 import uvicorn
 from websockets.sync.client import connect as websocket_connect
 from websockets.exceptions import ConnectionClosed
-from kllm.agent.live import LiveFeed, SourceDenied, _encoded
-from kllm.agent.services import dashboard_live as dashboard_live_service
-from kllm.state import ClusterState
+from kllm.modules.live.interactors.live import LiveFeed, SourceDenied, _encoded
+from kllm.modules.live.interactors import dashboard_live as dashboard_live_service
+from kllm.shared.state import ClusterState
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +77,7 @@ def test_dashboard_live_service_caches_feed_and_tracks_scope(monkeypatch):
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
     import kllm.agent as agent_mod
 
     importlib.reload(state_mod)
@@ -89,12 +90,10 @@ def client(tmp_path, monkeypatch):
 
 def test_dashboard_live_get_validates_and_hides_status_secrets(client, monkeypatch):
     test_client, agent = client
-    monkeypatch.setattr(
-        agent,
-        "_live_status",
+    monkeypatch.setattr(agent_runtime, "_live_status",
         lambda: {"role": "master", "join_key": "secret-key", "apply_error": "model does not fit"},
     )
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
 
     response = test_client.get("/v1/dashboard/live", params={"topics": "status"})
     assert response.status_code == 200
@@ -158,7 +157,7 @@ def test_live_status_uses_completed_member_metadata_without_running_probes(clien
         "software_identity",
         lambda: (_ for _ in ()).throw(AssertionError("software probe")),
     )
-    data = agent._live_status()
+    data = agent_runtime._live_status()
     assert data["capacity"]["total_ram_bytes"] == 4096
     assert data["software"]["git_head"] == "cached"
     assert data["members"]["testnode"]["role"] == "master"
@@ -171,7 +170,7 @@ def test_status_then_live_status_does_not_repeat_gpu_acquisition(client, native_
     after_status = dict(native_inventory_counts)
     assert after_status == {"list_gpus": 0, "binary_capabilities": 1}
 
-    agent._live_status()
+    agent_runtime._live_status()
     assert native_inventory_counts == after_status
 
 
@@ -208,8 +207,8 @@ def test_dashboard_live_get_origin_admission(client):
 
 def test_dashboard_live_websocket_sends_hello_and_current_status(client, monkeypatch):
     test_client, agent = client
-    monkeypatch.setattr(agent, "_live_status", lambda: {"role": "idle", "node_id": "testnode"})
-    agent.app.state.live_feed = agent._new_live_feed()
+    monkeypatch.setattr(agent_runtime, "_live_status", lambda: {"role": "idle", "node_id": "testnode"})
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
 
     with test_client.websocket_connect(
         "/v1/dashboard/live", headers={"Origin": "http://testserver"}
@@ -237,7 +236,7 @@ def test_dashboard_live_websocket_sends_hello_and_current_status(client, monkeyp
 def test_live_socket_closes_on_serving_role_replacement(client):
     test_client, agent = client
     agent.STATE.role = "idle"
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
     with test_client.websocket_connect(
         "/v1/dashboard/live", headers={"Origin": "http://testserver"}
     ) as socket:
@@ -257,8 +256,8 @@ def test_live_socket_closes_on_serving_role_replacement(client):
 def test_real_uvicorn_http_snapshot_and_websocket_change(client, monkeypatch):
     _, agent = client
     state = {"role": "idle", "node_id": "testnode"}
-    monkeypatch.setattr(agent, "_live_status", lambda: dict(state))
-    agent.app.state.live_feed = agent._new_live_feed()
+    monkeypatch.setattr(agent_runtime, "_live_status", lambda: dict(state))
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
 
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -486,7 +485,7 @@ def test_worker_usage_denial_does_not_become_unavailable_or_echo_upstream_body(c
     agent.STATE.role = "worker"
     agent.STATE.master_host = "10.0.0.1"
     agent.STATE.join_key = "private-join-key"
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
 
     class DeniedResponse:
         status_code = 403
@@ -510,11 +509,11 @@ def test_worker_usage_denial_does_not_become_unavailable_or_echo_upstream_body(c
 
 def test_error_area_does_not_hide_a_good_status_in_initial_websocket_frame(client, monkeypatch):
     test_client, agent = client
-    monkeypatch.setattr(agent, "_live_status", lambda: {"role": "idle", "node_id": "testnode"})
+    monkeypatch.setattr(agent_runtime, "_live_status", lambda: {"role": "idle", "node_id": "testnode"})
     monkeypatch.setattr(
-        agent, "_live_load", lambda: (_ for _ in ()).throw(RuntimeError("load unavailable"))
+        agent_runtime, "_live_load", lambda: (_ for _ in ()).throw(RuntimeError("load unavailable"))
     )
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
     with test_client.websocket_connect(
         "/v1/dashboard/live", headers={"Origin": "http://testserver"}
     ) as socket:
@@ -613,7 +612,7 @@ def test_near_limit_four_area_plus_logs_snapshot_fits_one_frame():
 
 @pytest.mark.unit
 def test_log_count_limit_reports_omitted_prefix_without_losing_highwater():
-    from kllm import cluster_log
+    from kllm.modules.logs.interactors import cluster_log
 
     hub = cluster_log.LogHub(ring_max=800)
     hub.ingest(
@@ -635,8 +634,8 @@ def test_log_count_limit_reports_omitted_prefix_without_losing_highwater():
 
 @pytest.mark.unit
 def test_log_suffix_fits_the_maximal_newest_complete_result_without_mutating_source():
-    from kllm.agent.live import _fit_log_suffix
-    from kllm.cluster_log import make_event
+    from kllm.modules.live.interactors.live import _fit_log_suffix
+    from kllm.modules.logs.interactors.cluster_log import make_event
 
     rows = [make_event("n1", "agent", f"line-{i}-" + "x" * 100, ts=1.0) for i in range(20)]
     snapshot = {
@@ -665,7 +664,7 @@ def test_log_suffix_fits_the_maximal_newest_complete_result_without_mutating_sou
 
 @pytest.mark.unit
 def test_log_suffix_uses_encoded_unicode_and_retains_retention_gap():
-    from kllm.agent.live import _fit_log_suffix
+    from kllm.modules.live.interactors.live import _fit_log_suffix
 
     prefix = {"availability": "available", "sampled_at": "2026-09-30T00:00:00Z", "error": None}
     lines = [
@@ -697,7 +696,7 @@ def test_log_suffix_uses_encoded_unicode_and_retains_retention_gap():
 
 @pytest.mark.unit
 def test_log_suffix_validates_omitted_rows_and_rejects_unfit_metadata():
-    from kllm.agent.live import _fit_log_suffix
+    from kllm.modules.live.interactors.live import _fit_log_suffix
 
     prefix = {"availability": "available", "sampled_at": "2026-09-30T00:00:00Z", "error": None}
     invalid = {
@@ -725,14 +724,14 @@ def test_log_suffix_validates_omitted_rows_and_rejects_unfit_metadata():
 
 def test_dashboard_log_get_and_websocket_keep_event_ids_and_checkpoint(client, monkeypatch):
     test_client, agent = client
-    from kllm import cluster_log
+    from kllm.modules.logs.interactors import cluster_log
 
     hub = cluster_log.LogHub()
     agent.STATE.role = "idle"
     event = cluster_log.make_event("testnode", "agent", "same message")
     hub.ingest([event], persist=False)
     monkeypatch.setattr(cluster_log, "HUB", hub)
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
     params = {"topics": "", "logs": "1"}
     http_logs = test_client.get("/v1/dashboard/live", params=params).json()["logs"]["snapshot"]
     assert [line["event_id"] for line in http_logs["lines"]] == [event["event_id"]]
@@ -967,8 +966,9 @@ def test_slow_logs_do_not_delay_cold_status_or_initial_deadline():
 
 def test_live_progress_snapshot_carries_active_and_latest_terminal(client, monkeypatch):
     test_client, agent = client
-    from kllm import models as model_ops, load_progress
-    from kllm.models.download_progress import DownloadProgress
+    from kllm.modules.inference.interactors import load_progress
+    from kllm.modules import models as model_ops
+    from kllm.modules.models.interactors.download_progress import DownloadProgress
 
     previous_download = (
         model_ops.downloads._DOWNLOAD_PROGRESS,
@@ -1009,7 +1009,7 @@ def test_live_progress_snapshot_carries_active_and_latest_terminal(client, monke
         finished_at="2026-01-01T00:00:01Z",
     )
     try:
-        agent.app.state.live_feed = agent._new_live_feed()
+        agent.app.state.live_feed = agent_runtime._new_live_feed()
         data = test_client.get("/v1/dashboard/live", params={"topics": "load,download"}).json()[
             "areas"
         ]
@@ -1066,18 +1066,16 @@ def test_worker_live_log_mirror_uses_private_cursor_and_reports_coverage_changes
         "gap_reason": None,
     }
     upstream_calls = []
-    monkeypatch.setattr(
-        agent,
-        "_try_proxy_master_logs",
+    monkeypatch.setattr(agent_runtime, "_try_proxy_master_logs",
         lambda *args: (upstream_calls.append(args), dict(remote))[1],
     )
     agent.app.state.live_log_state = None
-    first = agent._live_logs(None)
+    first = agent_runtime._live_logs(None)
     assert first["source"] == "cluster" and [row["line"] for row in first["lines"]] == ["one"]
     remote["cursor"] = f"{remote_epoch}:2"
     remote["lines"] = events[1:]
     agent.app.state.live_log_state["last_acquired"] = 0
-    next_snapshot = agent._live_logs(first["cursor"])
+    next_snapshot = agent_runtime._live_logs(first["cursor"])
     assert [row["line"] for row in next_snapshot["lines"]] == ["two"]
     assert next_snapshot["lines"][0]["event_id"] == events[1]["event_id"]
     assert upstream_calls[1][-1] == f"{remote_epoch}:1", (
@@ -1085,9 +1083,9 @@ def test_worker_live_log_mirror_uses_private_cursor_and_reports_coverage_changes
     )
 
     continuity = next_snapshot["continuity_id"]
-    monkeypatch.setattr(agent, "_try_proxy_master_logs", lambda *args: None)
+    monkeypatch.setattr(agent_runtime, "_try_proxy_master_logs", lambda *args: None)
     agent.app.state.live_log_state["last_acquired"] = 0
-    local = agent._live_logs(None)
+    local = agent_runtime._live_logs(None)
     assert local["source"] == "local"
     assert local["continuity_id"] != continuity
     assert local["gap"] is True
@@ -1099,12 +1097,12 @@ def test_worker_live_log_access_denial_is_not_replaced_with_local_fallback(clien
     agent.STATE.role = "worker"
     agent.STATE.node_id = "worker-1"
     agent.app.state.live_log_state = None
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
 
     def denied(*_args):
         raise HTTPException(403, "upstream private denial")
 
-    monkeypatch.setattr(agent, "_try_proxy_master_logs", denied)
+    monkeypatch.setattr(agent_runtime, "_try_proxy_master_logs", denied)
     response = test_client.get("/v1/dashboard/live", params={"topics": "", "logs": "1"})
     assert response.status_code == 200
     result = response.json()["logs"]

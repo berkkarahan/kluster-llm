@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectCommand, shellQuote } from '../src/lib/connect-command.ts';
+import { connectCommand, shellQuote } from '../src/lib/modules/integrations/connect-command.ts';
 
 test('CONNECT quotes model and endpoint in both supported shells', () => {
   const model = "a 'quoted' $HOME `model`.gguf";

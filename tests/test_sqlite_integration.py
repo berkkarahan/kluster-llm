@@ -15,11 +15,11 @@ import pytest
 from sqlalchemy import Column, MetaData, Text, delete, func, inspect, select, update
 from sqlalchemy.dialects.sqlite import insert
 
-from kllm.persistence import SQLiteOptions, SQLiteStore
-from kllm.usage_store import UsageStore
-from kllm.agent.usage_runtime import UsageRuntime
-from kllm.managed_network.store import NetworkStore
-from kllm.managed_network.models import NodeNetworkIdentity
+from kllm.shared.persistence import SQLiteOptions, SQLiteStore
+from kllm.modules.usage.gateways.usage_store import UsageStore
+from kllm.modules.usage.interactors.usage_runtime import UsageRuntime
+from kllm.modules.managed_network.gateways.store import NetworkStore
+from kllm.modules.managed_network.entities import NodeNetworkIdentity
 from sqlite_fixtures import legacy_file, seed_legacy_rows
 from test_usage import reading
 
@@ -46,9 +46,9 @@ def _mutate_network_under_fence(home, attempting, results):
 
 def usage_application(tmp_path):
     from fastapi import FastAPI, Request
-    from kllm import usage
-    from kllm.agent.handlers.usage import UsageIngestHandlers
-    from kllm.state import ClusterState
+    from kllm.modules.usage.interactors import usage
+    from kllm.modules.usage.router_http import UsageIngestHandlers
+    from kllm.shared.state import ClusterState
 
     point = reading(datetime.now(timezone.utc))
     state = ClusterState(
@@ -163,7 +163,7 @@ async def test_cancelled_http_ingest_after_commit_boundary_keeps_durable_batch(
     tmp_path, monkeypatch
 ):
     import httpx
-    from kllm.persistence.operations import Operation
+    from kllm.shared.persistence.operations import Operation
 
     app, store, point = usage_application(tmp_path)
     committing, release = threading.Event(), threading.Event()
@@ -209,7 +209,7 @@ async def test_cancelled_http_ingest_after_commit_boundary_keeps_durable_batch(
 async def test_async_network_route_held_lease_preserves_status_progress(tmp_path):
     from fastapi import FastAPI
     import httpx
-    from kllm.agent.handlers.managed_network import build_router
+    from kllm.modules.managed_network.router_http import build_router
     from uuid import uuid4
 
     store = NetworkStore(tmp_path, options=SQLiteOptions(wait_timeout=0.1))
@@ -371,8 +371,8 @@ def test_two_process_network_mutations_share_the_execution_fence(tmp_path):
 @pytest.mark.parametrize("domain", ["usage", "network"])
 def test_temporary_field_and_filter_maintenance_workflow(tmp_path, domain):
     """A future-field exercise changes a private test schema, never product fields."""
-    from kllm import usage_schema
-    from kllm.managed_network import schema as network_schema
+    from kllm.modules.usage import entities as usage_schema
+    from kllm.modules.managed_network.gateways import schema as network_schema
 
     original = usage_schema.metadata if domain == "usage" else network_schema.schema
     extended = MetaData()
@@ -515,10 +515,10 @@ def test_resource_cycles_reuse_and_release_every_owner(tmp_path, kind, capacity)
 async def test_responsiveness_with_retained_history_and_delayed_usage_lease(tmp_path, capacity):
     import httpx
     from fastapi import FastAPI
-    from kllm import usage_schema
-    from kllm.agent.routes.v2 import build_router
-    from kllm.agent.services.dashboard_status import DashboardStatusService
-    from kllm.state import ClusterState
+    from kllm.modules.usage import entities as usage_schema
+    from kllm.modules.control_v2 import build_router
+    from kllm.modules.cluster.presenters.dashboard_status import DashboardStatusService
+    from kllm.shared.state import ClusterState
 
     usage_store = UsageStore(
         tmp_path / "usage.sqlite3",

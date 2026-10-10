@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import socket
 import subprocess
 import sys
@@ -8,8 +10,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from kllm.agent.services.gpus import ResolvedGpuSelection
-from kllm.core.gpu_selection import GpuSelection
+from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
+from kllm.modules.inference.interactors.gpu_selection import GpuSelection
 
 
 @pytest.fixture()
@@ -18,8 +20,8 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.netsec as netsec_mod
-    import kllm.state as state_mod
+    import kllm.shared.netsec as netsec_mod
+    import kllm.shared.state as state_mod
     from fastapi.testclient import TestClient
 
     importlib.reload(state_mod)
@@ -87,13 +89,13 @@ def echo_tcp():
 
 @pytest.mark.integration
 def test_tcp_reachable_localhost(echo_tcp):
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     assert cp_proxy.tcp_reachable("127.0.0.1", echo_tcp)
 
 
 def test_tcp_reachable_handles_refusal(monkeypatch):
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     def refused(*_args, **_kwargs):
         raise OSError("controlled refusal")
@@ -104,7 +106,7 @@ def test_tcp_reachable_handles_refusal(monkeypatch):
 
 @pytest.mark.integration
 def test_shell_can_reach_localhost(echo_tcp, monkeypatch):
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     run = cp_proxy.subprocess.run
 
@@ -121,7 +123,7 @@ def test_shell_can_reach_localhost(echo_tcp, monkeypatch):
 
 
 def test_ensure_for_master_direct_when_reachable(echo_tcp):
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     cp_proxy.stop_current()
     assert cp_proxy.ensure_for_master("127.0.0.1", echo_tcp) is None
@@ -130,7 +132,7 @@ def test_ensure_for_master_direct_when_reachable(echo_tcp):
 @pytest.mark.unit
 def test_ensure_skips_proxy_when_connection_refused(monkeypatch):
     import errno
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     def refused(*_args, **_kwargs):
         raise OSError(errno.ECONNREFUSED, "connection refused")
@@ -143,7 +145,7 @@ def test_ensure_skips_proxy_when_connection_refused(monkeypatch):
 
 @pytest.mark.integration
 def test_proxy_relays_when_blocked(echo_tcp, monkeypatch):
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     cp_proxy.stop_current()
     monkeypatch.setattr(cp_proxy, "probe_master", lambda host, port, timeout=1.5: "blocked")
@@ -163,7 +165,7 @@ def test_proxy_relays_when_blocked(echo_tcp, monkeypatch):
 def test_join_uses_proxy_base(client, monkeypatch):
     """Join register URL goes via localhost proxy when LAN probe fails."""
     _client, agent, _netsec = client
-    from kllm import cp_proxy
+    from kllm.shared import cp_proxy
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -200,9 +202,9 @@ def test_join_uses_proxy_base(client, monkeypatch):
         agent.STATE.cp_proxy_port = master_port
         return ["control-plane via proxy"]
 
-    monkeypatch.setattr(agent, "_ensure_master_control_route", ensure_route)
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", ensure_route)
     monkeypatch.setattr(
-        agent,
+        agent_runtime,
         "_probe_capacity_for_cluster",
         lambda: {
             "total_ram_bytes": 1,
@@ -211,9 +213,7 @@ def test_join_uses_proxy_base(client, monkeypatch):
             "backend": "cpu",
         },
     )
-    monkeypatch.setattr(
-        agent,
-        "_resolve_gpu_selection",
+    monkeypatch.setattr(agent_runtime, "_resolve_gpu_selection",
         lambda gpu_ids, listed=None: ResolvedGpuSelection(GpuSelection((), "cpu", 0), ()),
     )
     monkeypatch.setattr(agent.netsec, "ensure_rpc_firewall", lambda *a, **k: {})

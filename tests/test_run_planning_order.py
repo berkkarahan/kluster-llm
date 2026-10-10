@@ -7,16 +7,16 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from kllm.membership import cluster_snapshot
-from kllm.run_planning import (
+from kllm.modules.cluster.interactors.membership import cluster_snapshot
+from kllm.modules.inference.interactors.run_planning import (
     cluster_nodes,
     ensure_rpc_peers_reachable,
     member_rpc_host,
     ordered_members,
     rpc_server_endpoints,
 )
-from kllm.run_launch import build_master_launch
-from kllm.run_settings import RunBody, RunSettingsFields
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.entities import RunBody, RunSettingsFields
 
 
 def test_ordered_members_workers_then_master():
@@ -128,7 +128,7 @@ def test_ensure_rpc_peers_reachable_fails_closed_port():
 
 
 def test_ensure_rpc_peers_reachable_uses_control_plane(monkeypatch):
-    from kllm import http_clients
+    from kllm.shared import http_clients
     import httpx
 
     calls = []
@@ -152,7 +152,7 @@ def test_ensure_rpc_peers_reachable_uses_control_plane(monkeypatch):
 
 
 def test_ensure_rpc_peers_reachable_rejects_rpc_bind_mismatch(monkeypatch):
-    from kllm import http_clients
+    from kllm.shared import http_clients
     import httpx
 
     def handle(_request):
@@ -204,7 +204,7 @@ def test_snapshot_includes_latency_ms():
 
 
 def test_cli_payload_includes_weights():
-    from kllm.cli_payload import build_plan_run_payload
+    from kllm.modules.inference.presenters import build_plan_run_payload
 
     payload = build_plan_run_payload(model="m.gguf", vram_weight=0.7, latency_weight=0.3)
     assert payload["vram_weight"] == 0.7
@@ -212,7 +212,7 @@ def test_cli_payload_includes_weights():
 
 
 def test_native_knapsack_exposes_placement_fields():
-    from kllm import native
+    from kllm.shared import native
 
     if not native.native_available():
         return

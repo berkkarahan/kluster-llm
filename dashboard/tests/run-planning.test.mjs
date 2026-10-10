@@ -93,17 +93,18 @@ test('run page cache dropdowns and required-node checkbox update the visible pla
       await call('Page.navigate', { url: base + '/run' });
       await wait("document.querySelector('#run-placement-mode')");
       await evaluate(`(async () => {
-        const { appStore } = await import('/src/lib/store.svelte.ts');
+        const { createApp } = await import('/src/lib/app.svelte.ts');
+        const appStore = createApp();
         appStore.stop();
-        appStore.status = { role: 'master', node_id: 'master', members: {
+        appStore.cluster.status = { role: 'master', node_id: 'master', members: {
           master: { node_id: 'master', role: 'master', host: 'master', devices: [{ index: 0, name: 'Apple M4' }] },
           worker: { node_id: 'worker', role: 'worker', host: 'worker', devices: [{ index: 0, name: 'AMD Radeon 8060S' }] }
         }};
-        appStore.models = [{ id: 'fixture.gguf' }];
-        appStore.selectedModel = 'fixture.gguf';
-        appStore.resetRunSettings();
-        appStore.advancedOpen = true;
-        appStore.scheduleEstimate(0);
+        appStore.models.models = [{ id: 'fixture.gguf' }];
+        appStore.models.selectedModel = 'fixture.gguf';
+        appStore.run.resetRunSettings();
+        appStore.run.advancedOpen = true;
+        appStore.run.scheduleEstimate(0);
       })()`);
       await wait("document.body.innerText.includes('K cache: q8_0') && document.body.innerText.includes('6.0 GiB')");
       await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Configure').click()");

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from kllm.agent.services.heartbeat_payload import HeartbeatPayloadBuilder
-from kllm.state import ClusterState
+from kllm.modules.cluster.presenters.heartbeat_payload import HeartbeatPayloadBuilder
+from kllm.shared.state import ClusterState
 
 
 def test_heartbeat_payload_builder_combines_state_and_runtime_identity():

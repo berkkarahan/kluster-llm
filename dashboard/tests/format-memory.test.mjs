@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formatGib, formatMemoryComponent, selectedCapacity } from '../src/lib/format-memory.ts';
+import { formatGib, formatMemoryComponent, selectedCapacity } from '../src/lib/shared/format-memory.ts';
 
 const gib = 1024 ** 3;
 const gpus = [

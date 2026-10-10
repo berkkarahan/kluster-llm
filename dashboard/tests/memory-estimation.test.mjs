@@ -31,17 +31,17 @@ test('memory controls refresh previews, explain constant batch totals and suppre
       if (defer) return new Promise((resolve) => pending.push({ body, resolve }));
       return response(body);
     };
-    ({ appStore: store } = await server.ssrLoadModule('/src/lib/store.svelte.ts'));
-    store.models = [{ id: 'fixture.gguf' }];
-    store.selectedModel = 'fixture.gguf';
-    store.status = { role: 'master', node_id: 'master', members: { master: { node_id: 'master' } } };
-    store.batchSize = 512;
-    await store.refreshEstimate();
-    store.batchSize = 1024;
-    await store.refreshEstimate();
+    store = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
+    store.models.models = [{ id: 'fixture.gguf' }];
+    store.models.selectedModel = 'fixture.gguf';
+    store.cluster.status = { role: 'master', node_id: 'master', members: { master: { node_id: 'master' } } };
+    store.run.batchSize = 512;
+    await store.run.refreshEstimate();
+    store.run.batchSize = 1024;
+    await store.run.refreshEstimate();
     assert.equal(requests.length, 2);
-    assert.match(store.estimateNote, /Preview recalculated.*logical batch changed.*micro-batch remains 128/);
-    assert.equal(store.estimateRecalculations, 2);
+    assert.match(store.run.estimateNote, /Preview recalculated.*logical batch changed.*micro-batch remains 128/);
+    assert.equal(store.run.estimateRecalculations, 2);
 
     // Exercise the debounced path used by the controls with each wire-format input.
     for (const [field, value, key] of [
@@ -54,8 +54,8 @@ test('memory controls refresh previews, explain constant batch totals and suppre
       ['mmproj', '/projector.gguf', 'mmproj'], ['extraArgsText', '--swa-full', 'extra_args']
     ]) {
       const before = requests.length;
-      store[field] = value;
-      store.scheduleEstimate(0);
+      store.run[field] = value;
+      store.run.scheduleEstimate(0);
       await new Promise((resolve) => setTimeout(resolve, 15));
       assert.equal(requests.length, before + 1, field);
       assert.deepEqual(requests.at(-1)[key], field === 'extraArgsText' ? ['--swa-full'] : value);
@@ -72,54 +72,54 @@ test('memory controls refresh previews, explain constant batch totals and suppre
     assert.match(html, /Incomplete estimate/);
     assert.match(html, /Fixture unpriced argument/);
 
-    store.cacheTypeK = 'q8_0'; store.cacheTypeV = 'q8_0';
-    await store.refreshEstimate();
-    store.cacheTypeK = 'q4_0'; store.cacheTypeV = 'q4_0';
-    await store.refreshEstimate();
-    assert.match(store.estimateNote, /KV cache decreased by 16\.00 MiB.*weights and host checkpoints are unchanged/);
+    store.run.cacheTypeK = 'q8_0'; store.run.cacheTypeV = 'q8_0';
+    await store.run.refreshEstimate();
+    store.run.cacheTypeK = 'q4_0'; store.run.cacheTypeV = 'q4_0';
+    await store.run.refreshEstimate();
+    assert.match(store.run.estimateNote, /KV cache decreased by 16\.00 MiB.*weights and host checkpoints are unchanged/);
     const quantized = render(RunPage).body;
     assert.match(quantized, /K cache: q4_0.*V cache: q4_0/);
     assert.match(quantized, /Must use this node/);
-    store.setNodeRequired('master', true);
-    if (store.estimateTimer) clearTimeout(store.estimateTimer);
-    await store.refreshEstimate();
+    store.run.setNodeRequired('master', true);
+    if (store.run.estimateTimer) clearTimeout(store.run.estimateTimer);
+    await store.run.refreshEstimate();
     assert.deepEqual(requests.at(-1).required_nodes, ['master']);
-    store.applyParameterSet({ required_nodes: ['master', 'missing'] });
+    store.run.applyParameterSet({ required_nodes: ['master', 'missing'] });
     assert.match(render(RunPage).body, /missing.*unavailable/);
-    store.nodeShares = { master: 1 };
-    assert.deepEqual(store.planPayload().required_nodes, []);
-    store.nodeShares = null;
-    store.setNodeRequired('missing', false);
-    if (store.estimateTimer) clearTimeout(store.estimateTimer);
-    assert.deepEqual(store.requiredNodes, ['master']);
-    store.applyParameterSet({ node_shares: { missing: 0.8, master: 0.2 } });
-    assert.deepEqual(store.nodePriority, ['missing', 'master']);
-    assert.equal(store.nodeShares, null);
+    store.run.nodeShares = { master: 1 };
+    assert.deepEqual(store.run.planPayload().required_nodes, []);
+    store.run.nodeShares = null;
+    store.run.setNodeRequired('missing', false);
+    if (store.run.estimateTimer) clearTimeout(store.run.estimateTimer);
+    assert.deepEqual(store.run.requiredNodes, ['master']);
+    store.run.applyParameterSet({ node_shares: { missing: 0.8, master: 0.2 } });
+    assert.deepEqual(store.run.nodePriority, ['missing', 'master']);
+    assert.equal(store.run.nodeShares, null);
     assert.match(render(RunPage).body, /Remove unavailable missing/);
-    store.removeNodePriority('missing');
-    assert.deepEqual(store.planPayload().node_priority, ['master']);
-    store.applyParameterSet({ node_priority: ['master'], required_nodes: ['master'] });
-    assert.deepEqual(store.nodePriority, ['master']);
-    store.setPriorityPlanning(false);
-    assert.deepEqual(store.planPayload().node_priority, []);
-    assert.deepEqual(store.planPayload().required_nodes, ['master']);
-    if (store.estimateTimer) clearTimeout(store.estimateTimer);
+    store.run.removeNodePriority('missing');
+    assert.deepEqual(store.run.planPayload().node_priority, ['master']);
+    store.run.applyParameterSet({ node_priority: ['master'], required_nodes: ['master'] });
+    assert.deepEqual(store.run.nodePriority, ['master']);
+    store.run.setPriorityPlanning(false);
+    assert.deepEqual(store.run.planPayload().node_priority, []);
+    assert.deepEqual(store.run.planPayload().required_nodes, ['master']);
+    if (store.run.estimateTimer) clearTimeout(store.run.estimateTimer);
 
     // Schedule invalidates in-flight previews before the next request even starts.
     defer = true;
-    const old = store.refreshEstimate();
-    store.batchSize = 4096;
-    store.scheduleEstimate(0);
+    const old = store.run.refreshEstimate();
+    store.run.batchSize = 4096;
+    store.run.scheduleEstimate(0);
     await new Promise((resolve) => setTimeout(resolve, 15));
     assert.equal(pending.length, 2);
     pending[1].resolve(response(pending[1].body, 2 * 1024 ** 3));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const recalculations = store.estimateRecalculations;
+    const recalculations = store.run.estimateRecalculations;
     pending[0].resolve(response(pending[0].body, 3 * 1024 ** 3));
     await old;
-    assert.equal(store.planResult.estimated_bytes, 2 * 1024 ** 3);
-    assert.equal(store.estimateRecalculations, recalculations);
-    assert.equal(store.estimating, false);
+    assert.equal(store.run.planResult.estimated_bytes, 2 * 1024 ** 3);
+    assert.equal(store.run.estimateRecalculations, recalculations);
+    assert.equal(store.run.estimating, false);
   } finally {
     store?.stop();
     globalThis.fetch = originalFetch;

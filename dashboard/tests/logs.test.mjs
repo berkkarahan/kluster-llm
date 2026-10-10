@@ -138,7 +138,7 @@ const worker = { event_id: eventId(2), ts: 2, node_id: 'w1', source: 'rpc', line
 test('cluster stop aborts reads, retains history, and resumes from its cursor', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     f.respond(f.calls[0], snapshot([master]));
@@ -165,7 +165,7 @@ test('cluster stop aborts reads, retains history, and resumes from its cursor', 
 test('a visit while logging is stopped reads saved history once without subscribing', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.setEnabled(false);
     trail.start();
@@ -182,7 +182,7 @@ test('a visit while logging is stopped reads saved history once without subscrib
 test('US1: loads, dedupes by id, filters by node, and times out stalled reads', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     assert.equal(f.calls.length, 1);
@@ -236,7 +236,7 @@ test('US1: loads, dedupes by id, filters by node, and times out stalled reads', 
 test('read failures stay visibly degraded with retained rows and clear on recovery', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     f.respond(f.calls[0], snapshot([master], { cursor: `${EPOCH}:1`, warning: 'master unreachable' }));
@@ -262,7 +262,7 @@ test('read failures stay visibly degraded with retained rows and clear on recove
 test('US2: fixed cadence, mode transitions, no overlap, cleanup', async () => {
   const f = install();
   try {
-    const { LogTrail, REFRESH_MS } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail, REFRESH_MS } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     f.respond(f.calls[0], snapshot([master]));
@@ -301,7 +301,7 @@ test('US2: fixed cadence, mode transitions, no overlap, cleanup', async () => {
 test('mode change cancels the old request and resumes from its last committed cursor', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     f.respond(f.calls[0], snapshot([master], { cursor: `${EPOCH}:1` }));
@@ -331,7 +331,7 @@ test('hidden page aborts active read and resumes with one immediate foreground r
   const f = install();
   const doc = fakeDocument();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     f.setDocument(doc);
     const trail = new LogTrail();
     trail.start();
@@ -358,7 +358,7 @@ test('hidden page aborts active read and resumes with one immediate foreground r
 test('US3: clear is a no-op before first success and display-only afterwards', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     // Clear before any committed cursor: must not discard the pending initial read.
@@ -423,7 +423,7 @@ test('long visits retain exact UUID dedup across row eviction, Clear and overlap
   const doc = fakeDocument();
   f.setDocument(doc);
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.setMode('5s');
     trail.start();
@@ -458,7 +458,7 @@ test('long visits retain exact UUID dedup across row eviction, Clear and overlap
 test('Clear treats an unseen log-continuity change as a baseline and keeps the gap visible', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     const continuityA = '00000000-0000-4000-8000-000000000010';
     const continuityB = '00000000-0000-4000-8000-000000000011';
@@ -482,7 +482,7 @@ test('Clear treats an unseen log-continuity change as a baseline and keeps the g
 test('known log gap remains visible until the visit is cleared', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.commit(snapshot([master], { cursor: `${EPOCH}:1`, gap: true, gapReason: 'retention' }));
     trail.commit(snapshot([worker], { cursor: `${EPOCH}:2` }));
@@ -497,17 +497,17 @@ test('known log gap remains visible until the visit is cleared', async () => {
 
 test('Live fallback owns an independent log GET lane and resets old-server cursor after Clear', async () => {
   const f = install();
-  const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
-  const realListener = appStore.setLogListener;
-  const realHealth = appStore.deliveryHealth;
+  const appStore = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
+  const realListener = appStore.live.setLogListener;
+  const realHealth = appStore.live.deliveryHealth;
   const doc = fakeDocument();
   f.setDocument(doc);
-  appStore.setLogListener = () => true;
-  appStore.deliveryHealth = 'periodic-refresh';
+  appStore.live.setLogListener = () => true;
+  appStore.live.deliveryHealth = 'periodic-refresh';
   let trail;
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
-    trail = new LogTrail();
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
+    trail = new LogTrail(appStore.live);
     trail.start();
     f.advance(2000);
     assert.equal(f.calls.length, 1);
@@ -534,23 +534,23 @@ test('Live fallback owns an independent log GET lane and resets old-server curso
     assert.equal(trail.continuityId, null);
   } finally {
     trail?.stop();
-    appStore.setLogListener = realListener;
-    appStore.deliveryHealth = realHealth;
+    appStore.live.setLogListener = realListener;
+    appStore.live.deliveryHealth = realHealth;
     f.restore();
   }
 });
 
 test('Live log access denial stops fallback reads without bypassing through old routes', async () => {
   const f = install();
-  const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
-  const realListener = appStore.setLogListener;
-  const realHealth = appStore.deliveryHealth;
-  appStore.setLogListener = () => true;
-  appStore.deliveryHealth = 'periodic-refresh';
+  const appStore = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
+  const realListener = appStore.live.setLogListener;
+  const realHealth = appStore.live.deliveryHealth;
+  appStore.live.setLogListener = () => true;
+  appStore.live.deliveryHealth = 'periodic-refresh';
   let trail;
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
-    trail = new LogTrail();
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
+    trail = new LogTrail(appStore.live);
     trail.start();
     f.advance(2000);
     assert.equal(f.calls.length, 1);
@@ -563,8 +563,8 @@ test('Live log access denial stops fallback reads without bypassing through old 
     assert.equal(f.calls.length, 1, 'a denied log area was retried without explicit access change');
   } finally {
     trail?.stop();
-    appStore.setLogListener = realListener;
-    appStore.deliveryHealth = realHealth;
+    appStore.live.setLogListener = realListener;
+    appStore.live.deliveryHealth = realHealth;
     f.restore();
   }
 });
@@ -572,7 +572,7 @@ test('Live log access denial stops fallback reads without bypassing through old 
 test('buffer caps at 2000 rows and reports trimming', async () => {
   const f = install();
   try {
-    const { LogTrail, MAX_ROWS } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail, MAX_ROWS } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     const lines = Array.from({ length: MAX_ROWS + 100 }, (_, i) => ({
@@ -596,7 +596,7 @@ test('buffer caps at 2000 rows and reports trimming', async () => {
 test('rejects malformed snapshots and times out while consuming a response body', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     f.respond(f.calls[0], { lines: [master], source: 'cluster' });
@@ -648,7 +648,7 @@ test('rejects malformed snapshots and times out while consuming a response body'
 test('producer tags filter the visit without a new request and survive Clear', async () => {
   const f = install();
   try {
-    const { LogTrail } = await server.ssrLoadModule('/src/lib/log-trail.svelte.ts');
+    const { LogTrail } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
     const trail = new LogTrail();
     trail.start();
     assert.equal(trail.selectedTag, '');

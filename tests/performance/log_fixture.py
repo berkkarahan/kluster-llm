@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from kllm.cluster_log import make_event
+from kllm.modules.logs.interactors.cluster_log import make_event
 
 
 def oversized_log_rows(count: int = 500, message_chars: int = 1024) -> list[dict]:

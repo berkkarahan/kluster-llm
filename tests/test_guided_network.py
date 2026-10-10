@@ -7,13 +7,13 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from kllm.agent.handlers.managed_network import build_router
-from kllm.agent.services.managed_network import ManagedNetworkService
-from kllm.managed_network.bootstrap import BootstrapCommit, BootstrapRequest, proof
-from kllm.managed_network.guided_setup import GuidedRequest, GuidedSetup
-from kllm.managed_network.identity import IdentityError
-from kllm.managed_network.store import StoreConflict
-from kllm.managed_network.platform.base import PlatformRefusal
+from kllm.modules.managed_network.router_http import build_router
+from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+from kllm.modules.managed_network.interactors.bootstrap import BootstrapCommit, BootstrapRequest, proof
+from kllm.modules.managed_network.interactors.guided_setup import GuidedRequest, GuidedSetup
+from kllm.modules.managed_network.interactors.identity import IdentityError
+from kllm.modules.managed_network.gateways.store import StoreConflict
+from kllm.shared.platform.base import PlatformRefusal
 
 
 def service(tmp_path, role="master", node_id="master"):
@@ -273,7 +273,8 @@ async def test_three_real_agents_bootstrap_and_guided_setup(tmp_path, monkeypatc
         )
         network = lab.nodes[0].service.network_view(network_id)
         assert len(network["participants"]) == 3
-        assert all(p["state"] == "ready" for p in network["participants"])
+        states = {p["node_id"]: p["state"] for p in network["participants"]}
+        assert set(states.values()) == {"ready"}, states
         assert not lab.configurations, (
             "Network setup must verify connectivity without creating RPC relays"
         )

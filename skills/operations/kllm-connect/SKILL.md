@@ -5,7 +5,7 @@ description: "Connect Claude Code, Codex, OpenCode, Hermes, OpenClaw, or Pi to K
 
 # Connect an agent to inference
 
-Locate the checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.state.repo_root()`. Read the Connect section in `docs/cli.md`; check `uv run kllm connect --help` and whether the requested client is installed.
+Locate the checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.shared.state.repo_root()`. Read the Connect section in `docs/cli.md`; check `uv run kllm connect --help` and whether the requested client is installed.
 
 1. Identify the endpoint, master, requested model, agent, and whether a model is already ready. Connecting can start a model when serving is enabled. Use `--no-serve` when the task must not start inference.
 2. Use `uv run kllm connect <agent> --model '<model>'` or specify the control endpoint with `--url`. A worker endpoint resolves to its master. Explicit remote endpoints require the master's token through `--api-key` or `KLLM_API_KEY`; a worker's local token cannot authenticate master inference.

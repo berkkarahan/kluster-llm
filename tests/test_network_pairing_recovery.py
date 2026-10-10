@@ -17,11 +17,11 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from kllm.agent.handlers.managed_network import build_router
-from kllm.agent.services.managed_network import ManagedNetworkService
-from kllm.managed_network import bootstrap as bootstrap_module
-from kllm.managed_network.identity import IdentityError
-from kllm.managed_network.models import ManagedNetwork, PeerIdentity
+from kllm.modules.managed_network.router_http import build_router
+from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+from kllm.modules.managed_network.interactors import bootstrap as bootstrap_module
+from kllm.modules.managed_network.interactors.identity import IdentityError
+from kllm.modules.managed_network.entities import ManagedNetwork, PeerIdentity
 
 
 def service(tmp_path, role="master", node_id="master"):

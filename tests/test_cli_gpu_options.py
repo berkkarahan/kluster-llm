@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import typer
 
-from kllm.commands import gpu_options
-from kllm.commands.ui import format_vram
+from kllm.modules.settings.interactors import gpu_options
+from kllm.modules.connect.view_cli import format_vram
 
 
 class FakeResponse:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kllm import usage
+from kllm.modules.usage.interactors import usage
 
 
 def test_generation_reset_is_idempotent_and_old_messages_cannot_restore_state():
@@ -60,7 +60,7 @@ def test_future_worker_clock_cannot_keep_cached_resources_fresh():
 
 
 def test_legacy_identity_adoption_requires_the_saved_start(tmp_path, monkeypatch):
-    from kllm import runtime
+    from kllm.shared import process_registry as runtime
 
     monkeypatch.setattr(runtime, "runtime_path", lambda: tmp_path / "runtime.json")
     monkeypatch.setattr(runtime, "ensure_home", lambda: None)

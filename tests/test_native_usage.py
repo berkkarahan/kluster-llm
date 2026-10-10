@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from kllm import native
+from kllm.shared import native
 
 pytestmark = [
     pytest.mark.integration,
@@ -34,14 +34,14 @@ PYTHON = (
 @pytest.fixture(autouse=True)
 def controlled_gpu_source(monkeypatch):
     """Default checks exercise pipes/bindings without a GPU driver dependency."""
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     if os.environ.get("KLLM_TEST_HARDWARE") == "1":
         return
 
     original = usage_probe.helper_command
     code = (
-        "import sys,json; from kllm.usage_probe import failure; "
+        "import sys,json; from kllm.modules.usage.gateways.usage_probe import failure; "
         "exec('for line in sys.stdin:\\n r=json.loads(line)\\n "
         'o={k:r[k] for k in ("version","generation","request_id")}\\n '
         'o["result"]=failure("gpu","unsupported_counter")\\n '
@@ -83,7 +83,7 @@ def test_private_binding_rejects_malformed_requests():
 
 
 def test_helper_rejects_unterminated_oversized_frame():
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     child = subprocess.Popen(
         usage_probe.helper_command("host"),
@@ -104,7 +104,7 @@ def test_helper_rejects_unterminated_oversized_frame():
 
 @pytest.mark.parametrize("blocked", ["gpu", "host"])
 def test_hung_source_is_bounded_and_closed(monkeypatch, blocked):
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     native.close_resource_probes()
     original = usage_probe.helper_command
@@ -138,7 +138,7 @@ def test_hung_source_is_bounded_and_closed(monkeypatch, blocked):
     sys.platform not in ("win32", "darwin"), reason="new host collector targets Windows/macOS"
 )
 def test_concurrent_calls_share_bounded_helpers():
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -156,7 +156,7 @@ def test_concurrent_calls_share_bounded_helpers():
     sys.platform not in ("win32", "darwin"), reason="new process collector targets Windows/macOS"
 )
 def test_registered_process_rss_baseline_and_exit(tmp_path, monkeypatch):
-    from kllm import runtime
+    from kllm.shared import process_registry as runtime
 
     monkeypatch.setattr(runtime, "runtime_path", lambda: tmp_path / "runtime.json")
     monkeypatch.setattr(runtime, "ensure_home", lambda: None)
@@ -207,7 +207,7 @@ def test_registered_process_rss_baseline_and_exit(tmp_path, monkeypatch):
 
 
 def test_source_schema_rejects_scope_and_bad_host():
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     source = usage_probe.failure("host", "source_error")
     validate = native.require_native()._validate_source_json
@@ -221,7 +221,7 @@ def test_source_schema_rejects_scope_and_bad_host():
 
 
 def test_shared_pool_references_are_not_duplicate_physical_memory():
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     source = usage_probe.failure("gpu", "unsupported_counter")
     missing = usage_probe.metric("bytes", "device", "unsupported_counter")
@@ -259,12 +259,12 @@ def test_shared_pool_references_are_not_duplicate_physical_memory():
 
 @pytest.mark.parametrize("mode", ["generation", "duplicate", "nonfinite", "scope", "oversize"])
 def test_malformed_helper_response_preserves_the_other_source(monkeypatch, mode):
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     native.close_resource_probes()
     original = usage_probe.helper_command
     script = (
-        "import sys,json; from kllm.usage_probe import failure; "
+        "import sys,json; from kllm.modules.usage.gateways.usage_probe import failure; "
         "r=json.loads(sys.stdin.readline()); "
         "o={k:r[k] for k in ('version','generation','request_id')}; "
         f"o['result']=failure({'host' if mode == 'scope' else 'gpu'!r},'source_error'); "
@@ -296,7 +296,8 @@ def test_malformed_helper_response_preserves_the_other_source(monkeypatch, mode)
 def test_parent_death_cleans_owned_helpers():
     code = """
 import json,sys,threading,time
-from kllm import native,usage_probe
+from kllm.shared import native
+from kllm.modules.usage.gateways import usage_probe
 original=usage_probe.helper_command
 usage_probe.helper_command=lambda source: [sys._base_executable,'-c','import sys; sys.stdin.buffer.read()'] if source=='gpu' else original(source)
 threading.Thread(target=lambda: native.probe_resources(node_id='parent-death'),daemon=True).start()
@@ -309,7 +310,7 @@ while True:
     time.sleep(.005)
 time.sleep(60)
 """
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     parent = subprocess.Popen(
         [PYTHON, "-c", code],
@@ -345,7 +346,7 @@ time.sleep(60)
 
 
 def test_helper_environment_does_not_inherit_credentials(monkeypatch):
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setenv("KLLM_JOIN_KEY", "test-key")
@@ -354,7 +355,7 @@ def test_helper_environment_does_not_inherit_credentials(monkeypatch):
 
 
 def test_unreaped_source_is_quarantined_without_spawning_a_replacement(monkeypatch):
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     native.close_resource_probes()
     command, kill = usage_probe.helper_command, usage_probe.Slot.kill
@@ -410,8 +411,8 @@ def test_short_cpu_interval_does_not_renew_its_observation():
 
 @pytest.mark.skipif(sys.platform not in ("win32", "darwin"), reason="requires target host source")
 def test_native_sampler_collects_host_resources_without_inventing_a_process(tmp_path, monkeypatch):
-    from kllm import usage
-    from kllm.state import ClusterState
+    from kllm.modules.usage.interactors import usage
+    from kllm.shared.state import ClusterState
 
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "state"))
     state = ClusterState(node_id="native-host-only", role="master")
@@ -504,7 +505,8 @@ def test_hardware_macos_gpu_matches_ioreg_reference():
     reason="opt-in Windows/macOS native hardware acceptance",
 )
 def test_hardware_sustained_probe_delivery(tmp_path, monkeypatch):
-    from kllm import runtime, usage_probe
+    from kllm.modules.usage.gateways import usage_probe
+    from kllm.shared import process_registry as runtime
 
     monkeypatch.setattr(runtime, "runtime_path", lambda: tmp_path / "runtime.json")
     monkeypatch.setattr(runtime, "ensure_home", lambda: None)
@@ -619,7 +621,7 @@ def test_hardware_sustained_probe_delivery(tmp_path, monkeypatch):
     reason="opt-in Windows/macOS native hardware acceptance",
 )
 def test_hardware_host_and_process_accuracy(tmp_path, monkeypatch):
-    from kllm import runtime
+    from kllm.shared import process_registry as runtime
 
     monkeypatch.setattr(runtime, "runtime_path", lambda: tmp_path / "runtime.json")
     monkeypatch.setattr(runtime, "ensure_home", lambda: None)
@@ -845,7 +847,7 @@ def test_hardware_windows_gpu_utilization_reference():
     reason="opt-in real private-agent/native integration",
 )
 def test_hardware_private_agents_publish_host_only_resources(tmp_path):
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     def port():
         with socket.socket() as listener:

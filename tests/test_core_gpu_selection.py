@@ -2,8 +2,8 @@
 
 import pytest
 
-from kllm.core.gpu_selection import GpuDeviceInput, parse_gpu_ids, select_gpu_devices
-from kllm.exceptions import ResourceUnavailableError, ValidationError
+from kllm.modules.inference.interactors.gpu_selection import GpuDeviceInput, parse_gpu_ids, select_gpu_devices
+from kllm.shared.exceptions import ResourceUnavailableError, ValidationError
 
 
 @pytest.mark.parametrize(

@@ -6,12 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from kllm.agent.handlers.run_settings import RunSettingsHandlers
-from kllm.effective_config import apply_active_defaults, effective_configuration
-from kllm.engine_parameters import parse_server_help, validate_engine_args
-from kllm.extra_args import ExtraArgsError, sanitize_extra_args, tokenize_extra_args
-from kllm.run_launch import build_master_launch
-from kllm.run_settings import LegacyRunBody, RunBody
+from kllm.modules.inference.interactors.run_settings_http import RunSettingsHandlers
+from kllm.modules.inference.interactors.effective_config import apply_active_defaults, effective_configuration
+from kllm.modules.inference.interactors.engine_parameters import parse_server_help, validate_engine_args
+from kllm.modules.inference.interactors.extra_args import ExtraArgsError, sanitize_extra_args, tokenize_extra_args
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.entities import LegacyRunBody, RunBody
 from test_plan_run_params import client as client, _fake_plan, _model_file
 
 
@@ -98,7 +98,7 @@ def test_saved_settings_merge_sparse_overrides_and_null_resets():
 
 def test_cli_posts_sparse_overrides_and_preserves_false(monkeypatch):
     from kllm.cli import main
-    from kllm.commands import inference
+    from kllm.modules.inference import router_cli as inference
 
     payloads = []
 
@@ -171,7 +171,7 @@ def test_unknown_engine_flag_fails_before_stopping_active_model(client, monkeypa
     c, agent, tmp = client
     _model_file(tmp)
     monkeypatch.setattr(
-        "kllm.engine_parameters.engine_catalog",
+        "kllm.modules.inference.interactors.engine_parameters.engine_catalog",
         lambda: parse_server_help("--threads N    thread count"),
     )
     agent.STATE.process_pid = 424242
@@ -280,7 +280,7 @@ def test_run_snapshot_survives_draft_edits_and_is_cleared_on_stop(client):
             return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
         ),
         patch.object(agent.native, "process_alive", return_value=True),
-        patch("kllm.agent.ensure_rpc_peers_reachable"),
+        patch("kllm.agent.runtime.ensure_rpc_peers_reachable"),
         patch.object(agent.native, "stop_process"),
     ):
         ran = c.post("/v2/inference/runs", json={"model": "toy.gguf", "temperature": 0.2})
@@ -324,7 +324,7 @@ def test_disabled_auxiliary_paths_do_not_launch_or_affect_cache_validation():
 
 
 def test_selected_template_capabilities_use_selected_preset():
-    from kllm.chat_templates import selected_template_text
+    from kllm.modules.inference.interactors.chat_templates import selected_template_text
 
     assert "enable_thinking" in selected_template_text("preset:qwen3-0.6b", None, "")
     assert selected_template_text("chatml", None, "reasoning_effort") == ""
@@ -332,7 +332,8 @@ def test_selected_template_capabilities_use_selected_preset():
 
 
 def test_independent_deployment_limits_respect_node_caps_and_real_budgets(client, monkeypatch):
-    from kllm import config, run_planning
+    from kllm.modules.inference.interactors import run_planning
+    from kllm.shared import config
     from test_memory_estimation import synthetic_gguf
     from test_required_node_planning import node
 

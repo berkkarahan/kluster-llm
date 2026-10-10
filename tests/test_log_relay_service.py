@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
-from kllm.agent.services.log_relay import LogRelayService
+from kllm.modules.logs.interactors.log_relay import LogRelayService
 
 
 def test_log_relay_tick_loads_master_journal_and_relays_current_identity():

@@ -25,22 +25,18 @@ import uvicorn
 import pytest
 from fastapi import FastAPI, Request, HTTPException
 
-from kllm import native
-from kllm.agent.handlers.inference import InferenceDependencies, InferenceHandlers
-from kllm.agent.handlers.managed_network import build_router
-from kllm.agent.services.managed_network import ManagedNetworkService
-from kllm.managed_network import executor, platform
-from kllm.managed_network.models import RPCChildIdentity
-from kllm.managed_network.platform.base import (
-    AdapterSnapshot,
-    PlatformAdapter,
-    PlatformRefusal,
-    Prepared,
-)
-from kllm.managed_network.platform.inspection import InterfaceState
-from kllm.managed_network.store import digest
-from kllm.managed_network.verification import DedicatedDiagnostics
-from kllm.run_settings import RunBody
+from kllm.shared import native
+from kllm.modules.inference.router_http import InferenceDependencies, InferenceHandlers
+from kllm.modules.managed_network.router_http import build_router
+from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+from kllm.modules.managed_network.interactors import executor
+from kllm.shared import platform
+from kllm.modules.managed_network.entities import RPCChildIdentity
+from kllm.shared.platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal, Prepared
+from kllm.shared.platform.inspection import InterfaceState
+from kllm.modules.managed_network.gateways.store import digest
+from kllm.modules.managed_network.interactors.verification import DedicatedDiagnostics
+from kllm.modules.inference.entities import RunBody
 
 RPC_SERVER = r"""
 import socket,struct,sys

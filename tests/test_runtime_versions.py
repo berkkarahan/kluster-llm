@@ -16,10 +16,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
-from kllm.agent.handlers.runtimes import build_router
-from kllm.agent.services.runtime_control import RuntimeControlService
-from kllm.runtimes import source
-from kllm.runtimes.models import (
+from kllm.modules.runtimes.router_http import build_router
+from kllm.modules.runtimes.interactors.runtime_control import RuntimeControlService
+from kllm.modules.runtimes.interactors import source
+from kllm.modules.runtimes.entities import (
     BuildRequest,
     RuntimeTarget,
     RuntimeVersion,
@@ -27,9 +27,9 @@ from kllm.runtimes.models import (
     TargetRequest,
     runtime_id,
 )
-from kllm.runtimes.registry import RuntimeRegistry, atomic_json, file_digest
-from kllm.runtimes.selection import snapshot, use_runtime
-from kllm.state import ClusterState
+from kllm.modules.runtimes.interactors.registry import RuntimeRegistry, atomic_json, file_digest
+from kllm.modules.runtimes.interactors.selection import snapshot, use_runtime
+from kllm.shared.state import ClusterState
 
 REPO = "https://github.com/ggml-org/llama.cpp.git"
 
@@ -134,7 +134,7 @@ def test_prepared_runtime_warmup_runs_once_per_identity(registry):
 
 @pytest.mark.asyncio
 async def test_prepare_command_warms_the_prepared_runtime(tmp_path):
-    from kllm.managed_network.identity import SignedRuntimeCommand
+    from kllm.modules.managed_network.interactors.identity import SignedRuntimeCommand
 
     registry = RuntimeRegistry(tmp_path / "worker", lambda: tmp_path)
     try:
@@ -681,7 +681,7 @@ def test_local_failure_retry_waits_for_backoff_then_resets(registry):
 
 def test_fast_failed_installer_keeps_logs_and_releases_process_tracking(tmp_path, monkeypatch):
     import psutil
-    from kllm.runtimes import registry as module
+    from kllm.modules.runtimes.interactors import registry as module
 
     checkout = tmp_path / "checkout"
     (checkout / "scripts").mkdir(parents=True)
@@ -846,8 +846,8 @@ target_link_libraries(rpc-server ggml-rpc)
 
 def test_real_git_cmake_build_is_isolated_from_bootstrap(tmp_path, monkeypatch):
     import shutil
-    from kllm.llama_pack import _load_install
-    from kllm.runtimes.build import managed_build
+    from kllm.shared.llama_pack import _load_install
+    from kllm.modules.runtimes.interactors.build import managed_build
 
     if not shutil.which("git") or not shutil.which("cmake"):
         pytest.skip("Git and CMake required for installer boundary check")
@@ -863,7 +863,7 @@ def test_real_git_cmake_build_is_isolated_from_bootstrap(tmp_path, monkeypatch):
     assert Path(manifest["rpc_server"]).is_relative_to(output)
     assert old_bin != Path(manifest["artifact_dir"])
     assert json.loads((output / "manifest.json").read_text()) == manifest
-    from kllm.managed_network.transport import require_tcp_runtime
+    from kllm.modules.managed_network.gateways.transport import require_tcp_runtime
 
     evidence = require_tcp_runtime(
         install.ROOT, Path(manifest["llama_server"]), Path(manifest["rpc_server"])
@@ -888,7 +888,7 @@ def test_git_environment_disables_prompts_and_enables_long_paths():
 
 
 def test_git_failure_detail_prefers_git_errors_and_falls_back():
-    from kllm.runtimes.build import _git_failure_detail
+    from kllm.modules.runtimes.interactors.build import _git_failure_detail
 
     assert (
         _git_failure_detail(
@@ -909,7 +909,7 @@ def test_git_failure_detail_prefers_git_errors_and_falls_back():
 
 
 def test_vulkan_build_environment_selects_platform_toolchain():
-    from kllm.runtimes.build import _vulkan_build_environment
+    from kllm.modules.runtimes.interactors.build import _vulkan_build_environment
 
     calls = []
     macos = SimpleNamespace(
@@ -934,7 +934,7 @@ def test_vulkan_build_environment_selects_platform_toolchain():
 def test_source_materialization_supports_paths_beyond_windows_max_path(tmp_path, monkeypatch):
     import os
     import shutil
-    from kllm.runtimes.build import _materialize_source
+    from kllm.modules.runtimes.interactors.build import _materialize_source
 
     if os.name != "nt":
         pytest.skip("Windows MAX_PATH regression; other platforms have no fixed limit")
@@ -960,10 +960,10 @@ def test_source_materialization_supports_paths_beyond_windows_max_path(tmp_path,
 @pytest.mark.asyncio
 async def test_signed_channel_build_preparation_does_not_block_runtime_renewals(tmp_path):
     import websockets
-    from kllm.agent.services.network_channel import ChannelSession, SocketWire
-    from kllm.managed_network.identity import ChannelFence, LocalIdentity
-    from kllm.managed_network.models import PeerIdentity
-    from kllm.managed_network.store import NetworkStore
+    from kllm.modules.managed_network.interactors.network_channel import ChannelSession, SocketWire
+    from kllm.modules.managed_network.interactors.identity import ChannelFence, LocalIdentity
+    from kllm.modules.managed_network.entities import PeerIdentity
+    from kllm.modules.managed_network.gateways.store import NetworkStore
 
     stores = [NetworkStore(tmp_path / n) for n in ("master", "worker")]
     identities = [
@@ -1049,7 +1049,7 @@ async def test_signed_channel_build_preparation_does_not_block_runtime_renewals(
 def test_native_launch_uses_verified_explicit_path_over_environment(tmp_path, monkeypatch):
     import os
     import sys
-    from kllm import native
+    from kllm.shared import native
 
     if os.name == "nt":
         pytest.skip(
@@ -1076,7 +1076,7 @@ def test_native_launch_uses_verified_explicit_path_over_environment(tmp_path, mo
 
 
 def test_old_native_extension_is_rejected_before_spawn(tmp_path, monkeypatch):
-    from kllm import native
+    from kllm.shared import native
 
     binary = tmp_path / "rpc"
     binary.write_text("controlled")
@@ -1145,7 +1145,7 @@ def test_restart_reaps_only_the_recorded_build_process(tmp_path, matching_identi
 
 
 def test_packs_tag_matching_accepts_peeled_annotated_tags():
-    from kllm.runtimes import packs
+    from kllm.modules.runtimes.interactors import packs
 
     values = {
         "refs/tags/v0.5.0": "c" * 40,
@@ -1159,7 +1159,7 @@ def test_packs_tag_matching_accepts_peeled_annotated_tags():
 
 
 def test_release_for_commit_requires_exact_commit_and_github_host():
-    from kllm.runtimes import packs
+    from kllm.modules.runtimes.interactors import packs
 
     releases = [{"tag_name": "v0.5.0", "assets": [{"name": "pack.zip"}]}]
     values = {"refs/tags/v0.5.0": "a" * 40}
@@ -1179,7 +1179,7 @@ def test_release_for_commit_requires_exact_commit_and_github_host():
 
 
 def _load_install_module():
-    from kllm.llama_pack import _load_install
+    from kllm.shared.llama_pack import _load_install
 
     return _load_install(Path(__file__).resolve().parents[1])
 
@@ -1201,7 +1201,7 @@ def _fake_release(name="pack.zip"):
 
 
 def test_managed_prebuilt_stages_pack_without_transport_claims(tmp_path, monkeypatch):
-    from kllm.runtimes import build
+    from kllm.modules.runtimes.interactors import build
 
     install = _load_install_module()
     commit = "a" * 40
@@ -1230,8 +1230,8 @@ def test_managed_prebuilt_stages_pack_without_transport_claims(tmp_path, monkeyp
 
 
 def test_managed_prebuilt_refuses_pack_without_rpc_server(tmp_path, monkeypatch):
-    from kllm.runtimes import build
-    from kllm.runtimes.packs import PrebuiltIneligible
+    from kllm.modules.runtimes.interactors import build
+    from kllm.modules.runtimes.interactors.packs import PrebuiltIneligible
 
     install = _load_install_module()
     monkeypatch.setattr(build, "release_for_commit", lambda *a, **k: _fake_release())
@@ -1256,8 +1256,8 @@ def test_managed_prebuilt_refuses_pack_without_rpc_server(tmp_path, monkeypatch)
 
 
 def test_managed_prebuilt_refuses_backend_contract_mismatch(tmp_path, monkeypatch):
-    from kllm.runtimes import build
-    from kllm.runtimes.packs import PrebuiltIneligible
+    from kllm.modules.runtimes.interactors import build
+    from kllm.modules.runtimes.interactors.packs import PrebuiltIneligible
 
     install = _load_install_module()
     monkeypatch.setattr(build, "release_for_commit", lambda *a, **k: _fake_release())
@@ -1282,8 +1282,8 @@ def test_managed_prebuilt_refuses_backend_contract_mismatch(tmp_path, monkeypatc
 
 
 def test_managed_prebuilt_ineligible_without_release(tmp_path, monkeypatch):
-    from kllm.runtimes import build
-    from kllm.runtimes.packs import PrebuiltIneligible
+    from kllm.modules.runtimes.interactors import build
+    from kllm.modules.runtimes.interactors.packs import PrebuiltIneligible
 
     install = _load_install_module()
     monkeypatch.setattr(build, "release_for_commit", lambda *a, **k: None)
@@ -1396,8 +1396,8 @@ def test_preparation_uses_prebuilt_pack_without_transport_evidence(tmp_path):
 
 
 def test_prebuilt_runtime_is_refused_by_the_managed_network_gate(tmp_path):
-    from kllm.managed_network.transport import require_tcp_runtime
-    from kllm.managed_network.platform.base import PlatformRefusal
+    from kllm.modules.managed_network.gateways.transport import require_tcp_runtime
+    from kllm.shared.platform.base import PlatformRefusal
 
     directory = tmp_path / "artifact" / "bin"
     directory.mkdir(parents=True)

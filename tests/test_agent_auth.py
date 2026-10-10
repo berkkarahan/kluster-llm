@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,7 +13,7 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -74,7 +76,7 @@ def test_join_key_accepts_good_key(client):
 
 
 def test_generate_join_key_unique():
-    from kllm.state import generate_join_key
+    from kllm.shared.state import generate_join_key
 
     a = generate_join_key()
     b = generate_join_key()
@@ -84,7 +86,7 @@ def test_generate_join_key_unique():
 
 def test_discover_includes_key_id(client, monkeypatch):
     c, agent = client
-    from kllm.discovery import DiscoveredMaster, join_key_id
+    from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("cluster-secret")
 
@@ -116,10 +118,10 @@ def test_discover_includes_key_id(client, monkeypatch):
 @pytest.mark.unit
 def test_join_discovers_master_by_key(client, monkeypatch):
     c, agent = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
     from unittest.mock import patch
 
-    from kllm.discovery import DiscoveredMaster, join_key_id
+    from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")
 
@@ -224,7 +226,7 @@ def test_join_no_matching_master_returns_404(client, monkeypatch):
 
 def test_join_multiple_matching_masters_returns_409(client, monkeypatch):
     c, agent = client
-    from kllm.discovery import DiscoveredMaster, join_key_id
+    from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("dup-key")
 

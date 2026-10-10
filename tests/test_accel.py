@@ -8,7 +8,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_probe_cache():
-    from kllm import accel
+    from kllm.shared import accel
 
     accel._probe_cache.clear()
     yield
@@ -39,7 +39,7 @@ def _fake_probe(monkeypatch, calls, *, fail_first=False, delay=0.0):
 
 
 def test_binary_capabilities_reuses_fresh_probe(monkeypatch):
-    from kllm.accel import binary_capabilities
+    from kllm.shared.accel import binary_capabilities
 
     calls = []
     _fake_probe(monkeypatch, calls)
@@ -51,18 +51,18 @@ def test_binary_capabilities_reuses_fresh_probe(monkeypatch):
 
 
 def test_binary_capabilities_reprobes_after_ttl(monkeypatch):
-    from kllm.accel import binary_capabilities
+    from kllm.shared.accel import binary_capabilities
 
     calls = []
     _fake_probe(monkeypatch, calls)
-    monkeypatch.setattr("kllm.accel._PROBE_TTL_S", 0.0)
+    monkeypatch.setattr("kllm.shared.accel._PROBE_TTL_S", 0.0)
     binary_capabilities("probe-b", 1, 0)
     binary_capabilities("probe-b", 1, 1)
     assert len(calls) == 4
 
 
 def test_binary_capabilities_mtime_change_invalidates(monkeypatch):
-    from kllm.accel import binary_capabilities
+    from kllm.shared.accel import binary_capabilities
 
     calls = []
     _fake_probe(monkeypatch, calls)
@@ -72,7 +72,7 @@ def test_binary_capabilities_mtime_change_invalidates(monkeypatch):
 
 
 def test_binary_capabilities_serializes_concurrent_probes(monkeypatch):
-    from kllm.accel import binary_capabilities
+    from kllm.shared.accel import binary_capabilities
 
     calls = []
     _fake_probe(monkeypatch, calls, delay=0.1)
@@ -90,7 +90,7 @@ def test_binary_capabilities_serializes_concurrent_probes(monkeypatch):
 
 
 def test_binary_capabilities_does_not_cache_failures(monkeypatch):
-    from kllm.accel import ProbeTimeoutError, binary_capabilities
+    from kllm.shared.accel import ProbeTimeoutError, binary_capabilities
 
     calls = []
     _fake_probe(monkeypatch, calls, fail_first=True)
@@ -101,7 +101,7 @@ def test_binary_capabilities_does_not_cache_failures(monkeypatch):
 
 
 def test_binary_capabilities_uses_long_timeout_for_an_unknown_binary(monkeypatch):
-    from kllm.accel import _PROBE_FIRST_TIMEOUT_S, _PROBE_TIMEOUT_S, binary_capabilities
+    from kllm.shared.accel import _PROBE_FIRST_TIMEOUT_S, _PROBE_TIMEOUT_S, binary_capabilities
 
     timeouts: list[float] = []
 
@@ -124,13 +124,13 @@ def test_binary_capabilities_uses_long_timeout_for_an_unknown_binary(monkeypatch
     binary_capabilities("fresh-bin", 1, 1)
     assert len(timeouts) == 2
     # Once the binary has completed a probe, a later re-probe stays on the short budget.
-    monkeypatch.setattr("kllm.accel._PROBE_TTL_S", 0.0)
+    monkeypatch.setattr("kllm.shared.accel._PROBE_TTL_S", 0.0)
     binary_capabilities("fresh-bin", 1, 2)
     assert timeouts[2:] == [_PROBE_TIMEOUT_S, _PROBE_TIMEOUT_S]
 
 
 def test_binary_capabilities_timeout_names_a_manual_first_launch(monkeypatch):
-    from kllm.accel import ProbeTimeoutError, binary_capabilities
+    from kllm.shared.accel import ProbeTimeoutError, binary_capabilities
 
     def run(argv, **_kwargs):
         raise subprocess.TimeoutExpired(argv, 120)
@@ -144,7 +144,7 @@ def test_binary_capabilities_timeout_names_a_manual_first_launch(monkeypatch):
 
 
 def test_failed_probe_keeps_the_long_budget(monkeypatch):
-    from kllm.accel import _PROBE_FIRST_TIMEOUT_S, ProbeTimeoutError, binary_capabilities
+    from kllm.shared.accel import _PROBE_FIRST_TIMEOUT_S, ProbeTimeoutError, binary_capabilities
 
     timeouts: list[float] = []
     calls = {"n": 0}
@@ -172,7 +172,7 @@ def test_failed_probe_keeps_the_long_budget(monkeypatch):
 
 
 def test_effective_accel_backend_override(monkeypatch):
-    from kllm.accel import effective_accel_backend
+    from kllm.shared.accel import effective_accel_backend
 
     monkeypatch.delenv("KLLM_ACCEL_BACKEND", raising=False)
     assert effective_accel_backend("metal") == "metal"
@@ -186,9 +186,9 @@ def test_effective_accel_backend_config_after_env(tmp_path, monkeypatch):
     monkeypatch.delenv("KLLM_ACCEL_BACKEND", raising=False)
     import importlib
 
-    import kllm.accel as accel_mod
-    import kllm.config as config_mod
-    import kllm.state as state_mod
+    import kllm.shared.accel as accel_mod
+    import kllm.shared.config as config_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     importlib.reload(config_mod)
@@ -203,7 +203,7 @@ def test_effective_accel_backend_config_after_env(tmp_path, monkeypatch):
 
 
 def test_allowed_accel_backends_lists_all_rpc_engines():
-    from kllm.accel import allowed_accel_backends, selectable_accel_backends
+    from kllm.shared.accel import allowed_accel_backends, selectable_accel_backends
 
     expected = selectable_accel_backends()
     assert allowed_accel_backends("metal", platform="darwin") == expected
@@ -211,7 +211,7 @@ def test_allowed_accel_backends_lists_all_rpc_engines():
 
 
 def test_llama_device_for_backend_names():
-    from kllm.accel import llama_device_for_backend
+    from kllm.shared.accel import llama_device_for_backend
 
     assert llama_device_for_backend("metal") == ("MTL0", "metal")
     assert llama_device_for_backend("vulkan") == ("Vulkan0", "vulkan")
@@ -220,7 +220,7 @@ def test_llama_device_for_backend_names():
 
 
 def test_parse_devices_mtl0_prefix():
-    from kllm.accel import parse_devices
+    from kllm.shared.accel import parse_devices
 
     text = "Available devices:\n  MTL0: Apple M1 Pro (25559 MiB, 25558 MiB free)\n"
     devices = parse_devices(text)
@@ -231,7 +231,7 @@ def test_parse_devices_mtl0_prefix():
 
 
 def test_parse_devices_mtl0_m5_pro():
-    from kllm.accel import parse_devices
+    from kllm.shared.accel import parse_devices
 
     text = "Available devices:\n  MTL0: Apple M5 Pro (38338 MiB, 38337 MiB free)\n"
     devices = parse_devices(text)
@@ -241,7 +241,7 @@ def test_parse_devices_mtl0_m5_pro():
 
 
 def test_resolve_effective_backend_honors_installed_request():
-    from kllm.accel import resolve_effective_backend
+    from kllm.shared.accel import resolve_effective_backend
 
     actual, warning = resolve_effective_backend(
         probed="metal",
@@ -254,7 +254,7 @@ def test_resolve_effective_backend_honors_installed_request():
 
 
 def test_resolve_effective_backend_falls_back_to_probed_metal():
-    from kllm.accel import resolve_effective_backend
+    from kllm.shared.accel import resolve_effective_backend
 
     actual, warning = resolve_effective_backend(
         probed="metal",
@@ -268,7 +268,7 @@ def test_resolve_effective_backend_falls_back_to_probed_metal():
 
 
 def test_resolve_effective_backend_auto_uses_probed():
-    from kllm.accel import resolve_effective_backend
+    from kllm.shared.accel import resolve_effective_backend
 
     actual, warning = resolve_effective_backend(
         probed="metal",
@@ -281,7 +281,7 @@ def test_resolve_effective_backend_auto_uses_probed():
 
 
 def test_devices_for_backend_filters_mtl_entries():
-    from kllm.accel import devices_for_backend
+    from kllm.shared.accel import devices_for_backend
 
     installed = [
         {"device": "MTL0", "backend": "metal", "name": "Apple M5 Pro"},
@@ -295,7 +295,7 @@ def test_devices_for_backend_filters_mtl_entries():
 
 
 def test_metal_device_init_failed_detects_zombie_line():
-    from kllm.accel import metal_device_init_failed, parse_devices
+    from kllm.shared.accel import metal_device_init_failed, parse_devices
 
     zombie = (
         "Available devices:\n  :  (0 MiB, 0 MiB free)\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
@@ -306,7 +306,7 @@ def test_metal_device_init_failed_detects_zombie_line():
 
 def test_list_gpus_respects_accel_override(monkeypatch):
     monkeypatch.setenv("KLLM_ACCEL_BACKEND", "vulkan")
-    from kllm import native
+    from kllm.shared import native
 
     if not native.native_available():
         pytest.skip("native extension not built")
@@ -316,9 +316,9 @@ def test_list_gpus_respects_accel_override(monkeypatch):
 
 
 def test_unified_memory_heuristic_matches_known_shared_pools(monkeypatch):
-    from kllm.accel import detect_unified_memory, is_unified_memory
+    from kllm.shared.accel import detect_unified_memory, is_unified_memory
 
-    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": None})
+    monkeypatch.setattr("kllm.shared.config.load_config", lambda: {"unified_memory": None})
     assert detect_unified_memory("metal") is True
     assert detect_unified_memory("vulkan", [{"name": "AMD Radeon RX 9070 XT"}]) is False
     assert detect_unified_memory("vulkan", [{"name": "AMD Radeon 8060S Graphics"}]) is True
@@ -330,7 +330,7 @@ def test_unified_memory_heuristic_matches_known_shared_pools(monkeypatch):
 
 
 def test_unified_memory_requires_every_device_integrated():
-    from kllm.accel import detect_unified_memory, is_integrated_gpu
+    from kllm.shared.accel import detect_unified_memory, is_integrated_gpu
 
     assert is_integrated_gpu("AMD Radeon(TM) Graphics", "vulkan") is True
     assert is_integrated_gpu("AMD Radeon RX 9070 XT", "vulkan") is False
@@ -347,16 +347,16 @@ def test_unified_memory_requires_every_device_integrated():
 
 
 def test_unified_memory_config_override_beats_heuristic(monkeypatch):
-    from kllm.accel import is_unified_memory
+    from kllm.shared.accel import is_unified_memory
 
-    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": False})
+    monkeypatch.setattr("kllm.shared.config.load_config", lambda: {"unified_memory": False})
     assert is_unified_memory("metal", [{"name": "Apple M4"}]) is False
-    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": True})
+    monkeypatch.setattr("kllm.shared.config.load_config", lambda: {"unified_memory": True})
     assert is_unified_memory("cuda", [{"name": "NVIDIA GeForce RTX 4090"}]) is True
 
 
 def test_unified_vram_fraction_env(monkeypatch):
-    from kllm.accel import UNIFIED_VRAM_FRACTION_DEFAULT, unified_vram_fraction
+    from kllm.shared.accel import UNIFIED_VRAM_FRACTION_DEFAULT, unified_vram_fraction
 
     monkeypatch.delenv("KLLM_UNIFIED_VRAM_FRACTION", raising=False)
     assert unified_vram_fraction() == UNIFIED_VRAM_FRACTION_DEFAULT

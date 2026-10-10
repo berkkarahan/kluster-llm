@@ -38,8 +38,8 @@ test('native topology shows measured GPU counters and separates shared pools', a
     reason: value === null ? 'unsupported_counter' : null, source: 'test.driver', observed_at: '2026-09-29T00:00:02Z' });
   try {
     const { render } = await server.ssrLoadModule('svelte/server');
-    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/components/NodeMap.svelte');
-    const { default: Details } = await server.ssrLoadModule('/src/lib/components/NodeUsageDetails.svelte');
+    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/modules/usage/view/NodeMap.svelte');
+    const { default: Details } = await server.ssrLoadModule('/src/lib/modules/usage/view/NodeUsageDetails.svelte');
     const resources = {
       schema_version: 2, host: { cpu: metric(11, 'percent_machine'), memory: {
         used: metric(16 * GIB), total: metric(32 * GIB), available: metric(12 * GIB), free: metric(8 * GIB) } },
@@ -76,8 +76,8 @@ test('node summaries expose host CPU, RAM and per-device readings before selecti
   try {
     server = await createSsrServer();
     const { render } = await server.ssrLoadModule('svelte/server');
-    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/components/NodeMap.svelte');
-    const { default: NodeUsageDetails } = await server.ssrLoadModule('/src/lib/components/NodeUsageDetails.svelte');
+    const { default: NodeMap } = await server.ssrLoadModule('/src/lib/modules/usage/view/NodeMap.svelte');
+    const { default: NodeUsageDetails } = await server.ssrLoadModule('/src/lib/modules/usage/view/NodeUsageDetails.svelte');
 
     const nodes = {
       // Multi-GPU union: device 0 has capacity but no usage sensor; device 1 has measured zero.

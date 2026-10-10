@@ -1,1 +1,1 @@
-"""Immutable llama.cpp source snapshots and node-local build artifacts."""
+"""Stable package for kllm.runtimes.build."""

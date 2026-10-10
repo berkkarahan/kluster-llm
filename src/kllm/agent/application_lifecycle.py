@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from kllm.exceptions import PersistenceError
+from kllm.shared.exceptions import PersistenceError
 
-from kllm.persistence.operations import drain_initializations, initialize
+from kllm.shared.persistence.operations import drain_initializations, initialize
 
 import asyncio
 import inspect
@@ -20,15 +20,10 @@ from typing import Any
 
 import httpx
 
-from kllm.agent.lifecycle_bus import (
-    LifecycleBus,
-    LifecycleEvent,
-    LifecycleNotice,
-    publish_lifecycle,
-)
-from kllm.http_clients import INFERENCE_LIMITS
-from kllm.membership_state import mark_master_unreachable
-from kllm.state import ClusterState
+from kllm.agent.lifecycle_bus import LifecycleBus, LifecycleEvent, LifecycleNotice, publish_lifecycle
+from kllm.shared.http_clients import INFERENCE_LIMITS
+from kllm.modules.cluster.interactors.membership_state import mark_master_unreachable
+from kllm.shared.state import ClusterState
 
 
 @dataclass(frozen=True)

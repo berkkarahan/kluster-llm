@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kllm.effective_config import effective_configuration
-from kllm.run_launch import build_master_launch
-from kllm.run_settings import cpu_batch_threads
-from kllm.run_settings import RunBody
+from kllm.modules.inference.interactors.effective_config import effective_configuration
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.entities import cpu_batch_threads
+from kllm.modules.inference.entities import RunBody
 from test_plan_run_params import _fake_plan
 
 
 def test_batch_threads_follow_physical_cores_without_shrinking_small_hosts(monkeypatch):
-    monkeypatch.setattr("kllm.run_settings.available_threads", lambda: 32)
+    monkeypatch.setattr("kllm.modules.inference.entities.available_threads", lambda: 32)
 
     def cores(*, logical: bool = True) -> int:
         return 32 if logical else 16
@@ -20,7 +20,7 @@ def test_batch_threads_follow_physical_cores_without_shrinking_small_hosts(monke
     monkeypatch.setattr("psutil.cpu_count", cores)
     assert cpu_batch_threads() == 16
 
-    monkeypatch.setattr("kllm.run_settings.available_threads", lambda: 8)
+    monkeypatch.setattr("kllm.modules.inference.entities.available_threads", lambda: 8)
 
     def small(*, logical: bool = True) -> int:
         return 8 if logical else 4
@@ -30,8 +30,8 @@ def test_batch_threads_follow_physical_cores_without_shrinking_small_hosts(monke
 
 
 def test_unset_threads_batch_is_what_launch_and_the_snapshot_use(monkeypatch):
-    monkeypatch.setattr("kllm.run_launch.cpu_batch_threads", lambda: 12)
-    monkeypatch.setattr("kllm.effective_config.cpu_batch_threads", lambda: 12)
+    monkeypatch.setattr("kllm.modules.inference.interactors.run_launch.cpu_batch_threads", lambda: 12)
+    monkeypatch.setattr("kllm.modules.inference.interactors.effective_config.cpu_batch_threads", lambda: 12)
     body = RunBody(model="toy.gguf")
     plan = _fake_plan()
     launch = build_master_launch(
@@ -51,7 +51,7 @@ def test_unset_threads_batch_is_what_launch_and_the_snapshot_use(monkeypatch):
 
 
 def test_explicit_threads_batch_is_not_replaced(monkeypatch):
-    monkeypatch.setattr("kllm.run_launch.cpu_batch_threads", lambda: 12)
+    monkeypatch.setattr("kllm.modules.inference.interactors.run_launch.cpu_batch_threads", lambda: 12)
     body = RunBody(model="toy.gguf", threads_batch=3)
     launch = build_master_launch(
         body,

@@ -6,17 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from kllm.agent.handlers.fast_subnet import FastSubnetHandlers
-from kllm.agent.handlers.membership import MembershipHandlers
+from kllm.modules.cluster.interactors.fast_subnet_http import FastSubnetHandlers
+from kllm.modules.cluster.router_http import MembershipHandlers
 from kllm.agent.schemas import FastSubnetReconnectBody, JoinBody, RegisterBody
-from kllm.agent.services.fast_subnet import FastSubnetService
-from kllm.exceptions import (
-    AuthenticationError,
-    ConflictError,
-    ExternalServiceError,
-    ValidationError,
-)
-from kllm.state import ClusterState
+from kllm.modules.cluster.interactors.fast_subnet import FastSubnetService
+from kllm.shared.exceptions import AuthenticationError, ConflictError, ExternalServiceError, ValidationError
+from kllm.shared.state import ClusterState
 
 SUBNET = "10.10.10.0/24"
 NETWORK = {
@@ -251,7 +246,7 @@ def test_handlers_map_domain_errors_to_http() -> None:
 
 
 def test_v2_routes_expose_fast_subnet() -> None:
-    from kllm.agent.routes.v2 import build_router
+    from kllm.modules.control_v2 import build_router
 
     router = build_router(
         {

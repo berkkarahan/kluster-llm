@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 import typer
 
-from kllm import agent_skills, connect
+from kllm.modules.connect.interactors import agent_skills, connect
 from kllm.cli import main
-from kllm.commands import connect as command
+from kllm.modules.connect import router_cli as command
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE_KEYS = {

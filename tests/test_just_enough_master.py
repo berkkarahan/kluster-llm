@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from kllm.core.placement import plan_devices
-from kllm.core.placement_models import PlacementNodeInput, PlacementSettings
+from kllm.modules.inference.interactors.core_placement import plan_devices
+from kllm.modules.inference.interactors.placement_models import PlacementNodeInput, PlacementSettings
 
 GiB = 1024**3
 

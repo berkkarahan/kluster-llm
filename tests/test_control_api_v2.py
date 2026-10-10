@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from kllm.agent import app, legacy_v1_router
-from kllm.agent.routes.v1 import ROUTES as V1_ROUTES
+from kllm.modules.legacy_v1 import ROUTES as V1_ROUTES
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def client(tmp_path, monkeypatch):
 def test_health_advertises_control_protocol_version(client) -> None:
     response = client.get("/health")
     assert response.status_code == 200
-    from kllm.config import CONTROL_PROTOCOL_VERSION
+    from kllm.shared.config import CONTROL_PROTOCOL_VERSION
 
     assert response.json()["control_protocol"] == CONTROL_PROTOCOL_VERSION
 
@@ -52,7 +52,7 @@ def test_legacy_v1_routes_are_bound_outside_the_agent_module() -> None:
 
 
 def test_worker_join_rejects_a_master_with_an_old_protocol(monkeypatch) -> None:
-    from kllm.agent import join_flow
+    from kllm.modules.cluster.interactors import join_flow
 
     class Response:
         status_code = 200

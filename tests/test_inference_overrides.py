@@ -3,19 +3,10 @@ from __future__ import annotations
 import pytest
 import typer
 
-from kllm.commands.inference import (
-    _headroom_override,
-    _parse_node_shares,
-    _read_chat_template_file,
-    _validate_run_payload,
-)
-from kllm.cli_payload import build_plan_run_payload
-from kllm.model_defaults import (
-    ModelDefaults,
-    merge_defaults_into_extra_args,
-    overlay_user_inference,
-)
-from kllm.run_settings import RunSettingsFields
+from kllm.modules.inference.router_cli import _headroom_override, _parse_node_shares, _read_chat_template_file, _validate_run_payload
+from kllm.modules.inference.presenters import build_plan_run_payload
+from kllm.modules.inference.interactors.model_defaults import ModelDefaults, merge_defaults_into_extra_args, overlay_user_inference
+from kllm.modules.inference.entities import RunSettingsFields
 
 
 def test_run_settings_inference_round_trip():

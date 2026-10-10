@@ -5,7 +5,7 @@ description: "Choose and run meaningful Kluster LLM Python, Svelte/dashboard, Ru
 
 # Verify a Kluster change
 
-Verify the Kluster checkout via `KLLM_REPO_ROOT`, current checkout, or `kllm.state.repo_root()`. Inspect `pyproject.toml`, `Makefile`, `dashboard/package.json`, and the current dashboard test runner before choosing commands.
+Verify the Kluster checkout via `KLLM_REPO_ROOT`, current checkout, or `kllm.shared.state.repo_root()`. Inspect `pyproject.toml`, `Makefile`, `dashboard/package.json`, and the current dashboard test runner before choosing commands.
 
 1. Start with the changed public behavior and its affected callers. Select existing focused tests and add an isolated regression case for uncovered non-trivial logic. Use temporary directories/state and fake endpoints/binaries rather than real credentials or a production cluster by default.
 2. Python: `uv run python -m pytest -q tests/<affected-file>.py`; then `uv run python -m pytest -q` when full Python validation is required. Do not use `uv run pytest` when its executable entry point is unavailable. The configured default is four workers with `--dist=loadfile`; use `-n 0` for a justified serial comparison or shared external-resource check.

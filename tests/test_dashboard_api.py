@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import json
 import os
 import stat
@@ -29,8 +31,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.auth as auth_mod
-    import kllm.state as state_mod
+    import kllm.shared.auth as auth_mod
+    import kllm.shared.state as state_mod
     import kllm.agent as agent_mod
 
     importlib.reload(state_mod)
@@ -78,7 +80,7 @@ def test_status_capacity_vram_matches_the_member(client, monkeypatch):
         agent.native, "require_native", lambda: SimpleNamespace(probe_capacity=lambda: snap)
     )
     monkeypatch.setattr(agent.native, "list_gpus", lambda: listed)
-    agent._refresh_local_capacity()
+    agent_runtime._refresh_local_capacity()
     body = c.get("/v1/status").json()
     node = agent.STATE.node_id
     assert body["capacity"]["vram_bytes"] == llama
@@ -92,23 +94,23 @@ def test_status_then_live_status_counts_hardware_discovery(client, native_invent
     assert response.status_code == 200
     assert native_inventory_counts == {"list_gpus": 0, "binary_capabilities": 1}
 
-    live_status = agent._live_status()
+    live_status = agent_runtime._live_status()
     assert live_status["capacity"] == {}
     assert native_inventory_counts == {"list_gpus": 0, "binary_capabilities": 1}
 
 
 def test_status_exposes_feature_flags(client):
     c, agent, _ = client
-    from kllm import config as kllm_config
+    from kllm.shared import config as kllm_config
 
     body = c.get("/v1/status").json()
     assert body["feature_flags"] == {"private-network-setup": False}
-    assert agent._live_status()["feature_flags"] == {"private-network-setup": False}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": False}
 
     assert kllm_config.set_feature_flag("private-network-setup", True) is True
     body = c.get("/v1/status").json()
     assert body["feature_flags"] == {"private-network-setup": True}
-    assert agent._live_status()["feature_flags"] == {"private-network-setup": True}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True}
 
 
 def test_status_exposes_the_shared_node_directory(client, monkeypatch):
@@ -116,11 +118,11 @@ def test_status_exposes_the_shared_node_directory(client, monkeypatch):
     rows = [
         {"node_id": "box", "hostname": "gpu-box", "role": "worker", "private_address": "10.10.10.4"}
     ]
-    monkeypatch.setattr(agent, "_network_directory", lambda: rows)
+    monkeypatch.setattr(agent_runtime, "_network_directory", lambda: rows)
 
     body = c.get("/v1/status").json()
     assert body["network_directory"] == rows
-    assert agent._live_status()["network_directory"] == rows
+    assert agent_runtime._live_status()["network_directory"] == rows
 
 
 def test_list_models_empty(client):
@@ -192,7 +194,7 @@ def test_served_models_and_responses_are_authenticated_native_passthrough(client
 def test_logging_control_auth_persistence_partial_and_worker_ack(client, monkeypatch):
     import httpx
     import time
-    from kllm import runtime
+    from kllm.shared import process_registry as runtime
 
     c, agent, token = client
     agent.STATE.role = "master"
@@ -236,7 +238,7 @@ def test_logging_control_auth_persistence_partial_and_worker_ack(client, monkeyp
 def test_native_resources_without_process_and_replayed_generations(client, monkeypatch):
     import uuid
     from datetime import datetime, timezone
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     c, agent, _ = client
     if not agent.native.resource_probe_available():
@@ -276,7 +278,7 @@ def test_native_resources_without_process_and_replayed_generations(client, monke
         def broken_history():
             raise sqlite3.DatabaseError("test history unavailable")
 
-        monkeypatch.setattr(agent, "_usage_store", broken_history)
+        monkeypatch.setattr(agent_runtime, "_usage_store", broken_history)
         snapshot.update(sequence=2, snapshot_id=f"{generation}:2")
         assert (
             c.post("/v1/usage/ingest", json=body, headers=headers).json()["resources_accepted"]
@@ -291,23 +293,23 @@ def test_native_resources_without_process_and_replayed_generations(client, monke
         )
         assert c.post("/v1/register", json=reset, headers=headers).status_code == 200
         assert c.post("/v1/usage/ingest", json=body, headers=headers).status_code == 409
-        assert "r1" not in agent._resources.latest
+        assert "r1" not in agent_runtime._resources.latest
     finally:
         usage_probe.close()
 
 
 def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, monkeypatch):
     from types import SimpleNamespace
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     _, agent, _ = client
     agent.STATE.role = "worker"
     agent.STATE.master_host = "master"
     agent.STATE.join_key = "resource-test-key"
-    monkeypatch.setattr(agent, "_master_control_base", lambda: "http://master")
-    monkeypatch.setattr(agent, "_tracked_process_token", lambda: None)
+    monkeypatch.setattr(agent_runtime, "_master_control_base", lambda: "http://master")
+    monkeypatch.setattr(agent_runtime, "_tracked_process_token", lambda: None)
     monkeypatch.setattr(
-        agent, "_heartbeat_payload", lambda: dict(node_id=agent.STATE.node_id, host="worker")
+        agent_runtime, "_heartbeat_payload", lambda: dict(node_id=agent.STATE.node_id, host="worker")
     )
     supported = [False]
     server = usage.ResourceState()
@@ -342,22 +344,22 @@ def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, m
         sequence=1,
         snapshot_id="a" * 32 + ":1",
     )
-    agent._publish_resources(original)
+    agent_runtime._publish_resources(original)
     assert posted == []
     supported[0] = True
-    agent._resource_remote.clear()  # Reconnect invalidates the old capability result.
-    agent._publish_resources(original)
+    agent_runtime._resource_remote.clear()  # Reconnect invalidates the old capability result.
+    agent_runtime._publish_resources(original)
     first = posted[-1][1]["resources"]
     assert first["generation"] != original["generation"]
     assert first["sequence"] == 1
     assert first["schema_version"] == 1
     assert "utilization" not in first["devices"][0]
     assert original["devices"][0]["utilization"]["value"] == 0
-    agent._publish_resources(original)
+    agent_runtime._publish_resources(original)
     assert posted[-1][1]["resources"]["sequence"] == 1
-    agent._publish_resources(dict(original, sequence=2, snapshot_id="a" * 32 + ":2"))
+    agent_runtime._publish_resources(dict(original, sequence=2, snapshot_id="a" * 32 + ":2"))
     assert posted[-1][1]["resources"]["sequence"] == 2
-    agent._publish_resources(dict(original, generation="c" * 32, snapshot_id="c" * 32 + ":1"))
+    agent_runtime._publish_resources(dict(original, generation="c" * 32, snapshot_id="c" * 32 + ":1"))
     assert posted[-1][1]["resources"]["generation"] != first["generation"]
     assert posted[-1][1]["resources"]["sequence"] == 1
     assert original["generation"] == "a" * 32
@@ -365,7 +367,7 @@ def test_resource_worker_negotiates_old_master_and_resets_new_sessions(client, m
 
 def test_usage_ingest_private_identity_and_durable_ack(client):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     agent.STATE.role = "master"
@@ -454,7 +456,7 @@ def test_usage_ingest_private_identity_and_durable_ack(client):
 
 def test_usage_live_stale_departed_and_worker_proxy(client, monkeypatch):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -538,7 +540,7 @@ def test_usage_live_stale_departed_and_worker_proxy(client, monkeypatch):
 
 def test_usage_live_never_attributes_old_reading_to_stopped_or_new_child(client):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -579,7 +581,7 @@ def test_usage_live_never_attributes_old_reading_to_stopped_or_new_child(client)
 
 def test_stopped_master_still_exposes_retained_history(client):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -630,7 +632,7 @@ def test_live_usage_sweeps_expired_members_without_status_poll(client, monkeypat
 def test_usage_collector_runs_without_dashboard(client, monkeypatch):
     from datetime import datetime, timedelta, timezone
     from types import SimpleNamespace
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     _, agent, _ = client
     # This check deliberately exercises the preserved psutil fallback.
@@ -656,8 +658,8 @@ def test_usage_collector_runs_without_dashboard(client, monkeypatch):
         "role": "master",
     }
     ticks = iter((False, False, True))
-    monkeypatch.setattr(agent._background_stop, "wait", lambda interval: next(ticks))
-    agent._usage_loop()
+    monkeypatch.setattr(agent_runtime._background_stop, "wait", lambda interval: next(ticks))
+    agent_runtime._usage_loop()
     store = agent.app.state.usage_store
     assert store.count() == 2
     assert store.latest(agent.STATE.node_id)["process"]["cpu_percent_machine"] == 10
@@ -665,7 +667,7 @@ def test_usage_collector_runs_without_dashboard(client, monkeypatch):
 
 def test_worker_ingest_failure_is_visible_without_stopping_inference(client, monkeypatch):
     from types import SimpleNamespace
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     agent.STATE.role = "worker"
@@ -680,10 +682,10 @@ def test_worker_ingest_failure_is_visible_without_stopping_inference(client, mon
         lambda: SimpleNamespace(post=lambda *a, **k: SimpleNamespace(status_code=503)),
     )
     ticks = iter((False, True))
-    monkeypatch.setattr(agent._background_stop, "wait", lambda _: next(ticks))
-    agent._usage_loop()
+    monkeypatch.setattr(agent_runtime._background_stop, "wait", lambda _: next(ticks))
+    agent_runtime._usage_loop()
     monkeypatch.setattr(
-        agent,
+        agent_runtime,
         "_proxy_master_usage",
         lambda *a, **k: {
             "nodes": {
@@ -705,7 +707,7 @@ def test_worker_ingest_failure_is_visible_without_stopping_inference(client, mon
     from fastapi import HTTPException
 
     monkeypatch.setattr(
-        agent,
+        agent_runtime,
         "_proxy_master_usage",
         lambda *a, **k: (_ for _ in ()).throw(
             HTTPException(503, "master usage history unavailable")
@@ -720,8 +722,8 @@ def test_worker_ingest_failure_is_visible_without_stopping_inference(client, mon
 
 def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
-    from kllm.state import ClusterState
+    from kllm.modules.usage.interactors import usage
+    from kllm.shared.state import ClusterState
 
     c, agent, _ = client
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -777,12 +779,12 @@ def test_worker_to_master_store_to_worker_history_boundary(client, monkeypatch):
                 agent.STATE = worker
 
     monkeypatch.setattr(agent.http_clients, "control_client", lambda: PrivateControl())
-    monkeypatch.setattr(agent, "_master_control_base", lambda: "http://master:18765")
+    monkeypatch.setattr(agent_runtime, "_master_control_base", lambda: "http://master:18765")
     monkeypatch.setattr(usage.Sampler, "sample", lambda *_: point)
     ticks = iter((False, True))
-    monkeypatch.setattr(agent._background_stop, "wait", lambda _: next(ticks))
+    monkeypatch.setattr(agent_runtime._background_stop, "wait", lambda _: next(ticks))
     agent.STATE = worker
-    agent._usage_loop()
+    agent_runtime._usage_loop()
     assert agent.app.state.usage_store.count() == 1
     response = c.get(
         "/v1/usage/readings", params={"node_id": "w1", "lifetime_id": point["lifetime_id"]}
@@ -812,7 +814,7 @@ def test_failed_liveness_history_save_keeps_last_successful_save(client, monkeyp
             finished.set()
 
     monkeypatch.setattr(store, "end_node", fail_close)
-    agent._sync_master_liveness(shrink=False)
+    agent_runtime._sync_master_liveness(shrink=False)
     assert "w1" not in agent.STATE.members, (
         "liveness publication must precede slow storage maintenance"
     )
@@ -825,7 +827,7 @@ def test_failed_liveness_history_save_keeps_last_successful_save(client, monkeyp
 
 def test_corrupt_saved_usage_is_server_failure_not_bad_browser_input(client):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -854,7 +856,7 @@ def test_corrupt_saved_usage_is_server_failure_not_bad_browser_input(client):
 
 def test_malformed_saved_usage_times_report_503_not_client_error(client):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -889,7 +891,7 @@ def test_malformed_saved_usage_times_report_503_not_client_error(client):
 
 def test_usage_history_filters_errors_and_departed_node(client, monkeypatch):
     from datetime import datetime, timedelta, timezone
-    from kllm import usage
+    from kllm.modules.usage.interactors import usage
 
     c, agent, _ = client
     agent.STATE.role = "master"
@@ -1035,7 +1037,7 @@ def test_connect_snapshot_uses_reachable_master_address_served_id_and_no_store(c
     agent.STATE.process_role = "master"
     agent.STATE.model_name = "requested.gguf"
     agent.STATE.members["master-node"] = {"role": "master", "lan_host": "192.168.1.20"}
-    monkeypatch.setattr(agent, "_inference_activity", lambda: {"server_ready": True})
+    monkeypatch.setattr(agent_runtime, "_inference_activity", lambda: {"server_ready": True})
 
     async def served_models(_port, _client):
         return {"data": [{"id": "/models/requested.gguf"}]}
@@ -1068,7 +1070,7 @@ def test_connect_snapshot_keeps_a_reachable_dashboard_origin(client, monkeypatch
     agent.STATE.process_pid = 123
     agent.STATE.process_role = "master"
     agent.STATE.model_name = "served.gguf"
-    monkeypatch.setattr(agent, "_inference_activity", lambda: {"server_ready": True})
+    monkeypatch.setattr(agent_runtime, "_inference_activity", lambda: {"server_ready": True})
 
     async def served_models(_port, _client):
         return {"data": [{"id": "served.gguf"}]}
@@ -1115,7 +1117,7 @@ def test_worker_connect_snapshot_relays_with_cluster_key(client, monkeypatch):
 
 
 def test_anthropic_to_openai_mapping():
-    from kllm.gateway import _anthropic_to_openai
+    from kllm.modules.inference.interactors.gateway import _anthropic_to_openai
 
     oai = _anthropic_to_openai(
         {
@@ -1131,7 +1133,7 @@ def test_anthropic_to_openai_mapping():
 
 
 def test_inference_activity_distinguishes_prompt_and_generation(monkeypatch):
-    from kllm import inference_activity
+    from kllm.modules.inference.interactors import inference_activity
 
     class Response:
         def __init__(self, status_code, payload=None):
@@ -1194,7 +1196,7 @@ def test_inference_activity_distinguishes_prompt_and_generation(monkeypatch):
 def test_worker_status_uses_master_activity_snapshot(client):
     c, agent, _ = client
     agent.STATE.role = "worker"
-    agent._apply_cluster_snapshot(
+    agent_runtime._apply_cluster_snapshot(
         {
             "model_name": "openai_gpt-oss-120b-MXFP4.gguf",
             "inference_activity": {
@@ -1215,7 +1217,7 @@ def test_worker_status_uses_master_activity_snapshot(client):
 
 def test_connect_plan_claude_no_launch(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
-    from kllm.connect import plan_claude
+    from kllm.modules.connect.interactors.connect import plan_claude
 
     monkeypatch.setenv("PATH", str(tmp_path))
     claude = tmp_path / ("claude.exe" if __import__("sys").platform == "win32" else "claude")
@@ -1223,16 +1225,16 @@ def test_connect_plan_claude_no_launch(tmp_path, monkeypatch):
     if not claude.name.endswith(".exe"):
         claude.chmod(0o755)
 
-    with patch("kllm.connect._which", return_value=str(claude)):
+    with patch("kllm.modules.connect.interactors.connect._which", return_value=str(claude)):
         plan = plan_claude("http://127.0.0.1:18765", "sk-test", "model.gguf", False, [])
     assert plan.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18765"
     assert plan.env["ANTHROPIC_MODEL"] == "model.gguf"
 
 
 def test_connect_plan_opencode_config():
-    from kllm.connect import plan_opencode
+    from kllm.modules.connect.interactors.connect import plan_opencode
 
-    with patch("kllm.connect._which", return_value="/usr/bin/opencode"):
+    with patch("kllm.modules.connect.interactors.connect._which", return_value="/usr/bin/opencode"):
         plan = plan_opencode("http://127.0.0.1:18765", "sk-test", "m.gguf", True, ["run"])
     cfg = json.loads(plan.env["OPENCODE_CONFIG_CONTENT"])
     assert cfg["model"].startswith("kllm/")
@@ -1412,8 +1414,8 @@ def test_status_download_during_mocked_download(client, monkeypatch):
 
     def run():
         try:
-            with patch("kllm.models.downloads.httpx.stream", return_value=FakeResp()):
-                from kllm import models as model_ops
+            with patch("kllm.modules.models.interactors.downloads.httpx.stream", return_value=FakeResp()):
+                from kllm.modules import models as model_ops
 
                 model_ops.download_model("https://example.com/model.gguf")
         except BaseException as exc:
@@ -1475,8 +1477,8 @@ def _patch_hub_search(monkeypatch):
             )
         raise OSError("skip")
 
-    monkeypatch.setattr("kllm.models.list_models", fake_list_models)
-    monkeypatch.setattr("kllm.models.model_info", fake_model_info)
+    monkeypatch.setattr("kllm.modules.models.api.list_models", fake_list_models)
+    monkeypatch.setattr("kllm.modules.models.api.model_info", fake_model_info)
 
 
 def test_models_search_empty_query_400(client):
@@ -1492,7 +1494,7 @@ def test_models_search_hub_error_400(client, monkeypatch):
     def boom(**_kwargs):
         raise RuntimeError("hub down")
 
-    monkeypatch.setattr("kllm.models.list_models", boom)
+    monkeypatch.setattr("kllm.modules.models.api.list_models", boom)
     r = c.post("/v1/models/search", json={"query": "Qwen3.8-27B-Uncensored-GGUF"})
     assert r.status_code == 400
     assert "hub down" in r.json()["detail"]
@@ -1558,8 +1560,8 @@ def _wait_download(client, state: str):
 def test_repository_search_download_preserves_revision_and_path(client, monkeypatch):
     from huggingface_hub.errors import RevisionNotFoundError
     import httpx
-    from kllm import models as model_ops
-    from kllm.state import models_dir
+    from kllm.modules import models as model_ops
+    from kllm.shared.state import models_dir
 
     c, agent, _ = client
     model_ops.downloads._reset_download_state()
@@ -1603,9 +1605,10 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
         streamed.append(url)
         return _BytesResp(b"tiny-selected")
 
-    monkeypatch.setattr(model_ops, "model_info", fake_info)
+    monkeypatch.setattr("kllm.modules.models.api.model_info", fake_info)
     monkeypatch.setattr(
-        model_ops, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery"))
+        "kllm.modules.models.api.list_models",
+        lambda **_k: (_ for _ in ()).throw(AssertionError("discovery")),
     )
     monkeypatch.setattr(model_ops.downloads.httpx, "stream", fake_stream)
     try:
@@ -1696,8 +1699,6 @@ def test_repository_search_download_preserves_revision_and_path(client, monkeypa
 
 
 def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
-    from kllm import models as model_ops
-
     c, _, _ = client
 
     class Sibling:
@@ -1717,8 +1718,8 @@ def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
             raise OSError("boom hf_SUPERSECRET https://signed.example/hidden")
         return Info()
 
-    monkeypatch.setattr(model_ops, "list_models", fake_list)
-    monkeypatch.setattr(model_ops, "model_info", fake_info)
+    monkeypatch.setattr("kllm.modules.models.api.list_models", fake_list)
+    monkeypatch.setattr("kllm.modules.models.api.model_info", fake_info)
     ok = c.post("/v1/models/search", json={"query": "llama:Q4_K_M"})
     assert ok.status_code == 200
     body = ok.json()
@@ -1729,7 +1730,8 @@ def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
     assert "signed.example" not in blob
 
     monkeypatch.setattr(
-        model_ops, "model_info", lambda *a, **k: (_ for _ in ()).throw(OSError("all-down"))
+        "kllm.modules.models.api.model_info",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("all-down")),
     )
     failed = c.post("/v1/models/search", json={"query": "llama"})
     assert failed.status_code == 400

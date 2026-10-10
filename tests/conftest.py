@@ -12,7 +12,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_control_pool():
     """Keep pooled clients and test doubles local to each test."""
-    from kllm import http_clients
+    from kllm.shared import http_clients
 
     previous = http_clients.control
     http_clients.control = None
@@ -27,7 +27,7 @@ def isolated_control_pool():
 @pytest.fixture
 def native_inventory_counts(tmp_path, monkeypatch):
     """Install a deterministic native inventory adapter and count expensive acquisitions."""
-    import kllm.native as native
+    import kllm.shared.native as native
 
     binary = tmp_path / "llama-server"
     binary.write_bytes(b"test binary")

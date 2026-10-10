@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import threading
 import uuid
 from unittest.mock import patch
@@ -15,11 +17,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.auth as auth_mod
-    import kllm.state as state_mod
+    import kllm.shared.auth as auth_mod
+    import kllm.shared.state as state_mod
     import kllm.agent as agent_mod
-    from kllm import models as model_ops
-    from kllm import load_progress
+    from kllm.modules import models as model_ops
+    from kllm.modules.inference.interactors import load_progress
 
     previous_download_state = (
         model_ops.downloads._DOWNLOAD_PROGRESS,
@@ -67,21 +69,19 @@ def test_download_start_and_complete(client, monkeypatch):
     finished = threading.Event()
 
     def fake_runner(source, name):
-        from kllm import models as model_ops
+        from kllm.modules import models as model_ops
 
         model_ops.downloads._DOWNLOAD_LOCK.release()
         model_ops.downloads._DOWNLOAD_CANCEL = None
         finished.set()
 
-    monkeypatch.setattr(
-        agent,
-        "_download_job_runner",
+    monkeypatch.setattr(agent_runtime, "_download_job_runner",
         fake_runner,
     )
     # Simulate a live job mid-transfer.
-    from kllm import models as model_ops
+    from kllm.modules import models as model_ops
 
-    from kllm.models.download_progress import DownloadProgress
+    from kllm.modules.models.interactors.download_progress import DownloadProgress
 
     model_ops.downloads._DOWNLOAD_PROGRESS = DownloadProgress(
         operation_id="00000000-0000-4000-8000-000000000001",
@@ -135,7 +135,7 @@ def test_download_start_and_complete(client, monkeypatch):
 def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
     """Complete, error, and cancelled snapshots must not block the next selection."""
     c, agent, _ = client
-    from kllm import models as model_ops
+    from kllm.modules import models as model_ops
 
     finished = threading.Event()
 
@@ -144,7 +144,7 @@ def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
         model_ops.downloads._DOWNLOAD_CANCEL = None
         finished.set()
 
-    monkeypatch.setattr(agent, "_download_job_runner", fake_runner)
+    monkeypatch.setattr(agent_runtime, "_download_job_runner", fake_runner)
     try:
         for phase, error in (
             ("complete", None),
@@ -159,7 +159,7 @@ def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
             )
             assert accepted.status_code == 200, accepted.text
             assert finished.wait(timeout=5)
-            from kllm.models.download_progress import DownloadProgress
+            from kllm.modules.models.interactors.download_progress import DownloadProgress
 
             model_ops.downloads._DOWNLOAD_PROGRESS = DownloadProgress(
                 operation_id="00000000-0000-4000-8000-000000000002",
@@ -183,8 +183,8 @@ def test_terminal_download_snapshots_accept_next_selection(client, monkeypatch):
 
 
 def test_operation_records_keep_terminal_separate_from_current():
-    from kllm import models as model_ops
-    from kllm.models.download_progress import DownloadProgress
+    from kllm.modules import models as model_ops
+    from kllm.modules.models.interactors.download_progress import DownloadProgress
 
     previous = model_ops.downloads._DOWNLOAD_PROGRESS
     try:
@@ -241,7 +241,7 @@ def test_operation_records_keep_terminal_separate_from_current():
 
 def test_download_bad_ref_fails_fast(client, monkeypatch):
     c, agent, _ = client
-    with patch("kllm.models.resolve_hf_filename", side_effect=ValueError("no such quant")):
+    with patch("kllm.modules.models.api.resolve_hf_filename", side_effect=ValueError("no such quant")):
         r = c.post("/v1/models/download", json={"source": "org/repo:Q9_Z"})
     assert r.status_code == 400
     assert "no such quant" in r.json()["detail"]
@@ -274,8 +274,8 @@ def test_download_cancel_mid_transfer(client, monkeypatch):
         return FakeResp()
 
     def run():
-        with patch("kllm.models.downloads.httpx.stream", side_effect=fake_stream):
-            from kllm import models as model_ops
+        with patch("kllm.modules.models.interactors.downloads.httpx.stream", side_effect=fake_stream):
+            from kllm.modules import models as model_ops
 
             try:
                 model_ops.download_model("https://example.com/model.gguf")
@@ -308,13 +308,13 @@ def test_download_cancel_mid_transfer(client, monkeypatch):
 
 def test_download_error_snapshot(client, monkeypatch):
     c, agent, _ = client
-    with patch("kllm.models.downloads.httpx.stream", side_effect=RuntimeError("boom")):
-        from kllm import models as model_ops
+    with patch("kllm.modules.models.interactors.downloads.httpx.stream", side_effect=RuntimeError("boom")):
+        from kllm.modules import models as model_ops
 
         with pytest.raises(RuntimeError):
             model_ops.download_model("https://example.com/model.gguf")
         # Runner path (same failing transport): publish the terminal error snapshot.
-        agent._download_job_runner("https://example.com/model.gguf", None)
+        agent_runtime._download_job_runner("https://example.com/model.gguf", None)
     r = c.get("/v1/models/download-progress")
     body = r.json()
     assert body["state"] == "error"
@@ -342,7 +342,7 @@ def test_load_progress_active(client, monkeypatch):
     c, agent, _ = client
     import os
 
-    from kllm import load_progress
+    from kllm.modules.inference.interactors import load_progress
 
     pid = os.getpid()  # a live pid for the liveness probe
     load_progress.begin("toy.gguf", pid, 1024)
@@ -378,7 +378,7 @@ def test_load_progress_active(client, monkeypatch):
 
 def test_load_progress_dead_process(client, monkeypatch):
     c, agent, _ = client
-    from kllm import load_progress
+    from kllm.modules.inference.interactors import load_progress
 
     load_progress.begin("toy.gguf", 999_999, 1024)
     try:
@@ -395,7 +395,7 @@ def test_load_progress_dead_process(client, monkeypatch):
 
 
 def test_load_records_keep_previous_terminal_during_next_load(monkeypatch):
-    from kllm import load_progress
+    from kllm.modules.inference.interactors import load_progress
 
     old_active, old_terminal = load_progress._active, load_progress._latest_terminal
     try:
@@ -428,7 +428,7 @@ def test_load_records_keep_previous_terminal_during_next_load(monkeypatch):
 
 
 def test_late_load_sample_cannot_terminalize_replacement_operation(monkeypatch):
-    from kllm import load_progress
+    from kllm.modules.inference.interactors import load_progress
 
     old_active, old_terminal = load_progress._active, load_progress._latest_terminal
     entered = threading.Event()
@@ -475,7 +475,7 @@ def test_load_progress_rate_eta(client, monkeypatch):
     import os
     import time
 
-    from kllm import load_progress
+    from kllm.modules.inference.interactors import load_progress
 
     pid = os.getpid()
     load_progress.begin("toy.gguf", pid, 10_000)

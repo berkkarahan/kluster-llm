@@ -17,11 +17,11 @@ test('estimate failures surface the structured v2 error and runtime readiness gu
       assert.equal(path, '/v2/inference/plans?preview=true');
       return nextResponse;
     };
-    ({ appStore: store } = await server.ssrLoadModule('/src/lib/store.svelte.ts'));
-    store.models = [{ id: 'fixture.gguf' }];
-    store.selectedModel = 'fixture.gguf';
-    store.threads = 1;
-    store.status = {
+    store = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
+    store.models.models = [{ id: 'fixture.gguf' }];
+    store.models.selectedModel = 'fixture.gguf';
+    store.run.threads = 1;
+    store.cluster.status = {
       role: 'master', node_id: 'master', members: { master: { node_id: 'master' } },
       runtimes: {
         target: { version: { runtime_id: 'runtime-1' } }, selected: null,
@@ -36,10 +36,10 @@ test('estimate failures surface the structured v2 error and runtime readiness gu
         details: { code: 'RUNTIME_NOT_READY', message: 'Runtime is not prepared; open Settings → llama.cpp and download/build the target' }
       }
     }, 409);
-    await store.refreshEstimate();
-    assert.equal(store.planResult, null);
-    assert.equal(store.estimateError, 'Runtime is not prepared; open Settings → llama.cpp and download/build the target');
-    assert.equal(store.estimating, false);
+    await store.run.refreshEstimate();
+    assert.equal(store.run.planResult, null);
+    assert.equal(store.run.estimateError, 'Runtime is not prepared; open Settings → llama.cpp and download/build the target');
+    assert.equal(store.run.estimating, false);
 
     const { render } = await server.ssrLoadModule('svelte/server');
     const { default: RunPage } = await server.ssrLoadModule('/src/routes/run/+page.svelte');
@@ -54,8 +54,8 @@ test('estimate failures surface the structured v2 error and runtime readiness gu
         details: { context: 'Model context limit is 131072' }
       }
     }, 422);
-    await store.refreshEstimate();
-    assert.equal(store.estimateError, 'Model context limit is 131072');
+    await store.run.refreshEstimate();
+    assert.equal(store.run.estimateError, 'Model context limit is 131072');
   } finally {
     store?.stop();
     globalThis.fetch = originalFetch;

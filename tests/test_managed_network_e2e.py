@@ -18,11 +18,11 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 
-from kllm.agent.handlers.managed_network import build_router
-from kllm.agent.services.managed_network import ManagedNetworkService
-from kllm.managed_network.platform import base
-from kllm.managed_network.platform.base import AdapterSnapshot, PlatformAdapter
-from kllm.managed_network.platform.inspection import InterfaceState
+from kllm.modules.managed_network.router_http import build_router
+from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+from kllm.shared.platform import base
+from kllm.shared.platform.base import AdapterSnapshot, PlatformAdapter
+from kllm.shared.platform.inspection import InterfaceState
 
 
 @pytest.mark.asyncio
@@ -312,8 +312,8 @@ async def test_three_agent_signed_start_idempotency_and_safe_refusal(tmp_path, m
 async def test_native_three_agent_ready_admission_and_partial_restart(tmp_path, monkeypatch):
     """Combined actual native sockets; see lab module for OS/runtime mappings."""
     from managed_network_lab import NativeAgentLab
-    from kllm import native
-    from kllm.managed_network.allocation import OperationRequest
+    from kllm.shared import native
+    from kllm.modules.managed_network.interactors.allocation import OperationRequest
 
     lab = NativeAgentLab(tmp_path, monkeypatch)
     try:

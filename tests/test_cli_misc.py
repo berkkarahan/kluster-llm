@@ -7,7 +7,9 @@ import pytest
 import typer
 
 from kllm.cli import main
-from kllm.commands import agent_runtime, connect, dashboard, rebuild
+from kllm.modules.cluster.interactors import agent_runtime
+from kllm.modules.connect import router_cli as connect, dashboard_cli as dashboard
+from kllm.modules.runtimes import router_cli as rebuild
 
 
 class FakePipe:

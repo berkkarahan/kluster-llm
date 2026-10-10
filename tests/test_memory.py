@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from kllm.core.gpu_selection import GpuDeviceInput, default_gpu_ids, select_gpu_devices
-from kllm.core.memory import build_snapshot, normalize_devices, sum_vram_bytes
+from kllm.modules.inference.interactors.gpu_selection import GpuDeviceInput, default_gpu_ids, select_gpu_devices
+from kllm.modules.inference.interactors.memory import build_snapshot, normalize_devices, sum_vram_bytes
 
 GIB = 1024**3
 DISCRETE = {

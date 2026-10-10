@@ -7,7 +7,7 @@ description: "Guide users through creating, verifying, troubleshooting, and rest
 
 Require a known negotiated physical Ethernet speed of at least 1 Gbps; 10 Gbps is preferred, not required. Report the speed each endpoint actually negotiates rather than inferring it from the switch, adapter label, or cable.
 
-Guide the user in small steps, using the OS of each computer. Locate the Kluster checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.state.repo_root()`; repository paths below resolve against that root.
+Guide the user in small steps, using the OS of each computer. Locate the Kluster checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.shared.state.repo_root()`; repository paths below resolve against that root.
 
 Read only the references for participating platforms:
 - [Windows](references/windows.md): numeric adapter indexes, PowerShell, local administrator approval, and scoped firewall checks.

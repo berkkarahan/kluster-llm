@@ -10,15 +10,15 @@ import pytest
 from fastapi import HTTPException
 
 from kllm.agent.schemas import JoinBody
-from kllm.agent.services.cluster_join import ClusterJoinDependencies, ClusterJoinService
-from kllm.agent.services.gpus import ResolvedGpuSelection
-from kllm.agent.services.rpc_runs import RpcRunCoordinator, remap_rpc_plan
-from kllm.agent.services.worker_rpc import LEASE_SECONDS, WorkerRpcService
-from kllm.core.gpu_selection import GpuSelection
-from kllm.managed_network.identity import SignedRuntimeCommand
-from kllm.managed_network.platform.base import PlatformRefusal
-from kllm.run_settings import RunBody
-from kllm.state import ClusterState
+from kllm.modules.cluster.interactors.cluster_join import ClusterJoinDependencies, ClusterJoinService
+from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
+from kllm.modules.inference.interactors.rpc_runs import RpcRunCoordinator, remap_rpc_plan
+from kllm.modules.inference.interactors.worker_rpc import LEASE_SECONDS, WorkerRpcService
+from kllm.modules.inference.interactors.gpu_selection import GpuSelection
+from kllm.modules.managed_network.interactors.identity import SignedRuntimeCommand
+from kllm.shared.platform.base import PlatformRefusal
+from kllm.modules.inference.entities import RunBody
+from kllm.shared.state import ClusterState
 
 CPU = [{"index": 0, "device": "CPU", "backend": "cpu", "memory_kind": "ram"}]
 
@@ -48,7 +48,7 @@ def command(run_id=None, action="start", **values):
 @pytest.fixture
 def worker(monkeypatch, tmp_path):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
-    monkeypatch.setattr("kllm.agent.services.worker_rpc.netsec.ensure_rpc_firewall", lambda *_: {})
+    monkeypatch.setattr("kllm.modules.inference.interactors.worker_rpc.netsec.ensure_rpc_firewall", lambda *_: {})
     state = ClusterState(
         role="worker",
         node_id="worker",
@@ -88,7 +88,7 @@ def worker(monkeypatch, tmp_path):
 
 def _retry_state(monkeypatch, tmp_path):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
-    monkeypatch.setattr("kllm.agent.services.worker_rpc.netsec.ensure_rpc_firewall", lambda *_: {})
+    monkeypatch.setattr("kllm.modules.inference.interactors.worker_rpc.netsec.ensure_rpc_firewall", lambda *_: {})
     state = ClusterState(
         role="worker",
         node_id="worker",
@@ -348,7 +348,7 @@ def test_rpc_endpoint_remapping_preserves_allocations():
 
 @pytest.fixture
 def coordinator(monkeypatch):
-    from kllm import native
+    from kllm.shared import native
 
     state = ClusterState(role="master", node_id="master")
     state.save = lambda: None
@@ -580,7 +580,7 @@ def test_successful_recovery_reloads_saved_settings(coordinator):
 
 
 def test_recovery_keeps_original_runtime_protected_until_explicit_stop(coordinator, tmp_path):
-    from kllm.runtimes.registry import RuntimeRegistry
+    from kllm.modules.runtimes.interactors.registry import RuntimeRegistry
     from test_runtime_versions import version, prepared
 
     c = coordinator
@@ -612,13 +612,13 @@ async def test_real_signed_websocket_commands_control_an_owned_child(tmp_path, m
     import psutil
     import websockets
 
-    from kllm.agent.services.network_channel import ChannelSession, SocketWire
-    from kllm.managed_network.identity import ChannelFence, LocalIdentity
-    from kllm.managed_network.models import PeerIdentity
-    from kllm.managed_network.store import NetworkStore
+    from kllm.modules.managed_network.interactors.network_channel import ChannelSession, SocketWire
+    from kllm.modules.managed_network.interactors.identity import ChannelFence, LocalIdentity
+    from kllm.modules.managed_network.entities import PeerIdentity
+    from kllm.modules.managed_network.gateways.store import NetworkStore
 
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
-    monkeypatch.setattr("kllm.agent.services.worker_rpc.netsec.ensure_rpc_firewall", lambda *_: {})
+    monkeypatch.setattr("kllm.modules.inference.interactors.worker_rpc.netsec.ensure_rpc_firewall", lambda *_: {})
     stores = [NetworkStore(tmp_path / name) for name in ("master", "worker")]
     identities = [
         LocalIdentity(tmp_path / name, name, store)

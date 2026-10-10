@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from kllm.agent.services.models import ModelService
-from kllm.exceptions import ConflictError, ValidationError
-from kllm.state import ClusterState
+from kllm.modules.models.interactors.model_service import ModelService
+from kllm.shared.exceptions import ConflictError, ValidationError
+from kllm.shared.state import ClusterState
 
 
 class FakeExecutor(Executor):

@@ -8,16 +8,11 @@ from uuid import uuid4
 
 import pytest
 
-from kllm.agent.services.managed_network import ManagedNetworkService
-from kllm.managed_network.allocation import (
-    ParticipantSelection,
-    assign,
-    propose,
-    reusable_addresses,
-)
-from kllm.managed_network.guided_setup import GuidedRequest
-from kllm.managed_network.platform.base import AdapterSnapshot, PlatformRefusal
-from kllm.managed_network.platform.inspection import InterfaceState
+from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+from kllm.modules.managed_network.interactors.allocation import ParticipantSelection, assign, propose, reusable_addresses
+from kllm.modules.managed_network.interactors.guided_setup import GuidedRequest
+from kllm.shared.platform.base import AdapterSnapshot, PlatformRefusal
+from kllm.shared.platform.inspection import InterfaceState
 
 PREFERRED = ipaddress.IPv4Network("10.10.10.0/24")
 ORDER = ["10.10.10.0/24", "192.168.234.0/24", "172.29.234.0/24", "10.234.234.0/24"]

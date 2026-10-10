@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runtimeRunReason } from '../src/lib/runtime-readiness.ts';
+import { runtimeRunReason } from '../src/lib/modules/run/runtime-readiness.ts';
 
 const library = {
   target: {version: {runtime_id: 'target'}},

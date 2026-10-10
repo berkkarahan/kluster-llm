@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from kllm.core.placement_models import PlacementDeviceCandidate
+from kllm.modules.inference.interactors.placement_models import PlacementDeviceCandidate
 
-from kllm.tensor_split import (
+from kllm.modules.inference.interactors.tensor_split import (
     device_can_hold,
     layer_counts_from_weights,
     proportional_weights,

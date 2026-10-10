@@ -3,15 +3,10 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from kllm import gguf_meta
+from kllm.modules.models.interactors import gguf_meta
 import pytest
 
-from kllm.gguf_meta import (
-    is_moe_architecture,
-    read_context_length,
-    read_inference_metadata,
-    sniff_reasoning_flags,
-)
+from kllm.modules.models.interactors.gguf_meta import is_moe_architecture, read_context_length, read_inference_metadata, sniff_reasoning_flags
 
 
 def _write_string(buf: bytearray, s: str) -> None:

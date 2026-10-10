@@ -3,8 +3,8 @@ from __future__ import annotations
 import ipaddress
 import json
 
-from kllm import discovery
-from kllm.discovery import DiscoveredMaster, browse_masters, join_key_id
+from kllm.modules.cluster.interactors import discovery
+from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, browse_masters, join_key_id
 
 
 def test_join_key_id_stable_and_truncated():
@@ -33,17 +33,17 @@ def test_browse_masters_falls_back_to_helper(monkeypatch):
     """When in-process mDNS is empty (LAN-blocked), use helper browse results."""
     kid = join_key_id("secret")
     monkeypatch.setattr(
-        "kllm.discovery._browse_inprocess",
+        "kllm.modules.cluster.interactors.discovery._browse_inprocess",
         lambda timeout=2.0, key=None: [],
     )
     monkeypatch.setattr(
-        "kllm.discovery._browse_via_helper",
+        "kllm.modules.cluster.interactors.discovery._browse_via_helper",
         lambda timeout, key: [
             DiscoveredMaster(name="m", host="192.168.68.63", port=18765, key_id=kid),
         ],
     )
     monkeypatch.setattr(
-        "kllm.discovery_http._browse_via_http",
+        "kllm.modules.cluster.interactors.discovery_http._browse_via_http",
         lambda timeout, key, port=18765: (_ for _ in ()).throw(
             AssertionError("http should not run")
         ),
@@ -56,7 +56,7 @@ def test_browse_masters_falls_back_to_helper(monkeypatch):
 def test_browse_masters_skips_helper_when_inprocess_finds(monkeypatch):
     calls = {"helper": 0}
     monkeypatch.setattr(
-        "kllm.discovery._browse_inprocess",
+        "kllm.modules.cluster.interactors.discovery._browse_inprocess",
         lambda timeout=2.0, key=None: [
             DiscoveredMaster(name="m", host="10.0.0.1", port=18765, key_id="abcd"),
         ],
@@ -66,9 +66,9 @@ def test_browse_masters_skips_helper_when_inprocess_finds(monkeypatch):
         calls["helper"] += 1
         raise AssertionError("helper should not run")
 
-    monkeypatch.setattr("kllm.discovery._browse_via_helper", boom)
+    monkeypatch.setattr("kllm.modules.cluster.interactors.discovery._browse_via_helper", boom)
     monkeypatch.setattr(
-        "kllm.discovery_http._browse_via_http",
+        "kllm.modules.cluster.interactors.discovery_http._browse_via_http",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("http should not run")),
     )
     found = browse_masters(timeout=0.1, key=None)
@@ -79,10 +79,10 @@ def test_browse_masters_skips_helper_when_inprocess_finds(monkeypatch):
 def test_browse_masters_falls_back_to_http(monkeypatch):
     """When mDNS and helper are empty, HTTP /24 probe finds the master."""
     kid = join_key_id("secret")
-    monkeypatch.setattr("kllm.discovery._browse_inprocess", lambda timeout=2.0, key=None: [])
-    monkeypatch.setattr("kllm.discovery._browse_via_helper", lambda timeout, key: [])
+    monkeypatch.setattr("kllm.modules.cluster.interactors.discovery._browse_inprocess", lambda timeout=2.0, key=None: [])
+    monkeypatch.setattr("kllm.modules.cluster.interactors.discovery._browse_via_helper", lambda timeout, key: [])
     monkeypatch.setattr(
-        "kllm.discovery_http._browse_via_http",
+        "kllm.modules.cluster.interactors.discovery_http._browse_via_http",
         lambda timeout, key, port=18765: [
             DiscoveredMaster(name="kllm-9aaafd02", host="192.168.68.100", port=port, key_id=kid),
         ],
@@ -94,7 +94,7 @@ def test_browse_masters_falls_back_to_http(monkeypatch):
 
 
 def test_probe_http_master_matches_kid(monkeypatch):
-    from kllm.discovery_http import _probe_http_master
+    from kllm.modules.cluster.interactors.discovery_http import _probe_http_master
 
     kid = join_key_id("secret")
     payload = json.dumps({"ok": True, "role": "master", "node_id": "abc", "kid": kid}).encode()
@@ -109,7 +109,7 @@ def test_probe_http_master_matches_kid(monkeypatch):
         def read(self):
             return payload
 
-    monkeypatch.setattr("kllm.discovery_http.urllib.request.urlopen", lambda *a, **k: _Resp())
+    monkeypatch.setattr("kllm.modules.cluster.interactors.discovery_http.urllib.request.urlopen", lambda *a, **k: _Resp())
     hit = _probe_http_master("192.168.68.100", 18765, kid, 0.2)
     assert hit is not None
     assert hit.host == "192.168.68.100"
@@ -121,7 +121,7 @@ def test_probe_http_master_matches_kid(monkeypatch):
 
 def test_http_probe_hosts_covers_full_netmask(monkeypatch):
     """/22 LAN is probed in full, not truncated to the caller's /24."""
-    from kllm import netsec
+    from kllm.shared import netsec
 
     monkeypatch.setattr(
         netsec,
@@ -137,7 +137,7 @@ def test_http_probe_hosts_covers_full_netmask(monkeypatch):
 
 
 def test_http_probe_hosts_caps_scan(monkeypatch):
-    from kllm import netsec
+    from kllm.shared import netsec
 
     monkeypatch.setattr(
         netsec,
@@ -150,7 +150,7 @@ def test_http_probe_hosts_caps_scan(monkeypatch):
 
 def test_http_probe_hosts_falls_back_to_24(monkeypatch):
     """No interface masks available -> historical /24-per-IP behaviour."""
-    from kllm import netsec
+    from kllm.shared import netsec
 
     monkeypatch.setattr(netsec, "_list_ipv4_networks", lambda: [])
     monkeypatch.setattr(netsec, "_list_ipv4_addresses", lambda: ["192.168.68.57"])

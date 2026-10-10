@@ -5,7 +5,7 @@ description: "Diagnose Kluster LLM startup, inference, membership, logging, runt
 
 # Diagnose a Kluster failure
 
-Find the checkout via `KLLM_REPO_ROOT`, current checkout, or `kllm.state.repo_root()`. Start with `docs/troubleshooting.md`, current CLI help, and the failing operation's logs. Read `docs/agent-install.md` for installer/runtime recovery.
+Find the checkout via `KLLM_REPO_ROOT`, current checkout, or `kllm.shared.state.repo_root()`. Start with `docs/troubleshooting.md`, current CLI help, and the failing operation's logs. Read `docs/agent-install.md` for installer/runtime recovery.
 
 1. Record the exact trigger, error/status code, affected computers, OS/backends, endpoint, time, and whether inference or networking is still active. Keep tokens and join keys out of evidence.
 2. Distinguish layers: local agent/control reachability, accepted membership heartbeat, dedicated network readiness, runtime source/backend readiness, RPC allocation, model load, and client protocol. A ping, cached node, or historical reading proves none of the later layers.

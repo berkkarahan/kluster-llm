@@ -86,8 +86,8 @@ impl AddressObserver {
                 use windows::Win32::{
                     Foundation::HANDLE, NetworkManagement::IpHelper::CancelMibChangeNotify2,
                 };
-                let _ = CancelMibChangeNotify2(HANDLE(address));
-                let _ = CancelMibChangeNotify2(HANDLE(route));
+                let _ = CancelMibChangeNotify2(HANDLE(address as *mut core::ffi::c_void));
+                let _ = CancelMibChangeNotify2(HANDLE(route as *mut core::ffi::c_void));
             }
         }
     }
@@ -442,7 +442,7 @@ fn parse(bytes: &[u8], shared: &Shared) -> io::Result<()> {
 mod win {
     use super::*;
     use windows::Win32::{
-        Foundation::{BOOLEAN, HANDLE},
+        Foundation::HANDLE,
         NetworkManagement::IpHelper::*,
         Networking::WinSock::AF_INET,
     };
@@ -505,13 +505,13 @@ mod win {
                 AF_INET,
                 Some(address),
                 Some(context),
-                BOOLEAN(0),
+                false,
                 &mut addr,
             );
             if result.0 != 0 {
                 return Err(io::Error::from_raw_os_error(result.0 as i32));
             }
-            let result = NotifyRouteChange2(AF_INET, Some(route), context, BOOLEAN(0), &mut routes);
+            let result = NotifyRouteChange2(AF_INET, Some(route), context, false, &mut routes);
             if result.0 != 0 {
                 let _ = CancelMibChangeNotify2(addr);
                 return Err(io::Error::from_raw_os_error(result.0 as i32));

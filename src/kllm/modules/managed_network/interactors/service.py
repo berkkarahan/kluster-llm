@@ -153,6 +153,10 @@ class ManagedNetworkService:
                     ),
                 )
 
+            if command.action.startswith("prima_"):
+                if self.runtimes is None:
+                    raise ValueError("Upgrade this worker for Prima control")
+                return await self.runtimes.prima.execute(command, deadline, authorize_sync)
             if command.action in (
                 "prepare_runtime",
                 "runtime_status",
@@ -187,6 +191,8 @@ class ManagedNetworkService:
             await asyncio.sleep(1)
             try:
                 await asyncio.to_thread(self.worker_rpc.expire)
+                if self.runtimes and hasattr(self.runtimes, "_prima"):
+                    await asyncio.to_thread(self.runtimes._prima.expire)
             except (PlatformRefusal, OSError, RuntimeError, ValueError):
                 pass  # Owned process and cleanup_pending remain available for retry.
 

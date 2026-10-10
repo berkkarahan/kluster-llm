@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PrimaPreparation from './PrimaPreparation.svelte';
   import { createApp } from '$lib/app.svelte';
   import { routes } from '$lib/shared/navigation';
   import { onMount } from 'svelte';
@@ -30,6 +31,7 @@
   let dialog: HTMLDialogElement;
   let mode = $state<'add' | 'logs' | 'details' | 'remove'>('add');
   let repository = $state(upstream);
+  let engine = $state<'llamacpp' | 'primacpp'>('llamacpp');
   let ref = $state('v0.5.0');
   let refType = $state<'tag' | 'branch' | 'commit'>('tag');
   let name = $state('');
@@ -46,7 +48,7 @@
 
   $effect(() => { if (!draft && target?.version.runtime_id) draft = target.version.runtime_id; });
   $effect(() => {
-    repository; ref; refType; name;
+    repository; ref; refType; name; engine;
     resolved = null;
     resolveGeneration++;
   });
@@ -81,7 +83,17 @@
     dialog.showModal();
   }
   function close() { controller?.abort(); resolveGeneration++; dialog.close(); returnFocus?.focus(); }
-  function add() { repository = library?.bootstrap?.repository ?? upstream; ref = library?.bootstrap?.ref || 'v0.5.0'; refType = 'tag'; name = ''; resolved = null; sources = null; open('add'); }
+  function add() { engine = 'llamacpp'; repository = library?.bootstrap?.repository ?? upstream; ref = library?.bootstrap?.ref || 'v0.5.0'; refType = 'tag'; name = ''; resolved = null; sources = null; open('add'); }
+  function chooseEngine(value: 'llamacpp' | 'primacpp') {
+    engine = value;
+    sources = null;
+    if (value === 'primacpp') {
+      const source = library?.engine_sources?.find(s => s.engine === value);
+      if (source) { repository = source.repository; ref = source.ref; refType = source.ref_type; }
+    } else {
+      repository = bootstrap.repository; ref = bootstrap.ref; refType = 'tag';
+    }
+  }
   async function discoverSources() {
     controller?.abort(); controller = new AbortController();
     const selectedRepo = repository;
@@ -97,7 +109,7 @@
     controller?.abort(); controller = new AbortController();
     const generation = resolveGeneration;
     await action(async () => {
-      const value = await presenter.resolve<RuntimeVersion>({ repository, ref, ref_type: refType, name }, controller?.signal);
+      const value = await presenter.resolve<RuntimeVersion>({ engine, repository, ref, ref_type: refType, name }, controller?.signal);
       if (generation === resolveGeneration) resolved = value;
     });
   }
@@ -231,18 +243,21 @@
       {@const version = entry.version}
       {@const job = jobFor(version.runtime_id)}
       <article class="version-row">
-        <div class="version-info"><div class="version-name"><button class="text-button" onclick={() => inspect(version)}>{label(version)}</button>{#if version.runtime_id === target?.version.runtime_id}<span class="runtime-badge green">Target</span>{:else if version.runtime_id === running?.runtime_id}<span class="runtime-badge">Running</span>{:else if version.repository !== upstream}<span class="runtime-badge">Fork</span>{/if}{#if entry.build?.prebuilt}<span class="runtime-badge" title="Installed from a prebuilt release pack. The managed 10GbE private network needs a source build of this version.">Prebuilt</span>{/if}</div><div class="version-source">{version.repository}</div><div class="version-ref"><span>{version.ref_type} · {version.ref}</span><code>{short(version.commit)}</code></div></div>
+        <div class="version-info"><div class="version-name"><button class="text-button" onclick={() => inspect(version)}>{label(version)}</button>{#if version.runtime_id === target?.version.runtime_id}<span class="runtime-badge green">Target</span>{:else if version.runtime_id === running?.runtime_id}<span class="runtime-badge">Running</span>{:else if version.repository !== upstream}<span class="runtime-badge">Fork</span>{/if}{#if entry.build?.prebuilt}<span class="runtime-badge" title="Installed from a prebuilt release pack. The managed 10GbE private network needs a source build of this version.">Prebuilt</span>{/if}</div><div class="version-source">{version.engine === 'primacpp' ? 'Prima.cpp · ' : ''}{version.repository}</div><div class="version-ref"><span>{version.ref_type} · {version.ref}</span><code>{short(version.commit)}</code></div></div>
         <div class="version-backend"><span>{entry.build?.backend ?? presenter.status?.accel_backend ?? 'Auto backend'}</span><span class="small" class:green={!!entry.build}>{isPreparing(job) ? job?.phase : job?.phase === 'failed' ? 'Failed' : entry.build?.prebuilt ? 'Prebuilt' : entry.build ? 'Built' : 'Not built'}</span></div>
         <div class="version-disk mono small muted">{disk(entry.build?.size_bytes)}</div>
         <div class="version-actions"><button class="btn" disabled={busy || isPreparing(job) || worker && version.runtime_id !== target?.version.runtime_id} onclick={() => build(version)}>{entry.build ? 'Verify build' : 'Build'}</button><button class="btn" disabled={!job?.job_id || busy} onclick={() => showLogs(job)}>Logs</button>
-          {#if master}<button class="btn" disabled={busy || draft === version.runtime_id} onclick={() => draft = version.runtime_id}>Select</button>{:else if !worker}<button class="btn" disabled={!entry.build || busy || !!running} onclick={() => selectLocal(version)}>Use locally</button>{/if}
+          {#if master}<button class="btn" disabled={busy || draft === version.runtime_id || entry.inference_supported === false} onclick={() => draft = version.runtime_id}>Select</button>{:else if !worker}<button class="btn" disabled={!entry.build || busy || !!running || entry.inference_supported === false} onclick={() => selectLocal(version)}>Use locally</button>{/if}
           <button class="btn runtime-remove" title={protectedVersion(version.runtime_id) ? 'Running, selected, targeted or building versions are protected' : 'Remove this local version'} aria-label={`Remove ${label(version)}`} disabled={busy || worker || protectedVersion(version.runtime_id)} onclick={() => remove(version)}>×</button>
         </div>
+        {#if entry.qualification_errors?.length}<p class="version-error small warning">Qualification pending: {entry.qualification_errors.map(value => value.replaceAll('_', ' ')).join(', ')}</p>{/if}
         {#if job?.error}<div class="version-error"><ErrorMessage source={`runtime-job:${job.job_id}`} message={job.error} /></div>{/if}
       </article>
     {/each}
     <div class="library-foot">Builds and disk usage shown for this node · {presenter.status?.node_id ?? '—'}</div>
   </section>
+
+  <PrimaPreparation {presenter} />
 
   <section class="panel" aria-labelledby="readiness-heading">
     <div class="runtime-panel-head"><div><h3 id="readiness-heading">Node readiness</h3><p>{worker ? 'Cluster nodes; this node builds locally and the master owns preparation.' : 'Source revision is shared. Each node builds for its local backend.'}</p></div><span class="runtime-badge">{presenter.planResult?.runtime_required_nodes ? `${requiredNodes.length} required by current plan` : 'Choose run participants in Deploy'}</span></div>
@@ -261,6 +276,8 @@
   <div class="runtime-dialog-body">
     <ErrorMessage source="runtime-action" message={errorGeneration === errors.generation ? error : ''} />
     {#if mode === 'add'}
+      <label class="field">Inference engine <select aria-label="Inference engine" value={engine} onchange={(event) => chooseEngine(event.currentTarget.value as 'llamacpp' | 'primacpp')}><option value="llamacpp">llama.cpp</option>{#if library?.engine_sources?.length}<option value="primacpp">Prima.cpp · under qualification</option>{/if}</select></label>
+      {#if engine === 'primacpp'}<p class="small muted">Prima can be built for evaluation. Inference selection requires API, platform, placement, lifecycle and performance qualification.</p>{/if}
       <label class="field">Display name <input bind:value={name} placeholder="Optional name" /></label>
       <label class="field">Public HTTPS Git repository <input bind:value={repository} type="url" placeholder={upstream} /></label>
       <button class="btn" disabled={busy} onclick={discoverSources}>{sourcesLoading ? 'Loading releases…' : 'Browse releases and refs'}</button>

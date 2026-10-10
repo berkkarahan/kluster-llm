@@ -270,6 +270,8 @@ class SignedRuntimeCommand(Record):
         "runtime_status",
         "cancel_runtime_build",
         "runtime_build_logs",
+        "prima_prepare", "prima_profile", "prima_start", "prima_status",
+        "prima_renew", "prima_stop", "prima_cancel", "prima_asset_chunk",
     ]
     ttl_ms: int = Field(strict=True, gt=0, le=60000)
     body: dict[str, Any]

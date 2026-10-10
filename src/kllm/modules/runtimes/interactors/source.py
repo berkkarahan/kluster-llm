@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
 from kllm.modules.runtimes.entities import RuntimeVersion, SourceRequest, runtime_id
+from kllm.modules.primacpp.interactors.recipe import recipe_digest, recipe
 
 
 def git_environment() -> dict[str, str]:
@@ -55,8 +56,15 @@ def resolve(source: SourceRequest) -> RuntimeVersion:
             raise ValueError(
                 f"{source.ref_type.title()} {source.ref!r} does not exist in this repository"
             )
+    digest = ""
+    if source.engine == "primacpp":
+        pinned = recipe()
+        if source.repository != pinned["source_repository"] or commit != pinned["source_commit"]:
+            raise ValueError("Prima requires the supported pinned source repository and commit")
+        digest = recipe_digest()
     return RuntimeVersion(
-        **source.model_dump(), commit=commit, runtime_id=runtime_id(source.repository, commit)
+        **source.model_dump(), commit=commit, recipe_digest=digest,
+        runtime_id=runtime_id(source.repository, commit, source.engine, digest),
     )
 
 

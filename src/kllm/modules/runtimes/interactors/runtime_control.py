@@ -14,6 +14,7 @@ from kllm.modules.cluster.interactors.membership_state import LIVENESS_TIMEOUT_S
 from kllm.modules.runtimes.entities import BuildRequest, RuntimeTarget, TargetRequest, body_digest
 from kllm.modules.runtimes.interactors.registry import RuntimeRegistry, TERMINAL
 from kllm.modules.runtimes.interactors.selection import snapshot, use_runtime
+from kllm.modules.primacpp.interactors.recipe import require_qualified
 
 _RETRY_BASE_S = 30.0
 _RETRY_MAX_S = 300.0
@@ -62,6 +63,18 @@ class RuntimeControlService:
         self._retry_marker: tuple[str, int] | None = None
         self.local_attempts = 0
         self.local_retry_after = 0.0
+
+    @property
+    def prima(self):
+        with self.registry.lock:
+            if self.closed:
+                raise ValueError("Runtime control is closing")
+            if not hasattr(self, '_prima'):
+                from kllm.modules.primacpp.interactors.control import PrimaControl
+                from kllm.modules.inference.interactors.run_planning import execute_plan
+                from kllm.modules.models import resolve_local_model
+                self._prima = PrimaControl(self.service, self.registry, resolve_model=resolve_local_model, execute_plan=execute_plan)
+            return self._prima
 
     def target_state(self) -> tuple[str, dict | None, str | None]:
         """Classify the stored target: current, label_stale, binding_stale or absent.
@@ -127,6 +140,7 @@ class RuntimeControlService:
             if request.expected_revision != (prior or {}).get("revision", 0):
                 raise ValueError("Target changed; refresh before applying your selection")
             version = self.registry.data["versions"][request.runtime_id]["version"]
+            require_qualified(version)
             target = RuntimeTarget(
                 version=version,
                 revision=request.expected_revision + 1,
@@ -221,6 +235,7 @@ class RuntimeControlService:
             try:
                 value = self.registry.capture(identity)
                 prepared = {k: value[k] for k in ("runtime_id", "build_id", "backend", "commit")}
+                prepared["engine"] = value.get("engine", "llamacpp")
             except (OSError, ValueError, KeyError) as failure:
                 error = str(failure)
         running = data["running"]
@@ -532,8 +547,12 @@ class RuntimeControlService:
         raise ValueError("Unsupported runtime action")
 
     async def close(self):
-        self.closed = True
+        with self.registry.lock:
+            self.closed = True
+            prima = getattr(self, '_prima', None)
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
+        if prima is not None:
+            await asyncio.to_thread(prima.close)
         await asyncio.to_thread(self.registry.close)

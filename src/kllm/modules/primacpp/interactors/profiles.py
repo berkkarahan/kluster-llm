@@ -1,0 +1,105 @@
+"""Bounded profile cache and explicit comparisons of already-feasible plans."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+from kllm.modules.primacpp.entities import DeviceProfile, PrimaTopology
+from kllm.modules.runtimes.entities import body_digest
+from kllm.modules.runtimes.interactors.registry import atomic_json
+
+
+def profile_key(profile: DeviceProfile) -> str:
+    return body_digest(
+        {
+            key: getattr(profile, key)
+            for key in (
+                "runtime_id",
+                "model_sha256",
+                "node_id",
+                "hardware_digest",
+                "settings_digest",
+                "backend",
+            )
+        }
+    )
+
+
+class ProfileCache:
+    def __init__(self, root: Path, *, max_entries: int = 256, max_age_s: float = 86400):
+        if max_entries < 1 or max_age_s <= 0:
+            raise ValueError("Profile cache limits must be positive")
+        self.root, self.max_entries, self.max_age_s = root, max_entries, max_age_s
+
+    def put(self, profile: DeviceProfile) -> str:
+        key = profile_key(profile)
+        atomic_json(self.root / (key + ".json"), profile.model_dump())
+        entries = sorted(self.root.glob("*.json"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        for stale in entries[self.max_entries :]:
+            stale.unlink(missing_ok=True)
+        return key
+
+    def get(self, identity: dict, *, now: float | None = None) -> DeviceProfile | None:
+        # Reads never create directories, run a profiler, or delete stale records.
+        path = self.root / (body_digest(identity) + ".json")
+        try:
+            value = DeviceProfile.model_validate(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            return None
+        age = (time.time() if now is None else now) - value.measured_at
+        if profile_key(value) != path.stem or not 0 <= age <= self.max_age_s:
+            return None
+        return value
+
+
+def predicted_decode_ms(
+    topology: PrimaTopology,
+    profiles: dict[str, DeviceProfile],
+    *,
+    model_sha256: str,
+    hardware: dict[str, str],
+    settings_digest: str,
+    link_ms: dict[tuple[str, str], float],
+    now: float | None = None,
+    max_age_s: float = 86400,
+) -> float | None:
+    observed = time.time() if now is None else now
+    total = 0.0
+    for rank in topology.ranks:
+        value = profiles.get(rank.node_id)
+        if value is None or (
+            value.runtime_id != topology.runtime_id
+            or value.model_sha256 != model_sha256
+            or value.hardware_digest != hardware.get(rank.node_id)
+            or value.settings_digest != settings_digest
+            or not 0 <= observed - value.measured_at <= max_age_s
+        ):
+            return None
+        if rank.ngl and value.gpu_layer_ms is None:
+            return None
+        layers = sum(r.end - r.start for r in rank.layers)
+        total += (layers - rank.ngl) * value.cpu_layer_ms + rank.ngl * (value.gpu_layer_ms or 0)
+        if len(topology.ranks) > 1:
+            latency = link_ms.get((rank.node_id, rank.next_node_id))
+            if latency is None or latency < 0:
+                return None
+            total += latency
+    return total
+
+
+def choose_profiled_plan(
+    candidates: list[PrimaTopology], profiles: dict[str, DeviceProfile], **measurement_context
+) -> tuple[PrimaTopology, dict]:
+    if not candidates:
+        raise ValueError("No feasible Kluster placement candidates")
+    scored = [
+        (predicted_decode_ms(plan, profiles, **measurement_context), i, plan)
+        for i, plan in enumerate(candidates)
+    ]
+    # A partial profile set cannot safely eliminate an unmeasured candidate.
+    if any(score is None for score, _, _ in scored):
+        return candidates[0], {"status": "unmeasured", "predicted_decode_ms": None}
+    score, _, selected = min(scored, key=lambda row: (row[0], row[1]))
+    return selected, {"status": "profiled_estimate", "predicted_decode_ms": score}

@@ -78,3 +78,13 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
 - RPC bind / optional WireGuard overlay: `src/kllm/netsec.py`
+
+## Optional Prima development
+
+Prima's piped ring uses rank-local model files and layer windows rather than llama.cpp
+RPC remote devices. The integration translates Kluster membership and planner allocations
+explicitly and pins a separate runtime/patch recipe. llama.cpp remains the default;
+Prima selection is blocked until API, platform/backend, model/placement, signed lifecycle
+and measured-performance parity are established. Vulkan GPU computation is a mandatory
+cross-platform gate; CPU/Metal/CUDA evidence cannot substitute for it. See
+[current status](prima-integration.md).

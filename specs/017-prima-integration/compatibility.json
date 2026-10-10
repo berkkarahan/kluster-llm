@@ -1,0 +1,1387 @@
+{
+  "schema_version": 2,
+  "baseline_ref": "v0.5.0",
+  "baseline_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "launch": [
+    {
+      "flag": "--batch-size",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--cache-ram",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--cache-type-k",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--cache-type-k-draft",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--cache-type-v",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--cache-type-v-draft",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--chat-template",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--chat-template-text",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--context",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--context-auto",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--ctx-checkpoints",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--device",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--draft-max",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--draft-model",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--enable-thinking",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--extra-arg",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--fit",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--flash-attention",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--flash-attn",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--frequency-penalty",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--gpu-id",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--jinja",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--kv-unified",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--latency-weight",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--load-mode",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--max-output-tokens",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--micro-batch",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--min-p",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--mmproj",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--moe-offload",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--n-cpu-moe",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--n-predict",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--no-jinja",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--no-kv-unified",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--node-priority",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--node-share",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--override-tensor",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--parallel",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--presence-penalty",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--ram-percent",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--reasoning-budget",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--reasoning-effort",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--reasoning-format",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--repeat-penalty",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--require-node",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--seed",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--spec-draft-n-max",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--spec-type",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--speculative",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--split-mode",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--stop",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--swa-full",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--temperature",
+      "baseline_present": true,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--threads",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--threads-batch",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--top-k",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--top-p",
+      "baseline_present": true,
+      "prima_present": true,
+      "implementation_status": "parser_present",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--vision",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--vram-percent",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    },
+    {
+      "flag": "--vram-weight",
+      "baseline_present": false,
+      "prima_present": false,
+      "implementation_status": "parser_absent",
+      "parity_check": "paired launch with identical effective settings and model",
+      "behavior": "unverified"
+    }
+  ],
+  "parameter_count": 46,
+  "missing_launch_flags": [
+    "--cache-ram",
+    "--cache-type-k-draft",
+    "--cache-type-v-draft",
+    "--ctx-checkpoints",
+    "--device",
+    "--fit",
+    "--jinja",
+    "--kv-unified",
+    "--load-mode",
+    "--mmproj",
+    "--n-cpu-moe",
+    "--no-jinja",
+    "--no-kv-unified",
+    "--override-tensor",
+    "--reasoning-budget",
+    "--reasoning-effort",
+    "--reasoning-format",
+    "--spec-type",
+    "--swa-full"
+  ],
+  "parameters": [
+    {
+      "name": "context",
+      "kluster_cli": "--context",
+      "engine_aliases": [
+        "--ctx-size",
+        "-c"
+      ],
+      "scope": "capacity",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using context",
+      "behavior": "unverified"
+    },
+    {
+      "name": "context_auto",
+      "kluster_cli": "--context-auto",
+      "engine_aliases": [],
+      "scope": "capacity",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using context_auto",
+      "behavior": "unverified"
+    },
+    {
+      "name": "parallel_slots",
+      "kluster_cli": "--parallel",
+      "engine_aliases": [
+        "--parallel",
+        "-np"
+      ],
+      "scope": "capacity",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using parallel_slots",
+      "behavior": "unverified"
+    },
+    {
+      "name": "batch_size",
+      "kluster_cli": "--batch-size",
+      "engine_aliases": [
+        "--batch-size",
+        "-b"
+      ],
+      "scope": "performance",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using batch_size",
+      "behavior": "unverified"
+    },
+    {
+      "name": "micro_batch",
+      "kluster_cli": "--micro-batch",
+      "engine_aliases": [
+        "--ubatch-size",
+        "-ub"
+      ],
+      "scope": "performance",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using micro_batch",
+      "behavior": "unverified"
+    },
+    {
+      "name": "threads",
+      "kluster_cli": "--threads",
+      "engine_aliases": [
+        "--threads",
+        "-t"
+      ],
+      "scope": "performance",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using threads",
+      "behavior": "unverified"
+    },
+    {
+      "name": "threads_batch",
+      "kluster_cli": "--threads-batch",
+      "engine_aliases": [
+        "--threads-batch",
+        "-tb"
+      ],
+      "scope": "performance",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using threads_batch",
+      "behavior": "unverified"
+    },
+    {
+      "name": "cache_type_k",
+      "kluster_cli": "--cache-type-k",
+      "engine_aliases": [
+        "--cache-type-k",
+        "-ctk"
+      ],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using cache_type_k",
+      "behavior": "unverified"
+    },
+    {
+      "name": "cache_type_v",
+      "kluster_cli": "--cache-type-v",
+      "engine_aliases": [
+        "--cache-type-v",
+        "-ctv"
+      ],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using cache_type_v",
+      "behavior": "unverified"
+    },
+    {
+      "name": "flash_attention",
+      "kluster_cli": "--flash-attention",
+      "engine_aliases": [
+        "--flash-attn",
+        "-fa"
+      ],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using flash_attention",
+      "behavior": "unverified"
+    },
+    {
+      "name": "mmap_mlock",
+      "kluster_cli": "--load-mode",
+      "engine_aliases": [
+        "--load-mode",
+        "-lm"
+      ],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using mmap_mlock",
+      "behavior": "unverified"
+    },
+    {
+      "name": "checkpoints",
+      "kluster_cli": "--ctx-checkpoints",
+      "engine_aliases": [
+        "--ctx-checkpoints",
+        "-ctxcp",
+        "--swa-checkpoints"
+      ],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using checkpoints",
+      "behavior": "unverified"
+    },
+    {
+      "name": "cache_ram",
+      "kluster_cli": "--cache-ram",
+      "engine_aliases": [
+        "--cache-ram",
+        "-cram"
+      ],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using cache_ram",
+      "behavior": "unverified"
+    },
+    {
+      "name": "speculative",
+      "kluster_cli": "--speculative",
+      "engine_aliases": [
+        "--spec-type"
+      ],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using speculative",
+      "behavior": "unverified"
+    },
+    {
+      "name": "draft_model",
+      "kluster_cli": "--draft-model",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using draft_model",
+      "behavior": "unverified"
+    },
+    {
+      "name": "draft_max",
+      "kluster_cli": "--draft-max",
+      "engine_aliases": [
+        "--spec-draft-n-max",
+        "--draft-max",
+        "--draft",
+        "--draft-n"
+      ],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using draft_max",
+      "behavior": "unverified"
+    },
+    {
+      "name": "moe_offload",
+      "kluster_cli": "--moe-offload",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using moe_offload",
+      "behavior": "unverified"
+    },
+    {
+      "name": "vision",
+      "kluster_cli": "--vision",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using vision",
+      "behavior": "unverified"
+    },
+    {
+      "name": "mmproj",
+      "kluster_cli": "--mmproj",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using mmproj",
+      "behavior": "unverified"
+    },
+    {
+      "name": "chat_template",
+      "kluster_cli": "--chat-template",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using chat_template",
+      "behavior": "unverified"
+    },
+    {
+      "name": "chat_template_text",
+      "kluster_cli": "--chat-template-text",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using chat_template_text",
+      "behavior": "unverified"
+    },
+    {
+      "name": "temperature",
+      "kluster_cli": "--temperature",
+      "engine_aliases": [
+        "--temp",
+        "--temperature"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using temperature",
+      "behavior": "unverified"
+    },
+    {
+      "name": "top_p",
+      "kluster_cli": "--top-p",
+      "engine_aliases": [
+        "--top-p"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using top_p",
+      "behavior": "unverified"
+    },
+    {
+      "name": "top_k",
+      "kluster_cli": "--top-k",
+      "engine_aliases": [
+        "--top-k"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using top_k",
+      "behavior": "unverified"
+    },
+    {
+      "name": "min_p",
+      "kluster_cli": "--min-p",
+      "engine_aliases": [
+        "--min-p"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using min_p",
+      "behavior": "unverified"
+    },
+    {
+      "name": "presence_penalty",
+      "kluster_cli": "--presence-penalty",
+      "engine_aliases": [
+        "--presence-penalty"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using presence_penalty",
+      "behavior": "unverified"
+    },
+    {
+      "name": "repeat_penalty",
+      "kluster_cli": "--repeat-penalty",
+      "engine_aliases": [
+        "--repeat-penalty"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using repeat_penalty",
+      "behavior": "unverified"
+    },
+    {
+      "name": "frequency_penalty",
+      "kluster_cli": "--frequency-penalty",
+      "engine_aliases": [
+        "--frequency-penalty"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using frequency_penalty",
+      "behavior": "unverified"
+    },
+    {
+      "name": "seed",
+      "kluster_cli": "--seed",
+      "engine_aliases": [
+        "--seed",
+        "-s"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using seed",
+      "behavior": "unverified"
+    },
+    {
+      "name": "max_output_tokens",
+      "kluster_cli": "--max-output-tokens",
+      "engine_aliases": [
+        "--predict",
+        "--n-predict",
+        "-n"
+      ],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": true,
+      "parity_check": "paired launch and request using max_output_tokens",
+      "behavior": "unverified"
+    },
+    {
+      "name": "stop",
+      "kluster_cli": "--stop",
+      "engine_aliases": [],
+      "scope": "generation",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using stop",
+      "behavior": "unverified"
+    },
+    {
+      "name": "enable_thinking",
+      "kluster_cli": "--enable-thinking",
+      "engine_aliases": [],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using enable_thinking",
+      "behavior": "unverified"
+    },
+    {
+      "name": "reasoning_effort",
+      "kluster_cli": "--reasoning-effort",
+      "engine_aliases": [
+        "--reasoning-effort"
+      ],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using reasoning_effort",
+      "behavior": "unverified"
+    },
+    {
+      "name": "reasoning_budget",
+      "kluster_cli": "--reasoning-budget",
+      "engine_aliases": [
+        "--reasoning-budget"
+      ],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using reasoning_budget",
+      "behavior": "unverified"
+    },
+    {
+      "name": "reasoning_format",
+      "kluster_cli": "--reasoning-format",
+      "engine_aliases": [
+        "--reasoning-format"
+      ],
+      "scope": "features",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": false,
+      "parity_check": "paired launch and request using reasoning_format",
+      "behavior": "unverified"
+    },
+    {
+      "name": "device",
+      "kluster_cli": "--device",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using device",
+      "behavior": "unverified"
+    },
+    {
+      "name": "gpu_ids",
+      "kluster_cli": "--gpu-id",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using gpu_ids",
+      "behavior": "unverified"
+    },
+    {
+      "name": "vram_percent",
+      "kluster_cli": "--vram-percent",
+      "engine_aliases": [],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using vram_percent",
+      "behavior": "unverified"
+    },
+    {
+      "name": "ram_percent",
+      "kluster_cli": "--ram-percent",
+      "engine_aliases": [],
+      "scope": "memory",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using ram_percent",
+      "behavior": "unverified"
+    },
+    {
+      "name": "vram_weight",
+      "kluster_cli": "--vram-weight",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using vram_weight",
+      "behavior": "unverified"
+    },
+    {
+      "name": "latency_weight",
+      "kluster_cli": "--latency-weight",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using latency_weight",
+      "behavior": "unverified"
+    },
+    {
+      "name": "required_nodes",
+      "kluster_cli": "--require-node",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using required_nodes",
+      "behavior": "unverified"
+    },
+    {
+      "name": "node_priority",
+      "kluster_cli": "--node-priority",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using node_priority",
+      "behavior": "unverified"
+    },
+    {
+      "name": "node_shares",
+      "kluster_cli": "--node-share",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using node_shares",
+      "behavior": "unverified"
+    },
+    {
+      "name": "split_mode",
+      "kluster_cli": "--split-mode",
+      "engine_aliases": [],
+      "scope": "placement",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using split_mode",
+      "behavior": "unverified"
+    },
+    {
+      "name": "extra_args",
+      "kluster_cli": "--extra-arg",
+      "engine_aliases": [],
+      "scope": "expert",
+      "implementation_status": "kluster_control_preserved",
+      "native_alias_present": null,
+      "parity_check": "paired launch and request using extra_args",
+      "behavior": "unverified"
+    }
+  ],
+  "api_routes": [
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "handler": "chat_completions",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v1/messages",
+      "method": "POST",
+      "handler": "anthropic_messages",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "handler": "responses",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v1/responses/input_tokens",
+      "method": "POST",
+      "handler": "response_tokens",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/models/chat-template/validation",
+      "method": "POST",
+      "handler": "validate_chat_template",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/capabilities",
+      "method": "GET",
+      "handler": "run_capabilities",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/models",
+      "method": "GET",
+      "handler": "inference_models",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/connection",
+      "method": "GET",
+      "handler": "connection_snapshot",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/plans",
+      "method": "POST",
+      "handler": "plan",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/runs",
+      "method": "POST",
+      "handler": "run",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/runs/stop",
+      "method": "POST",
+      "handler": "stop_inference",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/load",
+      "method": "GET",
+      "handler": "load_progress_endpoint",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/model-settings/{model}",
+      "method": "GET",
+      "handler": "get_model_settings",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    },
+    {
+      "path": "/v2/inference/model-settings/{model}",
+      "method": "PUT",
+      "handler": "put_model_settings",
+      "implementation_status": "kluster_route_preserved; native parity unverified",
+      "parity_check": "paired request through authenticated Kluster gateway",
+      "behavior": "unverified"
+    }
+  ],
+  "templates": [
+    {
+      "name": "chatml",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "custom",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "default",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "gemma",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "llama3",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "mistral-v3-tekken",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "phi3",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "preset:gemma2-2b",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "preset:llama31-8b",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "preset:mistral-nemo-2407",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "preset:qwen25-7b",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "preset:qwen3-0.6b",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    },
+    {
+      "name": "preset:qwen35-4b",
+      "implementation_status": "kluster_selection_preserved; native render unverified",
+      "parity_check": "compare rendered prompt and token IDs against baseline",
+      "behavior": "unverified"
+    }
+  ],
+  "moe_architectures": [
+    {
+      "architecture": "deepseek2",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "deepseek3",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "glm4moe",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "gpt_oss",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "grovemoe",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "hunyuan_moe",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "llama4",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "minimaxm2",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "mixtral",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "qwen2moe",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "qwen35moe",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "qwen3moe",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    },
+    {
+      "architecture": "qwen3next",
+      "implementation_status": "metadata_recognized; native execution unverified",
+      "parity_check": "model load, prefill/decode and output check on identical GGUF assets",
+      "behavior": "unverified"
+    }
+  ],
+  "execution_requirements": [
+    {
+      "name": "streaming",
+      "implementation_status": "unverified",
+      "parity_check": "SSE event schema, tool deltas, usage and terminal event",
+      "behavior": "unverified"
+    },
+    {
+      "name": "cancellation",
+      "implementation_status": "unverified",
+      "parity_check": "close stream; verify slot release and subsequent request",
+      "behavior": "unverified"
+    },
+    {
+      "name": "structured_output",
+      "implementation_status": "unverified",
+      "parity_check": "validate response against supplied JSON schema",
+      "behavior": "unverified"
+    },
+    {
+      "name": "tool_calls",
+      "implementation_status": "unverified",
+      "parity_check": "force tool call; validate arguments and finish reason",
+      "behavior": "unverified"
+    },
+    {
+      "name": "batching",
+      "implementation_status": "unverified",
+      "parity_check": "concurrent requests; verify independent slots and outputs",
+      "behavior": "unverified"
+    },
+    {
+      "name": "kv_cache",
+      "implementation_status": "unverified",
+      "parity_check": "paired cache formats, reuse, context and memory limits",
+      "behavior": "unverified"
+    },
+    {
+      "name": "speculative_decoding",
+      "implementation_status": "unverified",
+      "parity_check": "draft assets, acceptance and output correctness",
+      "behavior": "unverified"
+    },
+    {
+      "name": "dense_architectures",
+      "implementation_status": "unverified",
+      "parity_check": "supplied dense model load, tokenization and generation",
+      "behavior": "unverified"
+    },
+    {
+      "name": "authentication_and_model_identity",
+      "implementation_status": "unverified",
+      "parity_check": "gateway auth rejection and exact served model ID",
+      "behavior": "unverified"
+    },
+    {
+      "name": "platform_backends",
+      "implementation_status": "unverified",
+      "parity_check": "Windows/Linux/macOS compilation plus physical selected-device execution",
+      "behavior": "unverified"
+    },
+    {
+      "name": "exact_placement",
+      "implementation_status": "unverified",
+      "parity_check": "manifest ownership and backend execution acknowledgements",
+      "behavior": "unverified"
+    }
+  ],
+  "api_behavior": "requires model-backed parity assessment",
+  "model_behavior": "requires dense/MoE assessment; metadata support is not execution support"
+}

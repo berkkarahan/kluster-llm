@@ -20,6 +20,7 @@ from kllm.shared.state import ClusterState
 from kllm.modules.inference.interactors.effective_config import effective_configuration
 from kllm.modules.inference.interactors.rpc_runs import remap_rpc_plan, selected_workers
 from kllm.modules.runtimes.interactors.selection import snapshot
+from kllm.modules.primacpp.interactors.recipe import require_qualified
 
 
 class MasterLaunchBuilder(Protocol):
@@ -162,6 +163,10 @@ class InferenceHandlers:
             return self._run(body)
 
     def _run(self, body: RunBody) -> dict[str, Any]:
+        try:
+            require_qualified(snapshot() or {})
+        except ValueError as error:
+            raise HTTPException(409, detail={"code": "ENGINE_NOT_QUALIFIED", "message": str(error)}) from None
         state = self._deps.state
         if state.role != "master":
             raise HTTPException(400, "run requires master role")

@@ -425,6 +425,93 @@ impl LaunchConfig {
         })
     }
 
+    pub fn prima_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let binary: String = dict
+            .get_item("binary_path")?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("Verified Prima binary is required")
+            })?
+            .extract()?;
+        let rank: u32 = dict
+            .get_item("rank")?
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Prima rank is required"))?
+            .extract()?;
+        if rank >= 32 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Prima rank exceeds protocol limit",
+            ));
+        }
+        let expected = if rank == 0 {
+            "llama-server"
+        } else {
+            "llama-cli"
+        };
+        let path = PathBuf::from(&binary);
+        if !path.is_absolute() || path.file_stem().and_then(|v| v.to_str()) != Some(expected) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Invalid Prima rank binary",
+            ));
+        }
+        let mut argv = vec![binary.clone()];
+        for (key, flag) in [
+            ("model", "--model"),
+            ("manifest_path", "--execution-manifest"),
+        ] {
+            let value: String = dict
+                .get_item(key)?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!("Missing Prima {}", key))
+                })?
+                .extract()?;
+            if !PathBuf::from(&value).is_file() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Prima asset is missing",
+                ));
+            }
+            argv.extend([flag.into(), value]);
+        }
+        argv.extend(["--rank".into(), rank.to_string()]);
+        for (key, flag) in [("context", "--ctx-size"), ("threads", "--threads")] {
+            if let Some(value) = opt_i32_arg(dict, key)? {
+                let parsed = value.parse::<i32>().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err("Invalid Prima numeric setting")
+                })?;
+                if parsed <= 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "Invalid Prima execution setting",
+                    ));
+                }
+                argv.extend([flag.into(), value.to_string()]);
+            }
+        }
+        if rank == 0 {
+            argv.extend(["--host".into(), "127.0.0.1".into()]);
+            if let Some(port) = opt_i32_arg(dict, "port")? {
+                let parsed = port.parse::<i32>().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err("Invalid Prima HTTP port")
+                })?;
+                if !(1024..=65535).contains(&parsed) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "Invalid Prima HTTP port",
+                    ));
+                }
+                argv.extend(["--port".into(), port.to_string()]);
+            }
+        }
+        Ok(Self {
+            role: if rank == 0 {
+                "master".into()
+            } else {
+                "worker".into()
+            },
+            binary: path,
+            argv,
+            env: extract_env(dict)?,
+            log_path: opt_string(dict, "log_path")?.map(PathBuf::from),
+            log_helper_argv: Vec::new(),
+        })
+    }
+
     pub fn worker_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         let host: String = dict
             .get_item("host")?

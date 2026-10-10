@@ -348,6 +348,7 @@ def plan_cmd(
     chat_template_text: Optional[str] = typer.Option(
         None, "--chat-template-text", help="Inline custom Jinja template"
     ),
+    runtime_id: Optional[str] = typer.Option(None, "--runtime-id", help="Preview a prepared Prima runtime without selecting it"),
     ctx: typer.Context = None,
 ) -> None:
     """Dry-run capacity-aware layer split with RUN SETTINGS parity."""
@@ -407,7 +408,8 @@ def plan_cmd(
         chat_template_text=chat_template_text,
     )
     with _client(port) as c:
-        r = c.post("/v2/inference/plans", json=payload)
+        endpoint = f"/v2/node/runtimes/{runtime_id}/prima-plan" if runtime_id else "/v2/inference/plans"
+        r = c.post(endpoint, json=payload)
         if r.status_code >= 400:
             console.print(f"[red]{r.text}[/red]")
             raise typer.Exit(1)
@@ -588,7 +590,37 @@ def run(
     _print_run_result(data)
 
 
+def _prima_preparation(runtime_id: str, model: str, port: int, include_profile: bool):
+    from uuid import uuid4
+    payload = {"model": model}
+    with _client(port) as client:
+        planned = client.post(f"/v2/node/runtimes/{runtime_id}/prima-plan", json=payload)
+        if planned.status_code >= 400:
+            console.print(planned.text)
+            raise typer.Exit(1)
+        result = client.post("/v2/cluster/prima-preparations", json={
+            "runtime_id": runtime_id, "plan_digest": planned.json()["plan_digest"],
+            "settings": payload, "request_id": str(uuid4()), "include_profile": include_profile})
+        console.print(result.json())
+        if result.status_code >= 400:
+            raise typer.Exit(1)
+
+
+def prepare_cmd(runtime_id: str = typer.Option(..., "--runtime-id"),
+                model: str = typer.Option(..., "--model"), port: int = typer.Option(18765, "--port")):
+    """Prepare verified model copies on selected Prima participants; never launch inference."""
+    _prima_preparation(runtime_id, model, port, False)
+
+
+def profile_cmd(runtime_id: str = typer.Option(..., "--runtime-id"),
+                model: str = typer.Option(..., "--model"), port: int = typer.Option(18765, "--port")):
+    """Prepare and profile selected Prima participants; reports kernel estimates explicitly."""
+    _prima_preparation(runtime_id, model, port, True)
+
+
 def register(app: typer.Typer) -> None:
     """Register plan and inference commands."""
     app.command("plan")(plan_cmd)
+    app.command("prepare")(prepare_cmd)
+    app.command("profile")(profile_cmd)
     app.command()(run)

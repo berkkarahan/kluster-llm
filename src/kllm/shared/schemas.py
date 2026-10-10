@@ -83,6 +83,7 @@ class RegisterBody(BaseModel):
     rpc_devices: list[dict[str, Any]] = Field(default_factory=list)
     rpc_capabilities: list[dict[str, Any]] = Field(default_factory=list)
     rpc_control_version: int = Field(default=0, ge=0, le=1)
+    prima_control_version: int = Field(default=0, ge=0, le=1)
     runtime_management_version: int = Field(default=0, ge=0, le=1)
     runtime: dict[str, Any] = Field(default_factory=dict)
     rpc_status: Literal[

@@ -74,6 +74,25 @@ export class RuntimesInteractor {
     return this.act(`/v2/cluster/runtime-target/nodes/${encodeURIComponent(nodeId)}/builds/${jobId}/cancel`, 'POST');
   }
 
+  primaPlan(runtimeId: string, settings: unknown) {
+    return this.http.networkRequest<Record<string, any>>(`/v2/node/runtimes/${runtimeId}/prima-plan`, 'POST', settings);
+  }
+
+  preparePrima(runtimeId: string, settings: unknown, planDigest: string, profile: boolean) {
+    return this.http.networkRequest<Record<string, any>>('/v2/cluster/prima-preparations', 'POST', {
+      runtime_id: runtimeId, settings, plan_digest: planDigest,
+      request_id: crypto.randomUUID(), include_profile: profile
+    });
+  }
+
+  primaJob(id: string) {
+    return this.http.networkRequest<Record<string, any>>(`/v2/cluster/prima-preparations/${id}`, 'GET');
+  }
+
+  cancelPrima(id: string) {
+    return this.http.networkRequest(`/v2/cluster/prima-preparations/${id}/cancel`, 'POST');
+  }
+
   sources(repository: string, signal?: AbortSignal) {
     return this.http.networkRequest<RuntimeSources>(
       `/v2/node/runtimes/sources?repository=${encodeURIComponent(repository)}`,

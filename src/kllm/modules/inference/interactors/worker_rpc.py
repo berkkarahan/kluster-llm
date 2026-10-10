@@ -20,6 +20,7 @@ from kllm.shared.state import ClusterState
 
 from kllm.modules.runtimes.interactors.runtime_setup import RuntimeSetupService
 from kllm.modules.runtimes.interactors.selection import use_runtime
+from kllm.modules.primacpp.interactors.recipe import require_qualified
 
 # The master renews about every 5s (RpcRunCoordinator.monitor) and this process
 # reaps the lease about every 1s (ManagedNetworkService._expire_worker_rpc).
@@ -187,6 +188,8 @@ class WorkerRpcService:
                         "RUNTIME_NOT_READY", "Master must name the exact prepared runtime"
                     )
                 value = self.registry.capture(command.body["runtime_id"])
+                # Refuse an incompatible engine before firewall or process mutation.
+                require_qualified(value)
             with use_runtime(value):
                 return self._execute(command, deadline, authorize, value)
 

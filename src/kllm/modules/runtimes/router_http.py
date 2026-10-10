@@ -20,6 +20,20 @@ def build_router(
 ):
     router = APIRouter(prefix="/v2", tags=["llama.cpp-runtimes"])
 
+    def profiler():
+        # Optional service is owned and closed by the runtime registry.
+        from kllm.modules.primacpp.interactors.preparation import ProfileJobs
+        from kllm.modules import models as model_ops
+
+        local = registry()
+        with local.lock:
+            if getattr(local, "prima_profiles", None) is None:
+                local.prima_profiles = ProfileJobs(
+                    local.root / "prima-profiles", local.capture,
+                    model_ops.resolve_local_model, state, local._kill,
+                )
+            return local.prima_profiles
+
     def authorize(request: Request, *, mutation=False, master=False):
         if not token_verifier(
             request.headers.get("authorization") or request.headers.get("x-api-key")
@@ -70,6 +84,70 @@ def build_router(
     async def library(request: Request):
         authorize(request)
         return await work(cluster_status)
+
+    @router.post("/node/runtimes/{identity}/prima-plan")
+    async def prima_plan(identity: str, request: Request):
+        """Read-only topology preview; never starts ranks or runs profiling."""
+        from kllm.modules.inference.entities import PlanBody
+
+        authorize(request, master=True)
+        value = await body(request, PlanBody)
+        return await work(lambda: control().prima.plan(identity, value))
+
+
+    @router.post("/cluster/prima-preparations")
+    async def prepare_prima(request: Request):
+        from kllm.modules.inference.entities import PlanBody
+        from kllm.modules.primacpp.entities import PreparationRequest
+        authorize(request, mutation=True, master=True)
+        raw = await body(request, PreparationRequest)
+        try:
+            settings = PlanBody.model_validate(raw.settings)
+            return await work(lambda: control().prima.start_preparation(
+                raw.runtime_id, settings, raw.plan_digest, raw.request_id,
+                include_profile=raw.include_profile))
+        except (KeyError, ValueError) as error:
+            raise HTTPException(422, str(error)) from None
+
+    @router.get("/cluster/prima-preparations/{identity}")
+    async def prima_preparation(identity: str, request: Request):
+        authorize(request, master=True)
+        return await work(lambda: control().prima.job(identity))
+
+    @router.get("/cluster/prima-preparations/{identity}/logs")
+    async def prima_preparation_logs(identity: str, request: Request):
+        import json
+        authorize(request, master=True)
+        value = await work(lambda: control().prima.job(identity))
+        return {"text": json.dumps({"phase": value["phase"], "error": value.get("error"), "nodes": value.get("nodes", {})}, indent=2)[-65536:]}
+
+    @router.post("/cluster/prima-preparations/{identity}/cancel")
+    async def cancel_prima_preparation(identity: str, request: Request):
+        authorize(request, mutation=True, master=True)
+        return await work(lambda: control().prima.cancel(identity))
+
+    @router.post("/node/prima-profiles")
+    async def profile(request: Request):
+        from kllm.modules.primacpp.entities import ProfileRequest
+
+        authorize(request, mutation=True)
+        value = await body(request, ProfileRequest)
+        return await work(lambda: profiler().start(value))
+
+    @router.get("/node/prima-profiles/{identity}")
+    async def profile_status(identity: str, request: Request):
+        authorize(request)
+        return await work(lambda: profiler().job(identity))
+
+    @router.get("/node/prima-profiles/{identity}/logs")
+    async def profile_logs(identity: str, request: Request):
+        authorize(request)
+        return {"text": await work(lambda: profiler().logs(identity))}
+
+    @router.post("/node/prima-profiles/{identity}/cancel")
+    async def cancel_profile(identity: str, request: Request):
+        authorize(request, mutation=True)
+        return await work(lambda: profiler().cancel(identity))
 
     @router.get("/node/runtimes/sources")
     async def sources(request: Request, repository: str):

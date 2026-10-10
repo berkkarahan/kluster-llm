@@ -17,7 +17,12 @@ from kllm.shared.accel import (
 )
 from kllm.modules.inference.interactors.memory import build_snapshot
 from kllm.modules.inference.interactors.placement_api import plan_from_settings
-from kllm.modules.runtimes.interactors.selection import selected_binary
+from kllm.modules.runtimes.interactors.selection import (
+    selected_binary,
+    selected_environment,
+    selected_runtime,
+)
+from kllm.modules.primacpp.interactors.recipe import require_qualified
 from pathlib import Path
 import time
 import sys
@@ -388,6 +393,7 @@ def plan_split(
 
 
 def start_master(**kwargs: Any) -> dict[str, Any]:
+    require_qualified(selected_runtime() or {})
     n = require_native()
     selected = selected_binary("llama-server")
     if selected:
@@ -396,6 +402,9 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
                 "Rebuild the native extension with python scripts/build.py for managed runtimes"
             )
         kwargs["binary_path"] = selected
+        runtime_env = selected_environment()
+        if runtime_env:
+            kwargs["env"] = {**runtime_env, **(kwargs.get("env") or {})}
     if kwargs.get("log_path"):
         kwargs["log_helper_argv"] = log_sink.command(kwargs["log_path"])
     if kwargs.get("env") is None:
@@ -412,6 +421,7 @@ def start_master(**kwargs: Any) -> dict[str, Any]:
 
 
 def start_worker(**kwargs: Any) -> dict[str, Any]:
+    require_qualified(selected_runtime() or {})
     n = require_native()
     selected = selected_binary("rpc-server")
     if selected:

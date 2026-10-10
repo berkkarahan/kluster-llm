@@ -62,6 +62,7 @@ class HeartbeatPayloadBuilder:
             else [],
             "rpc_capabilities": member.get("rpc_capabilities", []),
             "rpc_control_version": 1,
+            "prima_control_version": 1,
             "runtime_management_version": 1,
             "runtime": self._runtime_status(),
             "rpc_status": member.get("rpc_status", "idle"),

@@ -182,6 +182,13 @@ uv run pre-commit install
 - Planning is an estimate for unknown architectures and runtime execution buffers; inspect warnings before launching a tight fit.
 - Large contexts can exhaust KV-cache memory even when model weights fit. Reduce context or use a smaller quantization when needed.
 
+## Prima.cpp integration development
+
+Prima source builds, topology previews and local profiling are available for
+evaluation. Inference selection remains gated until compatibility, distributed
+lifecycle and hardware performance qualification are complete. See
+[Prima integration status and preparation interfaces](docs/prima-integration.md).
+
 ## License
 
 See [LICENSE](LICENSE).

@@ -2161,6 +2161,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
     p.add_argument("--source-repo", help="Public HTTPS Git source for an isolated managed runtime")
     p.add_argument("--revision", help="Full immutable Git commit for --source-repo")
+    p.add_argument("--engine", choices=("llamacpp", "primacpp"), default="llamacpp",
+                   help="Managed inference engine; bootstrap continues to use llama.cpp")
+    p.add_argument("--recipe-digest", help="Resolved Prima compatibility/build recipe SHA-256")
     p.add_argument(
         "--runtime-dir", type=Path, help="Isolated destination; never replaces vendor/bin"
     )
@@ -2310,6 +2313,10 @@ def _run_stages(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.engine == "primacpp" and not all((args.source_repo, args.revision, args.runtime_dir)):
+        raise SystemExit("Prima requires isolated managed source arguments; see docs/agent-install.md")
+    if args.engine == "llamacpp" and args.recipe_digest:
+        raise SystemExit("--recipe-digest is only valid for Prima managed builds")
     if any((args.source_repo, args.revision, args.runtime_dir)):
         if (
             not all((args.source_repo, args.revision, args.runtime_dir))
@@ -2327,6 +2334,18 @@ def main(argv: list[str] | None = None) -> int:
                 "TCP-only RPC evidence"
             )
         sys.path.insert(0, str(ROOT / "src"))
+        if args.engine == "primacpp":
+            if args.prebuilt or args.rpc_tcp_only or not args.recipe_digest:
+                raise SystemExit("Prima requires --recipe-digest and source mode; RPC/prebuilt mode is incompatible")
+            from kllm.modules.primacpp.interactors.build import managed_prima_build
+
+            try:
+                managed_prima_build(sys.modules[__name__], args.source_repo, args.revision,
+                                    args.runtime_dir, args.backend, args.recipe_digest)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 1
+            return 0
         if args.prebuilt:
             from kllm.runtimes.build import PrebuiltIneligible, managed_prebuilt
 

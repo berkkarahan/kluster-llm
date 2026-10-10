@@ -26,6 +26,7 @@ from kllm.modules.runtimes.entities import (
     body_digest,
 )
 from kllm.modules.runtimes.interactors.source import git_environment
+from kllm.modules.primacpp.interactors.recipe import qualification_errors, require_qualified, recipe_digest, recipe
 from kllm.shared.atomic_io import replace_file
 
 TERMINAL = ("prepared", "failed", "cancelled", "interrupted")
@@ -138,6 +139,15 @@ class RuntimeRegistry:
         value.pop("requests", None)
         value["versions"] = list(value["versions"].values())
         value["jobs"] = list(value["jobs"].values())[-50:]
+        for entry in value["versions"]:
+            entry["qualification_errors"] = qualification_errors(entry["version"])
+            entry["inference_supported"] = not entry["qualification_errors"]
+        prima = recipe()
+        value["engine_sources"] = [{
+            "engine": "primacpp", "repository": prima["source_repository"],
+            "ref": prima["source_commit"], "ref_type": "commit",
+            "qualification_errors": qualification_errors({"engine": "primacpp"}),
+        }]
         repo = self.repository()
         pin = repo / "llama-release" if repo else None
         if pin and pin.exists():
@@ -171,7 +181,7 @@ class RuntimeRegistry:
                 self._save()
 
     def select(self, identity: str):
-        self.capture(identity)
+        require_qualified(self.capture(identity))
         with self.lock:
             if self.data["running"]:
                 raise ValueError("Stop the active run before changing local runtime selection")
@@ -198,6 +208,10 @@ class RuntimeRegistry:
         ):
             raise ValueError("Runtime build provenance does not match the selected source")
         self.verify(manifest)
+        if manifest.get("engine", "llamacpp") != entry["version"].get("engine", "llamacpp"):
+            raise ValueError("Runtime engine does not match the selected source")
+        if manifest.get("recipe_digest", "") != entry["version"].get("recipe_digest", ""):
+            raise ValueError("Runtime recipe does not match the selected source")
         return {**entry["version"], **manifest}
 
     def verify(self, manifest: dict):
@@ -207,29 +221,37 @@ class RuntimeRegistry:
         # Prebuilt manifests make no transport claims by design (an upstream
         # release archive cannot prove RDMA is off); only source manifests must
         # carry the verified TCP-only evidence the managed network gate needs.
-        if not manifest.get("prebuilt") and (
+        prima = manifest.get("engine", "llamacpp") == "primacpp"
+        if prima and (manifest.get("transport") != "prima-ring-tcp"
+                      or manifest.get("recipe_digest") != recipe_digest()):
+            raise ValueError("Prima runtime recipe or transport is not verified; resolve and rebuild")
+        if not prima and not manifest.get("prebuilt") and (
             manifest.get("ggml_rpc") != "ON" or manifest.get("ggml_rpc_rdma") != "OFF"
         ):
             raise ValueError("Runtime RPC transport is not verified")
+        artifact_paths = {}
+        for name in manifest["artifacts"]:
+            relative = Path(name)
+            artifact = (directory / relative).resolve()
+            if relative.is_absolute() or ".." in relative.parts or not artifact.is_relative_to(directory):
+                raise ValueError("Runtime artifact is not verified")
+            artifact_paths[name] = artifact
         stats = tuple(
-            (
-                name,
-                (directory / name).stat().st_mtime_ns,
-                (directory / name).stat().st_ctime_ns,
-                (directory / name).stat().st_size,
-            )
-            for name in manifest["artifacts"]
-            if Path(name).name == name
+            (name, path.stat().st_mtime_ns, path.stat().st_ctime_ns, path.stat().st_size)
+            for name, path in artifact_paths.items()
         )
         key = body_digest(manifest)
         if self.verified.get(key) == stats:
             return
         for name, expected in manifest["artifacts"].items():
-            if Path(name).name != name or file_digest(directory / name) != expected:
+            if file_digest(artifact_paths[name]) != expected:
                 raise ValueError("Runtime artifacts changed; rebuild this version before Run")
-        for name in ("llama_server", "rpc_server"):
+        executables = ("llama_server", "llama_cli", "profile_tool") if prima else ("llama_server", "rpc_server")
+        for name in executables:
             if Path(manifest[name]).resolve().parent != directory:
                 raise ValueError("Runtime executable is outside its verified artifact directory")
+            if prima and Path(manifest[name]).name not in manifest["artifacts"]:
+                raise ValueError("Prima executable digest is absent from the manifest")
         self.verified[key] = stats
 
     def running(self, value: dict | None):
@@ -362,6 +384,8 @@ class RuntimeRegistry:
             return
         try:
             manifest = self.builder(version, job["backend"], identity)
+            if manifest.get("engine", "llamacpp") != version.engine or manifest.get("recipe_digest", "") != version.recipe_digest:
+                raise ValueError("Build engine/recipe provenance does not match the requested snapshot")
             if (manifest.get("runtime_id"), manifest.get("repository"), manifest.get("commit")) != (
                 version.runtime_id,
                 version.repository,
@@ -411,7 +435,10 @@ class RuntimeRegistry:
             "--backend",
             backend,
         ]
-        command.extend(["--prebuilt"] if prebuilt else ["--from-source", "--rpc-tcp-only"])
+        if version.engine == "primacpp":
+            command.extend(["--engine", "primacpp", "--recipe-digest", version.recipe_digest, "--from-source"])
+        else:
+            command.extend(["--prebuilt"] if prebuilt else ["--from-source", "--rpc-tcp-only"])
         return command
 
     def _spawn_installer(
@@ -471,6 +498,15 @@ class RuntimeRegistry:
         log: Path,
     ) -> str:
         """Return the mode that produced the manifest: ``prebuilt`` or ``source``."""
+        if version.engine == "primacpp":
+            if self._spawn_installer(
+                repo, self._installer_command(repo, version, backend, destination, prebuilt=False),
+                identity, output, log,
+            ) != 0:
+                raise ValueError("Prima source build failed; inspect this operation’s build log")
+            if self.cancel_events[identity].is_set():
+                raise ValueError("Runtime build cancelled")
+            return "source"
         code = self._spawn_installer(
             repo,
             self._installer_command(repo, version, backend, destination, prebuilt=True),
@@ -526,6 +562,8 @@ class RuntimeRegistry:
         if self.closed:
             return
         self.closed = True
+        if getattr(self, "prima_profiles", None) is not None:
+            self.prima_profiles.close()
         for identity in list(self.cancel_events):
             was_active = self.job(identity)["phase"] not in TERMINAL
             self.cancel(identity)

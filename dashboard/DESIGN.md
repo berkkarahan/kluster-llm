@@ -322,6 +322,15 @@ Temperature, thinking, response limit and text/JSON/schema output are session ov
 
 ## Settings and llama.cpp runtime management
 
+Prima evaluation adds a master-only **Prima preparation** panel through
+[PrimaPreparation.svelte](src/lib/modules/runtimes/view/PrimaPreparation.svelte).
+It uses the model and draft settings already selected in Deploy, displays a read-only
+rank/device/layer/`-ngl`/tensor preview, and exposes Prepare files, Prepare & profile,
+and cancellation with polled participant progress and errors. A settings change makes
+the preview stale and requires another inspection. The placement table scrolls locally
+on narrow screens. Normal Prima target/deployment selection remains disabled while
+qualification is incomplete; this panel provides preparation and assessment groundwork.
+
 [src/routes/settings/+page.svelte](src/routes/settings/+page.svelte) defaults to Hardware.
 Section order is **Hardware, Network, Tokens, Software, llama.cpp, Paths**.
 The llama section is directly addressable with `/settings?section=llama`.

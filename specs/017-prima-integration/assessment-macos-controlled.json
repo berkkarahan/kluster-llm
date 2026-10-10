@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "os": "macOS-27.0-arm64-arm-64bit",
+  "architecture": "arm64",
+  "recipe_digest": "084e6674c89d9e454e004df6e6f2a8b926cb285b1dca3b1679afbffd90c485bb",
+  "source_commit": "aeb3afdd44b58c93e70e53d47ed4ac7e29452ff8",
+  "baseline_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "suite": "lifecycle",
+  "results": [
+    {
+      "case": "controlled_lifecycle",
+      "status": "passed",
+      "output": "bringing up nodes...\nbringing up nodes...\n\n..............                                                           [100%]\n14 passed in 1.77s\n",
+      "kind": "controlled process tests; not distributed model execution"
+    }
+  ],
+  "qualification": "open",
+  "devices": [
+    {
+      "backend": "Metal",
+      "description": "Apple M1 Pro",
+      "name": "Metal"
+    },
+    {
+      "backend": "Vulkan",
+      "description": "Apple M1 Pro",
+      "name": "Vulkan0"
+    }
+  ],
+  "baseline_binary": {
+    "sha256": "1d3aa0a818941707da64f76ca6eb341d6aa39f6603c5b4f38219b8ecd32605e8",
+    "reported_version": "0.00.000.141 I srv  llama_server: initializing ...\nversion: 0.5.0-dev (build 1, commit 7fe450e)\nbuilt with AppleClang 21.0.0.21000334 for Darwin arm64",
+    "expected_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+    "identity_check": "reported commit prefix and binary digest; not a build provenance attestation"
+  },
+  "compatibility_matrix": {
+    "path": "compatibility.json",
+    "sha256": "f698ca6d4630a5176841729fb0b495abd430be3c97ed4013adebede6c83a4a43"
+  },
+  "device_driver_check": {
+    "status": "unavailable",
+    "reason": "Device enumeration does not report physical driver execution evidence"
+  },
+  "remaining_checks": [
+    "full_native_api_model_backports",
+    "arbitrary_native_placement",
+    "production_coordinator_admission_dispatch",
+    "remote_end_to_end_profiling_planner",
+    "physical_vulkan",
+    "physical_distributed",
+    "paired_performance"
+  ]
+}

@@ -453,3 +453,17 @@ Physical Windows/Linux/macOS and mixed-node acceptance remains required before t
 **Linux configuration manager unsupported:** guided DHCP transitions support a readable NetworkManager connection or systemd-networkd network file. Custom DHCP plus static settings, ambiguous profiles or another configuration manager require manual review. Advanced/manual setup still supports already-configured dedicated interfaces.
 
 **Windows private traffic blocked:** the helper adds an inbound TCP rule limited to the dedicated address, interface, signed private peers and network ports. Existing firewall rules remain. Group-policy restrictions or externally changed rules are reported; Kluster does not open public RPC access.
+
+**Prima not qualified:** a successful build establishes source/artifact integrity, not
+drop-in API or platform compatibility. Qualification errors in the runtime library are
+expected during development. Continue serving with llama.cpp; do not remove launch
+options or edit manifests to bypass the gate. See [remaining implementation](../specs/017-prima-integration/tasks.md).
+
+**Prima recipe changed:** resolve the supported Prima source again and build a new
+isolated version. The recipe digest covers the patch series and build implementation;
+an old artifact is never silently attributed to a changed recipe.
+
+**Prima profiling failed:** inspect the profile job log. The model must be local and the
+node must have no active inference. Structured Q4K estimates may be unavailable for other
+quantizations; missing or nonfinite metrics are rejected. A profile cannot establish
+end-to-end inference speed or quality.

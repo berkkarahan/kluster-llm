@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 UPSTREAM = "https://github.com/ggml-org/llama.cpp.git"
+PRIMA_UPSTREAM = "https://github.com/OpenCPIL/prima.cpp.git"
 BACKENDS = ("auto", "metal", "cuda", "rocm", "vulkan", "cpu")
 PRESET_VERSION = 1
 
@@ -39,8 +41,12 @@ def repository_url(value: str) -> str:
     return urlunsplit(("https", parsed.hostname.lower(), path, "", ""))
 
 
-def runtime_id(repository: str, commit: str) -> str:
-    return hashlib.sha256((repository + "\n" + commit).encode()).hexdigest()
+def runtime_id(repository: str, commit: str, engine: str = "llamacpp", recipe_digest: str = "") -> str:
+    # Preserve all existing llama.cpp identities and saved targets.
+    identity = repository + "\n" + commit
+    if engine != "llamacpp":
+        identity += "\n" + engine + "\n" + recipe_digest
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 class Record(BaseModel):
@@ -48,12 +54,21 @@ class Record(BaseModel):
 
 
 class SourceRequest(Record):
+    engine: Literal["llamacpp", "primacpp"] = "llamacpp"
     repository: str = UPSTREAM
     ref: str = Field(min_length=1, max_length=256)
     ref_type: str = Field(default="tag", pattern="^(tag|branch|commit)$")
     name: str = Field(default="", max_length=120)
 
     _repository = field_validator("repository")(repository_url)
+
+    @model_serializer(mode="wrap")
+    def legacy_wire_defaults(self, handler):
+        value = handler(self)
+        if self.engine == "llamacpp":
+            value.pop("engine", None)
+            value.pop("recipe_digest", None)
+        return value
 
     @field_validator("ref")
     @classmethod
@@ -76,12 +91,17 @@ class SourceRequest(Record):
 
 
 class RuntimeVersion(SourceRequest):
+    recipe_digest: str = Field(default="", pattern="^([0-9a-f]{64})?$")
     commit: str = Field(pattern="^[0-9a-f]{40}$")
     runtime_id: str = Field(pattern="^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def identity(self):
-        if self.runtime_id != runtime_id(self.repository, self.commit):
+        if self.engine == "primacpp" and not self.recipe_digest:
+            raise ValueError("Prima runtime identity requires a pinned build recipe digest")
+        if self.engine == "llamacpp" and self.recipe_digest:
+            raise ValueError("llama.cpp uses its existing unpatched source identity")
+        if self.runtime_id != runtime_id(self.repository, self.commit, self.engine, self.recipe_digest):
             raise ValueError("Runtime identity does not match repository and commit")
         return self
 

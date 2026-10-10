@@ -336,3 +336,18 @@ All participants prepare before address changes. Kluster saves dedicated DHCP se
 On Plan & Run, choose the dedicated network explicitly for that request. The default remains LAN/WireGuard. The selector is excluded from remembered model settings. Run diagnostics expose logical dedicated endpoints and the actual master loopback bridge endpoints. Stop inference before stopping or changing a dependent network. Retry/add/cancel and local cleanup review are available in the network panel. Temporary addresses survive only as long as the host OS retains them; they are not persistent adapter profiles. Keep upstream RPC port 50052 off public networks.
 
 Administrator access can be revoked under **Advanced details** once the private network and cleanup are settled. That section retains manual identity pairing, adapter selection, subnet override and diagnostics. If ownership is lost after a restart or external changes, use **Review network recovery** locally and choose whether to keep the current settings or restore the reviewed Kluster changes. Recovery never silently deletes an ambiguous address.
+
+### Prima evaluation
+
+Prima is prepared through the managed runtime library and isolated installer, not a new
+`kllm run --engine` flag. The existing run commands retain llama.cpp behavior. Prima
+selection is blocked until qualification passes; see [preparation interfaces](prima-integration.md).
+
+### Prima preparation jobs
+
+`kllm plan --runtime-id ID --model MODEL` previews a prepared Prima source without
+selecting it. `kllm prepare --runtime-id ID --model MODEL` starts selected-node asset
+preparation; `kllm profile --runtime-id ID --model MODEL` also requests kernel profiling.
+Both print a job ID; inspect `/v2/cluster/prima-preparations/{job_id}` for progress.
+These operations never start normal inference or bypass qualification. See
+[Windows assessment](prima-windows-assessment.md) for the separate test harness.

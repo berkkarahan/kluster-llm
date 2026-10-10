@@ -32,3 +32,24 @@ Inference clients keep using the OpenAI-compatible `POST /v1/chat/completions` a
 On first startup with an older cluster-state file, the agent stops tracked model/runtime child processes, clears transient membership, join keys, active plans, and process state, then starts idle. It retains the node identity, run settings, models, credentials, and usage history. Rejoin each node after the coordinated upgrade. RPC port 50052 remains restricted to a private LAN or WireGuard overlay.
 
 SQLite-backed telemetry and managed-network operations return the existing sanitized `503` unavailable response when bounded admission or checkout expires, or when the owner is closing. A usage-ingest `503` may follow a confirmed reading commit if a later retention unit failed; retries use the existing reading identity and do not create duplicate observations. A storage commit with an unknown outcome is never retried automatically.
+
+### Optional Prima preparation resources
+
+Runtime source requests accept `engine: "primacpp"` for the supported pinned snapshot.
+Prima versions carry a `recipe_digest` and an engine-specific identity. Existing llama.cpp
+identity hashes and default wire records are unchanged. The library reports
+`engine_sources`, `inference_supported`, and `qualification_errors` additively.
+
+`POST /v2/node/runtimes/{runtime_id}/prima-plan` provides a master-only, read-only
+PlanBody topology preview. `/v2/node/prima-profiles` provides local explicit profiling
+jobs, status, logs and cancellation, with the existing local-mutation authorization.
+See [Prima contracts and limitations](prima-integration.md). Unqualified Prima runs return
+`409 ENGINE_NOT_QUALIFIED`; target/local selection is refused before changing state.
+
+Prima cluster preparation additionally exposes `POST /v2/cluster/prima-preparations`,
+`GET /{job_id}`, `GET /{job_id}/logs` and `POST /{job_id}/cancel`. Creation uses
+`{runtime_id, settings, plan_digest, request_id, include_profile}` and retains local-token,
+same-origin and master-authority checks. Previews return a plan_digest bound to runtime,
+model observations, settings, inventory and placement. Worker membership advertises
+`prima_control_version: 1`; paired signed commands authorize bounded asset pushes.
+Normal inference remains gated. See [Prima preparation](prima-integration.md).

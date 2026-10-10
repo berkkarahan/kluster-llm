@@ -476,3 +476,13 @@ The supported installer builds and copies `vendor/bin/kllm-network-helper` (`.ex
 macOS uses a protected `/Library/PrivilegedHelperTools/com.kllm.network` binary and system LaunchDaemon; Linux uses `/usr/local/libexec/kllm-network-helper`, `/etc/kllm-network` grants/journals and a systemd service, with `pkexec` for local authorization; Windows uses a protected Program Files helper and SYSTEM scheduled task. IPC is an account-restricted local socket or named pipe. The helper never imports Python or receives arbitrary executable paths or commands. Keep the ordinary agent under its existing account and credential directory.
 
 Updating the installed helper requires settled networking and another local OS approval. Stop the private network and resolve pending restoration first. Physical OS authorization, DHCP restoration, ARP/DAD, firewall and reboot behavior must be validated on each target deployment; compilation and controlled tests alone do not prove those checks.
+
+## Prima development builds
+
+The managed installer additionally accepts `--engine primacpp --recipe-digest <resolved-digest>`
+with `--llama-only --source-repo --revision --runtime-dir --from-source`. Use the engine
+source snapshot returned by the runtime library; the recipe pins the published Prima fork
+commit and applies no local source patches. CPU builds and Metal+Vulkan build/device
+discovery have been exercised on macOS; platform/backend parity and inference
+qualification are incomplete. Bootstrap commands still install llama.cpp.
+See [Prima preparation](prima-integration.md) before using this evaluation path.

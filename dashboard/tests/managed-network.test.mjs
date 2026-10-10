@@ -37,13 +37,14 @@ test('private network app setup, selected run, blocked stop and cleanup',
     const model = {name:'fixture.gguf',path:'fixture.gguf',size_bytes:100};
     try {
       const entry = compile(`<script>
-        import ManagedNetwork from '/src/lib/components/ManagedNetwork.svelte';
+        import ManagedNetwork from '/src/lib/modules/network/view/ManagedNetwork.svelte';
         import Run from '/src/routes/run/+page.svelte';
-        import {appStore} from '/src/lib/store.svelte.ts';
+        import {createApp} from '/src/lib/app.svelte.ts';
+        const appStore = createApp();
         window.networkStore = appStore;
-        appStore.status = ${JSON.stringify(status())};
-        appStore.models = [${JSON.stringify(model)}];
-        appStore.selectedModel = 'fixture.gguf';
+        appStore.cluster.status = ${JSON.stringify(status())};
+        appStore.models.models = [${JSON.stringify(model)}];
+        appStore.models.selectedModel = 'fixture.gguf';
       </script><ManagedNetwork/><Run/>`, {generate:'client',filename:'network-fixture.svelte'}).js.code;
       vite = await createServer({plugins:[{name:'network-fixture',resolveId(id){if(id==='/__network-entry.js'||id==='/__network-mount.js') return id;},load(id){if(id==='/__network-entry.js') return entry;if(id==='/__network-mount.js') return `import {mount} from 'svelte';import App from '/__network-entry.js';mount(App,{target:document.getElementById('app')});`;}}],server:{middlewareMode:true,hmr:false,ws:false,watch:null},appType:'custom'});
       server = createHttpServer((req,res) => { void (async () => {
@@ -159,7 +160,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
         ['invalid-json', 'Network request GET /v2/network-test/invalid-json returned 200: Invalid JSON response'],
         ['refusal', 'LINK_TOO_SLOW: Negotiated speed must be at least 1000 Mbps (1 Gbps)']
       ]) {
-        const message = await evaluate(`window.networkStore.networkRequest('/v2/network-test/${path}').then(() => 'unexpected success', error => error.message)`, true);
+        const message = await evaluate(`window.networkStore.http.networkRequest('/v2/network-test/${path}').then(() => 'unexpected success', error => error.message)`, true);
         assert.equal(message, expected);
       }
       const click = async text => {await wait(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()===${JSON.stringify(text)} && !b.disabled)`);return evaluate(`Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`);};
@@ -193,17 +194,17 @@ test('private network app setup, selected run, blocked stop and cleanup',
       await evaluate(`(()=>{const label=Array.from(document.querySelectorAll('fieldset label')).find(l=>l.textContent.includes('worker-b'));const input=label.querySelector('input');input.checked=true;input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
       await click('Add selected participants');
       await wait("document.querySelector('.network-status')?.textContent.includes('worker-b')");
-      await evaluate("fetch('/v2/status').then(r=>r.json()).then(status=>window.networkStore.status=status)",true);
+      await evaluate("fetch('/v2/status').then(r=>r.json()).then(status=>window.networkStore.cluster.status=status)",true);
       await wait("document.querySelector('#run-network option[value=\""+networkId+"\"]')");
       await evaluate(`(()=>{const s=document.querySelector('#run-network');s.value=${JSON.stringify(networkId)};s.dispatchEvent(new Event('change',{bubbles:true}));})()`);
       await click('Configure');
       await click('Review deployment');
       await click('Deploy model');
-      await wait("window.networkStore.planResult?.network_run_id");
+      await wait("window.networkStore.run.planResult?.network_run_id");
       await click('Refresh prerequisites and status');
       await wait("document.body.textContent.includes('Stop dependent inference first')");
       assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Stop private network').disabled"),true);
-      await evaluate("window.networkStore.stopInference()",true);
+      await evaluate("window.networkStore.run.stopInference()",true);
       await click('Refresh prerequisites and status');
       await wait("!Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Stop private network').disabled");
       await click('Stop private network');

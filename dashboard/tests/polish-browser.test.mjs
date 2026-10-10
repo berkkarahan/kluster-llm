@@ -219,14 +219,14 @@ test('all routes fit narrow screens; errors dismiss, reset and remain clear afte
         assert.ok(await evaluate('document.documentElement.scrollWidth <= innerWidth + 1'));
         await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
         await navigate('/');
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>appStore.refresh())");
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();return appStore.live.refresh()})");
         applyError = 'Fresh fixture apply failure'; loadError = ''; revision++;
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>appStore.refresh())");
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();return appStore.live.refresh()})");
         await wait("document.querySelector('[data-error-source=apply]')");
         await screenshot('home-new-error');
         await evaluate("document.querySelector('[data-error-source=apply] button').click()");
         await wait("!document.querySelector('[data-error-source=apply]')");
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>appStore.refresh())");
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();return appStore.live.refresh()})");
         await pause(250);
         assert.equal(await evaluate("document.querySelectorAll('[data-error-source=apply]').length"), 0);
         await evaluate("document.querySelector('a[href=\"/run\"]').click()");
@@ -236,16 +236,16 @@ test('all routes fit narrow screens; errors dismiss, reset and remain clear afte
         // Dismissal is presentation-only: invalid settings continue to block execution.
         await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Configure').click()");
         await wait("document.querySelector('#run-context')");
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>{appStore.context=0;appStore.validateRunSettings();})");
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();appStore.run.context=0;appStore.run.validateRunSettings();})");
         await wait("document.querySelector('[data-error-source=\"validation:context\"]')");
         await evaluate("document.querySelector('[data-error-source=\"validation:context\"] button').click()");
-        assert.equal(await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>!!appStore.fieldErrors.context)"), true);
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>{appStore.context=4096;appStore.validateRunSettings();})");
-        await evaluate("import('/src/lib/errors.ts').then(({errors})=>errors.publish('fixture-local','Local fixture error'))");
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>appStore.stopInference())");
-        assert.equal(await evaluate("import('/src/lib/errors.ts').then(({errors})=>{let result;const unsub=errors.subscribe(s=>result=Object.values(s.entries).filter(e=>e.visible).length);unsub();return result;})"), 0);
+        assert.equal(await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();return !!appStore.run.fieldErrors.context})"), true);
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();appStore.run.context=4096;appStore.run.validateRunSettings();})");
+        await evaluate("import('/src/lib/shared/errors.ts').then(({errors})=>errors.publish('fixture-local','Local fixture error'))");
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();return appStore.run.stopInference()})");
+        assert.equal(await evaluate("import('/src/lib/shared/errors.ts').then(({errors})=>{let result;const unsub=errors.subscribe(s=>result=Object.values(s.entries).filter(e=>e.visible).length);unsub();return result;})"), 0);
         stopFails = true;
-        await evaluate("import('/src/lib/store.svelte.ts').then(({appStore})=>appStore.stopCluster().catch(()=>{}))");
+        await evaluate("import('/src/lib/app.svelte.ts').then(({createApp})=>{const appStore=createApp();return appStore.cluster.stopCluster().catch(()=>{})})");
         await wait("[...document.querySelectorAll('[data-error-source]')].some(e=>e.textContent.includes('Fixture stop refused'))");
         await screenshot('run-failed-stop');
         await navigate('/run');
@@ -257,18 +257,18 @@ test('all routes fit narrow screens; errors dismiss, reset and remain clear afte
         const focus = await evaluate("getComputedStyle(document.querySelector('nav a')).outlineStyle");
         assert.notEqual(focus, 'none');
         // A connection drop clears once; repeated offline/reconnect notifications retain new messages.
-        const dropped = await evaluate(`Promise.all([import('/src/lib/store.svelte.ts'),import('/src/lib/errors.ts')]).then(([{appStore},{errors}])=>{
+        const dropped = await evaluate(`Promise.all([import('/src/lib/app.svelte.ts'),import('/src/lib/shared/errors.ts')]).then(([{createApp},{errors}])=>{const appStore=createApp();
           errors.publish('fixture-local','Previous local failure');
-          appStore.updates.options.onHealth('unavailable','Fixture connection lost');
+          appStore.live.updates.options.onHealth('unavailable','Fixture connection lost');
           let state; const unsubscribe=errors.subscribe(value=>state=value); unsubscribe();
-          return {connected:appStore.connected,visible:Object.values(state.entries).filter(e=>e.visible).length,generation:state.generation};
+          return {connected:appStore.live.connected,visible:Object.values(state.entries).filter(e=>e.visible).length,generation:state.generation};
         })`);
         assert.equal(dropped.connected, false);
         assert.equal(dropped.visible, 0);
-        const repeated = await evaluate(`Promise.all([import('/src/lib/store.svelte.ts'),import('/src/lib/errors.ts')]).then(([{appStore},{errors}])=>{
+        const repeated = await evaluate(`Promise.all([import('/src/lib/app.svelte.ts'),import('/src/lib/shared/errors.ts')]).then(([{createApp},{errors}])=>{const appStore=createApp();
           errors.publish('fixture-new','Fresh request failure while offline');
-          appStore.updates.options.onHealth('unavailable','Fixture connection lost');
-          appStore.updates.options.onHealth('loading');
+          appStore.live.updates.options.onHealth('unavailable','Fixture connection lost');
+          appStore.live.updates.options.onHealth('loading');
           let state; const unsubscribe=errors.subscribe(value=>state=value); unsubscribe();
           return {visible:Object.values(state.entries).filter(e=>e.visible).length,generation:state.generation};
         })`);

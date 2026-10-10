@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from kllm import agent_skills as skills
+from kllm.modules.connect.interactors import agent_skills as skills
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/install_skills.py"

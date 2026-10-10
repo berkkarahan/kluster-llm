@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 
 from kllm.agent.schemas import LlamaSetupBody
-from kllm.agent.services.gpus import ResolvedGpuSelection
-from kllm.agent.services.runtime_setup import RuntimeSetupService
-from kllm.core.gpu_selection import GpuDeviceInput, GpuSelection
-from kllm.exceptions import NotFoundError
-from kllm.run_settings import cpu_batch_threads
-from kllm.state import ClusterState
+from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
+from kllm.modules.runtimes.interactors.runtime_setup import RuntimeSetupService
+from kllm.modules.inference.interactors.gpu_selection import GpuDeviceInput, GpuSelection
+from kllm.shared.exceptions import NotFoundError
+from kllm.modules.inference.entities import cpu_batch_threads
+from kllm.shared.state import ClusterState
 
 
 def test_runtime_setup_maps_install_errors_to_domain_exceptions():

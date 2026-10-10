@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "tests" / "performance"))
 sys.path.insert(0, str(ROOT / "python"))
 
 from log_fixture import oversized_log_rows  # noqa: E402
-from kllm.agent.live import LiveFeed, _encoded  # noqa: E402
+from kllm.modules.live.interactors.live import LiveFeed, _encoded  # noqa: E402
 
 BUDGET = 256 * 1024
 

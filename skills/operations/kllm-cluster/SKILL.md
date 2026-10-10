@@ -5,7 +5,7 @@ description: "Start, join, inspect, update, or stop a Kluster LLM master/worker 
 
 # Operate a Kluster cluster
 
-Find the Kluster checkout using `KLLM_REPO_ROOT`, the current checkout, or `kllm.state.repo_root()`. Read `docs/cli.md` and `docs/agent-install.md` for current commands; inspect command help when options matter.
+Find the Kluster checkout using `KLLM_REPO_ROOT`, the current checkout, or `kllm.shared.state.repo_root()`. Read `docs/cli.md` and `docs/agent-install.md` for current commands; inspect command help when options matter.
 
 1. Identify the intended master, worker computers, control endpoints, existing inference, and management connectivity. Preserve the running cluster when the request is only inspection.
 2. Use `uv run kllm status` to inspect local state. It can start a local agent; use existing status APIs for strictly passive inspection. Start the master with `uv run kllm start` and join each worker with `uv run kllm join --key '<join-key>'`; supply `--master` only when discovery needs an explicit LAN address.

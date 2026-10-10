@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from kllm import hf_token, models
+from kllm.modules import models
+import kllm.modules.models.api as models_api
+from kllm.shared import hf_token
 
 
 @pytest.fixture()
@@ -73,7 +75,7 @@ def test_download_quant_passes_token_to_hub(kllm_home, monkeypatch):
         listed.append((repo_id, token))
         return REPO_FILES
 
-    monkeypatch.setattr(models, "list_repo_files", fake_list)
+    monkeypatch.setattr(models_api, "list_repo_files", fake_list)
     monkeypatch.setattr(
         models,
         "hf_hub_url",
@@ -107,7 +109,7 @@ def test_resolve_hf_filename_exact_skips_listing():
 
 
 def test_resolve_hf_filename_quant_lists(monkeypatch):
-    monkeypatch.setattr(models, "list_repo_files", lambda repo_id, token=None: REPO_FILES)
+    monkeypatch.setattr(models_api, "list_repo_files", lambda repo_id, token=None: REPO_FILES)
     assert models.resolve_hf_filename("org/repo", "Q4_K_M") == "model.Q4_K_M.gguf"
 
 
@@ -313,8 +315,8 @@ def _fake_hub_hits(**_kwargs):
 
 
 def test_search_quant_filter_skips_mmproj_and_ranks(monkeypatch):
-    monkeypatch.setattr(models, "list_models", _fake_hub_hits)
-    monkeypatch.setattr(models, "model_info", _fake_orca_info)
+    monkeypatch.setattr(models_api, "list_models", _fake_hub_hits)
+    monkeypatch.setattr(models_api, "model_info", _fake_orca_info)
     out = models.search_hub_ggufs(
         "Qwen3.8-27B-Uncensored-GGUF:Q4_K_M",
         total_vram_bytes=48_000_000_000,
@@ -331,8 +333,8 @@ def test_search_quant_filter_skips_mmproj_and_ranks(monkeypatch):
 
 
 def test_search_without_quant_lists_all_candidate_ggufs(monkeypatch):
-    monkeypatch.setattr(models, "list_models", _fake_hub_hits)
-    monkeypatch.setattr(models, "model_info", _fake_orca_info)
+    monkeypatch.setattr(models_api, "list_models", _fake_hub_hits)
+    monkeypatch.setattr(models_api, "model_info", _fake_orca_info)
     out = models.search_hub_ggufs(
         "Qwen3.8-27B-Uncensored-GGUF",
         total_vram_bytes=20_000_000_000,
@@ -352,15 +354,15 @@ def test_search_direct_repo_skips_hub(monkeypatch):
     def boom(**_kwargs):
         raise AssertionError("list_models should not run for org/repo")
 
-    monkeypatch.setattr(models, "list_models", boom)
-    monkeypatch.setattr(models, "model_info", _fake_orca_info)
+    monkeypatch.setattr(models_api, "list_models", boom)
+    monkeypatch.setattr(models_api, "model_info", _fake_orca_info)
     out = models.search_hub_ggufs(f"{ORCA_REPO}:Q4_K_M", token=False)
     assert len(out["results"]) == 1
     assert out["results"][0]["repo_id"] == ORCA_REPO
 
 
 def test_search_url_uses_content_length(monkeypatch):
-    monkeypatch.setattr(models, "_url_size_bytes", lambda url, headers=None: 12345)
+    monkeypatch.setattr(models_api, "_url_size_bytes", lambda url, headers=None: 12345)
     out = models.search_hub_ggufs("https://example.test/tiny.Q4_K_M.gguf", token=False)
     assert len(out["results"]) == 1
     row = out["results"][0]
@@ -385,8 +387,8 @@ def test_search_show_file_info_url_picks_exact_gguf(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr(models, "list_models", boom)
-    monkeypatch.setattr(models, "model_info", fake_info)
+    monkeypatch.setattr(models_api, "list_models", boom)
+    monkeypatch.setattr(models_api, "model_info", fake_info)
     out = models.search_hub_ggufs(UNSLOTH_SHOW_FILE_INFO, token=False)
     assert len(out["results"]) == 1
     row = out["results"][0]
@@ -411,7 +413,7 @@ def test_download_show_file_info_url_uses_hf_hub_url(kllm_home, monkeypatch):
         streamed.append(url)
         return _FakeResp(payload)
 
-    monkeypatch.setattr(models, "hf_hub_url", fake_hub_url)
+    monkeypatch.setattr(models_api, "hf_hub_url", fake_hub_url)
     monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
     path = models.download_model(UNSLOTH_SHOW_FILE_INFO)
     assert path.name == UNSLOTH_FILE
@@ -503,8 +505,8 @@ def _install_demo_hub(monkeypatch, *, mode: str = "ok", calls: list | None = Non
             return _FakeInfo(_main_siblings())
         raise _hub_error(RevisionNotFoundError, 404)
 
-    monkeypatch.setattr(models, "list_models", fake_list)
-    monkeypatch.setattr(models, "model_info", fake_info)
+    monkeypatch.setattr(models_api, "list_models", fake_list)
+    monkeypatch.setattr(models_api, "model_info", fake_info)
     monkeypatch.setattr(
         models,
         "_url_size_bytes",
@@ -649,7 +651,7 @@ def test_explicit_lookup_is_uncapped_and_empty_folder_differs_from_missing(monke
         assert kwargs["revision"] == "main"
         return _FakeInfo(files)
 
-    monkeypatch.setattr(models, "model_info", fake_info)
+    monkeypatch.setattr(models_api, "model_info", fake_info)
     monkeypatch.setattr(
         models, "list_models", lambda **_k: (_ for _ in ()).throw(AssertionError("discovery"))
     )
@@ -659,7 +661,7 @@ def test_explicit_lookup_is_uncapped_and_empty_folder_differs_from_missing(monke
     def docs_only(repo_id, **_kwargs):
         return _FakeInfo([_FakeSibling("docs/README.md", 1), _FakeSibling("gguf/README.md", 1)])
 
-    monkeypatch.setattr(models, "model_info", docs_only)
+    monkeypatch.setattr(models_api, "model_info", docs_only)
     empty = models.search_hub_ggufs(
         "https://huggingface.co/demo/model-GGUF/tree/main/gguf", token=False
     )
@@ -754,8 +756,8 @@ def test_keyword_partial_warnings_and_legacy_caps(monkeypatch):
             raise OSError("boom hf_SUPERSECRET https://signed.example/x?sig=1")
         return _FakeInfo([])
 
-    monkeypatch.setattr(models, "list_models", fake_list)
-    monkeypatch.setattr(models, "model_info", fake_info)
+    monkeypatch.setattr(models_api, "list_models", fake_list)
+    monkeypatch.setattr(models_api, "model_info", fake_info)
     out = models.search_hub_ggufs("llama:Q4_K_M", token=False)
     assert out["results"]
     assert any(
@@ -771,14 +773,14 @@ def test_keyword_partial_warnings_and_legacy_caps(monkeypatch):
     def failing_info(repo_id, **_kwargs):
         raise OSError("all-down")
 
-    monkeypatch.setattr(models, "model_info", failing_info)
+    monkeypatch.setattr(models_api, "model_info", failing_info)
     with pytest.raises(ValueError, match="all-down"):
         models.search_hub_ggufs("llama", token=False)
 
     def empty_info(repo_id, **_kwargs):
         return _FakeInfo([_FakeSibling("README.md", 1)])
 
-    monkeypatch.setattr(models, "model_info", empty_info)
+    monkeypatch.setattr(models_api, "model_info", empty_info)
     empty = models.search_hub_ggufs("llama", token=False)
     assert empty["results"] == []
     assert empty["warnings"] == []
@@ -795,9 +797,9 @@ def test_direct_signed_url_keeps_source_and_skips_hub_credentials(kllm_home, mon
         seen["stream"] = (url, dict(kwargs.get("headers") or {}))
         return _FakeResp(b"signed-bytes")
 
-    monkeypatch.setattr(models, "_url_size_bytes", fake_head)
+    monkeypatch.setattr(models_api, "_url_size_bytes", fake_head)
     monkeypatch.setattr(models.downloads.httpx, "stream", fake_stream)
-    monkeypatch.setattr(models, "resolve_hf_token", lambda: "hf_SUPERSECRET")
+    monkeypatch.setattr(models_api, "resolve_hf_token", lambda: "hf_SUPERSECRET")
     monkeypatch.setattr(
         models, "model_info", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no hub"))
     )
@@ -846,7 +848,7 @@ def test_shorthand_exact_path_does_not_invent_files(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr(models, "model_info", fake_info)
+    monkeypatch.setattr(models_api, "model_info", fake_info)
     out = models.search_hub_ggufs("demo/model-GGUF:real.Q4_K_M.gguf", token=False)
     assert [row["path"] for row in out["results"]] == ["real.Q4_K_M.gguf"]
     with pytest.raises(ValueError, match="unavailable"):

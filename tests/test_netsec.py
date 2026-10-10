@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -13,8 +15,8 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.netsec as netsec_mod
-    import kllm.state as state_mod
+    import kllm.shared.netsec as netsec_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     importlib.reload(netsec_mod)
@@ -29,14 +31,14 @@ def client(tmp_path, monkeypatch):
 
 
 def test_pick_rpc_bind_host_explicit_wins():
-    from kllm.netsec import pick_rpc_bind_host
+    from kllm.shared.netsec import pick_rpc_bind_host
 
     assert pick_rpc_bind_host("10.1.2.3") == "10.1.2.3"
     assert pick_rpc_bind_host("0.0.0.0") == "0.0.0.0"
 
 
 def test_pick_rpc_bind_host_default_not_wildcard(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     monkeypatch.setattr(
         network_discovery, "_list_ipv4_addresses", lambda: ["127.0.0.1", "192.168.10.5", "8.8.8.8"]
@@ -46,7 +48,7 @@ def test_pick_rpc_bind_host_default_not_wildcard(monkeypatch):
 
 
 def test_pick_rpc_bind_host_prefers_rfc1918_over_cgnat(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     monkeypatch.setattr(
         network_discovery,
@@ -58,7 +60,7 @@ def test_pick_rpc_bind_host_prefers_rfc1918_over_cgnat(monkeypatch):
 
 
 def test_collect_ifconfig_ipv4_parses_macos_output():
-    from kllm import network_discovery as netsec
+    from kllm.modules.cluster.interactors import network_discovery as netsec
 
     sample = """
 lo0: flags=8049
@@ -77,7 +79,7 @@ utun4: flags=8051
 
 
 def test_pick_rpc_bind_host_toward_beats_lexicographic_private(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     # 192.168.235.1 sorts before 192.168.68.63 as strings — the old bug.
     monkeypatch.setattr(
@@ -90,7 +92,7 @@ def test_pick_rpc_bind_host_toward_beats_lexicographic_private(monkeypatch):
 
 
 def test_pick_rpc_bind_host_default_route_beats_vmware_lex_order(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     monkeypatch.setattr(
         network_discovery,
@@ -108,7 +110,7 @@ def test_pick_rpc_bind_host_default_route_beats_vmware_lex_order(monkeypatch):
 
 
 def test_pick_rpc_bind_host_prefers_private_network_over_default_route(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     monkeypatch.setattr(
         network_discovery,
@@ -126,7 +128,7 @@ def test_pick_rpc_bind_host_prefers_private_network_over_default_route(monkeypat
 
 
 def test_pick_rpc_bind_host_private_network_subnet_order(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     def fake_toward(remote: str) -> str | None:
         if remote == "8.8.8.8":
@@ -157,14 +159,14 @@ def test_pick_rpc_bind_host_private_network_subnet_order(monkeypatch):
 
 
 def test_preferred_private_subnets_match_managed_network_candidates():
-    from kllm import network_discovery
-    from kllm.managed_network.allocation import CANDIDATES
+    from kllm.modules.cluster.interactors import network_discovery
+    from kllm.modules.managed_network.interactors.allocation import CANDIDATES
 
     assert tuple(CANDIDATES) == network_discovery.PREFERRED_PRIVATE_SUBNETS
 
 
 def test_pick_rpc_bind_host_ignores_other_10x_addresses(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     monkeypatch.setattr(
         network_discovery,
@@ -182,7 +184,7 @@ def test_pick_rpc_bind_host_ignores_other_10x_addresses(monkeypatch):
 
 
 def test_pick_rpc_bind_host_toward_beats_private_network(monkeypatch):
-    from kllm import network_discovery
+    from kllm.modules.cluster.interactors import network_discovery
 
     monkeypatch.setattr(
         network_discovery,
@@ -200,7 +202,7 @@ def test_pick_rpc_bind_host_toward_beats_private_network(monkeypatch):
 
 
 def test_is_usable_lan_peer():
-    from kllm.netsec import is_usable_lan_peer
+    from kllm.shared.netsec import is_usable_lan_peer
 
     assert is_usable_lan_peer("192.168.68.63")
     assert not is_usable_lan_peer("127.0.0.1")
@@ -211,7 +213,7 @@ def test_is_usable_lan_peer():
 
 
 def test_derive_wg_psk_stable():
-    from kllm.netsec import derive_wg_psk
+    from kllm.shared.netsec import derive_wg_psk
 
     a = derive_wg_psk("cluster-secret")
     b = derive_wg_psk("cluster-secret")
@@ -223,7 +225,7 @@ def test_derive_wg_psk_stable():
 
 
 def test_normalize_overlay():
-    from kllm.netsec import normalize_overlay
+    from kllm.shared.netsec import normalize_overlay
 
     assert normalize_overlay(None) == "none"
     assert normalize_overlay("WireGuard") == "wireguard"
@@ -232,7 +234,7 @@ def test_normalize_overlay():
 
 
 def test_firewall_darwin_already_permitted(monkeypatch):
-    from kllm import firewall as netsec
+    from kllm.shared import firewall as netsec
 
     monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: "/opt/rpc-server")
     monkeypatch.setattr(netsec, "_macos_app_firewall_permits", lambda _p: True)
@@ -250,7 +252,7 @@ def test_firewall_darwin_already_permitted(monkeypatch):
 
 
 def test_firewall_darwin_applies_add_and_unblock(monkeypatch):
-    from kllm import firewall as netsec
+    from kllm.shared import firewall as netsec
 
     monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: "/opt/rpc-server")
     permits = {"n": 0}
@@ -274,7 +276,7 @@ def test_firewall_darwin_applies_add_and_unblock(monkeypatch):
 
 
 def test_firewall_darwin_missing_binary_warns(monkeypatch):
-    from kllm import firewall as netsec
+    from kllm.shared import firewall as netsec
 
     monkeypatch.setattr(netsec, "_resolve_rpc_server_path", lambda: None)
     monkeypatch.setattr(netsec.Path, "is_file", lambda _p: True)
@@ -286,7 +288,7 @@ def test_firewall_darwin_missing_binary_warns(monkeypatch):
 
 
 def test_firewall_windows_reuses_existing_rule(monkeypatch):
-    from kllm import firewall as netsec
+    from kllm.shared import firewall as netsec
 
     calls: list[list[str]] = []
 
@@ -303,7 +305,7 @@ def test_firewall_windows_reuses_existing_rule(monkeypatch):
 
 
 def test_firewall_windows_access_denied_hint(monkeypatch):
-    from kllm import firewall as netsec
+    from kllm.shared import firewall as netsec
 
     def fake_run(cmd, **kwargs):
         joined = " ".join(cmd)
@@ -326,7 +328,7 @@ def test_firewall_windows_access_denied_hint(monkeypatch):
 
 
 def test_next_wg_address_skips_used():
-    from kllm.netsec import next_wg_address
+    from kllm.shared.netsec import next_wg_address
 
     assert next_wg_address({}, master=True) == "10.66.87.1"
     members = {"a": {"wg_address": "10.66.87.2"}, "b": {"wg_address": "10.66.87.3"}}
@@ -455,7 +457,7 @@ def test_join_missing_native_returns_503(client):
 @pytest.mark.unit
 def test_join_binds_private_host_not_wildcard(client, monkeypatch):
     c, agent, netsec_mod = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
     captured = {}
 
     def fake_start_worker(**kwargs):
@@ -539,7 +541,7 @@ def test_join_binds_private_host_not_wildcard(client, monkeypatch):
 @pytest.mark.unit
 def test_wireguard_join_uses_master_assignment_for_worker_tunnel(client, monkeypatch):
     c, agent, netsec_mod = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
     configurations = []
     started = {}
 
@@ -645,7 +647,7 @@ def test_wireguard_join_uses_master_assignment_for_worker_tunnel(client, monkeyp
 @pytest.mark.unit
 def test_join_honors_rpc_bind_hint_from_master(client, monkeypatch):
     c, agent, netsec_mod = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
     captured = {}
 
     def fake_start_worker(**kwargs):
@@ -727,7 +729,7 @@ def test_join_honors_rpc_bind_hint_from_master(client, monkeypatch):
 @pytest.mark.unit
 def test_join_ignores_rpc_bind_hint_that_is_not_local(client, monkeypatch):
     c, agent, netsec_mod = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
     captured = {}
 
     def fake_start_worker(**kwargs):
@@ -804,7 +806,7 @@ def test_join_ignores_rpc_bind_hint_that_is_not_local(client, monkeypatch):
 
 
 def test_should_apply_rpc_bind_hint_requires_local_ip():
-    from kllm.netsec import should_apply_rpc_bind_hint
+    from kllm.shared.netsec import should_apply_rpc_bind_hint
 
     local = ["192.168.68.51"]
     assert should_apply_rpc_bind_hint("192.168.68.51", "192.168.235.1", local)
@@ -813,7 +815,7 @@ def test_should_apply_rpc_bind_hint_requires_local_ip():
 
 
 def test_reconcile_rpc_bind_replaces_foreign_address(monkeypatch):
-    from kllm import netsec
+    from kllm.shared import netsec
 
     monkeypatch.setattr(netsec, "_list_ipv4_addresses", lambda: ["192.168.68.51"])
     monkeypatch.setattr(
@@ -825,7 +827,7 @@ def test_reconcile_rpc_bind_replaces_foreign_address(monkeypatch):
 
 
 def test_control_client_keeps_idle_sockets():
-    from kllm import http_clients
+    from kllm.shared import http_clients
 
     assert http_clients._CONTROL_LIMITS.keepalive_expiry == 120.0
     http_clients.close()
@@ -878,7 +880,7 @@ def test_register_assigns_wg_when_overlay_on(client):
 
 
 def test_netmask_to_prefix():
-    from kllm import netsec
+    from kllm.shared import netsec
 
     assert netsec._netmask_to_prefix("0xfffffc00") == 22
     assert netsec._netmask_to_prefix("255.255.255.0") == 24
@@ -890,7 +892,7 @@ def test_netmask_to_prefix():
 def test_collect_ipv4_networks_from_ifconfig():
     import ipaddress
 
-    from kllm import netsec
+    from kllm.shared import netsec
 
     out = (
         "en0: flags=8863<UP,BROADCAST> mtu 1500\n"
@@ -909,7 +911,7 @@ def test_collect_ipv4_networks_from_ifconfig():
 def test_list_ipv4_networks_parses_darwin_ifconfig(monkeypatch):
     import ipaddress
 
-    from kllm import network_discovery as netsec
+    from kllm.modules.cluster.interactors import network_discovery as netsec
 
     monkeypatch.setattr(netsec.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(
@@ -924,7 +926,7 @@ def test_list_ipv4_networks_parses_darwin_ifconfig(monkeypatch):
 def test_list_ipv4_networks_parses_linux_ip(monkeypatch):
     import ipaddress
 
-    from kllm import network_discovery as netsec
+    from kllm.modules.cluster.interactors import network_discovery as netsec
 
     monkeypatch.setattr(netsec.platform, "system", lambda: "Linux")
     monkeypatch.setattr(
@@ -939,7 +941,7 @@ def test_list_ipv4_networks_parses_linux_ip(monkeypatch):
 def test_list_ipv4_networks_parses_windows(monkeypatch):
     import ipaddress
 
-    from kllm import network_discovery as netsec
+    from kllm.modules.cluster.interactors import network_discovery as netsec
 
     monkeypatch.setattr(netsec.platform, "system", lambda: "Windows")
     monkeypatch.setattr(

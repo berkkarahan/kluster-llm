@@ -14,7 +14,7 @@ def test_main_reports_invalid_command_to_stderr(capsys) -> None:
 
 
 def test_main_reports_agent_protocol_mismatch(monkeypatch, tmp_path, capsys) -> None:
-    import kllm.commands.agent_runtime as cli_runtime
+    import kllm.modules.cluster.interactors.agent_runtime as cli_runtime
 
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     monkeypatch.setattr(
@@ -27,7 +27,7 @@ def test_main_reports_agent_protocol_mismatch(monkeypatch, tmp_path, capsys) -> 
 def test_plan_cli_forwards_repeated_required_nodes(monkeypatch):
     import json
     import httpx
-    import kllm.commands.inference as inference
+    import kllm.modules.inference.router_cli as inference
 
     calls = []
 
@@ -62,8 +62,8 @@ def test_plan_cli_forwards_repeated_required_nodes(monkeypatch):
 def test_connect_hermes_loopback_uses_local_token(monkeypatch, tmp_path, capsys):
     import json
     import httpx
-    from kllm import connect
-    from kllm.commands import connect as connect_command
+    from kllm.modules.connect.interactors import connect
+    from kllm.modules.connect import router_cli as connect_command
 
     model = "Ornith-1.5-35B-A3B-Q6_K_L.gguf"
     served = f"/models/{model}"

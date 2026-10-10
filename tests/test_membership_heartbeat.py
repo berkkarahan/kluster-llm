@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 from fastapi import HTTPException
 
-from kllm.agent.services.membership_heartbeat import MembershipHeartbeatService
-from kllm.state import ClusterState
+from kllm.modules.cluster.interactors.membership_heartbeat import MembershipHeartbeatService
+from kllm.shared.state import ClusterState
 
 
 def _worker(tmp_path, monkeypatch) -> ClusterState:

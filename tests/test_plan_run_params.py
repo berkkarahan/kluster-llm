@@ -13,9 +13,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.auth as auth_mod
+    import kllm.shared.auth as auth_mod
     import kllm.agent as agent_mod
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     importlib.reload(auth_mod)
@@ -140,8 +140,8 @@ def test_required_node_api_uses_real_planner_and_preserves_preview_state(
 ):
     from test_memory_estimation import synthetic_gguf
     from test_required_node_planning import node
-    from kllm import run_planning
-    from kllm.core.placement_models import PlacementNodeInput
+    from kllm.modules.inference.interactors import run_planning
+    from kllm.modules.inference.interactors.placement_models import PlacementNodeInput
 
     c, agent, tmp = client
     synthetic_gguf(_model_file(tmp))
@@ -169,7 +169,7 @@ def test_required_node_api_uses_real_planner_and_preserves_preview_state(
 
 def test_real_plan_components_auto_context_and_unpriced_arguments(client, monkeypatch):
     from test_memory_estimation import COMPONENTS, capacity, synthetic_gguf
-    from kllm import run_planning
+    from kllm.modules.inference.interactors import run_planning
 
     c, agent, tmp = client
     path = _model_file(tmp)
@@ -209,7 +209,7 @@ def test_flash_off_quantized_v_rejected_before_launch(client, endpoint):
 
 def test_equivalent_extra_args_use_same_resolved_estimate(client, monkeypatch):
     from test_memory_estimation import capacity, synthetic_gguf
-    from kllm import run_planning
+    from kllm.modules.inference.interactors import run_planning
 
     c, _, tmp = client
     synthetic_gguf(_model_file(tmp))
@@ -263,10 +263,10 @@ def test_equivalent_extra_args_use_same_resolved_estimate(client, monkeypatch):
 def test_template_selection_and_threads_capabilities(client, monkeypatch):
     c, agent, tmp = client
     _model_file(tmp)
-    from kllm.chat_templates import PRESETS
-    from kllm.run_settings import available_threads
-    from kllm.run_settings import RunBody
-    from kllm.run_launch import build_master_launch
+    from kllm.modules.inference.interactors.chat_templates import PRESETS
+    from kllm.modules.inference.entities import available_threads
+    from kllm.modules.inference.entities import RunBody
+    from kllm.modules.inference.interactors.run_launch import build_master_launch
 
     info = c.get("/v1/run-capabilities", params={"model": "toy.gguf"})
     assert info.status_code == 200, info.text
@@ -296,15 +296,15 @@ def test_template_selection_and_threads_capabilities(client, monkeypatch):
 
 
 def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
-    from kllm import run_settings
+    from kllm.modules.inference import entities as run_settings
 
     monkeypatch.setattr(run_settings, "available_threads", lambda: 4)
     assert run_settings.RunBody(model="toy.gguf").threads == 4
     with pytest.raises(ValueError, match="threads"):
         run_settings.RunBody(model="toy.gguf", threads=5)
-    from kllm.run_planning import resolve_launch_settings
+    from kllm.modules.inference.interactors.run_planning import resolve_launch_settings
 
-    monkeypatch.setattr("kllm.run_settings_resolution.available_threads", lambda: 4)
+    monkeypatch.setattr("kllm.modules.inference.interactors.run_settings_resolution.available_threads", lambda: 4)
     with pytest.raises(ValueError, match="threads"):
         resolve_launch_settings(
             run_settings.RunBody(model="toy.gguf", extra_args=["--threads", "5"])
@@ -333,7 +333,7 @@ def test_thread_limit_and_template_settings_round_trip(client, monkeypatch):
 def test_run_settings_cannot_be_mutated_after_validation():
     from pydantic import ValidationError
 
-    from kllm.run_settings import RunBody
+    from kllm.modules.inference.entities import RunBody
 
     settings = RunBody(model="toy.gguf")
     with pytest.raises(ValidationError):
@@ -354,7 +354,7 @@ def test_dashboard_layer_overrides_legacy_config_at_plan_and_run_boundary(client
             return_value={"pid": 42, "argv": [], "binary": "llama-server", "role": "master"},
         ) as launch,
         patch.object(agent.native, "process_alive", return_value=True),
-        patch("kllm.agent.ensure_rpc_peers_reachable"),
+        patch("kllm.agent.runtime.ensure_rpc_peers_reachable"),
     ):
         planned = c.post("/v1/plan", json=payload)
         assert planned.status_code == 200, planned.text
@@ -420,7 +420,7 @@ def test_run_tight_includes_warning(client):
             return_value=True,
         ),
         patch(
-            "kllm.agent.ensure_rpc_peers_reachable",
+            "kllm.agent.runtime.ensure_rpc_peers_reachable",
         ),
     ):
         r = c.post("/v1/run", json=_payload())
@@ -487,7 +487,7 @@ def test_remember_inference_overrides(client):
 
 
 def test_cli_payload_mapping():
-    from kllm.cli_payload import build_plan_run_payload
+    from kllm.modules.inference.presenters import build_plan_run_payload
 
     payload = build_plan_run_payload(
         model="m.gguf",
@@ -505,7 +505,7 @@ def test_cli_payload_mapping():
 
 
 def test_cli_remember_flags_in_payload():
-    from kllm.cli_payload import build_plan_run_payload
+    from kllm.modules.inference.presenters import build_plan_run_payload
 
     on = build_plan_run_payload(model="m.gguf", remember=True)
     off = build_plan_run_payload(model="m.gguf", remember=False)
@@ -514,13 +514,13 @@ def test_cli_remember_flags_in_payload():
 
 
 def test_cli_split_mode_in_payload():
-    from kllm.cli_payload import build_plan_run_payload
+    from kllm.modules.inference.presenters import build_plan_run_payload
 
     assert build_plan_run_payload(model="m.gguf", split_mode="tensor")["split_mode"] == "tensor"
 
 
 def test_inference_stop_unloads_model_and_keeps_cluster(client, monkeypatch):
-    from kllm import load_progress
+    from kllm.modules.inference.interactors import load_progress
 
     c, agent, _tmp = client
     stopped: list[tuple[int, bool]] = []
@@ -623,8 +623,8 @@ def test_priority_api_forwards_and_remembers_order(client, route):
 def _unified_plan(*, ram: int, reported: int, backend: str = "vulkan"):
     from test_cluster_optimizations import layout, settings
 
-    from kllm.core.placement import plan_devices
-    from kllm.core.placement_models import ModelLayout, PlacementNodeInput, PlacementSettings
+    from kllm.modules.inference.interactors.core_placement import plan_devices
+    from kllm.modules.inference.interactors.placement_models import ModelLayout, PlacementNodeInput, PlacementSettings
 
     node = PlacementNodeInput.from_mapping(
         {
@@ -660,7 +660,7 @@ def _unified_plan(*, ram: int, reported: int, backend: str = "vulkan"):
 
 
 def test_unified_planning_vram_is_fraction_of_ram_not_reported_carveout(monkeypatch):
-    from kllm.accel import UNIFIED_VRAM_FRACTION_DEFAULT
+    from kllm.shared.accel import UNIFIED_VRAM_FRACTION_DEFAULT
 
     monkeypatch.delenv("KLLM_UNIFIED_VRAM_FRACTION", raising=False)
     ram = 32 * 1024**3
@@ -695,7 +695,7 @@ def test_plan_result_prints_gpu_names_beside_nodes():
 
     from rich.console import Console
 
-    from kllm.commands import inference
+    from kllm.modules.inference import router_cli as inference
 
     buffer = StringIO()
     previous = inference.console
@@ -722,7 +722,7 @@ def test_plan_result_prints_gpu_names_beside_nodes():
 
 
 def test_missing_unified_flag_detects_strix_from_device_name():
-    from kllm.run_planning import _node_gpu_names, cluster_nodes
+    from kllm.modules.inference.interactors.run_planning import _node_gpu_names, cluster_nodes
 
     members = {
         "strix": {

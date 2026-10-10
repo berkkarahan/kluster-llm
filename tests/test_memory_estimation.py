@@ -9,14 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from kllm import native
-from kllm.gguf_meta import read_model_layout
-from kllm.placement import MIB, memory_costs, plan_devices
-from kllm.core.placement_models import ModelLayout, PlacementNodeInput, PlacementSettings
-from kllm.models.resolved_settings import ResolvedLaunchSettings
-from kllm.run_launch import build_master_launch
-from kllm.run_planning import estimate_auxiliary_assets, resolve_launch_settings
-from kllm.run_settings import RunBody
+from kllm.shared import native
+from kllm.modules.models.interactors.gguf_meta import read_model_layout
+from kllm.modules.inference.interactors.placement import MIB, memory_costs, plan_devices
+from kllm.modules.inference.interactors.placement_models import ModelLayout, PlacementNodeInput, PlacementSettings
+from kllm.modules.models.interactors.resolved_settings import ResolvedLaunchSettings
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.interactors.run_planning import estimate_auxiliary_assets, resolve_launch_settings
+from kllm.modules.inference.entities import RunBody
 
 
 def synthetic_gguf(path: Path, arch="llama", **metadata):

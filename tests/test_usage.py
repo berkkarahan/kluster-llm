@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import sqlite3
@@ -11,9 +13,9 @@ import json
 
 import pytest
 
-from kllm import usage, usage_devices
-from kllm.state import ClusterState
-from kllm.persistence import SQLiteOptions
+from kllm.modules.usage.interactors import usage, usage_devices
+from kllm.shared.state import ClusterState
+from kllm.shared.persistence import SQLiteOptions
 
 
 def reading(at, *, node="worker", pid=12, started=None, cpu=12.5, rss=2 * 1024**3):
@@ -154,7 +156,7 @@ def _dedicated_device(name, *, total, used, key="win:luid:1"):
 
 
 def test_reconcile_resources_uses_the_unique_llama_capacity():
-    from kllm import usage_probe
+    from kllm.modules.usage.gateways import usage_probe
 
     llama, dxgi, used = 17_095_983_104, 16_974_905_344, 5_000_000_000
     device = _dedicated_device("AMD Radeon RX 9070 XT", total=dxgi, used=used)
@@ -198,7 +200,8 @@ def test_reconcile_resources_uses_the_unique_llama_capacity():
 
 def test_reconciled_snapshot_still_passes_resource_validation():
     from datetime import datetime, timezone
-    from kllm import native, usage_probe
+    from kllm.modules.usage.gateways import usage_probe
+    from kllm.shared import native
 
     if not native.resource_probe_available():
         pytest.skip("requires rebuilt native schema validator")
@@ -668,7 +671,7 @@ def test_exited_tracked_child_closes_lifetime_even_if_pid_is_still_set(tmp_path,
         "process_pid": 99,
     }
     monkeypatch.setattr(agent, "STATE", state)
-    store = agent._usage_store()
+    store = agent_runtime._usage_store()
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = reading(
         now - timedelta(seconds=2), node="master", pid=99, started=now - timedelta(minutes=1)
@@ -679,8 +682,8 @@ def test_exited_tracked_child_closes_lifetime_even_if_pid_is_still_set(tmp_path,
         usage.Sampler, "sample", lambda *_: (_ for _ in ()).throw(usage.psutil.NoSuchProcess(99))
     )
     ticks = iter((False, True))
-    monkeypatch.setattr(agent._background_stop, "wait", lambda _: next(ticks))
-    agent._usage_loop()
+    monkeypatch.setattr(agent_runtime._background_stop, "wait", lambda _: next(ticks))
+    agent_runtime._usage_loop()
     assert store.lifetimes("master")[0]["state"] == "ended"
     assert store.count() == 1
     assert state.process_pid is None

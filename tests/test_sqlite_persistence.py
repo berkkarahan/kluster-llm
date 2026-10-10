@@ -9,9 +9,9 @@ import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, insert, select, event
 from sqlalchemy.exc import OperationalError
 
-from kllm.exceptions import PersistenceError
-from kllm.persistence import SQLiteOptions, SQLiteStore
-from kllm.persistence.operations import drain_initializations, initialize, pending_initializations
+from kllm.shared.exceptions import PersistenceError
+from kllm.shared.persistence import SQLiteOptions, SQLiteStore
+from kllm.shared.persistence.operations import drain_initializations, initialize, pending_initializations
 
 
 def storage(tmp_path, **options):
@@ -160,7 +160,7 @@ def test_close_timeout_quarantines_until_actual_cleanup(tmp_path):
 
 @pytest.mark.asyncio
 async def test_commit_wins_cancel_reports_confirmed_durable_unit(tmp_path, monkeypatch):
-    from kllm.persistence.operations import Operation
+    from kllm.shared.persistence.operations import Operation
 
     store, items = storage(tmp_path)
     committing, release = threading.Event(), threading.Event()
@@ -187,7 +187,7 @@ async def test_commit_wins_cancel_reports_confirmed_durable_unit(tmp_path, monke
 
 
 def test_unknown_commit_has_no_parameter_content_and_retires_connection(tmp_path):
-    from kllm.persistence.operations import CommitOutcomeUnknown
+    from kllm.shared.persistence.operations import CommitOutcomeUnknown
 
     store, items = storage(tmp_path)
 

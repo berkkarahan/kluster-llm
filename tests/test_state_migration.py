@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 import pytest
 
-from kllm import runtime, state
+from kllm.shared import process_registry as runtime, state
 
 
 def test_legacy_cluster_state_resets_transient_data_and_keeps_settings(

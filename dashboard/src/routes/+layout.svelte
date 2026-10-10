@@ -1,13 +1,19 @@
 <script lang="ts">
+  import { createApp } from '$lib/app.svelte';
+  import { routes } from '$lib/shared/navigation';
   import '../app.css';
   import '../prototype.css';
   import { onMount } from 'svelte';
   import { page } from '$app/state';
-  import { appStore } from '$lib/store.svelte';
-  import InferenceActivity from '$lib/components/InferenceActivity.svelte';
-  import Icon from '$lib/components/Icon.svelte';
-  import { toasts, dismissToast } from '$lib/toast';
-  import ErrorMessage from '$lib/components/ErrorMessage.svelte';
+  import InferenceActivity from '$lib/modules/usage/view/InferenceActivity.svelte';
+  import Icon from '$lib/shared/Icon.svelte';
+  import { toasts, dismissToast } from '$lib/shared/toast';
+  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  const app = createApp();
+  const cluster = app.cluster;
+  const models = app.models;
+  const live = app.live;
+  const run = app.run;
 
   let { children } = $props();
   let menuOpen = $state(false);
@@ -15,27 +21,27 @@
   let sidebarEl = $state<HTMLElement | null>(null);
 
   const nav = [
-    { href: '/', label: 'Cluster', icon: 'cluster' },
-    { href: '/models', label: 'Models', icon: 'cube' },
-    { href: '/run', label: 'Deploy', icon: 'rocket' },
-    { href: '/logs', label: 'Activity', icon: 'activity' },
-    { href: '/integrations', label: 'Connect', icon: 'plug' },
-    { href: '/settings', label: 'Settings', icon: 'settings' }
+    { href: routes.cluster, label: 'Cluster', icon: 'cluster' },
+    { href: routes.models, label: 'Models', icon: 'cube' },
+    { href: routes.run, label: 'Deploy', icon: 'rocket' },
+    { href: routes.logs, label: 'Activity', icon: 'activity' },
+    { href: routes.integrations, label: 'Connect', icon: 'plug' },
+    { href: routes.settings, label: 'Settings', icon: 'settings' }
   ];
 
   const current = $derived(nav.find((item) => item.href === page.url.pathname) ?? nav[0]);
-  const memberCount = $derived(Object.keys(appStore.status?.members ?? {}).length);
-  const modelCount = $derived(appStore.models.length);
-  const role = $derived(appStore.status?.role ?? '');
-  const view = $derived(appStore.viewState());
-  const nodeLabel = $derived(appStore.status?.node_id || 'This node');
+  const memberCount = $derived(Object.keys(cluster.status?.members ?? {}).length);
+  const modelCount = $derived(models.models.length);
+  const role = $derived(cluster.status?.role ?? '');
+  const view = $derived(cluster.viewState());
+  const nodeLabel = $derived(cluster.status?.node_id || 'This node');
   const connectionLabel = $derived.by(() => {
-    if (!appStore.connected) return 'Offline';
-    if (appStore.deliveryHealth === 'reconnecting') return 'Reconnecting';
-    if (appStore.deliveryHealth === 'periodic-refresh') return 'Periodic refresh';
-    if (appStore.deliveryHealth === 'live') return 'Live';
-    if (appStore.deliveryHealth === 'loading') return 'Loading';
-    if (appStore.deliveryHealth === 'paused') return 'Updates paused';
+    if (!live.connected) return 'Offline';
+    if (live.deliveryHealth === 'reconnecting') return 'Reconnecting';
+    if (live.deliveryHealth === 'periodic-refresh') return 'Periodic refresh';
+    if (live.deliveryHealth === 'live') return 'Live';
+    if (live.deliveryHealth === 'loading') return 'Loading';
+    if (live.deliveryHealth === 'paused') return 'Updates paused';
     return 'Updates unavailable';
   });
   const roleLabel = $derived.by(() => {
@@ -56,7 +62,7 @@
   }
 
   onMount(() => {
-    appStore.start();
+    app.start();
     const media = window.matchMedia('(max-width: 767px)');
     const syncNarrow = () => {
       narrowView = media.matches;
@@ -88,12 +94,12 @@
     return () => {
       media.removeEventListener('change', syncNarrow);
       document.removeEventListener('keydown', onKey);
-      appStore.stop();
+      app.stop();
     };
   });
 
   $effect(() => {
-    appStore.setUsageInterest(page.url.pathname === '/');
+    live.setUsageInterest(page.url.pathname === '/');
   });
 
   $effect(() => {
@@ -121,7 +127,7 @@
         <Icon name="close" />
       </button>
     </div>
-    <a class="workspace-picker" href="/settings">
+    <a class="workspace-picker" href={routes.settings}>
       <span class="workspace-avatar">{nodeLabel.slice(0, 2).toUpperCase()}</span>
       <span class="od-field od-fill">
         <strong>{nodeLabel}</strong>
@@ -148,7 +154,7 @@
     <div class="sidebar-bottom">
       <div class="sidebar-note">
         <div class="connection-line">
-          <span class="connection-dot" style:background={appStore.connected ? 'var(--accent)' : 'var(--danger)'}></span>
+          <span class="connection-dot" style:background={live.connected ? 'var(--accent)' : 'var(--danger)'}></span>
           {connectionLabel}
         </div>
         <p>{roleLabel}</p>
@@ -177,26 +183,26 @@
         </nav>
       </div>
       <div class="topbar-status shell-health" aria-label="Connection health">
-        {#if appStore.connected}
+        {#if live.connected}
           <span class="chip chip-ok">online</span>
         {:else}
           <span class="chip chip-danger">offline</span>
         {/if}
-        {#if appStore.deliveryHealth === 'live'}
+        {#if live.deliveryHealth === 'live'}
           <span class="chip chip-ok">live</span>
-        {:else if appStore.deliveryHealth === 'loading'}
+        {:else if live.deliveryHealth === 'loading'}
           <span class="chip chip-muted">updates loading</span>
-        {:else if appStore.deliveryHealth === 'periodic-refresh'}
+        {:else if live.deliveryHealth === 'periodic-refresh'}
           <span class="chip chip-warn">refresh</span>
-        {:else if appStore.deliveryHealth === 'unavailable'}
+        {:else if live.deliveryHealth === 'unavailable'}
           <span class="chip chip-muted">updates unavailable</span>
-          <ErrorMessage source="delivery" message={appStore.deliveryError} snapshot={false} />
-        {:else if appStore.deliveryHealth === 'reconnecting'}
+          <ErrorMessage source="delivery" message={live.deliveryError} snapshot={false} />
+        {:else if live.deliveryHealth === 'reconnecting'}
           <span class="chip chip-warn">reconnecting</span>
-        {:else if appStore.deliveryHealth === 'paused'}
+        {:else if live.deliveryHealth === 'paused'}
           <span class="chip chip-muted">updates paused</span>
         {/if}
-        {#each Object.entries(appStore.areaHealth) as [topic, health]}
+        {#each Object.entries(live.areaHealth) as [topic, health]}
           {#if health.availability === 'denied' || health.availability === 'unavailable'}
             <span class="chip chip-muted">{topic} {health.availability}</span>
             <ErrorMessage source={`area:${topic}`} message={health.error?.message ?? 'source unavailable'} label={topic} />
@@ -206,34 +212,34 @@
             <span class="chip chip-muted" title="This area contains local-node coverage only">{topic} local</span>
           {/if}
         {/each}
-        <span class="chip chip-muted mono">{appStore.status?.role ?? (appStore.statusSeen ? '…' : 'loading')}</span>
-        {#if appStore.downloadJob && appStore.downloadJob.state !== 'idle'}
-          {#if appStore.downloadJob.state === 'running'}
-            <span class="chip chip-ok">dl {Math.round(appStore.downloadJob.pct ?? 0)}%</span>
-          {:else if appStore.downloadJob.state === 'complete'}
+        <span class="chip chip-muted mono">{cluster.status?.role ?? (cluster.statusSeen ? '…' : 'loading')}</span>
+        {#if models.downloadJob && models.downloadJob.state !== 'idle'}
+          {#if models.downloadJob.state === 'running'}
+            <span class="chip chip-ok">dl {Math.round(models.downloadJob.pct ?? 0)}%</span>
+          {:else if models.downloadJob.state === 'complete'}
             <span class="chip chip-ok">dl ✓</span>
-          {:else if appStore.downloadJob.state === 'error'}
+          {:else if models.downloadJob.state === 'error'}
             <span class="chip chip-muted">dl stopped</span>
-            <ErrorMessage source="download" message={appStore.downloadJob.error ?? 'unknown error'} identity={appStore.downloadJob.operation_id} />
-          {:else if appStore.downloadJob.state === 'unknown'}
+            <ErrorMessage source="download" message={models.downloadJob.error ?? 'unknown error'} identity={models.downloadJob.operation_id} />
+          {:else if models.downloadJob.state === 'unknown'}
             <span class="chip chip-warn">dl ?</span>
           {:else}
             <span class="chip chip-muted">dl cancelled</span>
           {/if}
-        {:else if appStore.status?.download}
-          <span class="chip chip-ok">dl {Math.round(appStore.status.download.pct)}%</span>
+        {:else if cluster.status?.download}
+          <span class="chip chip-ok">dl {Math.round(cluster.status.download.pct)}%</span>
         {/if}
-        {#if appStore.loadProgress && (appStore.loadProgress.phase === 'starting' || appStore.loadProgress.phase === 'loading')}
-          <span class="chip chip-warn">load {Math.round(appStore.loadProgress.fraction * 100)}%</span>
-        {:else if appStore.loadProgress?.phase === 'ready'}
+        {#if run.loadProgress && (run.loadProgress.phase === 'starting' || run.loadProgress.phase === 'loading')}
+          <span class="chip chip-warn">load {Math.round(run.loadProgress.fraction * 100)}%</span>
+        {:else if run.loadProgress?.phase === 'ready'}
           <span class="chip chip-ok">load ✓</span>
         {/if}
-        {#if appStore.status?.update && appStore.status.update.phase && appStore.status.update.phase !== 'done'}
-          <span class="chip chip-warn">upd {Math.round(appStore.status.update.pct ?? 0)}%</span>
+        {#if cluster.status?.update && cluster.status.update.phase && cluster.status.update.phase !== 'done'}
+          <span class="chip chip-warn">upd {Math.round(cluster.status.update.pct ?? 0)}%</span>
         {/if}
-        {#if appStore.status?.inference_activity && appStore.status.inference_activity.phase !== 'idle'}
-          <InferenceActivity activity={appStore.status.inference_activity} />
-        {:else if appStore.status?.inference_up}
+        {#if cluster.status?.inference_activity && cluster.status.inference_activity.phase !== 'idle'}
+          <InferenceActivity activity={cluster.status.inference_activity} />
+        {:else if cluster.status?.inference_up}
           <span class="chip chip-ok">infer</span>
         {/if}
       </div>

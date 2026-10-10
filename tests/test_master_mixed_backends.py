@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 from unittest.mock import patch
 
 
-from kllm.placement import MIB, plan_devices
-from kllm.core.placement_models import ModelLayout, PlacementSettings
-from kllm.run_planning import cluster_nodes
-from kllm.run_planning import resolve_launch_settings
-from kllm.run_settings import RunBody
+from kllm.modules.inference.interactors.placement import MIB, plan_devices
+from kllm.modules.inference.interactors.placement_models import ModelLayout, PlacementSettings
+from kllm.modules.inference.interactors.run_planning import cluster_nodes
+from kllm.modules.inference.interactors.run_planning import resolve_launch_settings
+from kllm.modules.inference.entities import RunBody
 
 
 def _layout():
@@ -129,7 +131,7 @@ def test_ensure_master_member_repairs_missing_row(tmp_path, monkeypatch):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     import importlib
 
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
     import kllm.agent as agent_mod
 
     importlib.reload(state_mod)
@@ -163,7 +165,7 @@ def test_ensure_master_member_repairs_missing_row(tmp_path, monkeypatch):
         patch.object(agent.native, "probe_capacity", return_value=cap),
         patch.object(agent.native, "list_gpus", return_value=gpus),
     ):
-        assert agent._ensure_master_member(persist=False) is True
+        assert agent_runtime._ensure_master_member(persist=False) is True
     assert agent.STATE.node_id in agent.STATE.members
     assert agent.STATE.members[agent.STATE.node_id]["role"] == "master"
     assert "w1" in agent.STATE.members

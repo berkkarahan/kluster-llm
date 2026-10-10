@@ -3,10 +3,10 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
-from kllm.state import ClusterState
+from kllm.shared.state import ClusterState
 
-from kllm.agent.services import background_tasks
-from kllm.agent.services.membership_loop import MembershipLoop
+from kllm.modules.cluster.interactors import background_tasks
+from kllm.modules.cluster.interactors.membership_loop import MembershipLoop
 
 
 def test_capacity_scheduler_releases_slot_when_thread_cannot_start():

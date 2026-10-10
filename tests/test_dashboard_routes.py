@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kllm.agent.routes.dashboard import mount_dashboard
+from kllm.agent.dashboard import mount_dashboard
 
 
 def test_mount_dashboard_serves_spa_routes_and_static_files(tmp_path):

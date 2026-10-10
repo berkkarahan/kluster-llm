@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -7,8 +9,8 @@ import pytest
 import typer
 from fastapi.testclient import TestClient
 
-from kllm.agent.services.gpus import ResolvedGpuSelection
-from kllm.core.gpu_selection import GpuDeviceInput, GpuSelection
+from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
+from kllm.modules.inference.interactors.gpu_selection import GpuDeviceInput, GpuSelection
 
 
 @pytest.fixture()
@@ -17,7 +19,7 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -39,7 +41,7 @@ FAKE_GPUS = {
 
 
 def test_parse_gpu_ids():
-    from kllm.cli import parse_gpu_ids
+    from kllm.modules.settings.interactors.gpu_options import parse_gpu_ids
 
     assert parse_gpu_ids(None) is None
     assert parse_gpu_ids("0") == [0]
@@ -61,7 +63,7 @@ def test_get_gpus(client, monkeypatch):
     data = r.json()
     assert data["backend"] == "cuda"
     assert data["probed_backend"] == "cuda"
-    from kllm.accel import selectable_accel_backends
+    from kllm.shared.accel import selectable_accel_backends
 
     assert data["allowed_backends"] == selectable_accel_backends()
     assert len(data["gpus"]) == 2
@@ -132,7 +134,7 @@ def test_start_uses_config_gpu_ids_when_body_omits(client, monkeypatch):
     c, agent = client
     import importlib
 
-    import kllm.config as config_mod
+    import kllm.shared.config as config_mod
 
     importlib.reload(config_mod)
     config_mod.save_config({"device": "gpu", "gpu_ids": [1]})
@@ -259,7 +261,7 @@ def test_start_ignores_config_gpu_ids_when_inventory_empty(client, monkeypatch):
     c, agent = client
     import importlib
 
-    import kllm.config as config_mod
+    import kllm.shared.config as config_mod
 
     importlib.reload(config_mod)
     config_mod.save_config({"device": "gpu", "gpu_ids": [0]})
@@ -293,7 +295,7 @@ def test_start_ignores_config_gpu_ids_when_inventory_empty(client, monkeypatch):
 
 
 def test_install_recovery_command_matches_platform(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     monkeypatch.setattr(native_mod.sys, "platform", "win32")
     windows = native_mod.install_recovery_command()
@@ -306,7 +308,7 @@ def test_install_recovery_command_matches_platform(monkeypatch):
 
 
 def test_list_gpus_reports_missing_native(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     monkeypatch.setattr(native_mod, "_NATIVE", None)
     monkeypatch.setattr(native_mod, "_IMPORT_ERROR", ImportError("cannot import name '_native'"))
@@ -329,7 +331,7 @@ def test_start_rejects_explicit_gpu_ids_when_inventory_empty(client, monkeypatch
 
 
 def test_list_gpus_empty_metal_inventory_sets_error(monkeypatch, tmp_path):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     binary = tmp_path / "llama-server"
     binary.write_text("stub", encoding="utf-8")
@@ -355,7 +357,7 @@ def test_list_gpus_empty_metal_inventory_sets_error(monkeypatch, tmp_path):
             "metal_init_failed": True,
         },
     )
-    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("kllm.shared.state.repo_root", lambda: str(tmp_path))
     monkeypatch.setenv("KLLM_ACCEL_BACKEND", "metal")
 
     data = native_mod.list_gpus()
@@ -365,7 +367,7 @@ def test_list_gpus_empty_metal_inventory_sets_error(monkeypatch, tmp_path):
 
 
 def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     binary = tmp_path / "llama-server"
     binary.write_text("stub", encoding="utf-8")
@@ -400,7 +402,7 @@ def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
             "metal_init_failed": False,
         },
     )
-    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("kllm.shared.state.repo_root", lambda: str(tmp_path))
     monkeypatch.setenv("KLLM_ACCEL_BACKEND", "vulkan")
 
     data = native_mod.list_gpus()
@@ -413,7 +415,7 @@ def test_list_gpus_backend_mismatch_fallback(monkeypatch, tmp_path):
 
 
 def test_gpu_visibility_env():
-    from kllm.agent import _gpu_visibility_env
+    from kllm.agent.runtime import _gpu_visibility_env
 
     assert _gpu_visibility_env("cuda", [0, 1]) == {"CUDA_VISIBLE_DEVICES": "0,1"}
     assert _gpu_visibility_env("rocm", [0]) == {
@@ -427,9 +429,9 @@ def test_gpu_visibility_env():
 @pytest.mark.unit
 def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monkeypatch):
     c, agent = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
-    monkeypatch.setattr(agent, "_worker_post_heartbeat", lambda: None)
-    from kllm.discovery import DiscoveredMaster, join_key_id
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
+    monkeypatch.setattr(agent_runtime, "_worker_post_heartbeat", lambda: None)
+    from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")
     captured: dict = {}
@@ -534,7 +536,7 @@ def _snap():
 
 
 def test_probe_capacity_vram_is_the_llama_device_total(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
     monkeypatch.setattr(
@@ -551,7 +553,7 @@ def test_probe_capacity_vram_is_the_llama_device_total(monkeypatch):
 
 
 def test_probe_capacity_reuses_one_native_gpu_observation(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     calls = []
 
@@ -578,7 +580,7 @@ def test_probe_capacity_reuses_one_native_gpu_observation(monkeypatch):
 
 
 def test_probe_capacity_without_a_gpu_is_unknown(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
     monkeypatch.setattr(native_mod, "list_gpus", lambda: {"backend": "cpu", "gpus": []})
@@ -586,7 +588,7 @@ def test_probe_capacity_without_a_gpu_is_unknown(monkeypatch):
 
 
 def test_probe_capacity_keeps_the_registry_sum_when_inventory_fails(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     monkeypatch.setattr(native_mod, "require_native", lambda: SimpleNamespace(probe_capacity=_snap))
     monkeypatch.setattr(
@@ -602,7 +604,7 @@ def test_probe_capacity_keeps_the_registry_sum_when_inventory_fails(monkeypatch)
 
 
 def test_probe_capacity_classifies_registry_adapters_when_inventory_fails(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     class Native:
         def _probe_capacity_and_gpus(self):
@@ -633,9 +635,9 @@ def test_probe_capacity_classifies_registry_adapters_when_inventory_fails(monkey
 
 
 def test_probe_capacity_reports_effective_total_for_mixed_devices(monkeypatch):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
-    monkeypatch.setattr("kllm.config.load_config", lambda: {"unified_memory": None})
+    monkeypatch.setattr("kllm.shared.config.load_config", lambda: {"unified_memory": None})
 
     class Native:
         def _probe_capacity_and_gpus(self):
@@ -686,11 +688,11 @@ def test_probe_capacity_reports_effective_total_for_mixed_devices(monkeypatch):
 
 
 def test_list_gpus_from_probe_flags_integrated_adapters(monkeypatch, tmp_path):
-    import kllm.native as native_mod
+    import kllm.shared.native as native_mod
 
     monkeypatch.delenv("KLLM_ACCEL_BACKEND", raising=False)
     monkeypatch.setattr(
-        "kllm.config.load_config", lambda: {"unified_memory": None, "accel_backend": None}
+        "kllm.shared.config.load_config", lambda: {"unified_memory": None, "accel_backend": None}
     )
     binary = tmp_path / "llama-server"
     binary.write_text("stub", encoding="utf-8")
@@ -740,7 +742,7 @@ def test_list_gpus_from_probe_flags_integrated_adapters(monkeypatch, tmp_path):
             "metal_init_failed": False,
         },
     )
-    monkeypatch.setattr("kllm.state.repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("kllm.shared.state.repo_root", lambda: str(tmp_path))
 
     data = native_mod.list_gpus()
     assert [device["integrated"] for device in data["gpus"]] == [False, True]
@@ -768,16 +770,14 @@ def test_refresh_local_capacity_updates_member_vram(client):
                 "binary_version": "v",
             },
         ),
-        patch.object(
-            agent,
-            "_resolve_gpu_selection",
+        patch.object(agent_runtime, "_resolve_gpu_selection",
             return_value=ResolvedGpuSelection(
                 GpuSelection((0,), "vulkan", LLAMA_VRAM),
                 (GpuDeviceInput(index=0, name="AMD Radeon RX 9070 XT", vram_bytes=LLAMA_VRAM),),
             ),
         ) as resolve,
     ):
-        agent._refresh_local_capacity()
+        agent_runtime._refresh_local_capacity()
     assert resolve.call_args.kwargs["listed"]["binary_version"] == "v"
     member = agent.STATE.members[agent.STATE.node_id]
     assert member["vram_bytes"] == LLAMA_VRAM
@@ -798,17 +798,17 @@ def test_refresh_local_capacity_records_probe_failure(client):
     )
     with (
         patch.object(agent.native, "probe_capacity", return_value={"error": "timed out"}),
-        patch.object(agent, "_resolve_gpu_selection", side_effect=HTTPException(503, detail)),
+        patch.object(agent_runtime, "_resolve_gpu_selection", side_effect=HTTPException(503, detail)),
     ):
-        agent._refresh_local_capacity()
+        agent_runtime._refresh_local_capacity()
     assert agent.STATE.members[node_id]["capacity_probe_error"] == detail
 
 
 def test_capacity_service_rederives_auto_selection_without_integrated(tmp_path, monkeypatch):
     """An auto selection recorded by an older build drops its integrated adapter."""
-    from kllm.agent.services.capacity import CapacityService
-    from kllm.agent.services.gpus import GpuSelectionService
-    from kllm.state import ClusterState
+    from kllm.modules.inference.interactors.capacity import CapacityService
+    from kllm.modules.settings.interactors.gpus import GpuSelectionService
+    from kllm.shared.state import ClusterState
 
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     state = ClusterState.load()
@@ -852,9 +852,9 @@ def test_capacity_service_rederives_auto_selection_without_integrated(tmp_path, 
 
 def test_capacity_service_keeps_explicit_selection_including_integrated(tmp_path, monkeypatch):
     """An explicitly saved gpu_ids list is honored even when it includes an iGPU."""
-    from kllm.agent.services.capacity import CapacityService
-    from kllm.agent.services.gpus import GpuSelectionService
-    from kllm.state import ClusterState
+    from kllm.modules.inference.interactors.capacity import CapacityService
+    from kllm.modules.settings.interactors.gpus import GpuSelectionService
+    from kllm.shared.state import ClusterState
 
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     state = ClusterState.load()

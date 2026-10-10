@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { addressInSubnet, observedControlAddress } from '../src/lib/fast-subnet.ts';
+import { addressInSubnet, observedControlAddress } from '../src/lib/modules/cluster/fast-subnet.ts';
 
 test('a router address is outside the fast subnet and a private host is inside', () => {
   assert.equal(addressInSubnet('192.168.1.20', '10.10.10.0/24'), false);

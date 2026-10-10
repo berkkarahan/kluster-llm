@@ -11,7 +11,7 @@ import httpx
 import pytest
 import typer
 
-from kllm import connect
+from kllm.modules.connect.interactors import connect
 
 
 def install_transport(monkeypatch, handler):
@@ -379,7 +379,7 @@ def test_served_model_id_rejects_unknown_requested_model():
 
 
 def test_response_instructions_coalesce_only_leading_text_and_preserve_tools():
-    from kllm.gateway import _coalesce_response_instructions
+    from kllm.modules.inference.interactors.gateway import _coalesce_response_instructions
 
     user = {"role": "user", "content": "hello"}
     late = {"role": "developer", "content": "later"}

@@ -1,7 +1,7 @@
 ### 2026-09-29 - Facade patch surface
 
 **Status**
-Active
+Superseded by D3 on 2026-10-09. See `2026-10-09-viper-owning-module-patch-surface.md`.
 
 **ID**
 D1
@@ -16,7 +16,7 @@ Moving `STATE`, route helpers, or installer functions such as `_download_once` a
 `tests/test_install_script.py` loads `scripts/install.py` and patches its attributes. Agent tests assign `kllm.agent.STATE` and patch names on that module.
 
 **Where to look next**
-`.specify/memory/architecture_constitution.md` (Patch surface)
+D3, `2026-10-09-viper-owning-module-patch-surface.md`
 
 **Decision**
 Refactors of the agent and the installer keep patched names on the module tests already import. Siblings receive those callables and values as arguments.

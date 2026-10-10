@@ -10,7 +10,7 @@ test('history includes bounded keyboard-readable zero, gaps, UTC and failure sta
   try {
     server = await createSsrServer();
     const { render } = await server.ssrLoadModule('svelte/server');
-    const { default: UsageHistory } = await server.ssrLoadModule('/src/lib/components/UsageHistory.svelte');
+    const { default: UsageHistory } = await server.ssrLoadModule('/src/lib/modules/usage/view/UsageHistory.svelte');
     const life = { lifetime_id: 'w1:12:2026-09-28T12:00:00Z', pid: 12, state: 'ended', started_at: '2026-09-28T12:00:00Z',
       associations: [{ model: 'alpha.gguf', observed_from: '2026-09-28T12:00:00Z', observed_until: '2026-09-28T12:00:02Z' }] };
     const reading = { observed_at: '2026-09-28T12:00:02Z', process: { cpu_percent_machine: 0, rss_bytes: 0 },
@@ -39,36 +39,36 @@ test('history includes bounded keyboard-readable zero, gaps, UTC and failure sta
     assert.match(body, /RSS.*device 0.*33%/is);
     assert.match(body, /55 °C.*130 W/is);
 
-    const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
+    const appStore = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
     const priorFetch = globalThis.fetch;
     const pending = [];
     globalThis.fetch = (path) => new Promise((resolve) => pending.push({ path: String(path), resolve }));
     try {
       const reply = (call, payload) => call.resolve(new Response(JSON.stringify(payload), { status: 200 }));
-      appStore.selectedNodeId = 'w1';
-      appStore.selectedLifetimeId = 'l1';
-      appStore.usageWindow = '15m';
-      appStore.usageSeries = { buckets: [{ count: 1, start: 'old' }] };
-      appStore.usagePage = { readings: [{ observed_at: 'old' }], next_cursor: 'old' };
-      const oldLoad = appStore.loadUsageHistory();
-      assert.equal(appStore.usageSeries, null, 'old series must not look like a new filter');
-      assert.equal(appStore.usagePage, null);
-      const newLoad = appStore.selectUsageWindow('1h');
+      appStore.usage.selectedNodeId = 'w1';
+      appStore.usage.selectedLifetimeId = 'l1';
+      appStore.usage.usageWindow = '15m';
+      appStore.usage.usageSeries = { buckets: [{ count: 1, start: 'old' }] };
+      appStore.usage.usagePage = { readings: [{ observed_at: 'old' }], next_cursor: 'old' };
+      const oldLoad = appStore.usage.loadUsageHistory();
+      assert.equal(appStore.usage.usageSeries, null, 'old series must not look like a new filter');
+      assert.equal(appStore.usage.usagePage, null);
+      const newLoad = appStore.usage.selectUsageWindow('1h');
       reply(pending[2], { buckets: [{ count: 1, start: 'new' }], window_start: 'new' });
       reply(pending[3], { readings: [{ observed_at: 'new' }], next_cursor: 'next' });
       await newLoad;
       reply(pending[0], { buckets: [{ count: 1, start: 'old' }] });
       reply(pending[1], { readings: [{ observed_at: 'old' }] });
       await oldLoad;
-      assert.equal(appStore.usagePage.readings[0].observed_at, 'new');
-      const oldPage = appStore.nextUsagePage();
-      const latest = appStore.selectUsageWindow('24h');
+      assert.equal(appStore.usage.usagePage.readings[0].observed_at, 'new');
+      const oldPage = appStore.usage.nextUsagePage();
+      const latest = appStore.usage.selectUsageWindow('24h');
       reply(pending[4], { readings: [{ observed_at: 'outdated-page' }], next_cursor: null });
       await oldPage;
       reply(pending[5], { buckets: [{ count: 1, start: 'latest' }] });
       reply(pending[6], { readings: [{ observed_at: 'latest' }], next_cursor: null });
       await latest;
-      assert.deepEqual(appStore.usagePage.readings.map((point) => point.observed_at), ['latest']);
+      assert.deepEqual(appStore.usage.usagePage.readings.map((point) => point.observed_at), ['latest']);
     } finally {
       globalThis.fetch = priorFetch;
       appStore.stop();

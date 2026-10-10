@@ -6,15 +6,10 @@ from typing import Any
 
 import pytest
 
-from kllm.agent.services.cluster_updates import ClusterUpdateService
-from kllm.cluster_update import UpdateInProgressError
-from kllm.exceptions import (
-    AuthenticationError,
-    ConflictError,
-    ExternalServiceError,
-    ValidationError,
-)
-from kllm.state import ClusterState
+from kllm.modules.updates.interactors.cluster_update_service import ClusterUpdateService
+from kllm.modules.updates.interactors.cluster_update import UpdateInProgressError
+from kllm.shared.exceptions import AuthenticationError, ConflictError, ExternalServiceError, ValidationError
+from kllm.shared.state import ClusterState
 
 
 class FakeGateway:

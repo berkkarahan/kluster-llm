@@ -8,17 +8,12 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 
-from kllm import gateway
-from kllm.placement import memory_costs, plan_devices, MIB
-from kllm.core.placement_models import (
-    ModelLayout,
-    PlacementDeviceCandidate,
-    PlacementNodeInput,
-    PlacementSettings,
-)
-from kllm.run_launch import build_master_launch
-from kllm.run_planning import resolve_launch_settings
-from kllm.run_settings import RunBody
+from kllm.modules.inference.interactors import gateway
+from kllm.modules.inference.interactors.placement import memory_costs, plan_devices, MIB
+from kllm.modules.inference.interactors.placement_models import ModelLayout, PlacementDeviceCandidate, PlacementNodeInput, PlacementSettings
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.interactors.run_planning import resolve_launch_settings
+from kllm.modules.inference.entities import RunBody
 
 
 def settings(**kwargs):
@@ -26,7 +21,7 @@ def settings(**kwargs):
 
 
 def test_installed_device_names_include_unnumbered_metal():
-    from kllm.accel import parse_devices
+    from kllm.shared.accel import parse_devices
 
     devices = parse_devices(
         "Available devices:\n  Metal: Apple M5 Pro (49152 MiB, 40000 MiB free)\n  Vulkan0: AMD GPU (16304 MiB, 15000 MiB free)\n"
@@ -218,7 +213,7 @@ def test_single_remote_device_when_master_cannot_fit():
 
 def test_pool_proportional_avoids_even_split_oom():
     """Heterogeneous pool: each device stays within budget (no even-split OOM)."""
-    from kllm.tensor_split import proportional_weights, tensor_split_proportions
+    from kllm.modules.inference.interactors.tensor_split import proportional_weights, tensor_split_proportions
 
     assert tensor_split_proportions([24, 8]) == [24.0, 8.0]
     master = node("master", 800 * MIB, master=True)

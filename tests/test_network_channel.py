@@ -15,13 +15,8 @@ from types import SimpleNamespace
 import pytest
 import websockets
 
-from kllm.agent.services import network_channel
-from kllm.agent.services.network_channel import (
-    ChannelSession,
-    NetworkChannelHub,
-    _handshake_refused,
-    reconnect_delay,
-)
+from kllm.modules.managed_network.interactors import network_channel
+from kllm.modules.managed_network.interactors.network_channel import ChannelSession, NetworkChannelHub, _handshake_refused, reconnect_delay
 
 
 class _Scheduler:

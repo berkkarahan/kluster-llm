@@ -9,8 +9,8 @@ import pytest
 def kllm_home(tmp_path, monkeypatch):
     home = tmp_path / "kllm-home"
     monkeypatch.setenv("KLLM_HOME", str(home))
-    import kllm.state as state_mod
-    import kllm.config as config_mod
+    import kllm.shared.state as state_mod
+    import kllm.shared.config as config_mod
 
     importlib.reload(state_mod)
     importlib.reload(config_mod)

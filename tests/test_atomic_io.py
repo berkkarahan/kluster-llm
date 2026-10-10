@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from kllm import atomic_io
+from kllm.shared import atomic_io
 
 
 def _permission_error(winerror: int | None) -> PermissionError:

@@ -1,1 +1,1 @@
-"""Durable, explicitly paired private-network control. No host changes on import."""
+"""Stable package for kllm.managed_network.platform.inspection."""

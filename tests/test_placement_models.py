@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from kllm.core.placement_models import ModelLayout, PlacementNodeInput
+from kllm.modules.inference.interactors.placement_models import ModelLayout, PlacementNodeInput
 
 
 def test_placement_node_input_normalizes_nested_device_inventory():

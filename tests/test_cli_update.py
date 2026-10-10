@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from kllm.cli import main
-from kllm.cluster_update import UpdateError
-from kllm.commands import update
+from kllm.modules.updates.interactors.cluster_update import UpdateError
+from kllm.modules.updates import router_cli as update
 
 
 def _checkout(tmp_path: Path) -> Path:

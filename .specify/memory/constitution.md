@@ -90,7 +90,11 @@ maintainer reproduce both expected behavior and failures.
 - Specifications, plans, tasks, and reviews MUST comply with
   `.specify/memory/architecture_constitution.md`. That file is the structural coding
   standard: how modules, imports, and test patch surfaces are shaped. It does not add
-  product behavior.
+  product behavior. Amended 2026-10-09: each feature owns its module layout and its
+  test patch surface; facades remain only for the external entry points named in that
+  file. Reason: internal moves were retaining a facade for every historical patch path.
+  Impact: later specs patch the owning module, and the listed entry points stay
+  importable.
 
 ## Development Workflow and Quality Gates
 
@@ -134,4 +138,4 @@ Any temporary exception MUST record its rationale, bounded scope, maintainer app
 follow-up action with a review date in the change record. Exceptions MUST NOT permit public RPC
 exposure, secret disclosure, or removal of safeguards against data loss.
 
-**Version**: 1.2.0 | **Ratified**: 2026-09-28 | **Last Amended**: 2026-10-06
+**Version**: 1.3.0 | **Ratified**: 2026-09-28 | **Last Amended**: 2026-10-09

@@ -1,1 +1,1 @@
-"""Platform-specific temporary-address policy and ownership observation."""
+"""Stable package for kllm.managed_network.platform.inspection."""

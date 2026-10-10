@@ -5,7 +5,7 @@ description: "Install, rebuild, upgrade, or repair a Kluster LLM node on Windows
 
 # Install a Kluster node
 
-Locate the checkout through `KLLM_REPO_ROOT`, the current checkout, or `kllm.state.repo_root()`. Resolve repository paths below against that root. If it is unavailable, obtain the checkout location before offering installation commands.
+Locate the checkout through `KLLM_REPO_ROOT`, the current checkout, or `kllm.shared.state.repo_root()`. Resolve repository paths below against that root. If it is unavailable, obtain the checkout location before offering installation commands.
 
 1. Read `docs/agent-install.md`, including its recovery tree, before choosing commands. Check OS, Python, backend, checkout, available permissions, and whether this node is already running inference.
 2. Use `python scripts/install.py` (`python3` on macOS/Linux when appropriate, `py -3` on Windows). Use its documented flags for an intentional partial install. Do not replace this with system pip or a hand-built CMake flow unless recovering a specific documented failed stage.

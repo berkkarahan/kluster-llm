@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from kllm.agent.services.gpus import GpuSelectionService
-from kllm.exceptions import ResourceUnavailableError, ValidationError
+from kllm.modules.settings.interactors.gpus import GpuSelectionService
+from kllm.shared.exceptions import ResourceUnavailableError, ValidationError
 
 
 def make_service(payload: dict, configured: list[int] | None = None) -> GpuSelectionService:

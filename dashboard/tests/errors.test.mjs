@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { get } from 'svelte/store';
-import { createErrorPresentation } from '../src/lib/errors.ts';
+import { createErrorPresentation } from '../src/lib/shared/errors.ts';
 
 test('startup acknowledges initial failures, including sources first opened on another route', () => {
   const errors = createErrorPresentation();

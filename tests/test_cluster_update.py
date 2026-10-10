@@ -17,9 +17,9 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.cluster_update as update_mod
-    import kllm.commands.update_worker as update_worker_mod
-    import kllm.state as state_mod
+    import kllm.modules.updates.interactors.cluster_update as update_mod
+    import kllm.modules.updates.interactors.update_worker as update_worker_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     importlib.reload(update_mod)
@@ -33,7 +33,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_choose_rebuild_script_install_when_pin_changes():
-    from kllm.cluster_update import choose_rebuild_script
+    from kllm.modules.updates.interactors.cluster_update import choose_rebuild_script
 
     assert choose_rebuild_script("b1", "b2") == "install"
     assert choose_rebuild_script("b1\n", "b1") == "build"
@@ -41,7 +41,7 @@ def test_choose_rebuild_script_install_when_pin_changes():
 
 
 def test_repo_root_respects_env(tmp_path, monkeypatch):
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
 
     repo = tmp_path / "kluster-llm"
     (repo / "crates" / "kllm-native").mkdir(parents=True)
@@ -50,7 +50,7 @@ def test_repo_root_respects_env(tmp_path, monkeypatch):
 
 
 def test_legacy_orchestration_directories_do_not_mark_repo_root(tmp_path):
-    from kllm import state as state_mod
+    from kllm.shared import state as state_mod
 
     (tmp_path / "coordinator-macos").mkdir()
     (tmp_path / "worker-windows").mkdir()
@@ -59,7 +59,7 @@ def test_legacy_orchestration_directories_do_not_mark_repo_root(tmp_path):
 
 
 def test_software_identity_reads_pin(tmp_path):
-    from kllm.cluster_update import software_identity
+    from kllm.modules.updates.interactors.cluster_update import software_identity
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -200,7 +200,7 @@ def test_apply_worker_progress_aggregates(client):
 
 
 def test_git_ensure_clean_rejects_dirty(tmp_path, monkeypatch):
-    from kllm import cluster_update as update_mod
+    from kllm.modules.updates.interactors import cluster_update as update_mod
 
     root = tmp_path / "repo"
     root.mkdir()

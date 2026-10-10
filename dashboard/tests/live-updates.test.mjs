@@ -35,7 +35,7 @@ async function setup(t) {
   }
   globalThis.WebSocket = FakeWebSocket;
   globalThis.fetch = async () => new Response(JSON.stringify(snapshot()), { status: 200 });
-  const { DashboardUpdates } = await import('../src/lib/live-updates.ts');
+  const { DashboardUpdates } = await import('../src/lib/live/updates.ts');
   const applied = [];
   const health = [];
   const areaHealth = [];

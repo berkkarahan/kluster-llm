@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -7,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from kllm.membership import (
+from kllm.modules.cluster.interactors.membership import (
     HEARTBEAT_INTERVAL_S,
     LIVENESS_TIMEOUT_S,
     cluster_snapshot,
@@ -15,7 +17,7 @@ from kllm.membership import (
     on_membership_shrink,
     sweep_liveness,
 )
-from kllm.state import ClusterState
+from kllm.shared.state import ClusterState
 
 STATUS_KEYS = (
     "role",
@@ -67,7 +69,7 @@ def client(tmp_path, monkeypatch):
     import importlib
 
     import kllm.agent as agent_mod
-    import kllm.state as state_mod
+    import kllm.shared.state as state_mod
 
     importlib.reload(state_mod)
     agent_mod.STATE = state_mod.ClusterState.load()
@@ -295,8 +297,8 @@ def test_failed_join_does_not_write_member(client):
 @pytest.mark.unit
 def test_join_applies_cluster_members(client, monkeypatch):
     c, agent = client
-    monkeypatch.setattr(agent, "_ensure_master_control_route", lambda *_args: [])
-    from kllm.discovery import DiscoveredMaster, join_key_id
+    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
+    from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, join_key_id
 
     kid = join_key_id("secret")
     snapshot = {
@@ -479,11 +481,11 @@ def test_shrink_fits_restarts_serving(tmp_path, monkeypatch):
     )
     plan = _fake_plan(node_ids=["master1"], fit_status="fits")
     with (
-        patch("kllm.membership.execute_plan", return_value=plan) as ep,
-        patch("kllm.membership.native.stop_process"),
-        patch("kllm.membership.native.start_master", return_value={"pid": 222}) as sm,
-        patch("kllm.membership.runtime.clear_children"),
-        patch("kllm.membership.runtime.register_child"),
+        patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=plan) as ep,
+        patch("kllm.modules.cluster.interactors.membership.native.stop_process"),
+        patch("kllm.modules.cluster.interactors.membership.native.start_master", return_value={"pid": 222}) as sm,
+        patch("kllm.modules.cluster.interactors.membership.runtime.clear_children"),
+        patch("kllm.modules.cluster.interactors.membership.runtime.register_child"),
     ):
         on_membership_shrink(state)
     ep.assert_called_once()
@@ -520,11 +522,11 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
         warning="tight against budget",
     )
     with (
-        patch("kllm.membership.execute_plan", return_value=tight_plan),
-        patch("kllm.membership.native.stop_process"),
-        patch("kllm.membership.native.start_master", return_value={"pid": 333}),
-        patch("kllm.membership.runtime.clear_children"),
-        patch("kllm.membership.runtime.register_child"),
+        patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=tight_plan),
+        patch("kllm.modules.cluster.interactors.membership.native.stop_process"),
+        patch("kllm.modules.cluster.interactors.membership.native.start_master", return_value={"pid": 333}),
+        patch("kllm.modules.cluster.interactors.membership.runtime.clear_children"),
+        patch("kllm.modules.cluster.interactors.membership.runtime.register_child"),
     ):
         on_membership_shrink(tight_state)
     assert tight_state.apply_warning
@@ -548,10 +550,10 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
         node_ids=["master1"], fit_status="overflow", hint="does not fit remaining machines"
     )
     with (
-        patch("kllm.membership.execute_plan", return_value=overflow_plan),
-        patch("kllm.membership.native.stop_process") as sp,
-        patch("kllm.membership.native.start_master") as sm,
-        patch("kllm.membership.runtime.clear_children"),
+        patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=overflow_plan),
+        patch("kllm.modules.cluster.interactors.membership.native.stop_process") as sp,
+        patch("kllm.modules.cluster.interactors.membership.native.start_master") as sm,
+        patch("kllm.modules.cluster.interactors.membership.runtime.clear_children"),
     ):
         on_membership_shrink(overflow_state)
     sm.assert_not_called()
@@ -582,11 +584,11 @@ def test_manual_worker_loss_does_not_relaunch_or_show_stale_devices(tmp_path, mo
     )
     with (
         patch(
-            "kllm.membership.execute_plan", side_effect=ValueError("node shares must match members")
+            "kllm.modules.cluster.interactors.membership.execute_plan", side_effect=ValueError("node shares must match members")
         ),
-        patch("kllm.membership.native.stop_process") as stopped,
-        patch("kllm.membership.native.start_master") as started,
-        patch("kllm.membership.runtime.clear_children"),
+        patch("kllm.modules.cluster.interactors.membership.native.stop_process") as stopped,
+        patch("kllm.modules.cluster.interactors.membership.native.start_master") as started,
+        patch("kllm.modules.cluster.interactors.membership.runtime.clear_children"),
     ):
         on_membership_shrink(state)
     stopped.assert_called_once()
@@ -614,8 +616,8 @@ def test_shrink_plan_only_does_not_start(tmp_path, monkeypatch):
     )
     plan = _fake_plan(node_ids=["master1"], fit_status="fits")
     with (
-        patch("kllm.membership.execute_plan", return_value=plan),
-        patch("kllm.membership.native.start_master") as sm,
+        patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=plan),
+        patch("kllm.modules.cluster.interactors.membership.native.start_master") as sm,
     ):
         on_membership_shrink(state)
     sm.assert_not_called()
@@ -632,8 +634,8 @@ def test_shrink_plan_only_does_not_start(tmp_path, monkeypatch):
     )
     overflow_plan = _fake_plan(node_ids=["master1"], fit_status="overflow", hint="does not fit")
     with (
-        patch("kllm.membership.execute_plan", return_value=overflow_plan),
-        patch("kllm.membership.native.start_master") as sm,
+        patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=overflow_plan),
+        patch("kllm.modules.cluster.interactors.membership.native.start_master") as sm,
     ):
         on_membership_shrink(overflow_state)
     sm.assert_not_called()
@@ -652,7 +654,7 @@ def test_shrink_without_last_settings_is_membership_only(tmp_path, monkeypatch):
         last_plan={"node_ids": ["master1", "w1"]},
         process_pid=None,
     )
-    with patch("kllm.membership.execute_plan") as ep:
+    with patch("kllm.modules.cluster.interactors.membership.execute_plan") as ep:
         on_membership_shrink(state)
     ep.assert_not_called()
     assert state.last_plan["node_ids"] == ["master1", "w1"]
@@ -694,7 +696,7 @@ def test_grow_clears_stale_shrink_overflow(tmp_path, monkeypatch):
         budget_bytes=56_000_000_000,
         estimated_bytes=46_000_000_000,
     )
-    with patch("kllm.membership.execute_plan", return_value=plan):
+    with patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=plan):
         on_membership_grow(state)
     assert state.apply_error is None
     assert state.last_plan["fit_status"] == "fits"
@@ -711,7 +713,7 @@ def test_register_clears_stale_apply_error(client):
         fit_status="fits",
         budget_bytes=56_000_000_000,
     )
-    with patch("kllm.membership.execute_plan", return_value=plan):
+    with patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=plan):
         r = _register_worker(c)
     assert r.status_code == 200
     assert agent.STATE.apply_error is None
@@ -726,7 +728,7 @@ def test_unregister_triggers_shrink(client):
     agent.STATE.last_settings = {"model": "toy.gguf", "context": 4096, "threads": 8}
     agent.STATE.process_pid = None
     plan = _fake_plan(node_ids=[agent.STATE.node_id], fit_status="fits")
-    with patch("kllm.membership.execute_plan", return_value=plan):
+    with patch("kllm.modules.cluster.interactors.membership.execute_plan", return_value=plan):
         r = c.post("/v1/unregister", json={"node_id": "w1"}, headers={"X-Kllm-Key": "secret-key"})
     assert r.status_code == 200
     assert "w1" not in agent.STATE.members
@@ -766,11 +768,11 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
         agent.STATE.node_id: {"node_id": agent.STATE.node_id, "host": "10.0.0.2", "role": "worker"},
     }
     with patch("httpx.Client", side_effect=OSError("down")):
-        agent._worker_post_heartbeat()
+        agent_runtime._worker_post_heartbeat()
     assert agent.STATE.role == "worker"
     assert "master heartbeat unreachable" not in (agent.STATE.netsec_warnings or [])
     with patch("httpx.Client", side_effect=OSError("down")):
-        agent._worker_post_heartbeat()
+        agent_runtime._worker_post_heartbeat()
     assert agent.STATE.role == "worker"
     assert agent.STATE.node_id in agent.STATE.members
     assert any("unreachable" in w for w in (agent.STATE.netsec_warnings or []))
@@ -782,14 +784,14 @@ def test_worker_heartbeat_unreachable_stays_worker(client):
         json=lambda: {"accepted": True, "cluster_members": snapshot},
     )
     with (
-        patch.object(agent, "_ensure_master_control_route", return_value=[]),
+        patch.object(agent_runtime, "_ensure_master_control_route", return_value=[]),
         patch.object(
             agent.http_clients,
             "control_client",
             return_value=SimpleNamespace(post=lambda *a, **k: response),
         ),
     ):
-        agent._worker_post_heartbeat()
+        agent_runtime._worker_post_heartbeat()
     assert agent.STATE.role == "worker"
     assert agent.STATE.members == snapshot
     assert "master heartbeat unreachable" not in c.get("/v2/node").json()["netsec_warnings"]
@@ -801,14 +803,12 @@ def test_worker_heartbeat_precedes_capacity_refresh(client):
     events: list[str] = []
 
     with (
-        patch.object(
-            agent, "_worker_post_heartbeat", side_effect=lambda: events.append("heartbeat")
+        patch.object(agent_runtime, "_worker_post_heartbeat", side_effect=lambda: events.append("heartbeat")
         ),
-        patch.object(
-            agent, "_schedule_local_capacity_refresh", side_effect=lambda: events.append("refresh")
+        patch.object(agent_runtime, "_schedule_local_capacity_refresh", side_effect=lambda: events.append("refresh")
         ),
     ):
-        agent._tick_membership()
+        agent_runtime._tick_membership()
 
     assert events == ["heartbeat", "refresh"]
 
@@ -842,12 +842,12 @@ def test_master_liveness_sweep_does_not_wait_for_shrink_maintenance(client, monk
             second_replan.set()
 
     monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", blocked_replan)
-    assert agent._sync_master_liveness() == ["w1"]
+    assert agent_runtime._sync_master_liveness() == ["w1"]
     assert entered.wait(2)
 
     agent.STATE.members["w2"] = {"node_id": "w2", "role": "worker", "last_seen": time.time() - 30}
     started = time.monotonic()
-    assert agent._sync_master_liveness() == ["w2"]
+    assert agent_runtime._sync_master_liveness() == ["w2"]
     assert time.monotonic() - started < 0.5, "a blocked shrink replan delayed the next fast sweep"
     release.set()
     assert second_replan.wait(3)
@@ -867,7 +867,7 @@ def test_expired_worker_disconnection_reaches_live_feed_within_25_seconds(client
         },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": last_contact},
     }
-    agent.app.state.live_feed = agent._new_live_feed()
+    agent.app.state.live_feed = agent_runtime._new_live_feed()
     body = c.get("/v1/dashboard/live", params={"topics": "status,usage"}).json()["areas"]
     assert body["status"]["availability"] == "available"
     assert "w1" not in body["status"]["data"]["members"]
@@ -888,8 +888,8 @@ def test_failed_liveness_maintenance_does_not_strand_future_removals(client, mon
         },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
     }
-    monkeypatch.setattr(agent._membership_maintenance, "_pending", {})
-    monkeypatch.setattr(agent._membership_maintenance, "_inflight", False)
+    monkeypatch.setattr(agent_runtime._membership_maintenance, "_pending", {})
+    monkeypatch.setattr(agent_runtime._membership_maintenance, "_inflight", False)
     first_done = threading.Event()
     second_done = threading.Event()
     count = 0
@@ -905,10 +905,10 @@ def test_failed_liveness_maintenance_does_not_strand_future_removals(client, mon
         second_done.set()
 
     monkeypatch.setattr(agent.membership_mod, "on_membership_shrink", replan)
-    assert agent._sync_master_liveness() == ["w1"]
+    assert agent_runtime._sync_master_liveness() == ["w1"]
     assert first_done.wait(2)
     agent.STATE.members["w2"] = {"node_id": "w2", "role": "worker", "last_seen": time.time() - 30}
-    assert agent._sync_master_liveness() == ["w2"]
+    assert agent_runtime._sync_master_liveness() == ["w2"]
     assert second_done.wait(2), "failed maintenance permanently held the in-flight slot"
 
 
@@ -926,8 +926,8 @@ def test_liveness_maintenance_discards_obsolete_removal(client, monkeypatch, tra
         },
         "w1": {"node_id": "w1", "role": "worker", "last_seen": time.time() - 30},
     }
-    monkeypatch.setattr(agent._membership_maintenance, "_pending", {})
-    monkeypatch.setattr(agent._membership_maintenance, "_inflight", False)
+    monkeypatch.setattr(agent_runtime._membership_maintenance, "_pending", {})
+    monkeypatch.setattr(agent_runtime._membership_maintenance, "_inflight", False)
     entered = threading.Event()
     release = threading.Event()
     end_calls = []
@@ -942,12 +942,12 @@ def test_liveness_maintenance_discards_obsolete_removal(client, monkeypatch, tra
         assert release.wait(3)
         return Store()
 
-    monkeypatch.setattr(agent, "_usage_store", waiting_store)
+    monkeypatch.setattr(agent_runtime, "_usage_store", waiting_store)
     monkeypatch.setattr(
         agent.membership_mod, "on_membership_shrink", lambda _state: replans.append(True)
     )
     try:
-        assert agent._sync_master_liveness() == ["w1"]
+        assert agent_runtime._sync_master_liveness() == ["w1"]
         assert entered.wait(2)
         if transition == "rejoin":
             agent.STATE.members["w1"] = {
@@ -961,9 +961,9 @@ def test_liveness_maintenance_discards_obsolete_removal(client, monkeypatch, tra
         release.set()
 
     deadline = time.monotonic() + 2
-    while agent._membership_maintenance._inflight and time.monotonic() < deadline:
+    while agent_runtime._membership_maintenance._inflight and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert not agent._membership_maintenance._inflight
+    assert not agent_runtime._membership_maintenance._inflight
     assert end_calls == []
     assert replans == []
 
@@ -979,16 +979,16 @@ def test_capacity_refresh_allows_only_one_probe(client):
         def start(self):
             started.append(self.target)
 
-    assert not agent._capacity_refresh_scheduler.inflight
+    assert not agent_runtime._capacity_refresh_scheduler.inflight
     with patch.object(agent.threading, "Thread", FakeThread):
-        agent._schedule_local_capacity_refresh()
-        agent._schedule_local_capacity_refresh()
+        agent_runtime._schedule_local_capacity_refresh()
+        agent_runtime._schedule_local_capacity_refresh()
 
     assert len(started) == 1
     # Finish the captured background task so it resets module state for tests.
-    with patch.object(agent, "_refresh_local_capacity"):
+    with patch.object(agent_runtime, "_refresh_local_capacity"):
         started[0]()
-    assert not agent._capacity_refresh_scheduler.inflight
+    assert not agent_runtime._capacity_refresh_scheduler.inflight
 
 
 def test_worker_accepted_false_local_leave(client):
@@ -1032,12 +1032,12 @@ def test_worker_accepted_false_local_leave(client):
             return FakeResp()
 
     with (
-        patch.object(agent, "_ensure_master_control_route", return_value=[]),
+        patch.object(agent_runtime, "_ensure_master_control_route", return_value=[]),
         patch.object(agent.http_clients, "control_client", return_value=FakeControl()),
         patch.object(agent.native, "stop_process"),
         patch.object(agent.netsec, "tear_down_wireguard"),
     ):
-        agent._worker_post_heartbeat()
+        agent_runtime._worker_post_heartbeat()
     assert agent.STATE.role == "idle"
     assert agent.STATE.members == {}
 
@@ -1045,7 +1045,7 @@ def test_worker_accepted_false_local_leave(client):
 def test_register_keeps_advertised_host_when_rpc_bind_hint_sent():
     from types import SimpleNamespace
 
-    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import RegisterBody
 
     state = ClusterState(role="master", node_id="master", overlay="none")
@@ -1072,7 +1072,7 @@ def test_register_keeps_advertised_host_when_rpc_bind_hint_sent():
 def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
     from types import SimpleNamespace
 
-    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import RegisterBody
 
     state = ClusterState(role="master", node_id="master", overlay="none")
@@ -1111,7 +1111,7 @@ def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
 def test_heartbeat_response_carries_the_shared_node_directory():
     from types import SimpleNamespace
 
-    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import RegisterBody
 
     state = ClusterState(role="master", node_id="master", overlay="none")
@@ -1142,7 +1142,7 @@ def test_heartbeat_response_carries_the_shared_node_directory():
 def test_unregister_removes_the_directory_row():
     from types import SimpleNamespace
 
-    from kllm.agent.handlers.membership import MembershipHandlers
+    from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import UnregisterBody
 
     state = ClusterState(role="master", node_id="master", overlay="none")
@@ -1175,7 +1175,7 @@ def test_worker_runtime_reconciler_does_not_restart_unhealthy_worker(client, mon
     state.join_key = "secret"
     state.process_pid = None
     state.process_role = None
-    monkeypatch.setattr(agent, "_worker_runtime_healthy", lambda: False)
+    monkeypatch.setattr(agent_runtime, "_worker_runtime_healthy", lambda: False)
     calls: list[object] = []
 
     class FakeService:
@@ -1183,11 +1183,11 @@ def test_worker_runtime_reconciler_does_not_restart_unhealthy_worker(client, mon
             calls.append(current is state)
             return {"pid": 7}
 
-    monkeypatch.setattr(agent, "_runtime_setup_service", lambda: FakeService())
-    agent._worker_runtime_retry["failures"] = 0
-    agent._worker_runtime_retry["next_attempt"] = 0.0
+    monkeypatch.setattr(agent_runtime, "_runtime_setup_service", lambda: FakeService())
+    agent_runtime._worker_runtime_retry["failures"] = 0
+    agent_runtime._worker_runtime_retry["next_attempt"] = 0.0
 
-    agent._ensure_worker_runtime()
+    agent_runtime._ensure_worker_runtime()
 
     assert calls == []
 
@@ -1197,15 +1197,13 @@ def test_worker_runtime_reconciler_skips_healthy_worker(client, monkeypatch):
     agent.STATE.role = "worker"
     agent.STATE.master_host = "10.0.0.1"
     agent.STATE.join_key = "secret"
-    monkeypatch.setattr(agent, "_worker_runtime_healthy", lambda: True)
+    monkeypatch.setattr(agent_runtime, "_worker_runtime_healthy", lambda: True)
     calls: list[object] = []
-    monkeypatch.setattr(
-        agent,
-        "_runtime_setup_service",
+    monkeypatch.setattr(agent_runtime, "_runtime_setup_service",
         lambda: type("S", (), {"ensure_worker": lambda self, _state: calls.append(True)})(),
     )
 
-    agent._ensure_worker_runtime()
+    agent_runtime._ensure_worker_runtime()
 
     assert calls == []
 
@@ -1215,22 +1213,20 @@ def test_worker_runtime_reconciler_does_not_retry_without_master_command(client,
     agent.STATE.role = "worker"
     agent.STATE.master_host = "10.0.0.1"
     agent.STATE.join_key = "secret"
-    monkeypatch.setattr(agent, "_worker_runtime_healthy", lambda: False)
+    monkeypatch.setattr(agent_runtime, "_worker_runtime_healthy", lambda: False)
     calls: list[object] = []
-    monkeypatch.setattr(
-        agent,
-        "_runtime_setup_service",
+    monkeypatch.setattr(agent_runtime, "_runtime_setup_service",
         lambda: type(
             "S",
             (),
             {"ensure_worker": lambda self, _state: calls.append(True) or {"error": "bind failed"}},
         )(),
     )
-    agent._worker_runtime_retry["failures"] = 0
-    agent._worker_runtime_retry["next_attempt"] = 0.0
+    agent_runtime._worker_runtime_retry["failures"] = 0
+    agent_runtime._worker_runtime_retry["next_attempt"] = 0.0
 
-    agent._ensure_worker_runtime()
-    agent._ensure_worker_runtime()
+    agent_runtime._ensure_worker_runtime()
+    agent_runtime._ensure_worker_runtime()
 
     assert calls == []
-    assert agent._worker_runtime_retry["next_attempt"] == 0
+    assert agent_runtime._worker_runtime_retry["next_attempt"] == 0

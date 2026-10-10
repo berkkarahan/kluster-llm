@@ -17,22 +17,22 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
   let server;
   try {
     server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false, watch: null }, appType: 'custom' });
-    const { appStore } = await server.ssrLoadModule('/src/lib/store.svelte.ts');
+    const appStore = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
     const { render } = await server.ssrLoadModule('svelte/server');
     const { default: Home } = await server.ssrLoadModule('/src/routes/+page.svelte');
-    appStore.statusSeen = true;
-    appStore.connected = true;
-    appStore.status = { role: 'master', node_id: 'master', members: {
+    appStore.cluster.statusSeen = true;
+    appStore.live.connected = true;
+    appStore.cluster.status = { role: 'master', node_id: 'master', members: {
       master: { node_id: 'master', host: 'example', role: 'master' }
     }, inference_up: false };
-    appStore.liveUsage = { nodes: {
+    appStore.usage.liveUsage = { nodes: {
       master: { node_id: 'master', host: 'example', role: 'master',
         connected: true, freshness: 'unavailable', reading: null },
       gone: { node_id: 'gone', host: 'departed-host', role: 'worker',
         connected: false, freshness: 'stale', reading: null },
     }, relationships: [{ from_node_id: 'master', to_node_id: 'gone', kind: 'master-worker' }],
       recording: { recording: 'failed', last_successful_save: null } };
-    appStore.selectedNodeId = 'master';
+    appStore.usage.selectedNodeId = 'master';
     const live = render(Home).body;
     for (const control of ['Start', 'Stop', 'Join', 'Leave', 'Update workers', 'Details', 'History'])
       assert.match(live, new RegExp(control));
@@ -48,29 +48,29 @@ test('workspace keeps controls and chat reachable with textual live/offline stat
     // No permanent inspector and no eager history content.
     assert.doesNotMatch(live, /node-inspector/);
     assert.doesNotMatch(live, /Recorded usage/);
-    appStore.connected = false;
+    appStore.live.connected = false;
     assert.match(render(Home).body, /Disconnected.*not live/is);
-    appStore.connected = true;
-    appStore.status = { role: 'idle', node_id: 'master', members: {} };
+    appStore.live.connected = true;
+    appStore.cluster.status = { role: 'idle', node_id: 'master', members: {} };
     const stopped = render(Home).body;
     assert.match(stopped, /No members — Start as master or Join a cluster\./);
     assert.doesNotMatch(stopped, /example/);
     assert.doesNotMatch(stopped, /departed-host/);
     // Local agent availability must not make its saved worker mirror live.
-    appStore.status = { role: 'worker', node_id: 'worker', members: {
+    appStore.cluster.status = { role: 'worker', node_id: 'worker', members: {
       master: { node_id: 'master', host: 'saved-master', role: 'master' },
       worker: { node_id: 'worker', host: 'saved-worker', role: 'worker' }
     }, netsec_warnings: ['master heartbeat unreachable'] };
-    for (const usage of [null, appStore.liveUsage]) {
-      appStore.liveUsage = usage;
+    for (const usage of [null, appStore.usage.liveUsage]) {
+      appStore.usage.liveUsage = usage;
       const disconnected = render(Home).body;
-      assert.equal(appStore.viewState(), 'offline');
+      assert.equal(appStore.cluster.viewState(), 'offline');
       assert.match(disconnected, /0 connected/);
       assert.match(disconnected, /data-link-state="disconnected"/);
     }
     // A successful heartbeat clears the warning and restores current members.
-    appStore.status = { ...appStore.status, netsec_warnings: [] };
-    assert.equal(appStore.viewState(), 'live');
+    appStore.cluster.status = { ...appStore.cluster.status, netsec_warnings: [] };
+    assert.equal(appStore.cluster.viewState(), 'live');
     assert.match(render(Home).body, /2 connected/);
   } finally {
     try { await server?.watcher?.close(); } catch { /* no watcher */ }

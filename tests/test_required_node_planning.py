@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from kllm import native
-from kllm.agent.services.rpc_devices import worker_rpc_devices
-from kllm.core.contiguous_allocation import allocate_contiguous
-from kllm.core.placement_models import PlacementDeviceCandidate, PlacementNodeInput
-from kllm.core.gpu_selection import GpuDeviceInput
-from kllm.run_launch import build_master_launch
-from kllm.run_planning import resolve_launch_settings
-from kllm.run_settings import RunBody
+from kllm.shared import native
+from kllm.modules.inference.interactors.rpc_devices import worker_rpc_devices
+from kllm.modules.inference.interactors.contiguous_allocation import allocate_contiguous
+from kllm.modules.inference.interactors.placement_models import PlacementDeviceCandidate, PlacementNodeInput
+from kllm.modules.inference.interactors.gpu_selection import GpuDeviceInput
+from kllm.modules.inference.interactors.run_launch import build_master_launch
+from kllm.modules.inference.interactors.run_planning import resolve_launch_settings
+from kllm.modules.inference.entities import RunBody
 
 MIB = 1024**2
 
@@ -181,7 +181,7 @@ def test_manual_unified_devices_use_host_pool_and_individual_device_limits():
     p = plan([master], node_shares={"master": 1.0})
     assert p["fit_status"] != "overflow"
     # Reported 900+900 MiB is replaced by one 65% RAM pool, split across devices.
-    from kllm.accel import UNIFIED_VRAM_FRACTION_DEFAULT
+    from kllm.shared.accel import UNIFIED_VRAM_FRACTION_DEFAULT
 
     pool = int(master["total_ram_bytes"] * UNIFIED_VRAM_FRACTION_DEFAULT)
     assert p["node_gpu_budget_bytes"]["master"] == (pool // 2) * 2

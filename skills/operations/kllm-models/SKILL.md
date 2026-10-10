@@ -5,7 +5,7 @@ description: "Download, configure, capacity-plan, run, or remove models with Klu
 
 # Manage and run models
 
-Locate the Kluster checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.state.repo_root()`. Read `docs/cli.md` and use current `kllm model`, `kllm plan`, and `kllm run` help for supported flags.
+Locate the Kluster checkout through `KLLM_REPO_ROOT`, current checkout, or `kllm.shared.state.repo_root()`. Read `docs/cli.md` and use current `kllm model`, `kllm plan`, and `kllm run` help for supported flags.
 
 1. Inspect the master, model source/quantization, available storage, participating nodes, desired context, and active model. An existing active run keeps its effective configuration until stopped; changing deployment controls affects the next run.
 2. Download on the master with `uv run kllm model download 'org/repo:Q4_K_M'`, an exact GGUF filename source, or a supported direct URL. Keep GGUF files on the master; workers receive tensors over RPC. Use the existing credential mechanism for gated models without printing tokens.

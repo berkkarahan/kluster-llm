@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from kllm.agent.services.network_setup import (
-    MasterOverlaySetupService,
-    NetworkStateService,
-    WorkerOverlaySetupService,
-)
-from kllm.exceptions import ExternalServiceError, ResourceUnavailableError
-from kllm.state import ClusterState
+from kllm.modules.managed_network.interactors.network_setup import MasterOverlaySetupService, NetworkStateService, WorkerOverlaySetupService
+from kllm.shared.exceptions import ExternalServiceError, ResourceUnavailableError
+from kllm.shared.state import ClusterState
 
 
 def _network_state_service(state: ClusterState, calls: list[str]) -> NetworkStateService:

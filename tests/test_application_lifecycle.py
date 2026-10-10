@@ -9,12 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from kllm import http_clients
-from kllm.exceptions import PersistenceError
-from kllm.persistence import SQLiteOptions
+from kllm.shared import http_clients
+from kllm.shared.exceptions import PersistenceError
+from kllm.shared.persistence import SQLiteOptions
 from kllm.agent.application_lifecycle import AgentLifecycleDependencies, AgentLifespan
 from kllm.agent.lifecycle_bus import LifecycleEvent, LifecycleNotice, lifecycle_bus
-from kllm.state import ClusterState
+from kllm.shared.state import ClusterState
 
 
 @pytest.fixture(autouse=True)

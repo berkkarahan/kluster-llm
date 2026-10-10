@@ -10,8 +10,8 @@ import pytest
 def kllm_home(tmp_path, monkeypatch):
     home = tmp_path / "kllm-home"
     monkeypatch.setenv("KLLM_HOME", str(home))
-    import kllm.state as state_mod
-    import kllm.runtime as runtime_mod
+    import kllm.shared.state as state_mod
+    import kllm.shared.process_registry as runtime_mod
 
     importlib.reload(state_mod)
     importlib.reload(runtime_mod)
@@ -104,10 +104,7 @@ def test_stop_local_does_not_start_agent(kllm_home, monkeypatch):
     _, runtime = kllm_home
     runtime.register_agent(99, 18765)
 
-    import kllm.cli as cli
-    import kllm.commands.agent_runtime as cli_runtime
-
-    importlib.reload(cli)
+    import kllm.modules.cluster.interactors.agent_runtime as cli_runtime
 
     calls: list[str] = []
 
@@ -142,25 +139,23 @@ def test_stop_local_does_not_start_agent(kllm_home, monkeypatch):
             calls.append(f"DELETE {url}")
             return FakeResp()
 
-    monkeypatch.setattr(cli.httpx, "Client", FakeClient)
+    monkeypatch.setattr(cli_runtime.httpx, "Client", FakeClient)
     monkeypatch.setattr(cli_runtime.runtime, "kill_tracked", lambda: True)
     monkeypatch.setattr(cli_runtime.runtime, "clear", lambda: None)
 
     ensure_calls: list[int] = []
     monkeypatch.setattr(cli_runtime, "_ensure_agent", lambda port=18765: ensure_calls.append(port))
 
-    assert cli._stop_local(18765) is True
+    assert cli_runtime._stop_local(18765) is True
     assert ensure_calls == []
     assert any("/v2/cluster" in c for c in calls)
 
 
 def test_stop_command_nothing_to_stop(kllm_home, monkeypatch, capsys):
-    from kllm.commands import cluster_lifecycle
-    import kllm.cli as cli
+    from kllm.modules.cluster import lifecycle_cli as cluster_lifecycle
 
-    importlib.reload(cli)
     monkeypatch.setattr(cluster_lifecycle, "_stop_local", lambda port=18765: False)
-    cli.stop(port=18765)
+    cluster_lifecycle.stop(port=18765)
     out = capsys.readouterr().out
     assert "Nothing to stop" in out
 

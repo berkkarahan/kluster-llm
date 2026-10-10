@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import kllm.agent.runtime as agent_runtime
+
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-from kllm.agent.services.managed_network import ManagedNetworkService
-from kllm.managed_network.models import ManagedNetwork, NodeAssignment, NodeNetworkIdentity
-from kllm.managed_network.store import NetworkStore
+from kllm.modules.managed_network.interactors.service import ManagedNetworkService
+from kllm.modules.managed_network.entities import ManagedNetwork, NodeAssignment, NodeNetworkIdentity
+from kllm.modules.managed_network.gateways.store import NetworkStore
 
 
 def identity(node_id: str = "worker", **overrides) -> NodeNetworkIdentity:
@@ -144,7 +146,7 @@ def test_worker_mirrors_directory_snapshot(tmp_path, monkeypatch):
         monkeypatch.setattr(
             agent_mod.app.state, "managed_network", SimpleNamespace(store=store), raising=False
         )
-        agent_mod._apply_directory_snapshot(
+        agent_runtime._apply_directory_snapshot(
             [
                 identity(
                     "worker",
@@ -159,7 +161,7 @@ def test_worker_mirrors_directory_snapshot(tmp_path, monkeypatch):
         assert rows["worker"].hostname == "gpu-box"
         assert "../escaping" not in rows
 
-        agent_mod._apply_directory_snapshot([])
+        agent_runtime._apply_directory_snapshot([])
         assert store.directory() == []
     finally:
         store.close()

@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from kllm.agent.services.template_validation import TemplateValidationService
-from kllm.exceptions import ExternalServiceError, ResourceUnavailableError, ValidationError
+from kllm.modules.inference.interactors.template_validation import TemplateValidationService
+from kllm.shared.exceptions import ExternalServiceError, ResourceUnavailableError, ValidationError
 
 
 def test_template_validation_passes_a_temporary_file_to_engine():

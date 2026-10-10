@@ -3,9 +3,9 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-import kllm.gguf_meta as gguf_meta
-import kllm.model_defaults as model_defaults
-from kllm.model_defaults import (
+import kllm.modules.models.interactors.gguf_meta as gguf_meta
+import kllm.modules.inference.interactors.model_defaults as model_defaults
+from kllm.modules.inference.interactors.model_defaults import (
     ModelDefaults,
     apply_defaults_to_chat_body,
     clear_defaults_cache,

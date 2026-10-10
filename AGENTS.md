@@ -44,8 +44,9 @@ You MUST follow the memory-first workflow defined in `.specify/memory/workflow.m
 
 ## Conventions
 
-- Python application code uses the `src/kllm/` package; native code remains under `crates/kllm-native/`. Keep changes scoped to those boundaries.
-- Structural coding standards for specs, plans, and refactors: [`.specify/memory/architecture_constitution.md`](.specify/memory/architecture_constitution.md).
+- Python application code still lives in `src/kllm/`. Feature code is `modules/<feature>/`. Shared gateways are `shared/`. Composition roots are `kllm.agent` and `kllm.cli`. Native code remains under `crates/kllm-native/`.
+- The dashboard is Svelte 5 feature modules under `dashboard/src/lib/modules/`, with shared UI in `dashboard/src/lib/shared/`, the live feed in `dashboard/src/lib/live/`, and `createApp()` in `dashboard/src/lib/app.svelte.ts`.
+- Structural coding standards for specs, plans, and refactors: [`.specify/memory/architecture_constitution.md`](.specify/memory/architecture_constitution.md) (Module shape).
 - RPC is unauthenticated upstream — never recommend exposing port **50052** publicly.
 - Python is managed with **uv** (`.python-version`, `uv.lock`). After packaging changes, rebuild with `uv run python scripts/install.py` or `uv run python scripts/build.py` (maturin), not plain `pip install -e .` alone.
 - `llama-release` is the **stable** bootstrap default. Settings → llama.cpp supports explicit managed upstream/fork snapshots pinned to repository + commit. The master enforces one source identity for every run participant; backend builds may differ by node. Bootstrap installs still use `python scripts/install.py --llama-only`; managed selections use the isolated runtime library.

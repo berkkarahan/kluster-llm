@@ -10,10 +10,11 @@ import httpx
 import psutil
 import pytest
 
-from kllm import logging_control, native
-from kllm.cluster_log import LogHub, make_event
-from kllm.log_sink import OutputSink
-from kllm.state import ClusterState
+from kllm.modules.logs.interactors import logging_control
+from kllm.shared import native
+from kllm.modules.logs.interactors.cluster_log import LogHub, make_event
+from kllm.shared.log_sink import OutputSink
+from kllm.shared.state import ClusterState
 
 
 def wait_for(check, timeout=5):
@@ -183,7 +184,7 @@ def test_new_sink_inherits_persisted_stop(tmp_path, monkeypatch):
 
 def test_terminal_handler_applies_stop_without_a_new_log_record(tmp_path, monkeypatch):
     import logging
-    from kllm.log_sink import PolicyFileHandler
+    from kllm.shared.log_sink import PolicyFileHandler
 
     monkeypatch.setenv("KLLM_HOME", str(tmp_path))
     state = ClusterState()

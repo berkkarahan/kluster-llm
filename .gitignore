@@ -63,8 +63,6 @@ dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
 
-.specify
-.agents
 .claude
 
 # Generated native skill installations and recovery metadata

@@ -95,6 +95,7 @@ copies for supported agents with `python3 scripts/install_skills.py`; preview wi
 ## Network requirements
 
 - Keep RPC port 50052 on a private LAN or WireGuard overlay. Upstream llama.cpp RPC has no authentication.
+- The control plane listens on port 18765 and is also private. See [SECURITY.md](SECURITY.md).
 - Prefer a dedicated 10GbE or Thunderbolt IP link for multi-node inference.
 - Use stable IP addresses on dedicated links; DHCP changes interrupt active RPC sessions.
 - Never expose port 50052 publicly.
@@ -171,6 +172,7 @@ uv run pre-commit install
 - [Agent installation guide](docs/agent-install.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Engine decision and RPC security](docs/engine-decision.md)
+- [Security policy](SECURITY.md)
 - [Placement and inference](docs/inference-distribution.md)
 - [Memory constraints](docs/memory-constraints.md)
 - [Network configuration](network-config/10gbe-bridging-guide.md)

@@ -24,6 +24,6 @@ PYO3_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" cargo test
 npm --prefix dashboard run check
 ```
 
-Pull requests run Ruff and the Python tests. Run the dashboard and Rust suites locally when those areas change.
+Pull requests run Ruff, and that check is required to merge. The Python suite also runs on GitHub, but it does not gate the pull request: some tests expect more than four CPU threads and a local WireGuard install. Run the dashboard, Rust, and full Python suites locally when those areas change.
 
 `git push` runs Ruff through the pre-commit hook on the Python files in the commits being pushed.

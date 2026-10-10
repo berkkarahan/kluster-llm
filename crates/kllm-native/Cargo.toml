@@ -27,7 +27,7 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-sysinfo = "0.33"
+sysinfo = "0.39"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 base64 = "0.22"
 ed25519-dalek = "2"

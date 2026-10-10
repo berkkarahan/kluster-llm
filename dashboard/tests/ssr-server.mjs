@@ -1,4 +1,3 @@
-import { resolve } from 'node:path';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
 
@@ -8,7 +7,6 @@ export function createSsrServer() {
     configFile: false,
     root: process.cwd(),
     plugins: [svelte({ preprocess: vitePreprocess() })],
-    resolve: { alias: { '$lib': resolve(process.cwd(), 'src/lib') } },
     server: { middlewareMode: true, hmr: false, ws: false, watch: null },
     appType: 'custom'
   });

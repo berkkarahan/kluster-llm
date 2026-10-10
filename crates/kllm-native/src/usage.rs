@@ -555,7 +555,7 @@ impl UsageCollector {
         }
         let request: Request = serde_json::from_str(request_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        let result = py.allow_threads(|| self.collect(request));
+        let result = py.detach(|| self.collect(request));
         result.map_err(pyo3::exceptions::PyValueError::new_err)
     }
 }

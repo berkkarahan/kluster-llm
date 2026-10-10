@@ -318,7 +318,7 @@ pub fn probe_ipv4_conflict(
     }
     #[cfg(unix)]
     {
-        py.allow_threads(|| probe_native(&interface, &mac, &address))
+        py.detach(|| probe_native(&interface, &mac, &address))
             .map_err(python_io)
     }
 }
@@ -369,7 +369,7 @@ impl IPv4ConflictObserver {
         self.status_native()
     }
     fn close(&self, py: Python<'_>) {
-        py.allow_threads(|| self.close_native());
+        py.detach(|| self.close_native());
     }
 }
 #[cfg(unix)]
@@ -381,7 +381,7 @@ pub fn start_ipv4_conflict_observer(
     mac: String,
     address: String,
 ) -> PyResult<IPv4ConflictObserver> {
-    py.allow_threads(|| start_native(interface, mac, address)).map_err(python_io)
+    py.detach(|| start_native(interface, mac, address)).map_err(python_io)
 }
 
 #[cfg(unix)]

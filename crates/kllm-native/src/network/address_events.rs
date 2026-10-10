@@ -144,11 +144,11 @@ impl Drop for AddressObserver {
 #[pymethods]
 impl AddressObserver {
     fn events(&self, py: Python<'_>) -> PyResult<String> {
-        py.allow_threads(|| self.events_native())
+        py.detach(|| self.events_native())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
     fn close(&self, py: Python<'_>) {
-        py.allow_threads(|| self.close_native());
+        py.detach(|| self.close_native());
     }
     fn invalidate(&self) {
         self.invalidate_native();
@@ -616,6 +616,6 @@ pub fn start_address_observer(
     interface_index: u32,
     epoch: String,
 ) -> PyResult<AddressObserver> {
-    py.allow_threads(|| start(interface_index, epoch))
+    py.detach(|| start(interface_index, epoch))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }

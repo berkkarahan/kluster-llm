@@ -1,18 +1,18 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { routes } from '$lib/shared/navigation';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import LoadProgressPanel from '$lib/modules/run/view/LoadProgressPanel.svelte';
-  import InferenceActivity from '$lib/modules/usage/view/InferenceActivity.svelte';
-  import ManagedNetwork from '$lib/modules/network/view/ManagedNetwork.svelte';
-  import ClusterTopology from '$lib/modules/cluster/view/ClusterTopology.svelte';
-  import Icon from '$lib/shared/Icon.svelte';
-  import NodeUsageDetails from '$lib/modules/usage/view/NodeUsageDetails.svelte';
-  import UsageHistory from '$lib/modules/usage/view/UsageHistory.svelte';
-  import { addressInSubnet, observedControlAddress } from '$lib/modules/cluster/fast-subnet';
-  import { formatGib } from '$lib/shared/format-memory';
+  import { createApp } from '#lib/app.svelte';
+  import { routes } from '#lib/shared/navigation';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import LoadProgressPanel from '#lib/modules/run/view/LoadProgressPanel.svelte';
+  import InferenceActivity from '#lib/modules/usage/view/InferenceActivity.svelte';
+  import ManagedNetwork from '#lib/modules/network/view/ManagedNetwork.svelte';
+  import ClusterTopology from '#lib/modules/cluster/view/ClusterTopology.svelte';
+  import Icon from '#lib/shared/Icon.svelte';
+  import NodeUsageDetails from '#lib/modules/usage/view/NodeUsageDetails.svelte';
+  import UsageHistory from '#lib/modules/usage/view/UsageHistory.svelte';
+  import { addressInSubnet, observedControlAddress } from '#lib/modules/cluster/fast-subnet';
+  import { formatGib } from '#lib/shared/format-memory';
   import { onMount, tick } from 'svelte';
-  import type { App } from '$lib/app.svelte';
+  import type { App } from '#lib/app.svelte';
   let { cluster = createApp().cluster, usage = createApp().usage, settings = createApp().settings, run = createApp().run, network = createApp().network }: {
     cluster?: App['cluster'];
     usage?: App['usage'];

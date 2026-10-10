@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
+  import { createApp } from '#lib/app.svelte';
   import type { ClusterInteractor } from '../../cluster/interactor.svelte';
   let { presenter = createApp().cluster }: { presenter?: ClusterInteractor } = $props();
   /**

@@ -1,19 +1,19 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { routes } from '$lib/shared/navigation';
+  import { createApp } from '#lib/app.svelte';
+  import { routes } from '#lib/shared/navigation';
   import { tick, untrack } from 'svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import DownloadPanel from '$lib/modules/models/view/DownloadPanel.svelte';
-  import LoadProgressPanel from '$lib/modules/run/view/LoadProgressPanel.svelte';
-  import JinjaEditor from '$lib/modules/run/view/JinjaEditor.svelte';
-  import ParameterControl from '$lib/modules/run/view/ParameterControl.svelte';
-  import ExpertArguments from '$lib/modules/run/view/ExpertArguments.svelte';
-  import DeploymentPlan from '$lib/modules/run/view/DeploymentPlan.svelte';
-  import { formatGib } from '$lib/shared/format-memory';
-  import { MIN_CONTEXT } from '$lib/modules/run/entities';
-  import type { DeviceAllocation } from '$lib/modules/run/entities';
-  import { PARAMETER_LABELS } from '$lib/modules/run/configuration';
-  import { runtimeRunReason } from '$lib/modules/run/runtime-readiness';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import DownloadPanel from '#lib/modules/models/view/DownloadPanel.svelte';
+  import LoadProgressPanel from '#lib/modules/run/view/LoadProgressPanel.svelte';
+  import JinjaEditor from '#lib/modules/run/view/JinjaEditor.svelte';
+  import ParameterControl from '#lib/modules/run/view/ParameterControl.svelte';
+  import ExpertArguments from '#lib/modules/run/view/ExpertArguments.svelte';
+  import DeploymentPlan from '#lib/modules/run/view/DeploymentPlan.svelte';
+  import { formatGib } from '#lib/shared/format-memory';
+  import { MIN_CONTEXT } from '#lib/modules/run/entities';
+  import type { DeviceAllocation } from '#lib/modules/run/entities';
+  import { PARAMETER_LABELS } from '#lib/modules/run/configuration';
+  import { runtimeRunReason } from '#lib/modules/run/runtime-readiness';
   import type { RunInteractor } from '../interactor.svelte';
   let { presenter = createApp().run }: { presenter?: RunInteractor } = $props();
 

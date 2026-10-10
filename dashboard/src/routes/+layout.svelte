@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { routes } from '$lib/shared/navigation';
+  import { createApp } from '#lib/app.svelte';
+  import { routes } from '#lib/shared/navigation';
   import '../app.css';
   import '../prototype.css';
   import { onMount } from 'svelte';
   import { page } from '$app/state';
-  import InferenceActivity from '$lib/modules/usage/view/InferenceActivity.svelte';
-  import Icon from '$lib/shared/Icon.svelte';
-  import { toasts, dismissToast } from '$lib/shared/toast';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import InferenceActivity from '#lib/modules/usage/view/InferenceActivity.svelte';
+  import Icon from '#lib/shared/Icon.svelte';
+  import { toasts, dismissToast } from '#lib/shared/toast';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   const app = createApp();
   const cluster = app.cluster;
   const models = app.models;

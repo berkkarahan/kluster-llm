@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import { openRun } from '$lib/modules/models/router';
-  import DownloadPanel from '$lib/modules/models/view/DownloadPanel.svelte';
-  import LoadProgressPanel from '$lib/modules/run/view/LoadProgressPanel.svelte';
-  import { formatGb } from '$lib/shared/format-transfer';
-  import type { ModelSearchFit, ModelSearchHit } from '$lib/modules/models/entities';
-  import type { App } from '$lib/app.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import { openRun } from '#lib/modules/models/router';
+  import DownloadPanel from '#lib/modules/models/view/DownloadPanel.svelte';
+  import LoadProgressPanel from '#lib/modules/run/view/LoadProgressPanel.svelte';
+  import { formatGb } from '#lib/shared/format-transfer';
+  import type { ModelSearchFit, ModelSearchHit } from '#lib/modules/models/entities';
+  import type { App } from '#lib/app.svelte';
   let { models = createApp().models, run = createApp().run, cluster = createApp().cluster }: {
     models?: App['models'];
     run?: App['run'];

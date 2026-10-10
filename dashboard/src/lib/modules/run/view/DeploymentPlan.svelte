@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { routes } from '$lib/shared/navigation';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import { formatGib, formatMemoryComponent } from '$lib/shared/format-memory';
-  import { runtimeRunReason } from '$lib/modules/run/runtime-readiness';
+  import { createApp } from '#lib/app.svelte';
+  import { routes } from '#lib/shared/navigation';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import { formatGib, formatMemoryComponent } from '#lib/shared/format-memory';
+  import { runtimeRunReason } from '#lib/modules/run/runtime-readiness';
   import type { RunInteractor } from '../interactor.svelte';
   let { presenter = createApp().run }: { presenter?: RunInteractor } = $props();
   const plan = $derived(presenter.planResult);

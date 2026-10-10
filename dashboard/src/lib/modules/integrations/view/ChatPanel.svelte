@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import Icon from '$lib/shared/Icon.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import Icon from '#lib/shared/Icon.svelte';
   import type { IntegrationsInteractor } from '../interactor.svelte';
   let { presenter = createApp().integrations }: { presenter?: IntegrationsInteractor } = $props();
 </script>

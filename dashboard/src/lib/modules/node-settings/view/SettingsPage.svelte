@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
+  import { createApp } from '#lib/app.svelte';
   /**
    * System Settings tab. Centralizes cluster runtime, bind, and secret
    * configuration. The top nav is provided by +layout.svelte, so this page only
@@ -7,12 +7,12 @@
    * HardwareSettings control; the rest are dedicated panels.
    */
   import { onMount } from 'svelte';
-  import HardwareSettings from '$lib/modules/node-settings/view/HardwareSettings.svelte';
-  import NetworkSecurity from '$lib/modules/node-settings/view/NetworkSecurity.svelte';
-  import Tokens from '$lib/modules/node-settings/view/Tokens.svelte';
-  import Software from '$lib/modules/node-settings/view/Software.svelte';
-  import LlamaRuntimes from '$lib/modules/runtimes/view/LlamaRuntimes.svelte';
-  import type { App } from '$lib/app.svelte';
+  import HardwareSettings from '#lib/modules/node-settings/view/HardwareSettings.svelte';
+  import NetworkSecurity from '#lib/modules/node-settings/view/NetworkSecurity.svelte';
+  import Tokens from '#lib/modules/node-settings/view/Tokens.svelte';
+  import Software from '#lib/modules/node-settings/view/Software.svelte';
+  import LlamaRuntimes from '#lib/modules/runtimes/view/LlamaRuntimes.svelte';
+  import type { App } from '#lib/app.svelte';
   let { settings = createApp().settings, cluster = createApp().cluster, runtimes = createApp().runtimes }: {
     settings?: App['settings'];
     cluster?: App['cluster'];

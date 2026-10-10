@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import type { UsageLive, UsageNode } from '$lib/modules/usage/entities';
-  import { formatGib } from '$lib/shared/format-memory';
+  import type { UsageLive, UsageNode } from '#lib/modules/usage/entities';
+  import { formatGib } from '#lib/shared/format-memory';
 
   let { nodes, relationships, selectedId, onselect }: {
     nodes: Record<string, UsageNode>;

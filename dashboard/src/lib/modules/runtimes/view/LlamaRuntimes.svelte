@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { routes } from '$lib/shared/navigation';
+  import { createApp } from '#lib/app.svelte';
+  import { routes } from '#lib/shared/navigation';
   import { onMount } from 'svelte';
-  import { errors } from '$lib/shared/errors';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import type { RuntimeVersion, RuntimeJob, RuntimeNode, RuntimeSources } from '$lib/modules/runtimes/entities';
+  import { errors } from '#lib/shared/errors';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import type { RuntimeVersion, RuntimeJob, RuntimeNode, RuntimeSources } from '#lib/modules/runtimes/entities';
   import type { RuntimesInteractor } from '../interactor.svelte';
   let { presenter = createApp().runtimes }: { presenter?: RuntimesInteractor } = $props();
 

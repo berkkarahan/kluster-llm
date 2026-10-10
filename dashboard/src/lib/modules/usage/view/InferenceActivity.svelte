@@ -1,6 +1,6 @@
 <script lang="ts">
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import type { InferenceActivity } from '$lib/modules/usage/entities';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import type { InferenceActivity } from '#lib/modules/usage/entities';
 
   let {
     activity,

@@ -70,7 +70,7 @@ pub fn source_connect(source: Ipv4Addr, target: SocketAddrV4, timeout: Duration)
     socket.bind(&SocketAddrV4::new(source, 0).into())?;
     socket.connect_timeout(&target.into(), timeout)?;
     socket.set_nonblocking(false)?;
-    socket.set_nodelay(true)?;
+    socket.set_tcp_nodelay(true)?;
     Ok(socket.into())
 }
 

@@ -1,9 +1,9 @@
 <script lang="ts">
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import Icon from '$lib/shared/Icon.svelte';
-  import { formatGib } from '$lib/shared/format-memory';
-  import type { ManagedNetwork } from '$lib/modules/network/entities';
-import type { UsageNode } from '$lib/modules/usage/entities';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import Icon from '#lib/shared/Icon.svelte';
+  import { formatGib } from '#lib/shared/format-memory';
+  import type { ManagedNetwork } from '#lib/modules/network/entities';
+import type { UsageNode } from '#lib/modules/usage/entities';
 
   type FastSubnetPhase = 'hidden' | 'checking' | 'ready' | 'busy';
   type FastSubnetNode = {

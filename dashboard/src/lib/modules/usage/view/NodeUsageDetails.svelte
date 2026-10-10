@@ -1,7 +1,7 @@
 <script lang="ts">
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import { formatGib } from '$lib/shared/format-memory';
-  import type { InferenceActivity, UsageNode } from '$lib/modules/usage/entities';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import { formatGib } from '#lib/shared/format-memory';
+  import type { InferenceActivity, UsageNode } from '#lib/modules/usage/entities';
 
   let { node, assignment, activity }: { node: UsageNode | null; assignment: boolean; activity: InferenceActivity | null } = $props();
   const reading = $derived(node?.reading);

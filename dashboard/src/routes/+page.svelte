@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ClusterPage from '$lib/modules/cluster/view/ClusterPage.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ClusterPage from '#lib/modules/cluster/view/ClusterPage.svelte';
 
   const app = createApp();
 </script>

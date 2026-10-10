@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   /**
    * HF / URL download job strip. State comes from models.downloadJob
    * (shared dashboard live feed); cancel is non-blocking.
    */
-  import { errors } from '$lib/shared/errors';
-  import { composeProgressLabel, formatGb } from '$lib/shared/format-transfer';
-  import type { App } from '$lib/app.svelte';
+  import { errors } from '#lib/shared/errors';
+  import { composeProgressLabel, formatGb } from '#lib/shared/format-transfer';
+  import type { App } from '#lib/app.svelte';
   let { models = createApp().models, settings = createApp().settings }: {
     models?: App['models'];
     settings?: App['settings'];

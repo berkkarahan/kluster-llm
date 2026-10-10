@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { pushToast } from '$lib/shared/toast';
+  import { createApp } from '#lib/app.svelte';
+  import { pushToast } from '#lib/shared/toast';
   import { onMount } from 'svelte';
-  import ChatPanel from '$lib/modules/integrations/view/ChatPanel.svelte';
-  import { connectCommand, type CommandShell } from '$lib/modules/integrations/connect-command';
-  import type { App } from '$lib/app.svelte';
+  import ChatPanel from '#lib/modules/integrations/view/ChatPanel.svelte';
+  import { connectCommand, type CommandShell } from '#lib/modules/integrations/connect-command';
+  import type { App } from '#lib/app.svelte';
   let { cluster = createApp().cluster, integrations = createApp().integrations }: {
     cluster?: App['cluster'];
     integrations?: App['integrations'];

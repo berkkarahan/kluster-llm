@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import { formatArguments, parseArgumentText } from '$lib/modules/run/configuration';
+  import { createApp } from '#lib/app.svelte';
+  import { formatArguments, parseArgumentText } from '#lib/modules/run/configuration';
   import type { RunInteractor } from '../interactor.svelte';
   let { presenter = createApp().run }: { presenter?: RunInteractor } = $props();
   let search = $state('');

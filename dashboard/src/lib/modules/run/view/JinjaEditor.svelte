@@ -1,6 +1,6 @@
 <script lang="ts">
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import { errors } from '$lib/shared/errors';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import { errors } from '#lib/shared/errors';
   import { onMount } from 'svelte';
 
   let { initialText, onApply, onClose }: {

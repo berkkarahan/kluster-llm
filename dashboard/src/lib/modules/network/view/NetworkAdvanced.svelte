@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   import { onDestroy } from 'svelte';
-  import { errors } from '$lib/shared/errors';
-  import type { ManagedNetwork, NetworkAdapter, NetworkIdentity, NetworkInventory } from '$lib/modules/network/entities';
+  import { errors } from '#lib/shared/errors';
+  import type { ManagedNetwork, NetworkAdapter, NetworkIdentity, NetworkInventory } from '#lib/modules/network/entities';
   import type { NetworkInteractor } from '../interactor.svelte';
   let { presenter = createApp().network }: { presenter?: NetworkInteractor } = $props();
 

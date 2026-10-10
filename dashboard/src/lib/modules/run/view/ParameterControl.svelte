@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { PARAMETER_LABELS, parameterBounds } from '$lib/modules/run/configuration';
-  import { KV_CACHE_TYPES } from '$lib/modules/run/entities';
+  import { PARAMETER_LABELS, parameterBounds } from '#lib/modules/run/configuration';
+  import { KV_CACHE_TYPES } from '#lib/modules/run/entities';
 
-  import { createApp } from '$lib/app.svelte';
+  import { createApp } from '#lib/app.svelte';
   import type { RunInteractor } from '../interactor.svelte';
   let { name, label, presenter = createApp().run }: { name: string; label?: string; presenter?: RunInteractor } = $props();
   const descriptor = $derived(presenter.parameterDescriptor(name));

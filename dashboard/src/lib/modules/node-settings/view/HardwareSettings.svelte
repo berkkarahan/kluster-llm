@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   /**
    * System / hardware settings: device (CPU|GPU), accel backend (CUDA/Vulkan/…),
    * multi-GPU selection, and VRAM/RAM budget. Persists via PUT /v2/node/config —
    * no hard reload required (mirrors Unsloth's hardware info + engine toggles).
    */
-  import SliderField from '$lib/shared/SliderField.svelte';
-  import { formatGib, selectedCapacity } from '$lib/shared/format-memory';
+  import SliderField from '#lib/shared/SliderField.svelte';
+  import { formatGib, selectedCapacity } from '#lib/shared/format-memory';
   import type { NodeSettingsInteractor } from '../interactor.svelte';
   let { presenter = createApp().settings, lockBackend = false, onChanged }: {
     presenter?: NodeSettingsInteractor;

@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   /**
    * Live inference load strip — Unsloth Studio chat toast analogue.
    * Phases: Starting engine → Loading to VRAM/RAM → Ready | error | OOM Warning.
    * Reads the shared dashboard live feed; never blocks UI.
    */
-  import { errors } from '$lib/shared/errors';
-  import { composeProgressLabel } from '$lib/shared/format-transfer';
+  import { errors } from '#lib/shared/errors';
+  import { composeProgressLabel } from '#lib/shared/format-transfer';
   import type { RunInteractor } from '../interactor.svelte';
   let { presenter = createApp().run }: { presenter?: RunInteractor } = $props();
 

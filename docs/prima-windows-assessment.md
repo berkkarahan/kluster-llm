@@ -16,6 +16,21 @@ always the authoritative source SHA and build digest. The fork currently pins
 `288df6a2cc2120387e12d6f40798f30cc525c9ea`. Baseline llama.cpp is `v0.5.0`,
 `7fe450e19305b828c199d602c23a8337aaa1f03b`.
 
+Kluster implementation revision:
+`42be21fbc0df5e9e022635de86e879478bdceaa1` on `feat/prima-integration`.
+This receipt is a subsequent documentation commit. Record `git rev-parse HEAD` in
+every Windows receipt as well as the Prima source and recipe identities.
+For a fresh machine, clone the branch before the setup commands below:
+
+```powershell
+git clone --branch feat/prima-integration https://github.com/berkkarahan/kluster-llm.git
+Set-Location kluster-llm
+```
+
+The remote Git history was rewritten while this handoff was being prepared. Existing
+checkouts with the previous history should preserve local work and use a fresh checkout
+for assessment; a failed fast-forward pull is not a reason to force-push that history.
+
 Build recipe 7 digest for this handoff:
 `084e6674c89d9e454e004df6e6f2a8b926cb285b1dca3b1679afbffd90c485bb`.
 Native CPU compilation and contract checks passed on all three CI platforms in

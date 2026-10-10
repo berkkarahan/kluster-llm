@@ -155,3 +155,12 @@ chunks to sender, run and authority; its controlled transfer check launches no i
 
 All six source-controlled qualification gates remain false. No existing live cluster,
 adapter configuration, inference process or production runtime selection was changed.
+
+Kluster implementation revision: `42be21fbc0df5e9e022635de86e879478bdceaa1`,
+branch `feat/prima-integration`. The remote branch/main histories were rewritten
+during the session. An isolated checkout merged the existing module refactor from
+its equivalent published revision and reapplied the feature commit. Both the merge
+result and the final implementation tree were verified byte-for-byte against the
+locally validated trees. Publication uses a normal fast-forward push; no remote
+history is overwritten. The original local history is retained in a private Git ref.
+Only this handoff receipt is added after the implementation revision.

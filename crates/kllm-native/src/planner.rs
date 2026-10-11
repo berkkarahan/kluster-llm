@@ -172,14 +172,14 @@ impl PlanRequest {
         let nodes_obj = dict
             .get_item("nodes")?
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("nodes"))?;
-        let nodes_list = nodes_obj.downcast::<PyList>()?;
+        let nodes_list = nodes_obj.cast::<PyList>()?;
         let mut nodes = Vec::with_capacity(nodes_list.len());
         for item in nodes_list.iter() {
             if let Ok(nc) = item.extract::<PyRef<NodeCapacity>>() {
                 nodes.push(nc.clone());
                 continue;
             }
-            let d = item.downcast::<PyDict>()?;
+            let d = item.cast::<PyDict>()?;
             let vram: Option<u64> = d
                 .get_item("vram_bytes")?
                 .map(|v| {

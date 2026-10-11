@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import type { App } from '$lib/app.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import type { App } from '#lib/app.svelte';
   let { http = createApp().http, cluster = createApp().cluster, models = createApp().models }: {
     http?: App['http'];
     cluster?: App['cluster'];

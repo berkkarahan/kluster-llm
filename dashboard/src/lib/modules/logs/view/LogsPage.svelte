@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { logListEmptyCopy } from '$lib/modules/logs/presenter';
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import { logListEmptyCopy } from '#lib/modules/logs/presenter';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   import { onMount, untrack } from 'svelte';
-  import { LogTrail, REFRESH_MODES, REFRESH_MS } from '$lib/modules/logs/interactor.svelte';
-  import type { RefreshMode } from '$lib/modules/logs/entities';
-  import { errors } from '$lib/shared/errors';
-  import { pushToast } from '$lib/shared/toast';
-  import type { App } from '$lib/app.svelte';
+  import { LogTrail, REFRESH_MODES, REFRESH_MS } from '#lib/modules/logs/interactor.svelte';
+  import type { RefreshMode } from '#lib/modules/logs/entities';
+  import { errors } from '#lib/shared/errors';
+  import { pushToast } from '#lib/shared/toast';
+  import type { App } from '#lib/app.svelte';
   let { cluster = createApp().cluster, live = createApp().live, logs = createApp().logs }: {
     cluster?: App['cluster'];
     live?: App['live'];

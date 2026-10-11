@@ -1,7 +1,7 @@
 <script lang="ts">
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
-  import { formatGib } from '$lib/shared/format-memory';
-  import type { RecorderStatus, UsageBucket, UsageLifetime, UsagePage, UsageReading, UsageSeries } from '$lib/modules/usage/entities';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import { formatGib } from '#lib/shared/format-memory';
+  import type { RecorderStatus, UsageBucket, UsageLifetime, UsagePage, UsageReading, UsageSeries } from '#lib/modules/usage/entities';
 
   let { nodeId, lifetimes, selectedLifetimeId, window, series, page, recorder, onlifetime, onwindow, onnext, error = '' }: {
     nodeId: string;

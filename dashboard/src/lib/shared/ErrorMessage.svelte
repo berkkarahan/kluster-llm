@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { errors } from '$lib/shared/errors';
+  import { errors } from '#lib/shared/errors';
 
   let { source, message = '', identity = '', snapshot = true, generation, label = '', detail = '' }: {
     source: string; message?: string | null; identity?: string | null;

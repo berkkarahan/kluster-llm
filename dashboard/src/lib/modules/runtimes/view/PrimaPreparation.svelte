@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { RuntimesInteractor } from '../interactor.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   let { presenter }: { presenter: RuntimesInteractor } = $props();
   let runtimeId = $state('');
   let preview = $state<Record<string, any> | null>(null);

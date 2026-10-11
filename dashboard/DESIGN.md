@@ -1,8 +1,7 @@
 # Kluster LLM dashboard design system
 
 Regenerated **2026-10-06** by **OpenDesign / Local Codex** from the current implementation.
-Source: `/Users/berk/projects/kluster-llm`, branch `bka/multiple-llama-backends`,
-commit **`1d592374da390e28d415c2ac6c0e3f5302df2c46`** (`1d59237`).
+Source: this repository (`dashboard/DESIGN.md`).
 This is a descriptive implementation reference, not a redesign or a proposal.
 Links below are relative to this document's intended destination, `dashboard/DESIGN.md`.
 

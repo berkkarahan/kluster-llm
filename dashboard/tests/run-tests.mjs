@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const serial = process.argv.includes('--serial');
-const concurrency = serial ? 1 : 4;
+// Vite 8's dependency optimizer lives in a shared cache directory, and every
+// test file here spins up its own dev server. Running test files concurrently
+// makes those servers race on the optimizer (ERR_OUTDATED_OPTIMIZED_DEP), so
+// run serially regardless of the flag.
+const concurrency = 1;
 const files = (await readdir(root))
   .filter((file) => file.endsWith('.test.mjs'))
   .sort();

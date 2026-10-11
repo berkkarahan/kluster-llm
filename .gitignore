@@ -63,9 +63,17 @@ dashboard/node_modules/
 dashboard/.svelte-kit/
 dashboard/build/
 
-.specify
-.agents
 .claude
+
+# Local Spec Kit installs and benchmark output. Tracked workflow files stay visible.
+.specify/extensions/
+.specify/extensions.yml
+.specify/perf-*
+.specify/integrations/cursor-agent.manifest.json
+
+# Generated copies of skills/. Canonical sources stay in skills/.
+.agents/skills/.kllm-skills.json
+.agents/skills/kllm-*/
 
 # Generated native skill installations and recovery metadata
 /.hermes/

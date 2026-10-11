@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { createApp } from '$lib/app.svelte';
-  import ErrorMessage from '$lib/shared/ErrorMessage.svelte';
+  import { createApp } from '#lib/app.svelte';
+  import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   import type { ClusterInteractor } from '../../cluster/interactor.svelte';
   let { presenter = createApp().cluster }: { presenter?: ClusterInteractor } = $props();
   /**

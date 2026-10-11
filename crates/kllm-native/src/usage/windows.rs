@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_DESC1};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::Win32::System::Performance::*;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -78,9 +78,15 @@ pub fn process(pid: u32) -> Result<super::ProcessCounters, String> {
 }
 
 struct Query {
-    handle: isize,
-    counters: Vec<isize>,
+    handle: PDH_HQUERY,
+    counters: Vec<PDH_HCOUNTER>,
 }
+
+// PDH handles are opaque, process-global OS values. They are safe to move and
+// share across threads exactly as the previous integer handles were, so the
+// collector can keep releasing the GIL around sampling.
+unsafe impl Send for Query {}
+unsafe impl Sync for Query {}
 
 impl Drop for Query {
     fn drop(&mut self) {
@@ -92,7 +98,7 @@ impl Drop for Query {
 
 impl Query {
     fn new(paths: &[PCWSTR]) -> Option<Self> {
-        let mut handle = 0;
+        let mut handle = PDH_HQUERY::default();
         if unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut handle) } != 0 {
             return None;
         }
@@ -101,7 +107,7 @@ impl Query {
             counters: vec![],
         };
         for path in paths {
-            let mut counter = 0;
+            let mut counter = PDH_HCOUNTER::default();
             if unsafe { PdhAddEnglishCounterW(handle, *path, 0, &mut counter) } != 0 {
                 return None;
             }
@@ -412,15 +418,17 @@ impl Collector {
                     return result;
                 }
             };
-            let mut desc = DXGI_ADAPTER_DESC1::default();
-            if unsafe { adapter.GetDesc1(&mut desc) }.is_err() {
-                result.device_discovery = Some(Discovery {
-                    status: "error".into(),
-                    reason: Some("source_error".into()),
-                    observed_at: now(),
-                });
-                return result;
-            }
+            let desc = match unsafe { adapter.GetDesc1() } {
+                Ok(desc) => desc,
+                Err(_) => {
+                    result.device_discovery = Some(Discovery {
+                        status: "error".into(),
+                        reason: Some("source_error".into()),
+                        observed_at: now(),
+                    });
+                    return result;
+                }
+            };
             if desc.Flags & 2 != 0 {
                 continue;
             } // Software adapter is not physical GPU memory.

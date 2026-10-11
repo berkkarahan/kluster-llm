@@ -86,8 +86,8 @@ impl AddressObserver {
                 use windows::Win32::{
                     Foundation::HANDLE, NetworkManagement::IpHelper::CancelMibChangeNotify2,
                 };
-                let _ = CancelMibChangeNotify2(HANDLE(address));
-                let _ = CancelMibChangeNotify2(HANDLE(route));
+                let _ = CancelMibChangeNotify2(HANDLE(address as *mut core::ffi::c_void));
+                let _ = CancelMibChangeNotify2(HANDLE(route as *mut core::ffi::c_void));
             }
         }
     }
@@ -144,11 +144,11 @@ impl Drop for AddressObserver {
 #[pymethods]
 impl AddressObserver {
     fn events(&self, py: Python<'_>) -> PyResult<String> {
-        py.allow_threads(|| self.events_native())
+        py.detach(|| self.events_native())
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)
     }
     fn close(&self, py: Python<'_>) {
-        py.allow_threads(|| self.close_native());
+        py.detach(|| self.close_native());
     }
     fn invalidate(&self) {
         self.invalidate_native();
@@ -442,7 +442,7 @@ fn parse(bytes: &[u8], shared: &Shared) -> io::Result<()> {
 mod win {
     use super::*;
     use windows::Win32::{
-        Foundation::{BOOLEAN, HANDLE},
+        Foundation::HANDLE,
         NetworkManagement::IpHelper::*,
         Networking::WinSock::AF_INET,
     };
@@ -505,13 +505,13 @@ mod win {
                 AF_INET,
                 Some(address),
                 Some(context),
-                BOOLEAN(0),
+                false,
                 &mut addr,
             );
             if result.0 != 0 {
                 return Err(io::Error::from_raw_os_error(result.0 as i32));
             }
-            let result = NotifyRouteChange2(AF_INET, Some(route), context, BOOLEAN(0), &mut routes);
+            let result = NotifyRouteChange2(AF_INET, Some(route), context, false, &mut routes);
             if result.0 != 0 {
                 let _ = CancelMibChangeNotify2(addr);
                 return Err(io::Error::from_raw_os_error(result.0 as i32));
@@ -616,6 +616,6 @@ pub fn start_address_observer(
     interface_index: u32,
     epoch: String,
 ) -> PyResult<AddressObserver> {
-    py.allow_threads(|| start(interface_index, epoch))
+    py.detach(|| start(interface_index, epoch))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }

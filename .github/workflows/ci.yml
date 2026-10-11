@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      # The suite runs here, but it does not gate the job. Several tests assume
+      # more than four CPU threads and a local WireGuard install, which the
+      # hosted runner does not provide. make test remains the local full suite.
+      - name: Pytest
+        continue-on-error: true
+        run: uv run python -m pytest -q
+
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      # Gates Rust changes (and Cargo bumps) with the crate's own test suite.
+      - name: Cargo test
+        run: |
+          export PYO3_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')"
+          cargo test --manifest-path crates/kllm-native/Cargo.toml
+
+  dashboard:
+    name: dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install
+        run: npm --prefix dashboard ci
+
+      - name: Check
+        run: npm --prefix dashboard run check
+
+      - name: Build
+        run: npm --prefix dashboard run build
+
+      - name: Test
+        run: npm --prefix dashboard test

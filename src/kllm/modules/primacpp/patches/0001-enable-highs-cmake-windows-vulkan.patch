@@ -25,28 +25,28 @@
 +        URL_HASH SHA256=dff575df08d88583c109702c7c5c75ff6e51611e6eacca8b5b3fdfba8ecc2cb4)
 +    FetchContent_MakeAvailable(highs)
 +    target_include_directories(highs PUBLIC
-+        ${highs_SOURCE_DIR}/extern
-+        ${highs_SOURCE_DIR}/extern/filereader
-+        ${highs_SOURCE_DIR}/extern/pdqsort
-+        ${highs_SOURCE_DIR}/extern/zstr
-+        ${highs_SOURCE_DIR}/src
-+        ${highs_SOURCE_DIR}/src/interfaces
-+        ${highs_SOURCE_DIR}/src/io
-+        ${highs_SOURCE_DIR}/src/ipm
-+        ${highs_SOURCE_DIR}/src/ipm/ipx
-+        ${highs_SOURCE_DIR}/src/ipm/basiclu
-+        ${highs_SOURCE_DIR}/src/lp_data
-+        ${highs_SOURCE_DIR}/src/mip
-+        ${highs_SOURCE_DIR}/src/model
-+        ${highs_SOURCE_DIR}/src/parallel
-+        ${highs_SOURCE_DIR}/src/pdlp
-+        ${highs_SOURCE_DIR}/src/pdlp/cupdlp
-+        ${highs_SOURCE_DIR}/src/presolve
-+        ${highs_SOURCE_DIR}/src/qpsolver
-+        ${highs_SOURCE_DIR}/src/simplex
-+        ${highs_SOURCE_DIR}/src/test
-+        ${highs_SOURCE_DIR}/src/util
-+        ${highs_BINARY_DIR})
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/extern>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/extern/filereader>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/extern/pdqsort>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/extern/zstr>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/interfaces>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/io>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/ipm>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/ipm/ipx>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/ipm/basiclu>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/lp_data>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/mip>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/model>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/parallel>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/pdlp>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/pdlp/cupdlp>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/presolve>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/qpsolver>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/simplex>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/test>
++        $<BUILD_INTERFACE:${highs_SOURCE_DIR}/src/util>
++        $<BUILD_INTERFACE:${highs_BINARY_DIR}>)
  endif()
  add_subdirectory(src)
  if (LLAMA_BUILD_COMMON)
@@ -96,18 +96,17 @@
              n[m] = w[m];
          } else {
              n[m] = 0;
-@@ -1079,9 +1078,7 @@
-             bool is_macos   = strcmp(dev.device_os, "macOS") == 0;
+@@ -1080,8 +1079,7 @@
              bool is_linux   = strcmp(dev.device_os, "Linux") == 0;
              bool is_android = strcmp(dev.device_os, "Android") == 0;
--            bool is_windows = strcmp(dev.device_os, "Windows") == 0;
+             bool is_windows = strcmp(dev.device_os, "Windows") == 0;
 -            GGML_ASSERT(!is_windows && "Windows is not tested yet\n");
 -
-+    
++
              llama_model_compute_buf_size(&c_cpu[m], &c_gpu[m], model, cparams, get_backend_type(dev.gpu_support), m, dev_info_set[0].model_bytes, w[m] > n[m], n[m] > 0);
  
              int  l_m          = w[m] * k;  // total number of layers assigned to device m
-@@ -1097,7 +1094,7 @@
+@@ -1097,7 +1095,7 @@
                  M1.push_back(m); // case 1: macOS without Metal, and with insufficient memory
              } else if (is_macos && dev.gpu_support.metal && condition2) {
                  M2.push_back(m); // case 2: macOS with Metal, and with insufficient memory
@@ -116,7 +115,7 @@
                  M3.push_back(m); // case 3: Linux with insufficient memory
              } else {
                  M4.push_back(m); // case 4: devices with sufficient memory
-@@ -1180,7 +1177,7 @@
+@@ -1180,7 +1178,7 @@
          std::vector<int> dev_gpu(n_world, 0);
          for (uint32_t m = 0; m < n_world; ++m) {
              const device_info & dev = dev_info_set[m];
@@ -125,14 +124,14 @@
                  dev_gpu[m] = 1;
              }
          }
-@@ -1217,9 +1214,7 @@
+@@ -1217,9 +1215,7 @@
              GGML_ASSERT(dev.device_os != nullptr);
              bool is_macos   = strcmp(dev.device_os, "macOS") == 0;
              bool is_android = strcmp(dev.device_os, "Android") == 0;
 -            bool is_windows = strcmp(dev.device_os, "Windows") == 0;
 -            GGML_ASSERT(!is_windows && "Windows is not tested yet\n");
 -
-+    
++
              int64_t b_cio = (bi / n_vocab + bo) * int(m == 0) + c_cpu[m];
  
              if (in_set(m, M1)) {

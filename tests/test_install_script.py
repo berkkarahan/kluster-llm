@@ -1362,3 +1362,44 @@ def test_main_engine_primacpp_rejects_incompatible_flags(install, bad_argv):
     with pytest.raises(SystemExit):
         install.main(bad_argv)
 
+
+def test_ensure_prima_deps_installs_missing_packages_on_macos_and_linux(
+    install, monkeypatch, tmp_path
+):
+    commands: list[list[str]] = []
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+    monkeypatch.setattr(install, "ensure_cmake", lambda: True)
+    monkeypatch.setattr(install, "detect_backend", lambda b: b)
+    monkeypatch.setattr(install, "_run", lambda cmd, **kw: commands.append(list(cmd)))
+
+    # macOS with missing fio, wget, highs, zeromq
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    monkeypatch.setattr(install, "_brew_prefix", lambda: tmp_path)
+    monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
+    monkeypatch.setattr(
+        install,
+        "_which",
+        lambda name: f"/usr/bin/{name}"
+        if name in {"brew", "gcc", "make", "cmake", "git", "curl"}
+        else None,
+    )
+
+    install.ensure_prima_deps("metal")
+    assert commands == [["/usr/bin/brew", "install", "fio", "wget", "highs", "zeromq"]]
+
+    # Linux with apt-get and missing fio/zmq/vulkan
+    commands.clear()
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        install,
+        "_which",
+        lambda name: f"/usr/bin/{name}"
+        if name in {"apt-get", "gcc", "g++", "make", "cmake", "git", "curl"}
+        else None,
+    )
+    install.ensure_prima_deps("vulkan")
+    assert any(cmd[:3] == ["sudo", "apt-get", "install"] and "fio" in cmd and "libzmq3-dev" in cmd for cmd in commands)
+

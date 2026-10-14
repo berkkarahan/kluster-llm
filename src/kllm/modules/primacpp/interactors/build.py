@@ -128,8 +128,13 @@ def package_macos_vulkan(binaries: dict, output: Path, environment: dict[str, st
     icd_dir.mkdir(parents=True, exist_ok=True)
     loader_target = library_dir / "libvulkan.1.dylib"
     driver_target = library_dir / "libMoltenVK.dylib"
+    for target in (loader_target, driver_target):
+        if target.exists() or target.is_symlink():
+            target.unlink()
     shutil.copy2(loader_source, loader_target)
     shutil.copy2(driver_source, driver_target)
+    loader_target.chmod(0o755)
+    driver_target.chmod(0o755)
     subprocess.run(
         ["install_name_tool", "-id", "@rpath/libvulkan.1.dylib", str(loader_target)],
         check=True,
@@ -332,6 +337,8 @@ def managed_prima_build(
     if not install.ensure_cmake():
         raise ValueError("CMake is required; follow docs/agent-install.md")
     install.ensure_git()
+    if hasattr(install, "ensure_prima_deps"):
+        install.ensure_prima_deps(resolved)
     print("KLLM_RUNTIME_PHASE=downloading", flush=True)
     _materialize_source(vendor, source.repository, commit)
     _apply_patches(install, vendor, definition["patches"])
@@ -360,6 +367,8 @@ def bootstrap_prima_build(install, vendor: Path, output: Path, backend: str) -> 
     if not install.ensure_cmake():
         raise ValueError("CMake is required; follow docs/agent-install.md")
     install.ensure_git()
+    if hasattr(install, "ensure_prima_deps"):
+        install.ensure_prima_deps(resolved)
     print("KLLM_RUNTIME_PHASE=downloading", flush=True)
     if (vendor / ".git").is_dir():
         env = git_environment()

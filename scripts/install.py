@@ -878,7 +878,9 @@ def ensure_vulkan_macos() -> dict[str, str]:
             )
         if brew:
             print("Installing Vulkan build deps via Homebrew...")
-            _run([brew, "install", *_BREW_VULKAN_PACKAGES])
+            brew_env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"}
+            brew_env.pop("HOMEBREW_ASK", None)
+            _run([brew, "install", *_BREW_VULKAN_PACKAGES], env=brew_env)
         missing = _macos_vulkan_missing()
         if missing:
             raise SystemExit(
@@ -906,6 +908,153 @@ def ensure_vulkan_macos() -> dict[str, str]:
         merged = os.pathsep.join([*paths, existing] if existing else paths)
         env["CMAKE_PREFIX_PATH"] = merged
     return env
+
+
+# Prima.cpp README prerequisites on macOS:
+#   brew install gcc make cmake fio git wget highs zeromq curl
+_BREW_PRIMA_PACKAGES = (
+    "gcc",
+    "make",
+    "cmake",
+    "fio",
+    "git",
+    "wget",
+    "highs",
+    "zeromq",
+    "curl",
+)
+
+
+def _macos_prima_missing(prefix: Path | None = None) -> list[str]:
+    """Return Homebrew formula names from _BREW_PRIMA_PACKAGES that are not yet satisfied."""
+    prefix = prefix or _brew_prefix()
+    missing: list[str] = []
+    for tool in ("gcc", "make", "cmake", "fio", "git", "wget", "curl"):
+        if not _which(tool):
+            missing.append(tool)
+    has_highs = bool(_which("highs")) or (
+        prefix is not None
+        and (
+            (prefix / "include" / "highs" / "Highs.h").is_file()
+            or (prefix / "include" / "Highs.h").is_file()
+            or (prefix / "lib" / "libhighs.dylib").is_file()
+            or (prefix / "lib" / "libhighs.a").is_file()
+        )
+    )
+    if not has_highs:
+        missing.append("highs")
+    has_zmq = prefix is not None and (
+        (prefix / "include" / "zmq.h").is_file()
+        or (prefix / "lib" / "libzmq.dylib").is_file()
+        or (prefix / "lib" / "libzmq.a").is_file()
+    )
+    if not has_zmq:
+        missing.append("zeromq")
+    return missing
+
+
+def ensure_prima_deps(backend: str = "auto") -> None:
+    """Ensure Prima.cpp README prerequisite packages and backend SDKs are installed."""
+    resolved = detect_backend(backend)
+    ensure_git()
+    ensure_cmake()
+    if _is_macos():
+        prefix = _brew_prefix()
+        missing = _macos_prima_missing(prefix)
+        if missing:
+            brew = _which("brew")
+            if not brew:
+                raise SystemExit(
+                    "error: macOS Prima builds need Homebrew to install missing prerequisites ("
+                    + ", ".join(missing)
+                    + "). Install Homebrew (https://brew.sh) and re-run."
+                )
+            print(f"Installing Prima prerequisites via Homebrew ({', '.join(missing)})...")
+            brew_env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"}
+            brew_env.pop("HOMEBREW_ASK", None)
+            _run([brew, "install", *missing], env=brew_env)
+        if resolved != "cpu":
+            ensure_vulkan_macos()
+        return
+
+    if _is_windows():
+        if resolved == "vulkan":
+            ensure_windows_vulkan()
+        return
+
+    if _is_linux():
+        need_tools = [
+            tool
+            for tool in ("gcc", "g++", "make", "cmake", "fio", "git", "wget", "curl")
+            if not _which(tool)
+        ]
+        has_zmq_header = any(
+            Path(p).is_file()
+            for p in (
+                "/usr/include/zmq.h",
+                "/usr/local/include/zmq.h",
+            )
+        )
+        need_vulkan = resolved == "vulkan" and (
+            not _which("glslc")
+            or not (
+                Path("/usr/include/vulkan/vulkan.h").is_file()
+                or Path("/usr/local/include/vulkan/vulkan.h").is_file()
+            )
+        )
+        if not need_tools and has_zmq_header and not need_vulkan:
+            return
+        print("Installing Prima prerequisite packages on Linux...")
+        if _which("apt-get"):
+            pkgs = [
+                "build-essential",
+                "gcc",
+                "g++",
+                "make",
+                "cmake",
+                "fio",
+                "git",
+                "wget",
+                "libzmq3-dev",
+                "curl",
+                "pkg-config",
+            ]
+            if need_vulkan:
+                pkgs += ["libvulkan-dev", "glslc", "spirv-headers"]
+            _run(["sudo", "apt-get", "update", "-y"], check=False)
+            _run(["sudo", "apt-get", "install", "-y", *pkgs], check=False)
+        elif _which("dnf"):
+            pkgs = [
+                "gcc",
+                "gcc-c++",
+                "make",
+                "cmake",
+                "fio",
+                "git",
+                "wget",
+                "zeromq-devel",
+                "curl",
+                "pkgconf-pkg-config",
+            ]
+            if need_vulkan:
+                pkgs += ["vulkan-loader-devel", "glslc", "spirv-headers-devel"]
+            _run(["sudo", "dnf", "install", "-y", *pkgs], check=False)
+        elif _which("pacman"):
+            pkgs = [
+                "base-devel",
+                "gcc",
+                "make",
+                "cmake",
+                "fio",
+                "git",
+                "wget",
+                "zeromq",
+                "curl",
+                "pkgconf",
+            ]
+            if need_vulkan:
+                pkgs += ["vulkan-icd-loader", "vulkan-headers", "shaderc", "spirv-headers"]
+            _run(["sudo", "pacman", "-Sy", "--noconfirm", *pkgs], check=False)
 
 
 # Windows from-source Vulkan builds need the LunarG SDK: glslc and the Vulkan
@@ -2363,6 +2512,8 @@ def install_prima(
         print(f"Already at pinned {commit[:12]}")
         return
 
+    ensure_prima_deps(backend)
+
     src_dir = str(ROOT / "src")
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
@@ -2666,6 +2817,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_wireguard:
         print("\n=== WireGuard ===")
         install_wireguard()
+    if args.engine == "primacpp" and not args.skip_llama and not args.skip_toolchains:
+        ensure_prima_deps(args.backend)
 
     jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
     if not args.skip_rust:

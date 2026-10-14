@@ -331,7 +331,7 @@
             <div class="detail-row"><span>Recipe digest</span><code class="break" title={pinDigest ?? undefined}>{pinDigest ?? '—'}</code></div>
             <div class="detail-row"><span>Source identity</span><code class="break" title={version?.runtime_id}>{short(version?.runtime_id)}…</code></div>
           </div>
-          <p class="small muted">The recipe digest covers the pinned source, patches and dependency archive hashes. Nodes may build different backends; they never build a different digest.</p>
+          <p class="small muted">The recipe digest covers the pinned source, dependency archive hashes and build implementation. Nodes may build different backends; they never build a different digest.</p>
         </div>
         <div class="detail-col">
           <p class="small muted">{buildInfo?.capabilities?.features ? 'Declared capabilities · probed from this build' : 'Documented capabilities · recipe'}</p>

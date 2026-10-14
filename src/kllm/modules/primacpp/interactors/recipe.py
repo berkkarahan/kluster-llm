@@ -17,9 +17,6 @@ def recipe_digest() -> str:
     # Normalize checkout line endings so Windows and Unix pin the same recipe.
     value = hashlib.sha256((ROOT / "recipe.json").read_text(encoding="utf-8").encode())
     value.update((ROOT / "interactors/build.py").read_text(encoding="utf-8").encode())
-    for name in recipe()["patches"]:
-        value.update(name.encode())
-        value.update((ROOT / "patches" / name).read_text(encoding="utf-8").encode())
     return value.hexdigest()
 
 

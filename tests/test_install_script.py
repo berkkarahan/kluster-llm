@@ -1233,14 +1233,13 @@ def test_parse_args_engine_defaults_to_llamacpp_and_accepts_primacpp(install):
     assert prima_args.engine == "primacpp"
 
 
-def test_prima_highs_is_off_by_default_in_patch_and_enabled_by_install_script(install):
+def test_prima_highs_is_enabled_by_install_script_and_recipe_has_no_local_patches(install):
     from kllm.modules.primacpp.interactors.build import prima_cmake_flags
-    from kllm.modules.primacpp.interactors.recipe import ROOT as PRIMA_ROOT
+    from kllm.modules.primacpp.interactors.recipe import ROOT as PRIMA_ROOT, recipe
 
-    patch_text = (
-        PRIMA_ROOT / "patches" / "0001-enable-highs-cmake-windows-vulkan.patch"
-    ).read_text(encoding="utf-8")
-    assert '+option(USE_HIGHS  "prima: use HiGHS solver" OFF)' in patch_text
+    # Source changes live in the pinned Prima fork; kluster-llm applies no local patches.
+    assert "patches" not in recipe()
+    assert not (PRIMA_ROOT / "patches").exists()
 
     flags = install._cmake_prima_flags("cpu")
     assert "-DUSE_HIGHS=ON" in flags

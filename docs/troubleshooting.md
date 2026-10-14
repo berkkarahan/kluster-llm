@@ -479,8 +479,8 @@ are accepted when source commit and recipe match; their binaries (`build_id`, ar
 Rebuild the named node from the same managed source version.
 
 **Prima recipe changed:** resolve the supported Prima source again and build a new
-isolated version. The recipe digest covers the patch series and build implementation;
-an old artifact is never silently attributed to a changed recipe.
+isolated version. The recipe digest covers the pinned source, dependency hashes and build
+implementation; an old artifact is never silently attributed to a changed recipe.
 
 **Prima profiling failed:** inspect the profile job log. The model must be local and the
 node must have no active inference. Structured Q4K estimates may be unavailable for other

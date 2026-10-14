@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 
 from kllm.modules.primacpp.interactors.recipe import (
-    ROOT,
     recipe,
     recipe_digest,
     qualification_errors,
@@ -174,18 +173,6 @@ def package_macos_vulkan(binaries: dict, output: Path, environment: dict[str, st
     return {**environment, "VK_ICD_FILENAMES": str(icd_target)}
 
 
-def _apply_patches(install, vendor: Path, patches: list[str]) -> None:
-    for patch in patches:
-        install._run(
-            ["git", "apply", "--check", str(ROOT / "patches" / patch)],
-            cwd=vendor,
-            env=git_environment(),
-        )
-        install._run(
-            ["git", "apply", str(ROOT / "patches" / patch)], cwd=vendor, env=git_environment()
-        )
-
-
 def _compile_and_verify_prima(
     install,
     *,
@@ -341,7 +328,6 @@ def managed_prima_build(
         install.ensure_prima_deps(resolved)
     print("KLLM_RUNTIME_PHASE=downloading", flush=True)
     _materialize_source(vendor, source.repository, commit)
-    _apply_patches(install, vendor, definition["patches"])
     return _compile_and_verify_prima(
         install,
         vendor=vendor,
@@ -391,7 +377,6 @@ def bootstrap_prima_build(install, vendor: Path, output: Path, backend: str) -> 
         if vendor.exists():
             shutil.rmtree(vendor, ignore_errors=True)
         _materialize_source(vendor, repository, commit)
-    _apply_patches(install, vendor, definition["patches"])
     return _compile_and_verify_prima(
         install,
         vendor=vendor,

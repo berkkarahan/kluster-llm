@@ -2,7 +2,7 @@
   "schema_version": 2,
   "upstream_repository": "https://github.com/OpenCPIL/prima.cpp.git",
   "upstream_commit": "288df6a2cc2120387e12d6f40798f30cc525c9ea",
-  "build_recipe_version": 130,
+  "build_recipe_version": 131,
   "dependencies": {
     "libzmq": "622fc6dde99ee172ebaa9c8628d85a7a1995a21d",
     "cppzmq": "c94c20743ed7d4aa37835a5c46567ab0790d4acc",
@@ -13,7 +13,6 @@
     "cppzmq": "6fab1d2522bc3c5f952f176fe7c486f83991fb61f2c5acc63fa33fdb5928ecf3",
     "highs": "dff575df08d88583c109702c7c5c75ff6e51611e6eacca8b5b3fdfba8ecc2cb4"
   },
-  "patches": [],
   "qualification": {
     "vulkan_gpu_inference": false,
     "api_parity": false,

@@ -25,7 +25,8 @@ from kllm.modules.primacpp.interactors.devices import discover_vulkan_devices, s
 from kllm.modules.primacpp.interactors.launch import rank_arguments, execution_settings, materialize_template, device_arguments
 from kllm.modules.primacpp.interactors.execution import authority_owner, ExecutionManifest
 from kllm.modules.primacpp.interactors.distributed_runs import PrimaRuns
-from kllm.modules.primacpp.interactors.participants import observe_participant, ParticipantEvidence, require_participant
+from kllm.modules.primacpp.interactors.participants import (
+    observe_participant, ParticipantEvidence, require_participant, require_shared_identity)
 from kllm.shared.runtime_resources import node_resources, prima_scope
 from kllm.modules.primacpp.interactors.draft import draft_file, draft_mode
 from kllm.modules.primacpp.interactors.extras import materialize_template_kwargs
@@ -400,6 +401,13 @@ class PrimaControl:
     def _measured_plan(self, runtime, body, model, feasible):
         from kllm.modules.primacpp.interactors.measured_planning import measured_local_candidates, measured_distributed_candidates
 
+        strategy = getattr(body, "placement_strategy", "auto")
+        if strategy in ("capacity_first", "priority"):
+            return feasible[0], {
+                "status": "unmeasured",
+                "predicted_decode_ms": None,
+                "reason": f"Operator selected {strategy} placement strategy",
+            }
         if body.network_id:
             return measured_distributed_candidates(self, feasible, body, runtime, model)
         return measured_local_candidates(feasible, body, runtime, model, self.profiles.cache)
@@ -602,9 +610,7 @@ class PrimaControl:
                         raw = self._call(rank.node_id, operation, "prima_inventory", {
                             "runtime_id": runtime_id, "rank": rank.model_dump(), "backend": manifest.backends[rank.node_id]})
                         value = ParticipantEvidence.model_validate(raw)
-                    if (value.node_id != rank.node_id or value.runtime_id != runtime_id
-                            or value.source_commit != runtime["commit"] or value.recipe_digest != runtime["recipe_digest"]):
-                        raise ValueError("Signed participant evidence has a different node/source/recipe")
+                    require_shared_identity(value, rank.node_id, runtime_id, runtime)
                     evidence[rank.node_id] = value
                 manifest = ExecutionManifest.model_validate(manifest.model_copy(update={
                     "participant_evidence": evidence}).model_dump())

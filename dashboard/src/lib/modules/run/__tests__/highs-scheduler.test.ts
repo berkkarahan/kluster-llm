@@ -1,0 +1,98 @@
+import type { HighsScheduleReport, PlacementStrategyMode } from '../entities';
+
+export const SAMPLE_HIGHS_REPORT: HighsScheduleReport = {
+  scheduler_mode: 'highs_halda',
+  requested_strategy: 'auto',
+  solver_backend: 'highs_exact_milp',
+  total_layers: 32,
+  cycle_count_k: 2,
+  window_size_w: 16,
+  segmented_placement_enabled: true,
+  mmap_mode: 'readahead',
+  just_enough_master: false,
+  objective_step_ms: 42.5,
+  compute_step_ms: 28.0,
+  disk_reload_step_ms: 10.5,
+  network_step_ms: 4.0,
+  fallback_reason: null,
+  missing_profile_nodes: [],
+  forced_m4_rollback: false,
+  iterations: 2,
+  node_allocations: [
+    {
+      node_id: 'master',
+      rank: 0,
+      w_m: 10,
+      n_m: 8,
+      cpu_layers_per_cycle: 2,
+      total_layers: 20,
+      total_gpu_layers: 16,
+      total_cpu_layers: 4,
+      memory_pressure_set: 'M1',
+      initial_memory_pressure_set: 'M4',
+      forced_m4: false,
+      overloaded_memory_bytes: 1073741824,
+      vram_used_bytes: 4294967296,
+      ram_used_bytes: 2147483648,
+      compute_ms: 18.0,
+      disk_reload_ms: 10.5,
+      kv_and_sync_ms: 1.0,
+      network_ms: 2.0,
+      total_step_ms: 31.5,
+      prima_graphs: 4,
+    },
+    {
+      node_id: 'worker-fast',
+      rank: 1,
+      w_m: 6,
+      n_m: 6,
+      cpu_layers_per_cycle: 0,
+      total_layers: 12,
+      total_gpu_layers: 12,
+      total_cpu_layers: 0,
+      memory_pressure_set: 'M4',
+      initial_memory_pressure_set: 'M4',
+      forced_m4: true,
+      overloaded_memory_bytes: 0,
+      vram_used_bytes: 3221225472,
+      ram_used_bytes: 0,
+      compute_ms: 9.0,
+      disk_reload_ms: 0.0,
+      kv_and_sync_ms: 0.0,
+      network_ms: 2.0,
+      total_step_ms: 11.0,
+      prima_graphs: 2,
+    },
+  ],
+  pruned_nodes: [
+    {
+      node_id: 'worker-weak',
+      reason: 'weak_device_w_le_1_ngl_0',
+      iteration: 1,
+      last_w_m: 1,
+      last_n_m: 0,
+      detail: 'Weak worker assigned <= 1 CPU layer and 0 GPU layers per cycle',
+    },
+  ],
+  evaluated_cycles: [
+    { cycle_count_k: 1, window_size_w: 32, feasible: true, objective_step_ms: 51.0 },
+    { cycle_count_k: 2, window_size_w: 16, feasible: true, objective_step_ms: 42.5 },
+  ],
+};
+
+export function buildFallbackHighsReport(strategy: PlacementStrategyMode): HighsScheduleReport {
+  return {
+    ...SAMPLE_HIGHS_REPORT,
+    scheduler_mode: strategy === 'priority' ? 'priority' : 'capacity_first',
+    requested_strategy: strategy,
+    solver_backend: 'heuristic_fallback',
+    cycle_count_k: 1,
+    window_size_w: 32,
+    fallback_reason:
+      strategy === 'priority'
+        ? 'operator_selected_priority'
+        : 'operator_selected_capacity_first',
+    missing_profile_nodes: ['worker-fast'],
+    pruned_nodes: [],
+  };
+}

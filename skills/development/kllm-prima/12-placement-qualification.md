@@ -134,6 +134,14 @@ Evaluate OS/backend, topology, exact model/feature/placement combinations and
 device/driver evidence. Policy updates must not invalidate the build they qualify;
 implementation changes invalidate affected evidence.
 
+Scopes are `<windows|linux|darwin>-vulkan-<local|distributed>`, selected from each node's
+own platform (`kllm.modules.primacpp.interactors.platforms` normalizes aliases such as
+`macOS`). Defining a scope qualifies nothing: Linux/macOS entries ship with every gate
+false and no receipts, models or devices, and must stay that way until a physical run
+records evidence. Never copy another platform's evidence into a scope. In a mixed-OS run
+each participant platform is evaluated against its own scope. All GPU ranks in a ring must
+share one backend (`require_shared_ring_backend`); a CPU-only coordinator master is exempt.
+
 Keep controlled tests, physical local Vulkan, local multi-rank and physical multi-node
 results separate. Local Windows/Vulkan qualification cannot enable workers, other
 platforms, untested models or features. Missing assets/hardware/checks are unavailable,

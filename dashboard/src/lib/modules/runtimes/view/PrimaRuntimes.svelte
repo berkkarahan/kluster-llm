@@ -17,7 +17,7 @@
   import { errors } from '#lib/shared/errors';
   import Icon from '#lib/shared/Icon.svelte';
   import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
-  import type { RuntimeVersion, RuntimeJob, RuntimeNode, RuntimeLibrary, PrimaDeviceReport } from '#lib/modules/runtimes/entities';
+  import type { RuntimeVersion, RuntimeJob, RuntimeNode, RuntimeLibrary, PrimaDeviceReport, RuntimeSources } from '#lib/modules/runtimes/entities';
   import type { RuntimesInteractor } from '../interactor.svelte';
   let { presenter = createApp().runtimes }: { presenter?: RuntimesInteractor } = $props();
 
@@ -91,7 +91,7 @@
   let logJob = $state<RuntimeJob | null>(null);
   let logNode = $state<RuntimeNode | null>(null);
   let dialog: HTMLDialogElement;
-  let mode = $state<'details' | 'logs'>('details');
+  let mode = $state<'add' | 'details' | 'logs'>('details');
   let returnFocus: HTMLElement | null = null;
   let devices = $state<PrimaDeviceReport | null>(null);
   let devicesError = $state('');
@@ -129,13 +129,13 @@
     } finally { busy = false; }
   }
 
-  function open(next: 'details' | 'logs', v: RuntimeVersion | null = null) {
+  function open(next: 'add' | 'details' | 'logs', v: RuntimeVersion | null = null) {
     if (v) details = v;
     returnFocus = document.activeElement as HTMLElement;
     mode = next;
     dialog.showModal();
   }
-  function close() { dialog.close(); returnFocus?.focus(); }
+  function close() { pinController?.abort(); pinGeneration++; dialog.close(); returnFocus?.focus(); }
 
   async function build() {
     if (!version) return;
@@ -205,6 +205,87 @@
       ? presenter.cancelRemote(node!.node_id, job.job_id!)
       : presenter.cancelLocal(job.job_id!));
   }
+
+  /**
+   * Inline Prima pinning for the primacpp engine mode: browse, resolve and save
+   * an exact source revision without leaving this screen. The recipe pin is the
+   * only revision the resolver accepts, so the form opens prefilled from it;
+   * masters also set the saved revision as the cluster target (the same signed
+   * mechanism as the llama.cpp library), while workers stay read-only for
+   * targeting and the master assigns it.
+   */
+  let pinName = $state('');
+  let pinRepository = $state('');
+  let pinRef = $state('');
+  let pinRefType = $state<'tag' | 'branch' | 'commit'>('tag');
+  let pinResolved = $state<RuntimeVersion | null>(null);
+  let pinSources = $state<RuntimeSources | null>(null);
+  let pinSourcesLoading = $state(false);
+  let pinController: AbortController | null = null;
+  let pinGeneration = 0;
+
+  $effect(() => {
+    pinRepository; pinRef; pinRefType; pinName;
+    pinResolved = null;
+    pinGeneration++;
+  });
+
+  function startPin() {
+    const src = pinnedSource;
+    pinRepository = src?.repository ?? '';
+    // Prefer the pinned release when the recipe declares one; the commit ref is
+    // the fallback and both resolve to the same immutable SHA.
+    if (src?.release) { pinRef = src.release; pinRefType = 'tag'; }
+    else { pinRef = src?.ref || ''; pinRefType = src?.ref_type ?? 'tag'; }
+    pinName = '';
+    pinResolved = null;
+    pinSources = null;
+    open('add');
+  }
+
+  async function discoverPinSources() {
+    pinController?.abort(); pinController = new AbortController();
+    const selectedRepo = pinRepository;
+    const generation = pinGeneration;
+    pinSourcesLoading = true;
+    await action(async () => {
+      const value = await presenter.sources(selectedRepo, pinController?.signal);
+      if (generation === pinGeneration && selectedRepo === pinRepository) pinSources = value;
+    });
+    pinSourcesLoading = false;
+  }
+
+  async function resolvePin() {
+    pinController?.abort(); pinController = new AbortController();
+    const generation = pinGeneration;
+    await action(async () => {
+      const value = await presenter.resolve<RuntimeVersion>(
+        { engine: 'primacpp', repository: pinRepository, ref: pinRef, ref_type: pinRefType, name: pinName },
+        pinController?.signal
+      );
+      if (generation === pinGeneration) pinResolved = value;
+    });
+  }
+
+  async function savePin() {
+    if (!pinResolved) return;
+    const value = pinResolved;
+    await action(async () => {
+      const existing = (library?.versions ?? []).find((entry) => entry.version.runtime_id === value.runtime_id);
+      if (!existing) await presenter.add(value);
+      if (master && value.runtime_id !== target?.version.runtime_id) {
+        try {
+          await presenter.setTarget({
+            runtime_id: value.runtime_id, expected_revision: target?.revision ?? 0, request_id: crypto.randomUUID()
+          });
+        } catch (failure) {
+          try { await presenter.refresh(); } catch { /* Keep the original request error visible. */ }
+          throw failure;
+        }
+      }
+      close();
+    });
+  }
 </script>
 
 <div class="runtime-settings">
@@ -218,14 +299,21 @@
   <ErrorMessage source="runtime-action" message={errorGeneration === errors.generation ? error : ''} />
   {#if library?.reconcile_error}<ErrorMessage source="runtime-reconciliation" message={library.reconcile_error} />{/if}
 
+  <!-- Pin a Prima version: inline library entry for this node's primacpp launch. -->
+  <section class="panel" aria-labelledby="pin-heading">
+    <div class="runtime-panel-head"><div><h3 id="pin-heading">Pin a Prima version</h3><p>Resolve the supported fork to one immutable commit and keep it in the managed library for builds and profiling.</p></div><span class="runtime-head-meta"><button class="btn btn-accent" disabled={worker || busy} onclick={startPin}>+ Pin a version</button><span class="runtime-badge">{entries.length} pinned source{entries.length === 1 ? '' : 's'}</span></span></div>
+    <div class="table-note">Prima accepts only the revision the pinned build recipe declares{pinnedSource ? ` — prefilled from ${pinnedSource.release ? `release ${pinnedSource.release}` : 'the recipe commit'}` : ''}. Masters set the saved revision as the cluster target; workers stay read-only while the master assigns targeting.</div>
+  </section>
+
   {#if !pinned}
     <section class="panel" aria-labelledby="empty-heading">
       <div class="runtime-panel-head"><div><h3 id="empty-heading">Runtime identity</h3><p>The engine built for this launch is not in the managed library.</p></div><span class="runtime-badge">Unsaved</span></div>
       <div class="empty">
         <Icon name="cube" />
         <h4>No pinned Prima source</h4>
-        <p>Add it in Settings → llama.cpp using the engine picker (“Prima.cpp · under qualification”). Kluster pins the exact commit and recipe digest; it then appears here for builds and profiling.</p>
-        <a class="text-button" href="/settings?section=llama">Open the llama.cpp library →</a>
+        <p>Pin an exact Prima revision with “Pin a version” above. Kluster resolves it to one immutable commit covered by the build recipe digest, and it appears here for builds and profiling.</p>
+        <button class="btn btn-accent" disabled={worker || busy} onclick={startPin}>Pin a version</button>
+        <p class="small muted">The same engine picker also remains in Settings → llama.cpp.</p>
       </div>
     </section>
   {:else}
@@ -333,7 +421,7 @@
 
     <!-- Managed builds -->
     <section class="panel" aria-labelledby="builds-heading">
-      <div class="runtime-panel-head"><div><h3 id="builds-heading">Managed build</h3><p>{worker ? "The master assigns and verifies this node's builds." : "Build the pinned source for this node's backend, then prepare the cluster."}</p></div><span class="runtime-head-meta">{#if master && pinnedSource?.release}<button class="btn btn-accent" disabled={busy || target?.version.engine === 'primacpp'} onclick={installInitial}>Install {pinnedSource.release} and set target</button>{/if}<span class="runtime-badge">{entries.length} pinned source{entries.length === 1 ? '' : 's'}</span></span></div>
+      <div class="runtime-panel-head"><div><h3 id="builds-heading">Managed build</h3><p>{worker ? "The master assigns and verifies this node's builds." : "Build the pinned source for this node's backend, then prepare the cluster."}</p></div><span class="runtime-head-meta">{#if master && pinnedSource?.release}<button class="btn btn-accent" disabled={busy || target?.version.engine === 'primacpp'} onclick={installInitial}>Install {pinnedSource.release} and set target</button>{/if}</span></div>
       {#if !library?.nodes?.length}
         <div class="empty"><h4>No cluster nodes reporting</h4><p>Preparation state appears once this node and its connected workers report.</p></div>
       {:else}
@@ -394,10 +482,20 @@
 </div>
 
 <dialog bind:this={dialog} class="runtime-dialog" aria-labelledby="runtime-dialog-title" oncancel={close}>
-  <div class="runtime-dialog-head"><h2 id="runtime-dialog-title">{mode === 'logs' ? 'Build log' : details ? label(details) : 'Version details'}</h2><button class="btn" aria-label="Close dialog" onclick={close}>×</button></div>
+  <div class="runtime-dialog-head"><h2 id="runtime-dialog-title">{mode === 'add' ? 'Pin a Prima version' : mode === 'logs' ? 'Build log' : details ? label(details) : 'Version details'}</h2><button class="btn" aria-label="Close dialog" onclick={close}>×</button></div>
   <div class="runtime-dialog-body">
     <ErrorMessage source="runtime-action" message={errorGeneration === errors.generation ? error : ''} />
-    {#if mode === 'logs'}
+    {#if mode === 'add'}
+      {#if pinnedSource}<p class="small muted">Prefilled from the engine's pinned recipe{pinnedSource.release ? ` (release ${pinnedSource.release})` : ''}; only that recipe revision passes resolution.</p>{/if}
+      <label class="field">Display name <input bind:value={pinName} placeholder="Optional name" /></label>
+      <label class="field">Public HTTPS Git repository <input bind:value={pinRepository} type="url" placeholder="https://github.com/user/prima.cpp.git" /></label>
+      <button class="btn" disabled={busy || !pinRepository} onclick={discoverPinSources}>{pinSourcesLoading ? 'Loading releases…' : 'Browse releases and refs'}</button>
+      {#if pinSources?.warning}<p class="small muted">{pinSources.warning}</p>{/if}
+      {#if pinSources?.releases.length}<label class="field">Release <select aria-label="Release tag" onchange={(event) => { pinRefType = 'tag'; pinRef = event.currentTarget.value; }}><option value="">Choose a release</option>{#each pinSources.releases as release}<option value={release.tag}>{release.name}{release.prerelease ? ' · prerelease' : ''}</option>{/each}</select></label>{/if}
+      <div class="ref-grid"><label class="field">Reference type <select bind:value={pinRefType}><option value="tag">Tag</option><option value="branch">Branch</option><option value="commit">Commit</option></select></label><label class="field">{pinRefType === 'commit' ? 'Full commit SHA' : pinRefType === 'branch' ? 'Branch name' : 'Tag'}<input bind:value={pinRef} list="prima-pin-refs" /><datalist id="prima-pin-refs">{#each (pinRefType === 'branch' ? pinSources?.branches : pinSources?.tags) ?? [] as value}<option value={value}></option>{/each}</datalist></label></div>
+      <p class="small muted">Tags and branches resolve to one immutable commit covered by the recipe digest{master ? '. Saving also sets this revision as the cluster target.' : '; the master assigns the cluster target.'}</p>
+      {#if pinResolved}<div class="resolved-box"><strong>Resolved source</strong><code>{pinResolved.commit}</code><span class="small break">{pinResolved.repository}</span></div>{/if}
+    {:else if mode === 'logs'}
       <button class="btn" disabled={busy} onclick={refreshLogs}>Refresh log</button>
       <textarea class="log-console" readonly aria-label="Build output" rows="12" value={logText || 'No build output yet.'}></textarea>
     {:else if details}
@@ -412,7 +510,7 @@
     {/if}
   </div>
   <div class="runtime-dialog-foot">
-    {#if mode === 'details' && pinned}<button class="btn" disabled={busy || isPreparing(lastJob) || protectedVersion(pinned.version.runtime_id)} onclick={build}>{buildInfo ? 'Verify build' : 'Build'}</button>{/if}
+    {#if mode === 'add'}<button class="btn" disabled={busy || !pinRef || !pinRepository} onclick={resolvePin}>Resolve revision</button><button class="btn btn-accent" disabled={busy || !pinResolved} onclick={savePin}>Save version{master ? ' & set target' : ''}</button>{:else if mode === 'details' && pinned}<button class="btn" disabled={busy || isPreparing(lastJob) || protectedVersion(pinned.version.runtime_id)} onclick={build}>{buildInfo ? 'Verify build' : 'Build'}</button>{/if}
     <button class="btn" onclick={close}>Close</button>
   </div>
 </dialog>
@@ -485,6 +583,12 @@
   dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 24px;margin:0}
   dt{color:var(--muted);font-size:13px}
   dd{margin:0;font-size:14px;min-width:0}
+  .field{display:grid;gap:8px;font-size:14px}
+  input,select{min-width:0;width:100%;padding:10px 12px;min-height:48px;border:1px solid var(--control,#647181);border-radius:4px;background:var(--bg);color:var(--fg,var(--text));font:inherit}
+  .ref-grid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:16px}
+  .resolved-box{display:grid;gap:8px;padding:16px;border:1px solid var(--line,var(--border))}
+  .resolved-box code{overflow-wrap:anywhere}
+  .break{overflow-wrap:anywhere}
   .log-console{background:var(--bg);border:1px solid var(--line,var(--border));padding:16px;font:12px/1.8 var(--mono);max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;width:100%}
   @media(hover:hover){
     tbody tr:hover td{background:var(--raised,#181c22)}
@@ -503,5 +607,6 @@
   @media(max-width:520px){
     .runtime-dialog-head,.runtime-dialog-body,.runtime-dialog-foot{padding:20px}
     dl{grid-template-columns:1fr;gap:8px}
+    .ref-grid{grid-template-columns:1fr}
   }
 </style>

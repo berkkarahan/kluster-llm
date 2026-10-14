@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Any
 
 from kllm.modules.primacpp.entities import LayerRange, PrimaTopology, RankAllocation
+from kllm.modules.primacpp.interactors.platforms import normalize_platform, require_shared_ring_backend
 
 
 def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopology:
@@ -134,6 +135,12 @@ def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopol
                 output_gpu=output_gpu,
             )
         )
+    # Only ranks that offload to a GPU constrain the ring; a CPU-only coordinator does not.
+    require_shared_ring_backend([
+        (rank.node_id, normalize_platform(members[rank.node_id].get("platform")),
+         members[rank.node_id].get("actual_backend") or members[rank.node_id].get("backend"))
+        for rank in ranks if rank.ngl or rank.output_gpu
+    ])
     return PrimaTopology(
         runtime_id=runtime_id,
         master_node_id=master,

@@ -21,7 +21,11 @@ def _model_digest(path, size, modified, changed):
 
 
 def measured_local_candidates(feasible, body, runtime, model, cache):
+    from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
+
     fallback = feasible[0], {"status": "unmeasured", "predicted_decode_ms": None}
+    if getattr(body, "placement_strategy", "auto") in ("capacity_first", "priority"):
+        return fallback
     candidates = []
     for plan, members in feasible:
         try:
@@ -50,6 +54,7 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
         stat = model.stat()
         digest = _model_digest(str(model.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         scores = []
+        candidate_profiles = []
         for plan, members, topology, rank in candidates:
             selected = select_vulkan_devices(inventory, rank.devices)
             if len(selected) != 1:
@@ -67,12 +72,22 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
                     or profile.decode_ms is None or profile.prefill_ms is None or profile.peak_memory_bytes is None):
                 return fallback
             scores.append(profile.decode_ms)
+            candidate_profiles.append((rank.node_id, profile))
     except (OSError, ValueError):
         return fallback
     index = min(range(len(scores)), key=lambda i: (scores[i], i))
+    chosen_node_id, chosen_profile = candidate_profiles[index]
+    scheduler_report = solve_highs_halda_schedule(
+        body=body,
+        runtime=runtime,
+        members=feasible[index][1],
+        base_plan=feasible[index][0],
+        profiles={chosen_node_id: chosen_profile},
+    )
     return feasible[index], {"status": "profiled_model_probe", "predicted_decode_ms": scores[index],
         "model_sha256": digest, "measurement_kind": "end_to_end",
-        "scope": "matching local full-model f16/one-slot generation probe"}
+        "scope": "matching local full-model f16/one-slot generation probe",
+        "scheduler": scheduler_report.model_dump()}
 
 
 def measured_distributed_candidates(control, feasible, body, runtime, model):

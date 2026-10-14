@@ -42,6 +42,94 @@
       "devices": [],
       "execution_scopes": [],
       "receipts": []
+    },
+    "linux-vulkan-local": {
+      "validation_status": "unverified",
+      "unverified_reason": "No Linux/Vulkan hardware evidence has been recorded; no gate is passed by defining this scope.",
+      "platform": "Linux",
+      "backend": "vulkan",
+      "topology": "local",
+      "source_commit": null,
+      "recipe_digest": null,
+      "gates": {
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false
+      },
+      "models": [],
+      "features": [],
+      "placements": [],
+      "devices": [],
+      "execution_scopes": [],
+      "receipts": []
+    },
+    "linux-vulkan-distributed": {
+      "validation_status": "unverified",
+      "unverified_reason": "No Linux/Vulkan distributed hardware evidence has been recorded; no gate is passed by defining this scope.",
+      "platform": "Linux",
+      "backend": "vulkan",
+      "topology": "distributed",
+      "source_commit": null,
+      "recipe_digest": null,
+      "gates": {
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "hardware_performance_gate": false
+      },
+      "models": [],
+      "features": [],
+      "placements": [],
+      "devices": [],
+      "execution_scopes": [],
+      "receipts": []
+    },
+    "darwin-vulkan-local": {
+      "validation_status": "unverified",
+      "unverified_reason": "No macOS/Vulkan (MoltenVK) hardware evidence has been recorded; no gate is passed by defining this scope.",
+      "platform": "Darwin",
+      "backend": "vulkan",
+      "topology": "local",
+      "source_commit": null,
+      "recipe_digest": null,
+      "gates": {
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false
+      },
+      "models": [],
+      "features": [],
+      "placements": [],
+      "devices": [],
+      "execution_scopes": [],
+      "receipts": []
+    },
+    "darwin-vulkan-distributed": {
+      "validation_status": "unverified",
+      "unverified_reason": "No macOS/Vulkan (MoltenVK) distributed hardware evidence has been recorded; no gate is passed by defining this scope.",
+      "platform": "Darwin",
+      "backend": "vulkan",
+      "topology": "distributed",
+      "source_commit": null,
+      "recipe_digest": null,
+      "gates": {
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "hardware_performance_gate": false
+      },
+      "models": [],
+      "features": [],
+      "placements": [],
+      "devices": [],
+      "execution_scopes": [],
+      "receipts": []
     }
   }
 }

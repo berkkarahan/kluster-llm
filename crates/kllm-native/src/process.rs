@@ -16,7 +16,7 @@ pub enum ProcessError {
     Io(#[from] std::io::Error),
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct ProcessHandle {
     #[pyo3(get)]
@@ -25,7 +25,7 @@ pub struct ProcessHandle {
     pub role: String,
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct LaunchResult {
     #[pyo3(get)]

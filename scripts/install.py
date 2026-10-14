@@ -68,10 +68,12 @@ ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = ROOT / ".venv"
 DASHBOARD = ROOT / "dashboard"
 VENDOR_LLAMA = ROOT / "vendor" / "llama.cpp"
+VENDOR_PRIMA = ROOT / "vendor" / "prima.cpp"
 BIN_DIR = ROOT / "vendor" / "bin"
 PRIMA_BIN_DIR = ROOT / "vendor" / "prima"
 PIN_FILE = ROOT / "llama-release"
 STAMP_FILE = BIN_DIR / "llama-release.txt"
+PRIMA_STAMP_FILE = PRIMA_BIN_DIR / "prima-release.txt"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 GITHUB_HEADERS = {"User-Agent": "kllm-install", "Accept": "application/vnd.github+json"}
 # Binary/asset downloads must not use the GitHub API Accept — some CDNs/proxies
@@ -447,6 +449,99 @@ def llama_install_status(tag: str | None = None, *, expected: str | None = None)
             and rpc
             and stamp.get("tag") == pin
             and backends_satisfied(wanted, actual_backends)
+        ),
+    }
+
+
+def read_prima_recipe_pin() -> tuple[str, str, str]:
+    """Return (source_repository, source_commit, recipe_digest) for pinned prima.cpp."""
+    src_dir = str(ROOT / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    from kllm.modules.primacpp.interactors.recipe import recipe, recipe_digest
+
+    definition = recipe()
+    return (
+        str(definition["source_repository"]),
+        str(definition["source_commit"]),
+        recipe_digest(),
+    )
+
+
+def write_prima_install_stamp(
+    *,
+    commit: str,
+    recipe_digest: str,
+    backend: str,
+    highs: str = "on",
+) -> None:
+    PRIMA_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"commit={commit}",
+        f"recipe_digest={recipe_digest}",
+        f"backend={backend}",
+        f"highs={highs}",
+    ]
+    PRIMA_STAMP_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_prima_install_stamp() -> dict[str, str]:
+    if not PRIMA_STAMP_FILE.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for line in PRIMA_STAMP_FILE.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
+def prima_stamp_matches(
+    commit: str, recipe_digest: str, backend: str | None = None
+) -> bool:
+    stamp = read_prima_install_stamp()
+    if stamp.get("commit") != commit or stamp.get("recipe_digest") != recipe_digest:
+        return False
+    if stamp.get("highs") != "on":
+        return False
+    if backend is None:
+        return True
+    return frozenset(parse_stamp_backends(stamp.get("backend"))) == frozenset(
+        parse_stamp_backends(backend)
+    )
+
+
+def prima_install_status(*, expected: str | None = None) -> dict[str, Any]:
+    """Pin/stamp state plus probed capabilities for a bootstrap Prima install."""
+    _repo, commit, digest = read_prima_recipe_pin()
+    llama_server = _resolve_prima_binary("llama-server")
+    llama_cli = _resolve_prima_binary("llama-cli")
+    profile_tool = _resolve_prima_binary("profile-tool")
+    stamp = read_prima_install_stamp()
+    requested = stamp.get("backend")
+    wanted = expected or requested
+    actual_backends, features = _probe_prima_capabilities(llama_server)
+    highs_ok = stamp.get("highs") == "on" and "highs" in features
+    return {
+        "pin": commit,
+        "recipe_digest": digest,
+        "stamp": stamp.get("commit"),
+        "stamp_recipe_digest": stamp.get("recipe_digest"),
+        "llama_server": str(llama_server) if llama_server else None,
+        "llama_cli": str(llama_cli) if llama_cli else None,
+        "profile_tool": str(profile_tool) if profile_tool else None,
+        "requested_backend": requested,
+        "expected_backend": wanted,
+        "actual_backends": actual_backends,
+        "features": features,
+        "highs": "on" if highs_ok else "off",
+        "ok": bool(
+            llama_server
+            and llama_cli
+            and profile_tool
+            and prima_stamp_matches(commit, digest, wanted)
+            and backends_satisfied(wanted, actual_backends)
+            and highs_ok
         ),
     }
 
@@ -1392,6 +1487,18 @@ def _cmake_backend_flags(backend: str) -> list[str]:
     return install_llama_source.cmake_backend_flags(backend, macos=_is_macos(), linux=_is_linux())
 
 
+def _cmake_prima_flags(backend: str) -> list[str]:
+    """CMake flags Kluster passes to compile prima.cpp (explicitly enabling HiGHS)."""
+    return [
+        *_cmake_backend_flags(backend),
+        "-DUSE_HIGHS=ON",
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DGGML_BLAS=OFF",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    ]
+
+
 def clone_or_update_llama(tag: str | None = None) -> None:
     ensure_git()
     tag = tag or read_pinned_release()
@@ -1588,6 +1695,45 @@ def _resolve_runtime_binary(name: str) -> Path | None:
     if staged.is_file():
         return staged
     return _find_build_tree_binary(name)
+
+
+def _resolve_prima_binary(name: str) -> Path | None:
+    """Resolve a staged Prima binary in ``vendor/prima``."""
+    exe = f"{name}.exe" if _is_windows() else name
+    staged = PRIMA_BIN_DIR / exe
+    return staged if staged.is_file() else None
+
+
+def _probe_prima_capabilities(binary: Path | None) -> tuple[list[str], list[str]]:
+    """Return (actual_backends, features) reported by Prima llama-server --list-devices."""
+    if binary is None:
+        return [], []
+    try:
+        probe = subprocess.run(
+            [str(binary), "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [], []
+    text = probe.stdout + probe.stderr
+    found = parse_list_devices_backends(text)
+    if probe.returncode == 0 and not found:
+        found = ["cpu"]
+    features: list[str] = []
+    for line in probe.stdout.splitlines():
+        if line.startswith("KLLM_PRIMA_CAPABILITIES="):
+            try:
+                import json
+
+                payload = json.loads(line.removeprefix("KLLM_PRIMA_CAPABILITIES="))
+                raw_features = payload.get("features")
+                if isinstance(raw_features, list):
+                    features = [str(f) for f in raw_features]
+            except Exception:
+                pass
+    return found, features
 
 
 def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, Any] | None:
@@ -2157,12 +2303,93 @@ def verify_llama_installed(tag: str, *, expected: str | None = None) -> None:
     )
 
 
+def print_prima_check(*, expected: str | None = None) -> int:
+    status = prima_install_status(expected=expected)
+    print(f"pin:          {status['pin']}")
+    print(f"recipe:       {status['recipe_digest']}")
+    print(f"installed:    {status['stamp'] or '(no stamp)'}")
+    print(f"llama-server: {status['llama_server'] or 'MISSING'}")
+    print(f"llama-cli:    {status['llama_cli'] or 'MISSING'}")
+    print(f"profile-tool: {status['profile_tool'] or 'MISSING'}")
+    print(
+        "backends:     "
+        f"requested={status['requested_backend'] or '(none)'} "
+        f"probed={','.join(status['actual_backends']) or '(none)'}"
+    )
+    print(f"highs:        {status['highs']}")
+    if expected and expected != status["requested_backend"]:
+        print(f"expected:     {expected}")
+    if status["ok"]:
+        print("status:       ok")
+        return 0
+    print("status:       mismatch")
+    print("hint:         run python scripts/install.py --engine primacpp --llama-only --force")
+    return 1
+
+
+def verify_prima_installed(*, expected: str | None = None) -> None:
+    status = prima_install_status(expected=expected)
+    if status["ok"]:
+        return
+    raise SystemExit(
+        f"error: prima.cpp {status['pin'][:12]} is not installed or mismatched "
+        f"(stamp={status['stamp']!r}, highs={status['highs']!r}, "
+        f"expected={status['expected_backend']!r}, probed={status['actual_backends']!r}). "
+        "Retry with --engine primacpp --force."
+    )
+
+
+def install_prima(
+    backend: str,
+    *,
+    force: bool = False,
+    expected: str | None = None,
+) -> None:
+    backend = detect_backend(backend)
+    stamp_be = expected or stamp_backend_for_install(backend)
+    _repo, commit, digest = read_prima_recipe_pin()
+    print(f"prima.cpp backend: {backend}" + (f" (stamp {stamp_be})" if stamp_be != backend else ""))
+    print(f"prima.cpp pin:     {commit} (recipe {digest[:12]})")
+    print("prima.cpp highs:   enabled (-DUSE_HIGHS=ON)")
+
+    if (
+        not force
+        and prima_stamp_matches(commit, digest, stamp_be)
+        and prima_install_status(expected=stamp_be)["ok"]
+    ):
+        print(f"llama-server: {_resolve_prima_binary('llama-server')}")
+        print(f"llama-cli:    {_resolve_prima_binary('llama-cli')}")
+        print(f"profile-tool: {_resolve_prima_binary('profile-tool')}")
+        print(f"Already at pinned {commit[:12]}")
+        return
+
+    src_dir = str(ROOT / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    from kllm.modules.primacpp.interactors.build import bootstrap_prima_build
+
+    bootstrap_prima_build(sys.modules[__name__], VENDOR_PRIMA, PRIMA_BIN_DIR, backend)
+    write_prima_install_stamp(
+        commit=commit,
+        recipe_digest=digest,
+        backend=stamp_be,
+        highs="on",
+    )
+    print(f"llama-server: {_resolve_prima_binary('llama-server')}")
+    print(f"llama-cli:    {_resolve_prima_binary('llama-cli')}")
+    print(f"profile-tool: {_resolve_prima_binary('profile-tool')}")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
     p.add_argument("--source-repo", help="Public HTTPS Git source for an isolated managed runtime")
     p.add_argument("--revision", help="Full immutable Git commit for --source-repo")
-    p.add_argument("--engine", choices=("llamacpp", "primacpp"), default="llamacpp",
-                   help="Managed inference engine; bootstrap continues to use llama.cpp")
+    p.add_argument(
+        "--engine",
+        choices=("llamacpp", "primacpp"),
+        default="llamacpp",
+        help="Inference engine to install (llamacpp or primacpp; default: llamacpp)",
+    )
     p.add_argument("--recipe-digest", help="Resolved Prima compatibility/build recipe SHA-256")
     p.add_argument(
         "--runtime-dir", type=Path, help="Isolated destination; never replaces vendor/bin"
@@ -2281,6 +2508,19 @@ def _run_install_llama_stage(
     )
 
 
+def _run_install_prima_stage(
+    backend: str,
+    *,
+    force: bool,
+    expected: str | None,
+) -> None:
+    install_prima(
+        backend,
+        force=force,
+        expected=expected,
+    )
+
+
 def _record_stage_error(name: str, exc: BaseException) -> str:
     detail = str(exc) or type(exc).__name__
     _warn(f"{name} failed ({detail})")
@@ -2313,11 +2553,11 @@ def _run_stages(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.engine == "primacpp" and not all((args.source_repo, args.revision, args.runtime_dir)):
-        raise SystemExit("Prima requires isolated managed source arguments; see docs/agent-install.md")
     if args.engine == "llamacpp" and args.recipe_digest:
         raise SystemExit("--recipe-digest is only valid for Prima managed builds")
     if any((args.source_repo, args.revision, args.runtime_dir)):
+        if args.engine == "primacpp" and not all((args.source_repo, args.revision, args.runtime_dir)):
+            raise SystemExit("Prima requires isolated managed source arguments; see docs/agent-install.md")
         if (
             not all((args.source_repo, args.revision, args.runtime_dir))
             or not args.llama_only
@@ -2380,7 +2620,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {error}", file=sys.stderr)
             return 1
         return 0
-    tag = read_pinned_release(args.tag)
+    if args.engine == "primacpp":
+        if args.recipe_digest:
+            raise SystemExit("--recipe-digest is only valid for Prima managed builds")
+        if args.prebuilt or args.prefer_prebuilt:
+            raise SystemExit(
+                "error: prebuilt packs are not available for primacpp; Prima builds from source with HiGHS"
+            )
+        if args.rpc_tcp_only:
+            raise SystemExit("error: --rpc-tcp-only is only valid for llamacpp")
+        if args.tag:
+            raise SystemExit("error: --tag is only valid for llamacpp")
+    tag = read_pinned_release(args.tag) if args.engine == "llamacpp" else ""
 
     if args.llama_only:
         args.skip_rust = True
@@ -2389,6 +2640,8 @@ def main(argv: list[str] | None = None) -> int:
         args.skip_toolchains = True
 
     if args.check:
+        if args.engine == "primacpp":
+            return print_prima_check(expected=expected_stamp_for_default(args.backend))
         return print_llama_check(tag, expected=expected_stamp_for_default(args.backend))
 
     print(f"Repo root: {ROOT}")
@@ -2427,32 +2680,47 @@ def main(argv: list[str] | None = None) -> int:
             ("Dashboard (Svelte)", build_ui, (), {"skip_install": args.skip_npm_install}),
         )
 
+    expected_stamp: str | None = None
     if not args.skip_llama:
-        print("\n=== llama.cpp (llama-server + rpc-server) ===")
-        if args.llama_only:
-            print(f"Pin file:  {PIN_FILE} ({tag})")
-        # macOS GPU installs must source-build Metal+Vulkan; there is no prebuilt
-        # path for them (see the rejection above). Elsewhere prefer prebuilt
-        # unless --from-source was asked for.
-        # (--prefer-prebuilt still applies to `--backend cpu` on macOS.)
         resolved_backend = detect_backend(args.backend)
-        prefer_prebuilt = _prefer_llama_prebuilt(args, resolved_backend)
         expected_stamp = stamp_backend_for_install(resolved_backend)
+        if args.engine == "primacpp":
+            print("\n=== prima.cpp (llama-server + llama-cli + profile-tool, HiGHS=ON) ===")
+            jobs.append(
+                (
+                    "prima.cpp (llama-server + llama-cli + profile-tool)",
+                    _run_install_prima_stage,
+                    (args.backend,),
+                    {
+                        "force": args.force,
+                        "expected": expected_stamp,
+                    },
+                ),
+            )
+        else:
+            print("\n=== llama.cpp (llama-server + rpc-server) ===")
+            if args.llama_only:
+                print(f"Pin file:  {PIN_FILE} ({tag})")
+            # macOS GPU installs must source-build Metal+Vulkan; there is no prebuilt
+            # path for them (see the rejection above). Elsewhere prefer prebuilt
+            # unless --from-source was asked for.
+            # (--prefer-prebuilt still applies to `--backend cpu` on macOS.)
+            prefer_prebuilt = _prefer_llama_prebuilt(args, resolved_backend)
 
-        jobs.append(
-            (
-                "llama.cpp (llama-server + rpc-server)",
-                _run_install_llama_stage,
-                (args.backend,),
-                {
-                    "prefer_prebuilt": prefer_prebuilt,
-                    "force": args.force,
-                    "tag": tag,
-                    "expected": expected_stamp,
-                    "rpc_tcp_only": args.rpc_tcp_only,
-                },
-            ),
-        )
+            jobs.append(
+                (
+                    "llama.cpp (llama-server + rpc-server)",
+                    _run_install_llama_stage,
+                    (args.backend,),
+                    {
+                        "prefer_prebuilt": prefer_prebuilt,
+                        "force": args.force,
+                        "tag": tag,
+                        "expected": expected_stamp,
+                        "rpc_tcp_only": args.rpc_tcp_only,
+                    },
+                ),
+            )
 
     errors = _run_stages(jobs, sync=args.sync)
 
@@ -2463,9 +2731,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if not args.skip_llama:
-        verify_llama_installed(tag, expected=expected_stamp)
-        if args.llama_only:
-            print(f"llama.cpp {tag} ready.")
+        if args.engine == "primacpp":
+            verify_prima_installed(expected=expected_stamp)
+            if args.llama_only:
+                _repo, commit, _digest = read_prima_recipe_pin()
+                print(f"prima.cpp {commit[:12]} ready.")
+        else:
+            verify_llama_installed(tag, expected=expected_stamp)
+            if args.llama_only:
+                print(f"llama.cpp {tag} ready.")
 
     path_updated = False
     if not args.skip_rust and not args.skip_path_shim:

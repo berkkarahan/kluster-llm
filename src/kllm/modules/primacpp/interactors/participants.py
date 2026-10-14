@@ -5,7 +5,7 @@ from __future__ import annotations
 import platform
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from kllm.modules.primacpp.entities import Record, RankAllocation
 from kllm.modules.primacpp.interactors.devices import discover_vulkan_devices, select_vulkan_devices
@@ -46,11 +46,21 @@ class ParticipantEvidence(Record):
     build_id: str = Field(min_length=1, max_length=256)
     artifacts_digest: str = Field(pattern="^[0-9a-f]{64}$")
     platform: Literal["Windows", "Linux", "Darwin"]
+    # platform.machine() of the observing node (e.g. AMD64, x86_64, arm64).
+    architecture: str | None = Field(default=None, min_length=1, max_length=64)
     build_backend: str = Field(min_length=1, max_length=64)
     backend: Literal["cpu", "vulkan"]
     allocation_digest: str = Field(pattern="^[0-9a-f]{64}$")
     host: HostEvidence
     devices: list[DeviceEvidence] = Field(max_length=32)
+
+    @model_serializer(mode="wrap")
+    def wire(self, serialize):
+        value = serialize(self)
+        # Evidence without an architecture keeps its canonical bytes and digest.
+        if self.architecture is None:
+            value.pop("architecture", None)
+        return value
 
     @model_validator(mode="after")
     def selected(self):
@@ -87,7 +97,8 @@ def observe_participant(runtime, node_id, rank: RankAllocation, backend: str):
         raise ValueError("Prepared Prima artifact identity is unavailable")
     return ParticipantEvidence(node_id=node_id, runtime_id=runtime["runtime_id"],
         source_commit=runtime["commit"], recipe_digest=runtime["recipe_digest"], build_id=runtime["build_id"],
-        artifacts_digest=body_digest(artifacts), platform=platform.system(), build_backend=runtime["backend"],
+        artifacts_digest=body_digest(artifacts), platform=platform.system(),
+        architecture=platform.machine() or None, build_backend=runtime["backend"],
         backend=backend, allocation_digest=body_digest(rank.model_dump()), host=execution_host(), devices=devices)
 
 
@@ -95,3 +106,15 @@ def require_participant(manifest, node_id, current: ParticipantEvidence):
     expected = manifest.participant_evidence.get(node_id)
     if expected is None or current.digest != expected.digest:
         raise ValueError(f"{node_id}: Prima participant hardware/build changed; prepare a new plan")
+
+
+def require_shared_identity(value: ParticipantEvidence, node_id: str, runtime_id: str, runtime: dict) -> None:
+    """Source and recipe identity must match on every OS; binaries (build, artifacts, arch) may differ."""
+    differing = [name for name, same in (
+        ("node", value.node_id == node_id),
+        ("runtime", value.runtime_id == runtime_id),
+        ("source commit", value.source_commit == runtime["commit"]),
+        ("recipe", value.recipe_digest == runtime["recipe_digest"]),
+    ) if not same]
+    if differing:
+        raise ValueError(f"{node_id}: signed participant evidence has a different " + ", ".join(differing))

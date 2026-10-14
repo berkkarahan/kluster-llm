@@ -51,9 +51,78 @@ export type DeviceAllocation = {
   budget_bytes: number;
 };
 
+export type MemoryPressureSet = 'M1' | 'M2' | 'M3' | 'M4';
+export type PlacementStrategyMode = 'auto' | 'capacity_first' | 'priority';
+export type SchedulerMode = 'highs_halda' | 'capacity_first' | 'priority';
+
+export type HighsNodeAllocation = {
+  node_id: string;
+  rank: number;
+  w_m: number;
+  n_m: number;
+  cpu_layers_per_cycle: number;
+  total_layers: number;
+  total_gpu_layers: number;
+  total_cpu_layers: number;
+  memory_pressure_set: MemoryPressureSet;
+  initial_memory_pressure_set?: MemoryPressureSet;
+  forced_m4: boolean;
+  overloaded_memory_bytes: number;
+  vram_used_bytes: number;
+  ram_used_bytes: number;
+  compute_ms: number;
+  disk_reload_ms: number;
+  kv_and_sync_ms: number;
+  network_ms: number;
+  total_step_ms: number;
+  prima_graphs: number;
+};
+
+export type HighsPrunedNode = {
+  node_id: string;
+  reason: 'weak_device_w_le_1_ngl_0' | 'zero_layers_assigned';
+  iteration?: number;
+  last_w_m?: number;
+  last_n_m?: number;
+  detail?: string;
+};
+
+export type HighsCycleCandidate = {
+  cycle_count_k: number;
+  window_size_w: number;
+  feasible: boolean;
+  objective_step_ms: number | null;
+};
+
+export type HighsScheduleReport = {
+  scheduler_mode: SchedulerMode;
+  requested_strategy: PlacementStrategyMode;
+  solver_backend: 'highspy' | 'highs_exact_milp' | 'heuristic_fallback';
+  total_layers: number;
+  cycle_count_k: number;
+  window_size_w: number;
+  segmented_placement_enabled: boolean;
+  mmap_mode: string;
+  just_enough_master: boolean;
+  objective_step_ms: number;
+  compute_step_ms: number;
+  disk_reload_step_ms: number;
+  network_step_ms: number;
+  fallback_reason: string | null;
+  missing_profile_nodes: string[];
+  forced_m4_rollback: boolean;
+  iterations: number;
+  node_allocations: HighsNodeAllocation[];
+  pruned_nodes: HighsPrunedNode[];
+  evaluated_cycles: HighsCycleCandidate[];
+};
+
 export type PlacementPlan = {
   required_nodes?: string[];
   node_priority?: string[];
+  placement_strategy?: PlacementStrategyMode;
+  placement_mode?: SchedulerMode;
+  scheduler?: HighsScheduleReport;
   node_ram_budget_bytes?: Record<string, number>;
   node_ram_alloc_bytes?: Record<string, number>;
   node_vram_alloc_bytes?: Record<string, number>;

@@ -11,6 +11,7 @@ from pathlib import Path
 import psutil
 from kllm.modules.primacpp.interactors.draft import draft_mode
 from kllm.modules.primacpp.interactors.extras import template_kwargs, adapter_requests, head_only_arguments
+from kllm.modules.primacpp.interactors.platforms import normalize_platform, scope_platform, vulkan_build
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON_GATES = {"vulkan_gpu_inference", "api_parity", "model_and_placement_parity", "signed_rank_lifecycle"}
@@ -401,20 +402,11 @@ def require_api_features(body: dict, active_config: dict | None, protocol: str):
         raise ValueError("Prima native runtime does not support automatic tool streams")
 
 
-def qualification_status(runtime: dict, *, context: dict | None = None) -> dict:
-    """Library selection checks preparation; execution additionally checks its plan."""
-    if runtime.get("engine", "llamacpp") != "primacpp":
-        return {"scope": None, "inference_supported": True, "qualification_errors": []}
-    topology = (context or {}).get("topology", "local")
-    scope = "windows-vulkan-" + topology if topology in ("local", "distributed") else None
-    definition = policy()
-    record = definition.get("scopes", {}).get(scope) if definition.get("schema_version") == 1 else None
-    errors: list[str] = []
-    if (not record or runtime.get("platform") != "Windows" or runtime.get("backend") != "vulkan"):
-        return {"scope": scope, "inference_supported": False,
-                "qualification_errors": ["platform_backend_not_qualified"]}
+def _scope_errors(record: dict, runtime: dict, topology: str, context: dict | None) -> tuple[list[str], set]:
+    """Evidence checks for one scope record; the caller adds participant-level checks."""
     from kllm.modules.primacpp.interactors.recipe import recipe_digest, recipe
 
+    errors: list[str] = []
     if (record.get("source_commit") != recipe()["source_commit"]
             or runtime.get("commit") != record.get("source_commit")
             or record.get("recipe_digest") != recipe_digest()
@@ -450,17 +442,52 @@ def qualification_status(runtime: dict, *, context: dict | None = None) -> dict:
         selected = context.get("devices", [])
         if not selected or any((d.get("device_identity"), d.get("driver_identity")) not in approved for d in selected):
             errors.append("device_driver_not_qualified")
+    return errors, features
+
+
+def qualification_status(runtime: dict, *, context: dict | None = None) -> dict:
+    """Library selection checks preparation; execution additionally checks its plan.
+
+    The scope is `<platform>-vulkan-<topology>` for the node's own operating system. A
+    platform without a defined, evidenced scope is unqualified; it never borrows another
+    platform's scope or evidence.
+    """
+    if runtime.get("engine", "llamacpp") != "primacpp":
+        return {"scope": None, "inference_supported": True, "qualification_errors": []}
+    topology = (context or {}).get("topology", "local")
+    platform_key = scope_platform(runtime.get("platform"))
+    scope = (f"{platform_key}-vulkan-{topology}"
+             if platform_key and topology in ("local", "distributed") else None)
+    definition = policy()
+    scopes = definition.get("scopes", {}) if definition.get("schema_version") == 1 else {}
+    record = scopes.get(scope)
+    if not record or not vulkan_build(platform_key, runtime.get("backend")):
+        return {"scope": scope, "inference_supported": False,
+                "qualification_errors": ["platform_backend_not_qualified",
+                                         *([] if platform_key else ["platform_unrecognized"])]}
+    errors, features = _scope_errors(record, runtime, topology, context)
+    if context is not None:
         participants = context.get("participants", [])
         if topology == "local" and len(participants) != 1:
             errors.append("local_qualification_requires_one_node")
         if topology == "distributed" and (len(participants) < 2
                 or len(context.get("execution", {}).get("participants", [])) != len(participants)):
             errors.append("participant_hardware_evidence_missing")
-        if any(p.get("platform") != "Windows" or (p.get("backend") != "vulkan" and not (
+        if any(normalize_platform(p.get("platform")) is None or (p.get("backend") != "vulkan" and not (
                 topology == "distributed" and p.get("role") == "master" and p.get("rank") == 0
                 and p.get("backend") == "cpu" and p.get("ngl") == 0 and p.get("layers") == []))
                 for p in participants):
             errors.append("participant_platform_backend_not_qualified")
+        # Each other platform in the run is held to its own scope; one gap fails the run.
+        for other in sorted({scope_platform(p.get("platform")) for p in participants} - {None, platform_key}):
+            other_scope = f"{other}-vulkan-{topology}"
+            other_record = scopes.get(other_scope)
+            if not other_record:
+                errors.append(f"{other_scope}: platform_backend_not_qualified")
+                continue
+            other_errors, other_features = _scope_errors(other_record, runtime, topology, context)
+            errors.extend(f"{other_scope}: {error}" for error in other_errors)
+            features &= other_features
     return {"scope": scope, "inference_supported": not errors, "qualification_errors": errors,
             "qualified_models": record.get("models", []), "qualified_features": sorted(features),
             "qualified_placements": record.get("placements", [])}

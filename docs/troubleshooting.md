@@ -459,6 +459,25 @@ drop-in API or platform compatibility. Qualification errors in the runtime libra
 expected during development. Continue serving with llama.cpp; do not remove launch
 options or edit manifests to bypass the gate. See [remaining implementation](../specs/017-prima-integration/tasks.md).
 
+**Prima scope per platform:** qualification is evaluated against the scope for the node's own
+operating system, `<windows|linux|darwin>-vulkan-<local|distributed>` (macOS uses Vulkan through
+MoltenVK). Only Windows has recorded evidence in this repository; the Linux and macOS scopes are
+defined but unqualified (`qualification_evidence_missing`) until physical hardware receipts are
+recorded. A platform never borrows another platform's evidence. In a mixed-OS run every
+participant platform must have its own qualified scope; errors for a non-local platform are
+prefixed with that scope (for example `linux-vulkan-distributed: qualification_evidence_missing`).
+`platform_unrecognized` means the node did not report a known OS; it is never assumed to be Windows.
+
+**Prima ring mixes GPU backends:** a Prima ring needs one shared accelerator backend. Planning
+fails with `Prima rings require one shared compatible GPU backend` and names each node, its
+platform and its backend (for example a Metal macOS node with a Vulkan Linux node). Select
+Vulkan on the differing node, or exclude it. A coordinator-only CPU master is exempt on any OS.
+
+**Prima participant identity differs:** preparation names the node and the differing identity
+(`runtime`, `source commit` or `recipe`). Nodes on different operating systems and architectures
+are accepted when source commit and recipe match; their binaries (`build_id`, artifacts) may differ.
+Rebuild the named node from the same managed source version.
+
 **Prima recipe changed:** resolve the supported Prima source again and build a new
 isolated version. The recipe digest covers the patch series and build implementation;
 an old artifact is never silently attributed to a changed recipe.

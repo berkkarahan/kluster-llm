@@ -141,6 +141,7 @@ struct Helper {
     direct_ports: bool,
 }
 impl Helper {
+    #[cfg(test)]
     fn open(grant: Grant, path: PathBuf) -> Result<Self> {
         Self::open_mode(grant, path, false)
     }

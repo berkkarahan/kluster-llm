@@ -17,8 +17,23 @@ from kllm.modules.primacpp.interactors.execution import (
 from kllm.modules.primacpp.interactors.placement import (
     topology_from_plan, network_edges, require_layer_execution,
 )
+from kllm.modules.primacpp.interactors.platforms import normalize_platform
 from kllm.modules.primacpp.interactors.recipe import qualification_errors
 from kllm.modules.runtimes.entities import body_digest
+
+
+def participant_platforms(topology, members: dict) -> dict:
+    """Reported OS, architecture and backend per planned rank; unreported values stay None."""
+    result = {}
+    for rank in topology.ranks:
+        member = members[rank.node_id]
+        result[rank.node_id] = {
+            "rank": rank.rank,
+            "platform": normalize_platform(member.get("platform")),
+            "architecture": member.get("architecture"),
+            "backend": member.get("actual_backend") or member.get("backend"),
+        }
+    return result
 
 
 def candidates(body, members, execute_plan, *, limit=32):
@@ -74,11 +89,27 @@ def candidates(body, members, execute_plan, *, limit=32):
 
 
 def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, score=None) -> dict:
+    from kllm.modules.primacpp.entities import HighsScheduleReport
+    from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
+
     feasible = candidates(body, members, execute_plan)
-    plan, _ = feasible[0]
+    plan, selected_members = feasible[0]
     profiling = {"status": "unmeasured", "predicted_decode_ms": None}
     if score is not None:
-        (plan, _), profiling = score(feasible)
+        (plan, selected_members), profiling = score(feasible)
+    if isinstance(profiling, dict) and isinstance(profiling.get("scheduler"), dict):
+        scheduler_report = HighsScheduleReport.model_validate(profiling["scheduler"])
+    else:
+        scheduler_report = solve_highs_halda_schedule(
+            body=body,
+            runtime=runtime,
+            members=selected_members,
+            base_plan=plan,
+        )
+        profiling = {
+            **(profiling if isinstance(profiling, dict) else {}),
+            "scheduler": scheduler_report.model_dump(),
+        }
     stat = model.stat()
     # This is an observation, not a claim that a large model has been digest-verified.
     identity = {
@@ -101,6 +132,7 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
     topology = None
     try:
         topology = topology_from_plan(plan, members, runtime["runtime_id"])
+        topology = topology.model_copy(update={"scheduler_report": scheduler_report})
     except ValueError as error:
         errors = [*errors, str(error)]
     if topology is not None and (plan.get("split_mode") or "layer") == "layer":
@@ -124,8 +156,11 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         "prima_topology": topology.model_dump() if topology else None,
         "network_edges": network_edges(topology) if topology else [],
         "runtime_required_nodes": [r.node_id for r in topology.ranks] if topology else [],
+        "participant_platforms": participant_platforms(topology, members) if topology else {},
         "candidate_count": len(feasible),
         "profiling": profiling,
+        "scheduler": scheduler_report.model_dump(),
+        "placement_mode": scheduler_report.scheduler_mode,
         "inference_supported": not errors,
         "qualification_errors": errors,
     }

@@ -34,9 +34,10 @@ export type RuntimeNode = {
   target_error?: string | null; channel?: { connected: boolean; error?: string | null };
 };
 export type RuntimeTargetState = 'current' | 'label_stale' | 'binding_stale' | 'absent';
+export type RuntimeScope = `${'windows' | 'linux' | 'darwin'}-vulkan-${'local' | 'distributed'}`;
 export type RuntimeLibrary = {
   versions: { version: RuntimeVersion; build: RuntimeBuild | null; inference_supported?: boolean; qualification_errors?: string[];
-    scope?: 'windows-vulkan-local' | 'windows-vulkan-distributed' | null;
+    scope?: RuntimeScope | null;
     qualified_models?: {sha256: string; name?: string}[];
     qualified_features?: string[]; qualified_placements?: string[];
   }[];
@@ -54,6 +55,26 @@ export type RuntimeSources = {
   repository: string; releases: {tag: string; name: string; prerelease: boolean}[];
   tags: string[]; branches: string[]; warning: string | null;
 };
+import type {
+  HighsCycleCandidate,
+  HighsNodeAllocation,
+  HighsPrunedNode,
+  HighsScheduleReport,
+  MemoryPressureSet,
+  PlacementStrategyMode,
+  SchedulerMode,
+} from '../run/entities';
+
+export type {
+  HighsCycleCandidate,
+  HighsNodeAllocation,
+  HighsPrunedNode,
+  HighsScheduleReport,
+  MemoryPressureSet,
+  PlacementStrategyMode,
+  SchedulerMode,
+};
+
 /** GET /v2/node/prima-devices — the selected Prima build's own device probe. */
 export type PrimaDeviceReport = {
   available: boolean;
@@ -64,4 +85,33 @@ export type PrimaDeviceReport = {
     backend?: string; name?: string; description?: string;
     device_identity?: string; driver_identity?: string; physical_index?: number;
   }[];
+};
+
+export type PrimaPlanPreview = {
+  runtime_id: string;
+  plan_digest: string;
+  inventory_digest: string;
+  candidate_count: number;
+  placement_mode?: SchedulerMode;
+  scheduler?: HighsScheduleReport;
+  profiling?: {
+    status: string;
+    predicted_decode_ms: number | null;
+    reason?: string;
+    scheduler?: HighsScheduleReport;
+  };
+  prima_topology?: {
+    total_layers: number;
+    ranks: {
+      node_id: string;
+      rank: number;
+      layers: { start: number; end: number }[];
+      devices: string[];
+      ngl: number;
+      tensor_split: number[];
+    }[];
+  } | null;
+  qualification_errors?: string[];
+  network_edges?: Record<string, unknown>[];
+  [key: string]: unknown;
 };

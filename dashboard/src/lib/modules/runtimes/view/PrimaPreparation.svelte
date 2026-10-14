@@ -17,6 +17,7 @@
   let reviewedSettings = $state('');
   const fresh = $derived(currentSettings === reviewedSettings);
   const ranks = $derived(preview?.prima_topology?.ranks ?? []);
+  const scheduler = $derived(preview?.scheduler ?? preview?.profiling?.scheduler ?? null);
   const active = $derived(job && !['prepared', 'failed', 'cancelled', 'interrupted'].includes(job.phase));
   async function inspect() {
     const seq = ++generation;
@@ -73,11 +74,23 @@
   </div>
   {#if preview}
     {#if !fresh}<p class="hint">Settings changed. Inspect placement again before preparation.</p>{/if}
-    <p>Profiles: {preview.profiling?.status ?? 'unmeasured'} · Candidates: {preview.candidate_count ?? 0}</p>
+    <p>Profiles: {preview.profiling?.status ?? 'unmeasured'} · Candidates: {preview.candidate_count ?? 0}{#if scheduler} · Scheduler: {scheduler.scheduler_mode} (k={scheduler.cycle_count_k}, W={scheduler.window_size_w}){/if}</p>
+    {#if scheduler}
+      {#if scheduler.scheduler_mode === 'highs_halda'}
+        <p class="hint">HiGHS Halda MILP objective: {Number(scheduler.objective_step_ms ?? 0).toFixed(2)} ms · compute {Number(scheduler.compute_step_ms ?? 0).toFixed(2)} ms · disk reload {Number(scheduler.disk_reload_step_ms ?? 0).toFixed(2)} ms · network {Number(scheduler.network_step_ms ?? 0).toFixed(2)} ms</p>
+      {:else if scheduler.fallback_reason}
+        <p class="hint">Scheduler fallback: {scheduler.fallback_reason}{scheduler.missing_profile_nodes?.length ? ` (missing profiles: ${scheduler.missing_profile_nodes.join(', ')})` : ''}</p>
+      {/if}
+      {#if scheduler.pruned_nodes?.length}
+        <p class="hint">Pruned weak workers: {scheduler.pruned_nodes.map((p: any) => `${p.node_id} (${p.reason})`).join(', ')}</p>
+      {/if}
+    {/if}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (keyboard access to the scrollable placement table) -->
     <div class="table-scroll" role="region" aria-label="Prima rank placement" tabindex="0">
-      <table><thead><tr><th>Node</th><th>Rank</th><th>Layers</th><th>Devices</th><th>-ngl</th><th>Tensor split</th></tr></thead>
-        <tbody>{#each ranks as rank}<tr><td>{rank.node_id}</td><td>{rank.rank}</td><td>{rank.layers.map((r: any) => `${r.start}–${r.end}`).join(', ') || 'Coordinator'}</td><td>{rank.devices.join(', ') || 'CPU'}</td><td>{rank.ngl}</td><td>{rank.tensor_split.join(', ') || '—'}</td></tr>{/each}</tbody>
+      <table><thead><tr><th>Node</th><th>Rank</th><th>Layers</th><th>Devices</th><th>-ngl</th><th>Tensor split</th>{#if scheduler?.node_allocations?.length}<th>Halda (w, n / set / graphs)</th>{/if}</tr></thead>
+        <tbody>{#each ranks as rank}
+          {@const halda = scheduler?.node_allocations?.find((a: any) => a.node_id === rank.node_id)}
+          <tr><td>{rank.node_id}</td><td>{rank.rank}</td><td>{rank.layers.map((r: any) => `${r.start}–${r.end}`).join(', ') || 'Coordinator'}</td><td>{rank.devices.join(', ') || 'CPU'}</td><td>{rank.ngl}</td><td>{rank.tensor_split.join(', ') || '—'}</td>{#if scheduler?.node_allocations?.length}<td>{halda ? `w=${halda.w_m}, n=${halda.n_m} · ${halda.memory_pressure_set} · graphs=${halda.prima_graphs}` : '—'}</td>{/if}</tr>{/each}</tbody>
       </table>
     </div>
     <details><summary>Qualification blockers and network edges</summary><pre>{JSON.stringify({ blockers: preview.qualification_errors, edges: preview.network_edges }, null, 2)}</pre></details>

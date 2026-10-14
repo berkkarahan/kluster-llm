@@ -132,9 +132,15 @@ class ExecutionManifest(Record):
         if self.participant_evidence:
             if set(self.participant_evidence) != nodes:
                 raise ValueError("Every rank requires observed participant evidence")
+            master = self.participant_evidence.get(self.ranks[0].node_id)
             if (len({e.source_commit for e in self.participant_evidence.values()}) != 1
                     or len({e.recipe_digest for e in self.participant_evidence.values()}) != 1):
-                raise ValueError("Participant source/recipe identities disagree")
+                odd = sorted(node for node, e in self.participant_evidence.items()
+                             if master and (e.source_commit, e.recipe_digest)
+                             != (master.source_commit, master.recipe_digest))
+                raise ValueError("Participant source/recipe identities disagree"
+                                 + (f": {', '.join(odd)} differ from master {self.ranks[0].node_id}"
+                                    if odd else ""))
             for rank in self.ranks:
                 evidence = self.participant_evidence[rank.node_id]
                 if (evidence.node_id != rank.node_id or evidence.runtime_id != self.runtime_id
@@ -192,11 +198,16 @@ def inventory_identity(members: dict, network_id: str | None = None) -> str:
         "config_revision",
         "network_revision",
     )
+    # Reported only when present: members without them keep their existing plan digests,
+    # while an OS or architecture change on a reporting member makes its plan stale.
+    optional = ("platform", "architecture")
     return body_digest(
         {
             "network_id": network_id,
-            "members": {n: {k: stable_device_inventory(m.get(k)) if k == "devices" else m.get(k)
-                            for k in fields} for n, m in sorted(members.items())},
+            "members": {n: {**{k: stable_device_inventory(m.get(k)) if k == "devices" else m.get(k)
+                               for k in fields},
+                            **{k: m[k] for k in optional if m.get(k) is not None}}
+                        for n, m in sorted(members.items())},
         }
     )
 

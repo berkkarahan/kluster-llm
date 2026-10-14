@@ -1,0 +1,295 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,6 +72,7 @@
+ 
+ # 3rd party libs
+ option(LLAMA_CURL "llama: use libcurl to download model from an URL" OFF)
++option(USE_HIGHS  "prima: use HiGHS solver" OFF)
+ 
+ # Required for relocatable CMake package
+ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
+@@ -137,6 +138,41 @@
+ FetchContent_GetProperties(cppzmq)
+ if(NOT cppzmq_POPULATED)
+     FetchContent_Populate(cppzmq)
++endif()
++if (USE_HIGHS)
++    set(FAST_BUILD ON CACHE BOOL "" FORCE)
++    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
++    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
++    set(BUILD_CXX_EXAMPLE OFF CACHE BOOL "" FORCE)
++    set(ZLIB OFF CACHE BOOL "" FORCE)
++    set(HIGHS_NO_DEFAULT_THREADS ON CACHE BOOL "" FORCE)
++    FetchContent_Declare(highs
++        URL https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.9.0.tar.gz
++        URL_HASH SHA256=dff575df08d88583c109702c7c5c75ff6e51611e6eacca8b5b3fdfba8ecc2cb4)
++    FetchContent_MakeAvailable(highs)
++    target_include_directories(highs PUBLIC
++        ${highs_SOURCE_DIR}/extern
++        ${highs_SOURCE_DIR}/extern/filereader
++        ${highs_SOURCE_DIR}/extern/pdqsort
++        ${highs_SOURCE_DIR}/extern/zstr
++        ${highs_SOURCE_DIR}/src
++        ${highs_SOURCE_DIR}/src/interfaces
++        ${highs_SOURCE_DIR}/src/io
++        ${highs_SOURCE_DIR}/src/ipm
++        ${highs_SOURCE_DIR}/src/ipm/ipx
++        ${highs_SOURCE_DIR}/src/ipm/basiclu
++        ${highs_SOURCE_DIR}/src/lp_data
++        ${highs_SOURCE_DIR}/src/mip
++        ${highs_SOURCE_DIR}/src/model
++        ${highs_SOURCE_DIR}/src/parallel
++        ${highs_SOURCE_DIR}/src/pdlp
++        ${highs_SOURCE_DIR}/src/pdlp/cupdlp
++        ${highs_SOURCE_DIR}/src/presolve
++        ${highs_SOURCE_DIR}/src/qpsolver
++        ${highs_SOURCE_DIR}/src/simplex
++        ${highs_SOURCE_DIR}/src/test
++        ${highs_SOURCE_DIR}/src/util
++        ${highs_BINARY_DIR})
+ endif()
+ add_subdirectory(src)
+ if (LLAMA_BUILD_COMMON)
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -92,6 +92,11 @@
+     set(LLAMA_COMMON_EXTRA_LIBS ${LLAMA_COMMON_EXTRA_LIBS} ${CURL_LIBRARY})
+ endif ()
+ 
++if (USE_HIGHS)
++    target_compile_definitions(${TARGET} PUBLIC USE_HIGHS)
++    set(LLAMA_COMMON_EXTRA_LIBS ${LLAMA_COMMON_EXTRA_LIBS} highs)
++endif ()
++
+ target_include_directories(${TARGET} PUBLIC .)
+ target_include_directories(${TARGET} BEFORE PRIVATE chat-runtime)
+ target_compile_features   (${TARGET} PUBLIC cxx_std_17)
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -925,7 +925,7 @@
+         alpha[m] = t_calc_cpu + t_kv_cpy_cpu + t_read_ram_cpu; // in ms
+ 
+         // beta[m]
+-        if (dev.gpu_support.metal || dev.gpu_support.cuda) {
++        if (dev.gpu_support.metal || dev.gpu_support.cuda || dev.gpu_support.vulkan) {
+             float t_calc_gpu     = 0.0;
+             float t_kv_cpy_gpu   = 0.0;
+             float t_read_ram_gpu = 0.0;
+@@ -983,9 +983,8 @@
+         bool is_linux   = strcmp(dev.device_os, "Linux") == 0;
+         bool is_android = strcmp(dev.device_os, "Android") == 0;
+         bool is_windows = strcmp(dev.device_os, "Windows") == 0;
+-        GGML_ASSERT(!is_windows && "Windows is not tested yet\n");
+-
+-        if ((is_macos && !dev.gpu_support.metal) || is_linux) {
++
++        if ((is_macos && !dev.gpu_support.metal) || is_linux || is_windows) {
+             mem_budget[m] = dev.memory.available_physical;
+         } else if (is_macos && dev.gpu_support.metal) {
+             mem_budget[m] = dev.gpu_props.memory_free + 1e-4; // to avoid division by zero
+@@ -1020,7 +1019,7 @@
+     w[std::distance(mem_budget.begin(), device)] += diff;
+     // initialize n_m to w_m (if there is GPU), assume all layers can run on GPU
+     for (uint32_t m = 0; m < n_world; ++m) {
+-        if (dev_info_set[m].gpu_support.metal || dev_info_set[m].gpu_support.cuda) {
++        if (dev_info_set[m].gpu_support.metal || dev_info_set[m].gpu_support.cuda || dev_info_set[m].gpu_support.vulkan) {
+             n[m] = w[m];
+         } else {
+             n[m] = 0;
+@@ -1079,9 +1078,7 @@
+             bool is_macos   = strcmp(dev.device_os, "macOS") == 0;
+             bool is_linux   = strcmp(dev.device_os, "Linux") == 0;
+             bool is_android = strcmp(dev.device_os, "Android") == 0;
+-            bool is_windows = strcmp(dev.device_os, "Windows") == 0;
+-            GGML_ASSERT(!is_windows && "Windows is not tested yet\n");
+-
++    
+             llama_model_compute_buf_size(&c_cpu[m], &c_gpu[m], model, cparams, get_backend_type(dev.gpu_support), m, dev_info_set[0].model_bytes, w[m] > n[m], n[m] > 0);
+ 
+             int  l_m          = w[m] * k;  // total number of layers assigned to device m
+@@ -1097,7 +1094,7 @@
+                 M1.push_back(m); // case 1: macOS without Metal, and with insufficient memory
+             } else if (is_macos && dev.gpu_support.metal && condition2) {
+                 M2.push_back(m); // case 2: macOS with Metal, and with insufficient memory
+-            } else if ((is_linux || is_android) && condition3) {
++            } else if ((is_linux || is_android || is_windows) && condition3) {
+                 M3.push_back(m); // case 3: Linux with insufficient memory
+             } else {
+                 M4.push_back(m); // case 4: devices with sufficient memory
+@@ -1180,7 +1177,7 @@
+         std::vector<int> dev_gpu(n_world, 0);
+         for (uint32_t m = 0; m < n_world; ++m) {
+             const device_info & dev = dev_info_set[m];
+-            if (dev.gpu_support.cuda || dev.gpu_support.metal) {
++            if (dev.gpu_support.cuda || dev.gpu_support.metal || dev.gpu_support.vulkan) {
+                 dev_gpu[m] = 1;
+             }
+         }
+@@ -1217,9 +1214,7 @@
+             GGML_ASSERT(dev.device_os != nullptr);
+             bool is_macos   = strcmp(dev.device_os, "macOS") == 0;
+             bool is_android = strcmp(dev.device_os, "Android") == 0;
+-            bool is_windows = strcmp(dev.device_os, "Windows") == 0;
+-            GGML_ASSERT(!is_windows && "Windows is not tested yet\n");
+-
++    
+             int64_t b_cio = (bi / n_vocab + bo) * int(m == 0) + c_cpu[m];
+ 
+             if (in_set(m, M1)) {
+@@ -1536,7 +1531,7 @@
+     // assign layers according to RAM/VRAM
+     for (uint32_t m = 0; m < n_world; ++m) {
+         const device_info & dev = dev_info_set[m];
+-        if (dev.gpu_support.metal || dev.gpu_support.cuda) {
++        if (dev.gpu_support.metal || dev.gpu_support.cuda || dev.gpu_support.vulkan) {
+             mem_budget[m] = dev.gpu_props.memory_free;
+         } else {
+             mem_budget[m] = dev.memory.available_physical;
+@@ -1574,7 +1569,7 @@
+         const device_info & dev = dev_info_set[m];
+         llama_model_compute_buf_size(&c_cpu[m], &c_gpu[m], model, cparams, get_backend_type(dev.gpu_support), m, dev_info_set[0].model_bytes, false, true);
+ 
+-        if (dev.gpu_support.cuda || dev.gpu_support.metal) {
++        if (dev.gpu_support.cuda || dev.gpu_support.metal || dev.gpu_support.vulkan) {
+             int64_t required_mem = w[m] * b_prime;
+             int64_t available_mem = dev.gpu_props.memory_free * GIGABYTE - c_gpu[m];
+             if (dev.gpu_support.metal && m == 0 && cparams.keep_out_in_metal) {
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -3583,6 +3583,9 @@
+         features.push_back("vulkan_profile_device_identity_v1");
+         features.push_back("gpu_execution_evidence_v1");
+         if (ggml_backend_vk_diagnostic_timing()) features.push_back("diagnostic_vulkan_timing_v1");
++#endif
++#ifdef USE_HIGHS
++        features.push_back("highs");
+ #endif
+         std::fprintf(stdout, "KLLM_PRIMA_CAPABILITIES=%s\n", json({
+             {"schema_version", 1},
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -3979,16 +3979,16 @@
+     dev_info->cpu_props.name                = cpu_props.name;
+     dev_info->cpu_props.description         = cpu_props.description;
+ 
+-#if defined(GGML_USE_METAL) || defined(GGML_USE_CUDA)
++#if defined(GGML_USE_METAL) || defined(GGML_USE_CUDA) || defined(GGML_USE_VULKAN)
+     dev_info->gpu_props.name                = gpu_props.name;
+     dev_info->gpu_props.description         = gpu_props.description;
+     dev_info->gpu_props.memory_free         = round(gpu_props.memory_free / (double)(1 << 30) * 100) / 100;
+     dev_info->gpu_props.memory_free         = std::min((float)gpu_mem, dev_info->gpu_props.memory_free);
+     dev_info->gpu_props.memory_total        = round(gpu_props.memory_total / (double)(1 << 30) * 100) / 100;
+     dev_info->gpu_props.metal_read_vram_bw  = device_metal_read_vram_bw();
+-    dev_info->gpu_props.cuda_read_vram_bw   = device_cuda_read_vram_bw();
++    dev_info->gpu_props.cuda_read_vram_bw   = dev_info->gpu_support.cuda ? device_cuda_read_vram_bw() : device_vulkan_read_vram_bw();
+     dev_info->gpu_props.metal_mem_cpy_delay = device_metal_mem_copy(model);
+-    dev_info->gpu_props.cuda_mem_cpy_delay  = device_cuda_mem_copy(model);
++    dev_info->gpu_props.cuda_mem_cpy_delay  = dev_info->gpu_support.cuda ? device_cuda_mem_copy(model) : device_vulkan_mem_copy(model);
+ #else
+     (void)gpu_mem;
+ #endif
+@@ -3996,74 +3996,74 @@
+     if (is_dtype_exist(n_params, GGML_TYPE_F32)) {
+         dev_info->cpu_props.flops_f32_f32         = device_cpu_flops  (model, GGML_TYPE_F32,  GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_f32_f32   = device_metal_flops(model, GGML_TYPE_F32,  GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_f32_f32    = device_cuda_flops (model, GGML_TYPE_F32,  GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_f32_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_F32, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_F32, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_F16)) {
+         dev_info->cpu_props.flops_f16_f32         = device_cpu_flops  (model, GGML_TYPE_F16,  GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_f16_f32   = device_metal_flops(model, GGML_TYPE_F16,  GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_f16_f32    = device_cuda_flops (model, GGML_TYPE_F16,  GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_f16_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_F16, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_F16, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_Q2_K)) {
+         dev_info->cpu_props.flops_q2k_f32         = device_cpu_flops  (model, GGML_TYPE_Q2_K, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_q2k_f32   = device_metal_flops(model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_q2k_f32    = device_cuda_flops (model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_q2k_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_Q2_K, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_Q4_K)) {
+         dev_info->cpu_props.flops_q4k_f32         = device_cpu_flops  (model, GGML_TYPE_Q4_K, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_q4k_f32   = device_metal_flops(model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_q4k_f32    = device_cuda_flops (model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_q4k_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_Q4_K, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_Q5_K)) {
+         dev_info->cpu_props.flops_q5k_f32         = device_cpu_flops  (model, GGML_TYPE_Q5_K, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_q5k_f32   = device_metal_flops(model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_q5k_f32    = device_cuda_flops (model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_q5k_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_Q5_K, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_Q6_K)) {
+         dev_info->cpu_props.flops_q6k_f32         = device_cpu_flops  (model, GGML_TYPE_Q6_K, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_q6k_f32   = device_metal_flops(model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_q6k_f32    = device_cuda_flops (model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_q6k_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_Q6_K, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_IQ2_XXS)) {
+         dev_info->cpu_props.flops_iq2xxs_f32      = device_cpu_flops  (model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_iq2xxs_f32= device_metal_flops(model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_iq2xxs_f32 = device_cuda_flops (model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_iq2xxs_f32 = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_Q5_0)) {
+         dev_info->cpu_props.flops_q50_f32         = device_cpu_flops  (model, GGML_TYPE_Q5_0, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_q50_f32   = device_metal_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_q50_f32    = device_cuda_flops (model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_q50_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+     }
+ 
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_Q8_0)) {
+         dev_info->cpu_props.flops_q80_f32         = device_cpu_flops  (model, GGML_TYPE_Q8_0, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_q80_f32   = device_metal_flops(model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_q80_f32    = device_cuda_flops (model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_q80_f32    = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_Q8_0, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_IQ1_S)) {
+         dev_info->cpu_props.flops_iq1s_f32        = device_cpu_flops  (model, GGML_TYPE_IQ1_S, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_iq1s_f32  = device_metal_flops(model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_iq1s_f32   = device_cuda_flops (model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_iq1s_f32   = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_IQ1_S, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_IQ4_NL)) {
+         dev_info->cpu_props.flops_iq4nl_f32       = device_cpu_flops   (model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_iq4nl_f32 = device_metal_flops(model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_iq4nl_f32  = device_cuda_flops (model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_iq4nl_f32  = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
+     }
+ 
+     if (is_dtype_exist(n_params, GGML_TYPE_IQ1_M)) {
+         dev_info->cpu_props.flops_iq1m_f32        = device_cpu_flops  (model, GGML_TYPE_IQ1_M, GGML_TYPE_F32, n_threads);
+         dev_info->gpu_props.metal_flops_iq1m_f32  = device_metal_flops(model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
+-        dev_info->gpu_props.cuda_flops_iq1m_f32   = device_cuda_flops (model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
++        dev_info->gpu_props.cuda_flops_iq1m_f32   = dev_info->gpu_support.cuda ? device_cuda_flops(model, GGML_TYPE_IQ1_M, GGML_TYPE_F32) : device_vulkan_flops(model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
+     }
+ }
+ 
+@@ -28764,7 +28764,7 @@
+     // GPU compute buffer
+     // estimate the GPU compute buffer, here we can only estimate the upper bound of various models,
+     // but cannot estimate the exact value.
+-    if (backend == BACKEND_CUDA) {
++    if (backend == BACKEND_CUDA || backend == BACKEND_VULKAN) {
+         *gpu_buf = (n_bak_embd + n_norm) * type_size_f32;
+ 
+         if (is_master) {
+@@ -28867,7 +28867,7 @@
+     LLAMA_LOG_INFO("%s: (rank %d) compute buffer size = %7.2f MiB (GPU) + %7.2f MiB (CPU & GPU-host buffer)\n", __func__,
+             my_rank, *gpu_buf / (1024.0 * 1024.0), *cpu_buf / (1024.0 * 1024.0));
+     
+-    if (backend == BACKEND_CUDA) {
++    if (backend == BACKEND_CUDA || backend == BACKEND_VULKAN) {
+         // context GPU memory usage, i.e. the initial memory cost of creating a CUDA context, 
+         // even before you launch any kernels or allocate your own buffers.
+         // this value may vary by GPU and CUDA version, but it's lower than 400 MiB in most cases,

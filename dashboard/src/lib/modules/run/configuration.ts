@@ -12,6 +12,7 @@ export const PARAMETER_FIELDS: Record<string, string> = {
   seed: 'seed', max_output_tokens: 'maxOutputTokens', stop: 'stopSequences', enable_thinking: 'enableThinking',
   reasoning_effort: 'reasoningEffort', reasoning_budget: 'reasoningBudget', reasoning_format: 'reasoningFormat',
   device: 'runDevice', gpu_ids: 'runGpuIds', vram_percent: 'runVramPercent', ram_percent: 'runRamPercent',
+  placement_strategy: 'placementStrategy',
 };
 
 export const PARAMETER_LABELS: Record<string, string> = {
@@ -24,7 +25,7 @@ export const PARAMETER_LABELS: Record<string, string> = {
   presence_penalty: 'Presence penalty', repeat_penalty: 'Repeat penalty', enable_thinking: 'Thinking',
   reasoning_effort: 'Reasoning effort', reasoning_budget: 'Thinking token budget', reasoning_format: 'Reasoning response format',
   draft_max: 'Maximum draft tokens', moe_offload: 'MoE expert offload', vram_percent: 'Deployment VRAM limit (%)',
-  ram_percent: 'Deployment RAM limit (%)', device: 'Compute preference',
+  ram_percent: 'Deployment RAM limit (%)', device: 'Compute preference', placement_strategy: 'Placement strategy',
 };
 
 /** Free text is an import convenience. JSON argv is the lossless representation. */

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import re
 import socket
 from collections.abc import Callable
@@ -83,6 +84,8 @@ class HeartbeatPayloadBuilder:
             "available_ram_bytes": member.get("available_ram_bytes") or 0,
             "vram_bytes": member.get("vram_bytes"),
             "backend": member.get("backend") or "unknown",
+            "platform": platform.system() or None,
+            "architecture": platform.machine() or None,
             "vram_percent": config["vram_percent"],
             "ram_percent": config["ram_percent"],
             **{

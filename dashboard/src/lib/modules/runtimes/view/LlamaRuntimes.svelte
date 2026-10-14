@@ -172,6 +172,7 @@
   function short(value: string | null | undefined) { return value?.slice(0, 8) ?? '—'; }
   function disk(bytes: number | undefined) { return bytes ? `${(bytes / 1024 ** 2).toFixed(0)} MiB` : '—'; }
   function label(version: RuntimeVersion) { return version.name || version.ref; }
+  function scopeLabel(scope: string) { const os = scope.split('-')[0]; return `${os === 'darwin' ? 'macOS' : os === 'linux' ? 'Linux' : 'Windows'}/Vulkan`; }
   function inspect(version: RuntimeVersion) { details = version; open('details'); }
   function remove(version: RuntimeVersion) { details = version; open('remove'); }
   async function confirmRemove() {
@@ -255,8 +256,8 @@
           {#if master}<button class="btn" disabled={busy || draft === version.runtime_id || entry.inference_supported === false} onclick={() => draft = version.runtime_id}>Select</button>{:else if !worker}<button class="btn" disabled={!entry.build || busy || !!running || entry.inference_supported === false} onclick={() => selectLocal(version)}>Use locally</button>{/if}
           <button class="btn runtime-remove" title={protectedVersion(version.runtime_id) ? 'Running, selected, targeted or building versions are protected' : 'Remove this local version'} aria-label={`Remove ${label(version)}`} disabled={busy || worker || protectedVersion(version.runtime_id)} onclick={() => remove(version)}>×</button>
         </div>
-        {#if entry.scope === 'windows-vulkan-local'}
-          <p class="small muted">{entry.inference_supported ? 'Qualified for local Windows/Vulkan' : 'Local Windows/Vulkan qualification pending'}. Multi-node runs require separate physical qualification.</p>
+        {#if entry.scope?.endsWith('-vulkan-local')}
+          <p class="small muted">{entry.inference_supported ? 'Qualified for local' : 'Local'} {scopeLabel(entry.scope)}{entry.inference_supported ? '' : ' qualification pending'}. Multi-node runs require separate physical qualification.</p>
           {#if entry.inference_supported}<p class="small muted">Qualified models: {entry.qualified_models?.map(model => model.name ?? model.sha256.slice(0, 12)).join(', ')}. Features: {entry.qualified_features?.join(', ')}.</p>{/if}
         {/if}
         {#if entry.qualification_errors?.length}<p class="version-error small warning">Qualification pending: {entry.qualification_errors.map(value => value.replaceAll('_', ' ')).join(', ')}</p>{/if}

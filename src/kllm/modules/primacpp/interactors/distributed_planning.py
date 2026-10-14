@@ -23,6 +23,11 @@ def fallback(feasible, reason):
 
 
 def score_candidates(feasible, body, runtime, model_sha256, layout, profiles, contexts, links, *, now):
+    from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
+
+    strategy = getattr(body, "placement_strategy", "auto")
+    if strategy in ("capacity_first", "priority"):
+        return fallback(feasible, f"Operator selected {strategy} placement strategy")
     metadata = layout.get("metadata", {})
     embedding = metadata.get(str(layout.get("architecture")) + ".embedding_length")
     vocab = None
@@ -155,12 +160,25 @@ def score_candidates(feasible, body, runtime, model_sha256, layout, profiles, co
             "compute_ms": compute, "host_handoff_ms": handoff, "application_link_ms": network,
             "wire_cost_model": "segmented_ring_header_bound_v1" if segmented else "legacy_ring_v1"})
     chosen = min(range(len(scores)), key=lambda i: (scores[i]["predicted_decode_ms"], scores[i]["predicted_weight_read_ms"], i))
+    scheduler_report = solve_highs_halda_schedule(
+        body=body,
+        runtime=runtime,
+        members=feasible[chosen][1],
+        base_plan=feasible[chosen][0],
+        layout=layout,
+        profiles={k: v for k, v in profiles.items() if k in feasible[chosen][1]},
+        links=links,
+    )
     return feasible[chosen], {"status": "profiled_estimate", "measurement_kind": "typed_roofline_estimate",
         "scope": "one-token f16/off resident layer execution, per-visit handoffs and signed application link proxy",
-        "model_sha256": model_sha256, "candidate_estimates": scores, **scores[chosen]}
+        "model_sha256": model_sha256, "candidate_estimates": scores, **scores[chosen],
+        "scheduler": scheduler_report.model_dump()}
 
 
 def measured_candidates(control, feasible, body, runtime, model, model_digest):
+    strategy = getattr(body, "placement_strategy", "auto")
+    if strategy in ("capacity_first", "priority"):
+        return fallback(feasible, f"Operator selected {strategy} placement strategy")
     if control.service.state().role != "master":
         return fallback(feasible, "Measured distributed planning requires current master authority")
     owner = authority_owner(control.service.channels.master_authority())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 from collections.abc import Callable
 from typing import Any
 
@@ -93,6 +94,8 @@ def build_register_payload(
         "wg_listen_port": netsec.WG_LISTEN_PORT,
         "git_head": git_head,
         "llama_release": llama_release,
+        "platform": platform.system() or None,
+        "architecture": platform.machine() or None,
     }
 
 

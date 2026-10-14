@@ -12,6 +12,131 @@ const chrome = [process.env.CHROME_BIN, '/Applications/Google Chrome.app/Content
   '/usr/bin/chromium', 'C:/Program Files/Google/Chrome/Application/chrome.exe'].find(p => p && existsSync(p));
 const pause = ms => new Promise(r => setTimeout(r, ms));
 
+test('Prima mode pins the recipe revision inline above runtime identity and masters set the cluster target',
+  { skip: !chrome && 'Chrome required for Prima pin browser check' }, async () => {
+    const primaRepo = 'https://github.com/berkkarahan/prima.cpp.git';
+    const prima = {
+      name: 'Prima.cpp 0.0.1', engine: 'primacpp', repository: primaRepo, ref: '0.0.1',
+      ref_type: 'tag', commit: '1'.repeat(40), runtime_id: '2'.repeat(64), recipe_digest: '3'.repeat(64)
+    };
+    const gates = ['vulkan_gpu_inference', 'api_parity', 'platform_backend_parity',
+      'model_and_placement_parity', 'signed_rank_lifecycle', 'hardware_performance_gate'];
+    // Pre-pin state from the screenshot: the launch engine is not in the library.
+    const library = {
+      versions: [], jobs: [], selected: null,
+      bootstrap: { repository: 'https://github.com/ggml-org/llama.cpp.git', ref: 'v0.5.0' },
+      target: null, running: null,
+      engine_sources: [{ engine: 'primacpp', repository: primaRepo, ref: prima.commit, ref_type: 'commit', release: '0.0.1', release_commit: prima.commit, qualification_errors: gates }],
+      nodes: [{ node_id: 'master', name: 'control-box', address: '10.10.10.1', role: 'master', capability: 1, phase: 'offline' }]
+    };
+    const status = () => ({ role: 'master', node_id: 'master', members: {}, process_pid: 99,
+      process_role: 'master', inference_up: false, engine: 'primacpp', runtimes: library, capacity: { backend: 'vulkan' },
+      accel_backend: 'vulkan', software: { git_head: 'fixture', llama_release: 'v0.5.0' } });
+    const commands = [];
+    const profile = mkdtempSync(join(tmpdir(), 'kllm-prima-pin-'));
+    const screenshots = resolve('../artifacts/prima-settings');
+    mkdirSync(screenshots, { recursive: true });
+    let vite, server, browser, socket;
+    try {
+      vite = await createServer({server: {middlewareMode: true, hmr: false, ws: false, watch: null}, appType: 'custom'});
+      server = httpServer(async (req, res) => {
+        const url = new URL(req.url, 'http://fixture'), path = url.pathname;
+        const json = (value, code = 200) => res.writeHead(code, {'Content-Type': 'application/json'}).end(JSON.stringify(value));
+        if (!path.startsWith('/v2/')) return vite.middlewares(req, res, () => res.writeHead(404).end());
+        if (req.method !== 'GET') {
+          let raw = ''; for await (const chunk of req) raw += chunk;
+          const value = raw ? JSON.parse(raw) : {};
+          commands.push({path, value});
+          if (path === '/v2/node/runtimes/resolve') return json({...value, commit: prima.commit, recipe_digest: prima.recipe_digest, runtime_id: prima.runtime_id});
+          if (path === '/v2/node/runtimes') library.versions.push({version: value, build: null, inference_supported: false, qualification_errors: gates});
+          if (path === '/v2/cluster/runtime-target') library.target = {version: prima, revision: 1, cluster_binding_id: 'fixture', master_node_id: 'master'};
+          return json({ok: true});
+        }
+        if (path === '/v2/node/runtimes') return json(library);
+        if (path === '/v2/credentials/api-token') return json({api_token: 'fixture-token'});
+        if (path === '/v2/node') return json(status());
+        if (path === '/v2/node/home') return json({home: '/fixture', models: '/fixture/models', logs: '/fixture/logs'});
+        if (path === '/v2/node/config') return json({device: 'gpu', gpu_ids: [0], ram_percent: 80, vram_percent: 80, accel_backend: 'vulkan', engine: 'primacpp'});
+        if (path === '/v2/node/devices') return json({devices: [], backend: 'vulkan', installed_backends: ['vulkan'], allowed_backends: ['vulkan']});
+        if (path === '/v2/node/prima-devices') return json({available: false, features: [], backends: [], devices: []});
+        if (path === '/v2/models') return json({data: []});
+        if (path === '/v2/events') {
+          const area = data => ({revision: 1, sampled_at: new Date().toISOString(), availability: 'available', coverage: 'local', upstream_last_success_at: null, error: null, data});
+          const areas = {status: area(status()), usage: area({nodes: {}, relationships: [], recording: {recording: 'stopped'}}), load: area({current: null, last_terminal: null}), download: area({current: null, last_terminal: null})};
+          const topics = url.searchParams.get('topics')?.split(',') ?? Object.keys(areas);
+          return json({version: 1, transport: 'websocket', epoch: '00000000-0000-4000-8000-000000000003', server_time: new Date().toISOString(),
+            areas: Object.fromEntries(topics.filter(t => t in areas).map(t => [t, areas[t]])), logs: null});
+        }
+        return json({});
+      });
+      await new Promise(r => server.listen(0, '127.0.0.1', r));
+      const base = `http://127.0.0.1:${server.address().port}`;
+      browser = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], {stdio: 'ignore'});
+      for (let i=0; i<100 && !existsSync(join(profile, 'DevToolsActivePort')); i++) await pause(100);
+      const port = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0];
+      const tab = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(t => t.type === 'page');
+      socket = new WebSocket(tab.webSocketDebuggerUrl);
+      await new Promise(r => socket.onopen = r);
+      let id=0; const pending = new Map();
+      socket.onmessage = ({data}) => {const message=JSON.parse(data); pending.get(message.id)?.(message); pending.delete(message.id);};
+      async function call(method, params={}) {
+        const request = ++id;
+        const result = new Promise((resolve, reject) => {const timer=setTimeout(()=>reject(new Error(method)), 15000);pending.set(request,m=>{clearTimeout(timer);resolve(m);});});
+        socket.send(JSON.stringify({id:request,method,params}));
+        const message=await result; assert.equal(message.error,undefined);return message.result;
+      }
+      async function evaluate(expression) {const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});assert.equal(r.exceptionDetails,undefined);return r.result.value;}
+      async function wait(expression) {for(let i=0;i<100;i++){if(await evaluate(`Boolean(${expression})`))return;await pause(100);}assert.fail(`Timeout: ${expression}; ${await evaluate('document.body.innerText')}`);}
+      async function click(text) {await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)} && b.getClientRects().length).click()`);}
+      async function navigate(section) {await call('Page.navigate',{url:`${base}/settings?section=${section}`});await wait("document.querySelector('.settings-nav')");await evaluate('document.fonts.ready');await pause(150);}
+
+      // Empty state: nothing pinned yet, the inline pin panel sits above Runtime identity.
+      await call('Emulation.setDeviceMetricsOverride',{width:390,height:1000,deviceScaleFactor:1,mobile:false});
+      await navigate('prima');
+      assert.ok(await evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), 'Prima pin tab overflows 390px');
+      const empty = await evaluate('document.body.innerText');
+      assert.match(empty, /Pin a Prima version/);
+      assert.match(empty, /No pinned Prima source/);
+      assert.match(empty, /0 pinned sources/i);
+      assert.doesNotMatch(empty, /Open the llama\.cpp library/);
+      const shot=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,'prima-pin-empty-390.png'),Buffer.from(shot.data,'base64'));
+
+      // Open the pin dialog: it opens prefilled from the recipe source (release).
+      await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+      await navigate('prima');
+      await click('+ Pin a version');
+      await wait("document.querySelector('dialog').open");
+      assert.match(await evaluate("document.querySelector('dialog h2').textContent"), /Pin a Prima version/);
+      const inputs = await evaluate("[...document.querySelectorAll('dialog input')].map(el => el.value)");
+      assert.deepEqual(inputs.slice(0, 2), ['', primaRepo]);
+      assert.equal(inputs[2], '0.0.1');
+      assert.equal(await evaluate("document.querySelector('dialog select').value"), 'tag');
+      // Resolve then save: masters set the saved revision as the cluster target.
+      await click('Resolve revision');
+      await wait("document.querySelector('.resolved-box')");
+      assert.match(await evaluate("document.querySelector('.resolved-box').textContent"), new RegExp(prima.commit.slice(0, 8)));
+      const shotPin=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,'prima-pin-resolved.png'),Buffer.from(shotPin.data,'base64'));
+      await click('Save version & set target');
+      await wait("!document.querySelector('dialog').open && document.body.textContent.includes('Pinned source')");
+      assert.deepEqual(commands.map(c => c.path), ['/v2/node/runtimes/resolve', '/v2/node/runtimes', '/v2/cluster/runtime-target']);
+      assert.deepEqual([commands[0].value.engine, commands[0].value.repository, commands[0].value.ref, commands[0].value.ref_type], ['primacpp', primaRepo, '0.0.1', 'tag']);
+      assert.equal(commands[2].value.runtime_id, prima.runtime_id);
+      assert.equal(commands[2].value.expected_revision, 0);
+      const pinnedText = await evaluate('document.body.innerText');
+      assert.doesNotMatch(pinnedText, /No pinned Prima source/);
+      assert.match(pinnedText, /Pinned by Kluster's build recipe/);
+      assert.match(pinnedText, new RegExp(primaRepo.replaceAll('.', '\\.')));
+      assert.match(pinnedText, /1 pinned source/i);
+      assert.equal(await evaluate("[...document.querySelectorAll('.runtime-badge')].some(b => b.textContent.trim() === 'Pinned source')"), true);
+      const shotDone=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,'prima-pin-pinned.png'),Buffer.from(shotDone.data,'base64'));
+    } finally {
+      socket?.close(); browser?.kill();
+      if(browser && browser.exitCode===null)await new Promise(r=>browser.once('exit',r));
+      await vite?.close();if(server)await new Promise(r=>server.close(r));
+      removeBrowserProfile(profile);
+    }
+  });
+
 test('Prima settings swaps the runtime section on the engine mode and keeps llama.cpp intact',
   { skip: !chrome && 'Chrome required for Prima settings browser check' }, async () => {
     const primaRepo = 'https://github.com/berkkarahan/prima.cpp.git';

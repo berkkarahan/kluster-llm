@@ -126,10 +126,7 @@ impl AddressObserver {
         };
         serde_json::to_string(&batch).map_err(|_| failure("observer result encoding failed"))
     }
-    #[cfg_attr(
-        not(any(feature = "python-bindings", test)),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "python-bindings"), allow(dead_code))]
     pub fn invalidate_native(&self) {
         self.shared.lost.store(true, Ordering::SeqCst);
     }

@@ -1220,3 +1220,145 @@ def test_llama_install_status_ok_requires_all_stamped_backends(install, monkeypa
     monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: MetalOnly())
     status = install.llama_install_status("v0.5.0")
     assert status["ok"] is False
+
+
+def test_parse_args_engine_defaults_to_llamacpp_and_accepts_primacpp(install):
+    default_args = install.parse_args([])
+    assert default_args.engine == "llamacpp"
+
+    llama_args = install.parse_args(["--engine", "llamacpp"])
+    assert llama_args.engine == "llamacpp"
+
+    prima_args = install.parse_args(["--engine", "primacpp"])
+    assert prima_args.engine == "primacpp"
+
+
+def test_prima_highs_is_off_by_default_in_patch_and_enabled_by_install_script(install):
+    from kllm.modules.primacpp.interactors.build import prima_cmake_flags
+    from kllm.modules.primacpp.interactors.recipe import ROOT as PRIMA_ROOT
+
+    patch_text = (
+        PRIMA_ROOT / "patches" / "0001-enable-highs-cmake-windows-vulkan.patch"
+    ).read_text(encoding="utf-8")
+    assert '+option(USE_HIGHS  "prima: use HiGHS solver" OFF)' in patch_text
+
+    flags = install._cmake_prima_flags("cpu")
+    assert "-DUSE_HIGHS=ON" in flags
+    assert prima_cmake_flags(install, "cpu") == flags
+
+    class WithoutHighs:
+        @staticmethod
+        def _cmake_prima_flags(_backend: str) -> list[str]:
+            return ["-DBUILD_SHARED_LIBS=OFF"]
+
+    with pytest.raises(ValueError, match="-DUSE_HIGHS=ON"):
+        prima_cmake_flags(WithoutHighs(), "cpu")
+
+
+def test_prima_install_status_requires_highs_and_all_binaries(install, monkeypatch, tmp_path):
+    prima_bin = tmp_path / "prima"
+    monkeypatch.setattr(install, "PRIMA_BIN_DIR", prima_bin)
+    monkeypatch.setattr(install, "PRIMA_STAMP_FILE", prima_bin / "prima-release.txt")
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+
+    _repo, commit, digest = install.read_prima_recipe_pin()
+    install.write_prima_install_stamp(
+        commit=commit,
+        recipe_digest=digest,
+        backend="vulkan",
+        highs="on",
+    )
+    for name in ("llama-server", "llama-cli", "profile-tool"):
+        (prima_bin / name).write_bytes(b"bin")
+
+    import json
+
+    class WithHighs:
+        returncode = 0
+        stdout = (
+            "Vulkan0: Test GPU (8192 MiB, 8000 MiB free)\n"
+            "KLLM_PRIMA_CAPABILITIES="
+            + json.dumps(
+                {
+                    "schema_version": 1,
+                    "ring_protocol_version": 1,
+                    "backends": ["vulkan"],
+                    "devices": [{"backend": "Vulkan", "name": "Vulkan0", "description": "Test GPU"}],
+                    "features": [
+                        "layer_window",
+                        "tensor_split",
+                        "ngl",
+                        "ring_tcp",
+                        "execution_manifest_v1",
+                        "highs",
+                    ],
+                }
+            )
+            + "\n"
+        )
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: WithHighs())
+    status = install.prima_install_status(expected="vulkan")
+    assert status["ok"] is True
+    assert status["highs"] == "on"
+    assert install.main(["--check", "--engine", "primacpp", "--backend", "vulkan"]) == 0
+
+    class WithoutHighsFeature:
+        returncode = 0
+        stdout = WithHighs.stdout.replace('"highs"', '"other"')
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: WithoutHighsFeature())
+    status_no_highs = install.prima_install_status(expected="vulkan")
+    assert status_no_highs["ok"] is False
+    assert status_no_highs["highs"] == "off"
+    assert install.main(["--check", "--engine", "primacpp", "--backend", "vulkan"]) == 1
+
+
+def test_main_engine_primacpp_bootstrap_runs_prima_stage_without_touching_llama(
+    install, monkeypatch, tmp_path
+):
+    llama_bin = tmp_path / "bin"
+    prima_bin = tmp_path / "prima"
+    monkeypatch.setattr(install, "BIN_DIR", llama_bin)
+    monkeypatch.setattr(install, "PRIMA_BIN_DIR", prima_bin)
+    monkeypatch.setattr(install, "PRIMA_STAMP_FILE", prima_bin / "prima-release.txt")
+    monkeypatch.setattr(install, "detect_backend", lambda _b: "vulkan")
+    monkeypatch.setattr(install, "stamp_backend_for_install", lambda b: b)
+
+    called: list[tuple[str, bool, str | None]] = []
+
+    def fake_prima_stage(backend: str, *, force: bool, expected: str | None) -> None:
+        called.append((backend, force, expected))
+
+    monkeypatch.setattr(install, "_run_install_prima_stage", fake_prima_stage)
+    monkeypatch.setattr(
+        install,
+        "_run_install_llama_stage",
+        lambda *a, **k: pytest.fail("llamacpp stage must not run when --engine primacpp is selected"),
+    )
+    monkeypatch.setattr(install, "verify_prima_installed", lambda **_k: None)
+
+    rc = install.main(["--llama-only", "--engine", "primacpp", "--force", "--sync"])
+    assert rc == 0
+    assert called == [("auto", True, "vulkan")]
+    assert not llama_bin.exists()
+
+
+@pytest.mark.parametrize(
+    "bad_argv",
+    [
+        ["--engine", "primacpp", "--prefer-prebuilt"],
+        ["--engine", "primacpp", "--prebuilt"],
+        ["--engine", "primacpp", "--rpc-tcp-only"],
+        ["--engine", "primacpp", "--tag", "b5000"],
+        ["--engine", "primacpp", "--recipe-digest", "a" * 64],
+        ["--engine", "primacpp", "--source-repo", "https://github.com/berkkarahan/prima.cpp.git"],
+    ],
+)
+def test_main_engine_primacpp_rejects_incompatible_flags(install, bad_argv):
+    with pytest.raises(SystemExit):
+        install.main(bad_argv)
+

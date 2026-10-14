@@ -22,7 +22,26 @@ from kllm.modules.runtimes.interactors.registry import atomic_json, file_digest
 from kllm.modules.runtimes.interactors.source import git_environment
 
 
-def parse_device_report(install, stdout: str, stderr: str = "") -> dict:
+def prima_cmake_flags(install, resolved: str) -> list[str]:
+    if hasattr(install, "_cmake_prima_flags"):
+        flags = list(install._cmake_prima_flags(resolved))
+    else:
+        flags = [
+            *install._cmake_backend_flags(resolved),
+            "-DUSE_HIGHS=ON",
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DLLAMA_BUILD_TESTS=OFF",
+            "-DGGML_BLAS=OFF",
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+        ]
+    if "-DUSE_HIGHS=ON" not in flags:
+        raise ValueError("Prima builds must enable HiGHS via -DUSE_HIGHS=ON")
+    return flags
+
+
+def parse_device_report(
+    install, stdout: str, stderr: str = "", *, require_highs: bool = False
+) -> dict:
     capability_lines = [
         line.removeprefix("KLLM_PRIMA_CAPABILITIES=")
         for line in stdout.splitlines()
@@ -35,6 +54,8 @@ def parse_device_report(install, stdout: str, stderr: str = "") -> dict:
     except json.JSONDecodeError as error:
         raise ValueError("Prima staged server returned malformed capability JSON") from error
     required_features = {"layer_window", "tensor_split", "ngl", "ring_tcp", "execution_manifest_v1"}
+    if require_highs:
+        required_features.add("highs")
     if not isinstance(capabilities, dict):
         raise ValueError("Prima staged server reported an invalid execution contract")
     features = capabilities.get("features")
@@ -148,35 +169,8 @@ def package_macos_vulkan(binaries: dict, output: Path, environment: dict[str, st
     return {**environment, "VK_ICD_FILENAMES": str(icd_target)}
 
 
-def managed_prima_build(
-    install, repository: str, commit: str, destination: Path, backend: str, expected_recipe: str
-) -> dict:
-    source = SourceRequest(repository=repository, ref=commit, ref_type="commit", engine="primacpp")
-    definition = recipe()
-    digest = recipe_digest()
-    if expected_recipe != digest:
-        raise ValueError("Prima build recipe changed; resolve the source again before building")
-    if (
-        source.repository != definition["source_repository"]
-        or commit != definition["source_commit"]
-    ):
-        raise ValueError(
-            "This Prima recipe requires the pinned source repository and commit"
-        )
-    destination.mkdir(parents=True, exist_ok=True)
-    vendor, output = destination / "source", destination / "bin"
-    if vendor.exists():
-        raise ValueError(
-            "Prima source destination already exists; retry using a new preparation job"
-        )
-    resolved = install.detect_backend(backend)
-    expected = install.stamp_backend_for_install(resolved)
-    if not install.ensure_cmake():
-        raise ValueError("CMake is required; follow docs/agent-install.md")
-    install.ensure_git()
-    print("KLLM_RUNTIME_PHASE=downloading", flush=True)
-    _materialize_source(vendor, source.repository, commit)
-    for patch in definition["patches"]:
+def _apply_patches(install, vendor: Path, patches: list[str]) -> None:
+    for patch in patches:
         install._run(
             ["git", "apply", "--check", str(ROOT / "patches" / patch)],
             cwd=vendor,
@@ -185,14 +179,24 @@ def managed_prima_build(
         install._run(
             ["git", "apply", str(ROOT / "patches" / patch)], cwd=vendor, env=git_environment()
         )
+
+
+def _compile_and_verify_prima(
+    install,
+    *,
+    vendor: Path,
+    output: Path,
+    manifest_dir: Path,
+    build_id: str,
+    repository: str,
+    commit: str,
+    resolved: str,
+    expected: str,
+    definition: dict,
+    digest: str,
+) -> dict:
     build = vendor / "build"
-    flags = [
-        *install._cmake_backend_flags(resolved),
-        "-DBUILD_SHARED_LIBS=OFF",
-        "-DLLAMA_BUILD_TESTS=OFF",
-        "-DGGML_BLAS=OFF",
-        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-    ]
+    flags = prima_cmake_flags(install, resolved)
     environment = _vulkan_build_environment(install, resolved)
     print("KLLM_RUNTIME_PHASE=building", flush=True)
     install._run(["cmake", "-S", str(vendor), "-B", str(build), *flags], env=environment)
@@ -250,7 +254,9 @@ def managed_prima_build(
     )
     if probe_result.returncode:
         raise ValueError("Prima staged server could not enumerate its compute devices")
-    capabilities = parse_device_report(install, probe_result.stdout, probe_result.stderr)
+    capabilities = parse_device_report(
+        install, probe_result.stdout, probe_result.stderr, require_highs=True
+    )
     actual = capabilities["backends"]
     if "vulkan" in resolved and "vulkan_profile" not in capabilities["features"]:
         raise ValueError("Prima Vulkan build does not expose its Vulkan profiler")
@@ -258,19 +264,19 @@ def managed_prima_build(
         raise ValueError("Prima staged server cannot satisfy this node's backend contract")
     if resolved != "cpu" and not capabilities["devices"]:
         raise ValueError("Prima staged server reports no usable GPU devices")
-    identity = runtime_id(source.repository, commit, "primacpp", digest)
+    identity = runtime_id(repository, commit, "primacpp", digest)
     manifest = {
         "schema": 1,
         "engine": "primacpp",
         "transport": "prima-ring-tcp",
         "runtime_id": identity,
-        "repository": source.repository,
+        "repository": repository,
         "commit": commit,
         "upstream_repository": definition["upstream_repository"],
         "upstream_commit": definition["upstream_commit"],
         "recipe_digest": digest,
         "dependencies": definition["dependencies"],
-        "build_id": destination.name,
+        "build_id": build_id,
         "backend": expected,
         "capabilities": capabilities,
         "runtime_env": {
@@ -287,10 +293,106 @@ def managed_prima_build(
         "artifacts": {
             p.relative_to(output).as_posix(): file_digest(p)
             for p in output.rglob("*")
-            if p.is_file()
+            if p.is_file() and p.name not in {"manifest.json", "prima-release.txt"}
         },
-        "size_bytes": sum(p.stat().st_size for p in output.rglob("*") if p.is_file()),
+        "size_bytes": sum(
+            p.stat().st_size
+            for p in output.rglob("*")
+            if p.is_file() and p.name not in {"manifest.json", "prima-release.txt"}
+        ),
         "qualification_errors": qualification_errors({"engine": "primacpp"}),
     }
-    atomic_json(destination / "manifest.json", manifest)
+    atomic_json(manifest_dir / "manifest.json", manifest)
     return manifest
+
+
+def managed_prima_build(
+    install, repository: str, commit: str, destination: Path, backend: str, expected_recipe: str
+) -> dict:
+    source = SourceRequest(repository=repository, ref=commit, ref_type="commit", engine="primacpp")
+    definition = recipe()
+    digest = recipe_digest()
+    if expected_recipe != digest:
+        raise ValueError("Prima build recipe changed; resolve the source again before building")
+    if (
+        source.repository != definition["source_repository"]
+        or commit != definition["source_commit"]
+    ):
+        raise ValueError(
+            "This Prima recipe requires the pinned source repository and commit"
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    vendor, output = destination / "source", destination / "bin"
+    if vendor.exists():
+        raise ValueError(
+            "Prima source destination already exists; retry using a new preparation job"
+        )
+    resolved = install.detect_backend(backend)
+    expected = install.stamp_backend_for_install(resolved)
+    if not install.ensure_cmake():
+        raise ValueError("CMake is required; follow docs/agent-install.md")
+    install.ensure_git()
+    print("KLLM_RUNTIME_PHASE=downloading", flush=True)
+    _materialize_source(vendor, source.repository, commit)
+    _apply_patches(install, vendor, definition["patches"])
+    return _compile_and_verify_prima(
+        install,
+        vendor=vendor,
+        output=output,
+        manifest_dir=destination,
+        build_id=destination.name,
+        repository=source.repository,
+        commit=commit,
+        resolved=resolved,
+        expected=expected,
+        definition=definition,
+        digest=digest,
+    )
+
+
+def bootstrap_prima_build(install, vendor: Path, output: Path, backend: str) -> dict:
+    definition = recipe()
+    digest = recipe_digest()
+    repository = definition["source_repository"]
+    commit = definition["source_commit"]
+    resolved = install.detect_backend(backend)
+    expected = install.stamp_backend_for_install(resolved)
+    if not install.ensure_cmake():
+        raise ValueError("CMake is required; follow docs/agent-install.md")
+    install.ensure_git()
+    print("KLLM_RUNTIME_PHASE=downloading", flush=True)
+    if (vendor / ".git").is_dir():
+        env = git_environment()
+        head = subprocess.run(
+            ["git", "-C", str(vendor), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if head.returncode != 0 or head.stdout.strip() != commit:
+            shutil.rmtree(vendor, ignore_errors=True)
+            _materialize_source(vendor, repository, commit)
+        else:
+            install._run(["git", "-C", str(vendor), "reset", "--hard", commit], env=env)
+            install._run(
+                ["git", "-C", str(vendor), "clean", "-fd", "-e", "build"],
+                env=env,
+            )
+    else:
+        if vendor.exists():
+            shutil.rmtree(vendor, ignore_errors=True)
+        _materialize_source(vendor, repository, commit)
+    _apply_patches(install, vendor, definition["patches"])
+    return _compile_and_verify_prima(
+        install,
+        vendor=vendor,
+        output=output,
+        manifest_dir=output,
+        build_id=output.name,
+        repository=repository,
+        commit=commit,
+        resolved=resolved,
+        expected=expected,
+        definition=definition,
+        digest=digest,
+    )

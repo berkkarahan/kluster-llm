@@ -1,5 +1,5 @@
 import { formatArguments, parseArgumentText, PARAMETER_FIELDS, parameterBounds, shellQuote } from './configuration';
-import type { EffectiveConfig, ExpertFlag, LoadProgress, ParameterDescriptor } from './entities';
+import type { EffectiveConfig, ExpertFlag, LoadProgress, ParameterDescriptor, PlacementStrategyMode } from './entities';
 import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './entities';
 import type { ModelDefaultsInfo } from '../models/entities';
 import { formatMemoryComponent } from '../../shared/format-memory';
@@ -26,6 +26,7 @@ export class RunInteractor {
   flashAttention = $state<'auto' | 'on' | 'off'>('auto');
   nodeShares = $state<Record<string, number> | null>(null);
   nodePriority = $state<string[] | null>(null);
+  placementStrategy = $state<PlacementStrategyMode>('auto');
   justEnoughMaster = $state(false);
   requiredNodes = $state<string[]>([]);
   threadsMax = $state(8);
@@ -275,6 +276,16 @@ export class RunInteractor {
       ? [...new Set(ps.node_priority.filter((node): node is string => typeof node === 'string' && !!node))]
       : ps.node_shares && typeof ps.node_shares === 'object' && !Array.isArray(ps.node_shares)
         ? Object.keys(ps.node_shares).sort((a, b) => Number((ps.node_shares as Record<string, number>)[b]) - Number((ps.node_shares as Record<string, number>)[a])) : null;
+    if (ps.placement_strategy === 'auto' || ps.placement_strategy === 'capacity_first' || ps.placement_strategy === 'priority') {
+      this.placementStrategy = ps.placement_strategy;
+      if (this.placementStrategy === 'priority' && !this.nodePriority?.length) {
+        this.nodePriority = [...new Set(Object.keys(this.status?.members ?? {}))];
+      } else if (this.placementStrategy !== 'priority') {
+        this.nodePriority = null;
+      }
+    } else {
+      this.placementStrategy = this.nodePriority?.length ? 'priority' : 'auto';
+    }
     this.requiredNodes = Array.isArray(ps.required_nodes)
       ? [...new Set(ps.required_nodes.filter((node): node is string => typeof node === 'string' && !!node))] : [];
     if (typeof ps.speculative === 'string') this.speculative = ps.speculative;
@@ -392,10 +403,19 @@ export class RunInteractor {
     this.scheduleEstimate();
   }
 
-  setPriorityPlanning(enabled: boolean) {
+  setPlacementStrategy(mode: PlacementStrategyMode) {
+    const normalized: PlacementStrategyMode =
+      mode === 'capacity_first' || mode === 'priority' ? mode : 'auto';
+    this.placementStrategy = normalized;
     this.nodeShares = null;
-    this.nodePriority = enabled ? [...new Set([...(this.nodePriority ?? []), ...Object.keys(this.status?.members ?? {})])] : null;
+    this.nodePriority = normalized === 'priority'
+      ? [...new Set([...(this.nodePriority ?? []), ...Object.keys(this.status?.members ?? {})])]
+      : null;
     this.scheduleEstimate();
+  }
+
+  setPriorityPlanning(enabled: boolean) {
+    this.setPlacementStrategy(enabled ? 'priority' : 'auto');
   }
 
   moveNodePriority(node: string, direction: -1 | 1) {
@@ -405,6 +425,7 @@ export class RunInteractor {
     if (index < 0 || target < 0 || target >= order.length) return;
     [order[index], order[target]] = [order[target], order[index]];
     this.nodePriority = order;
+    this.placementStrategy = 'priority';
     this.nodeShares = null;
     this.scheduleEstimate();
   }
@@ -487,6 +508,7 @@ export class RunInteractor {
     this.flashAttention = 'auto';
     this.nodeShares = null;
     this.nodePriority = null;
+    this.placementStrategy = 'auto';
     this.justEnoughMaster = false;
     this.requiredNodes = [];
     this.speculative = 'auto';
@@ -638,6 +660,7 @@ export class RunInteractor {
 
   planPayload() {
     const extra = parseArgumentText(this.extraArgsText);
+    const effectiveStrategy: PlacementStrategyMode = this.nodePriority?.length ? 'priority' : this.placementStrategy;
     const body: Record<string, unknown> = {
       model: this.selectedModel,
       context: this.context,
@@ -653,6 +676,7 @@ export class RunInteractor {
       flash_attention: this.flashAttention,
       node_shares: this.nodeShares,
       node_priority: this.nodePriority ? [...new Set([...this.nodePriority, ...Object.keys(this.status?.members ?? {})])] : [],
+      placement_strategy: effectiveStrategy,
       just_enough_master: this.justEnoughMaster,
       required_nodes: this.nodeShares ? [] : [...this.requiredNodes],
       vision: this.vision,

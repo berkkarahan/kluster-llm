@@ -235,6 +235,7 @@ remains the bootstrap default for existing installer commands and `--check`.
 
 | Flag | When to use |
 |------|-------------|
+| `--engine llamacpp\|primacpp` | Choose the inference engine to install (default: `llamacpp`). When `primacpp` is selected, `scripts/install.py` compiles the pinned Prima recipe into `vendor/prima` with `-DUSE_HIGHS=ON` (Prima's CMake keeps `USE_HIGHS=OFF` by default). |
 | `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
 | `--prefer-prebuilt` | Prefer GitHub release zips (default on Windows/Linux; rejected on macOS, which must build Metal+Vulkan). |
 | `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp` (macOS default for Metal+Vulkan). |
@@ -258,6 +259,14 @@ python scripts/install.py --check
 python scripts/install.py --llama-only --backend metal    # macOS: Metal+Vulkan multi-backend (default)
 # Vulkan-master cluster: keep the multi binary; prefer Vulkan at runtime:
 #   export KLLM_ACCEL_BACKEND=vulkan
+```
+
+**prima.cpp bootstrap (with HiGHS)** (pinned in `src/kllm/modules/primacpp/recipe.json`; stages `llama-server`, `llama-cli`, `profile-tool`, `manifest.json`, and `prima-release.txt` into `vendor/prima` without modifying `vendor/bin`):
+
+```bash
+python scripts/install.py --engine primacpp
+python scripts/install.py --llama-only --engine primacpp
+python scripts/install.py --check --engine primacpp
 ```
 
 **CLI/UI rebuild only** (no llama/WG/toolchains):

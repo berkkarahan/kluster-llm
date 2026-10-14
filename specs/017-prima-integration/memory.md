@@ -67,7 +67,30 @@
 
 ## Latest continuation state
 
-- Current pin: `f221716d9b45077a906621ca7e10d8b4ada485ed`, recipe 10, digest
+- 2026-10-14 continuation: root integration published as `d30ecdc` on
+  `feat/prima-integration` (the entire Prima managed-runtime integration, engine mode,
+  Prima dashboard settings UI and its browser test; commit 1 pins recipe 128
+  `31c1e22cf1ff330e5454166d0434a892fd54b77a`). Recipe 129 pins the fork's initial
+  release `0.0.1` — `source_release`/`source_release_commit`
+  `cb0da060105c18cc702b5d1927eb2e60ec2c1e22` (the post-integration `main`; the old
+  `codex/kluster-integration` was merged there) — digest
+  `8f92b6a3d9b59d8fb46212ec89b688788187e1f1794e62882081d8c8921f4e72`. Contract
+  validation passed at ancestor 3107200 (prima-chat-parser-contract-test exit 0 with
+  CI-identical flags, incl. JSON-native tool/content regressions). Clean managed
+  build: artifacts/prima-initial-release-published129 with verified
+  commit/digest/staged executables/111-feature capabilities/RX 9070 XT Vulkan
+  identity/6 unpassed gates. Dual-source resolution (pinned commit or pinned
+  release tag collapsing to the same identity) is implemented and tested; the
+  dashboard prefills the release, offers "Install 0.0.1 and set target" and shows
+  the dual identity. An installer exit-code read of 1 through PowerShell pipeline
+  captures was a capture artifact; successes verify via the manifest. Commit 2
+  (recipe 129 + receipts + docs) and the push are the remaining publication step.
+  The dashboard swap precedence: status `engine` (kllm start/join --engine) →
+  master's flag wins; worker follows the cluster target engine → active-run config
+  → running runtime. Compute panel reports the build's own device probe
+  (`GET /v2/node/prima-devices`); selection stays on Hardware gpu_ids + the Deploy
+  plan.
+- Current pin (pre-129): `f221716d9b45077a906621ca7e10d8b4ada485ed`, recipe 10, digest
   `f177ecbaa7c8ac05c211b2824abe368a7511706ada0945537ddf1bb1b532bb31`.
   Published/clean native checkout remains artifacts/prima-windows-initial/source.
   Fresh managed runtime: artifacts/prima-windows-protocols. CI38127635068 passed all jobs.
@@ -1263,7 +1286,7 @@ and local performance remain open. Physical distributed cluster gates and valida
 will be tested later; no qualification scope is enabled and the full goal stays active.
 
 
-### Completed GPU handoffs and typed candidate comparison � 2026-10-12 (T069)
+### Completed GPU handoffs and typed candidate comparison � 2026-10-12 (T069)
 
 Prima commit cac12883afb9dd91b247deb61cb8245806bea4fd is published and remote-verified
 on codex/kluster-integration. It adds completed_f32_embedding_v1 host uploads/downloads
@@ -1340,7 +1363,7 @@ cluster gates and validations will be tested later. Root changes remain uncommit
 Prima source is published/clean and the full integration goal remains active.
 
 
-### Shared node work reservations � 2026-10-12 (T070)
+### Shared node work reservations � 2026-10-12 (T070)
 
 The registry now owns an atomic NodeResources guard. Exact engine/operation or run,
 authority and immutable contract scopes permit an owned preparation's profile/link

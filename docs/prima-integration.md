@@ -16,15 +16,20 @@ requests recheck it, including policy revocation. All production scopes remain e
 
 The runtime library can resolve and save the supported Prima source through its
 existing endpoints using `engine: "primacpp"`, repository
-`https://github.com/berkkarahan/prima.cpp.git`, `ref_type: "commit"`, and ref
-`f13088f3c8bc02f5f72c2e1cb6c09de632bbe202`. The response includes `recipe_digest`.
-The fork branch is `codex/kluster-integration`; builds always use the immutable commit.
-The recipe records upstream `OpenCPIL/prima.cpp` commit
+`https://github.com/berkkarahan/prima.cpp.git`, and either the pinned commit ref
+(ref_type `"commit"`) or the pinned release — recipe 129 pins
+`berkkarahan/prima.cpp` release `0.0.1` (`source_release` /
+`source_release_commit`) whose tag resolves to exactly the pinned commit; both
+routes produce the same immutable identity. A moved or deleted release tag refuses
+until the recipe is advanced. The response includes `recipe_digest`. The recipe
+records upstream `OpenCPIL/prima.cpp` commit
 `288df6a2cc2120387e12d6f40798f30cc525c9ea` as provenance. Native changes are already
-committed in the fork, so preparation applies no local source patches.
+committed in the fork, so preparation applies no local source patches. The fork's
+integration branch was merged into `main` and released as `0.0.1`.
 Build using the existing `/v2/node/runtime-builds` resource. Settings → llama.cpp →
-Add version offers Prima under qualification. Build and logs are available; selection
-requires completed qualification.
+Add version offers Prima under qualification (the dialog prefills the pinned
+release); the Prima settings section offers "Install 0.0.1 and set target" for the
+master. Build and logs are available; selection requires completed qualification.
 
 Recipe22 corrects native kernel-profile operands: floats are encoded into actual
 F16/quantized storage, completed multiplication is checked against decoded operands,

@@ -43,6 +43,7 @@
   const target = $derived(library?.target);
   const running = $derived(library?.running);
   const nodes = $derived(library?.nodes ?? []);
+  const pinnedSource = $derived(library?.engine_sources?.find((s) => s.engine === 'primacpp') ?? null);
 
   const entries = $derived((library?.versions ?? []).filter((entry) => entry.version.engine === 'primacpp'));
   /** Prefer the cluster target (what a Prima launch pins), then the running/selected build. */
@@ -141,6 +142,37 @@
     await action(() => presenter.build(version.runtime_id));
   }
 
+  /**
+   * Install the pinned initial release and make it the cluster target: resolve
+   * the release tag (the resolver enforces the immutable SHA), save it when the
+   * library does not hold it yet, then set the target. Builds reconcile per node
+   * through the same master assignment as llama.cpp.
+   */
+  async function installInitial() {
+    const src = pinnedSource;
+    if (!master || !src?.release) return;
+    await action(async () => {
+      const version = (library?.versions ?? []).find((entry) =>
+        entry.version.engine === 'primacpp' && (!src.release_commit || entry.version.commit === src.release_commit))?.version;
+      let runtimeId = version?.runtime_id ?? '';
+      if (!version) {
+        const resolved = await presenter.resolve<RuntimeVersion>({
+          engine: 'primacpp', repository: src.repository, ref: src.release, ref_type: 'tag', name: `Prima.cpp ${src.release}`
+        });
+        await presenter.add(resolved);
+        runtimeId = resolved.runtime_id;
+      }
+      try {
+        await presenter.setTarget({
+          runtime_id: runtimeId, expected_revision: target?.revision ?? 0, request_id: crypto.randomUUID()
+        });
+      } catch (failure) {
+        try { await presenter.refresh(); } catch { /* Keep the original request error visible. */ }
+        throw failure;
+      }
+    });
+  }
+
   async function showLogs(job: RuntimeJob | null | undefined, node: RuntimeNode | null = null) {
     if (!job?.job_id) return;
     logJob = job; logNode = node;
@@ -204,6 +236,9 @@
         <div class="detail-col">
           <div class="detail-rows">
             <div class="detail-row"><span>Repository</span><code class="break">{version?.repository}</code></div>
+            {#if pinnedSource?.release}
+              <div class="detail-row"><span>Release</span><span class="mono" title={pinnedSource.release_commit}>Prima.cpp {pinnedSource.release}</span></div>
+            {/if}
             <div class="detail-row"><span>Commit</span><code class="break">{version?.commit}</code></div>
             <div class="detail-row"><span>Recipe digest</span><code class="break" title={pinDigest ?? undefined}>{pinDigest ?? '—'}</code></div>
             <div class="detail-row"><span>Source identity</span><code class="break" title={version?.runtime_id}>{short(version?.runtime_id)}…</code></div>
@@ -298,7 +333,7 @@
 
     <!-- Managed builds -->
     <section class="panel" aria-labelledby="builds-heading">
-      <div class="runtime-panel-head"><div><h3 id="builds-heading">Managed build</h3><p>{worker ? "The master assigns and verifies this node's builds." : "Build the pinned source for this node's backend, then prepare the cluster."}</p></div><span class="runtime-badge">{entries.length} pinned source{entries.length === 1 ? '' : 's'}</span></div>
+      <div class="runtime-panel-head"><div><h3 id="builds-heading">Managed build</h3><p>{worker ? "The master assigns and verifies this node's builds." : "Build the pinned source for this node's backend, then prepare the cluster."}</p></div><span class="runtime-head-meta">{#if master && pinnedSource?.release}<button class="btn btn-accent" disabled={busy || target?.version.engine === 'primacpp'} onclick={installInitial}>Install {pinnedSource.release} and set target</button>{/if}<span class="runtime-badge">{entries.length} pinned source{entries.length === 1 ? '' : 's'}</span></span></div>
       {#if !library?.nodes?.length}
         <div class="empty"><h4>No cluster nodes reporting</h4><p>Preparation state appears once this node and its connected workers report.</p></div>
       {:else}
@@ -396,6 +431,7 @@
   .runtime-panel-head h3{font-size:18px}
   .runtime-panel-head p{font-size:14px;color:var(--muted);margin-top:4px}
   .runtime-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border:1px solid var(--line,var(--border));font:11px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.4px;color:var(--muted);white-space:nowrap}
+  .runtime-head-meta{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
   .runtime-badge.green{color:var(--accent);background:var(--green-wash,#132b22);border-color:#2b5a44}
   .detail-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
   .detail-col{padding:24px;display:grid;gap:16px;min-width:0;align-content:start}

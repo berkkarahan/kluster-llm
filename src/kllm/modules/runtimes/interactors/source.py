@@ -59,13 +59,28 @@ def resolve(source: SourceRequest) -> RuntimeVersion:
     digest = ""
     if source.engine == "primacpp":
         pinned = recipe()
-        if source.repository != pinned["source_repository"] or commit != pinned["source_commit"]:
-            raise ValueError("Prima requires the supported pinned source repository and commit")
+        accept_prima_source(source, commit, pinned)
         digest = recipe_digest()
     return RuntimeVersion(
         **source.model_dump(), commit=commit, recipe_digest=digest,
         runtime_id=runtime_id(source.repository, commit, source.engine, digest),
     )
+
+
+def accept_prima_source(source: SourceRequest, commit: str, pinned: dict) -> None:
+    """Accept the pinned commit, or the pinned release resolving to exactly it."""
+    if source.repository != pinned["source_repository"]:
+        raise ValueError("Prima requires the supported pinned source repository and commit")
+    if commit == pinned["source_commit"]:
+        return
+    release = str(pinned.get("source_release") or "")
+    if source.ref_type == "tag" and release and source.ref == release:
+        raise ValueError(
+            f"Prima release {release!r} moved; the recipe pin stands at "
+            f"{pinned['source_commit'][:12]}. Use it, or advance the recipe"
+        )
+    supported = "the pinned release" if release else "the pinned commit"
+    raise ValueError(f"Prima requires the supported pinned source ({supported} at commit {pinned['source_commit'][:12]})")
 
 
 def discover(repository: str) -> dict:

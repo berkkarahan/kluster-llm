@@ -8205,3 +8205,20 @@ fixture test all passed. No Prima model execution, profiling measurement, distri
 lifecycle or performance validation was attempted; every qualification gate remains false
 and execution scopes stay empty. API/model/backend, distributed and performance acceptance
 remain deferred with the integration's test phase to the live three-computer cluster.
+
+Recipe 129 release-pin receipt (2026-10-14): recipe.json 129 pins the fork's initial
+release `0.0.1` at `cb0da060105c18cc702b5d1927eb2e60ec2c1e22` (digest
+`8f92b6a3d9b59d8fb46212ec89b688788187e1f1794e62882081d8c8921f4e72`; parser fixes from
+3107200 retained upstream). Contract validation passed at the ancestor with
+CI-identical flags and the clean managed Windows/Vulkan build in
+artifacts/prima-initial-release-published129 verified commit/recipe_digest, three
+staged executables, exactly six unpassed qualification gates, the 111-feature probe
+with the node's physical Vulkan identity, and a verified set of artifact hashes.
+Dual-source resolution (pinned commit or pinned release resolving to the same
+identity) carries focused resolver tests, engine_sources release publication and
+dashboard prefill/shortcut/browser-test evidence. Packaging passed
+(compileall + scripts/build.py, native_available True). No unit/native/model test
+phase nor any Prima inference/profiling/distributed/performance validation ran; all
+qualification gates and execution scopes remain closed as before, and the deferred
+physical distributed/performance acceptance still waits for the live three-computer
+cluster.

@@ -148,9 +148,14 @@ class RuntimeRegistry:
                 status = qualification_status(entry.get("build") or entry["version"])
                 entry.update(status)
         prima = recipe()
-        value["engine_sources"] = [{
+        source_entry = {
             "engine": "primacpp", "repository": prima["source_repository"],
             "ref": prima["source_commit"], "ref_type": "commit",
+        }
+        if prima.get("source_release"):
+            source_entry["release"] = prima["source_release"]
+            source_entry["release_commit"] = prima["source_release_commit"]
+        value["engine_sources"] = [{**source_entry,
             "qualification_errors": qualification_errors({"engine": "primacpp"}),
         }]
         repo = self.repository()

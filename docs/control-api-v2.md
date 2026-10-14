@@ -40,6 +40,14 @@ Prima versions carry a `recipe_digest` and an engine-specific identity. Existing
 identity hashes and default wire records are unchanged. The library reports
 `engine_sources`, `inference_supported`, and `qualification_errors` additively.
 
+`resolve` accepts a Prima source through two routes that converge on one immutable
+identity: the pinned `source_commit`, or the pinned `source_release` tag when it
+resolves to exactly `source_release_commit` (a moved or deleted release tag refuses
+until the recipe is advanced). `engine_sources` publishes the release as
+`release` / `release_commit` next to the commit ref, driving the add-dialog prefill
+and the Prima section's install shortcut. Save/build/target contracts are unchanged:
+the release carries no build assets, so preparation still compiles the pinned source.
+
 The node status payload carries the configured engine mode (`engine`:
 `llamacpp | primacpp`, written by `kllm start/join --engine`); the dashboard uses it to
 swap the Settings runtime section to the Prima settings. `GET /v2/node/prima-devices`

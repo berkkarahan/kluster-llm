@@ -3502,3 +3502,37 @@ screenshots in artifacts/prima-settings). No Prima inference, profiling measurem
 performance check ran; all qualification gates remain false and execution scopes empty;
 the unit/native/model test deferral and the physical distributed/performance gates are
 unchanged and remain deferred to the live three-computer cluster.
+
+### Recipe 129 - Prima initial release 0.0.1 pin and dual release/commit resolution (published build)
+
+Prima advances recipe.json to `build_recipe_version` 129 pinning the fork's initial
+release `0.0.1` — `source_release` / `source_release_commit` =
+`cb0da060105c18cc702b5d1927eb2e60ec2c1e22`, the fork's post-integration `main` (the
+old `codex/kluster-integration` branch was merged there) — with recipe digest
+`8f92b6a3d9b59d8fb46212ec89b688788187e1f1794e62882081d8c8921f4e72`. The release is
+four commits ahead of the prior `31c1e22` pin and those commits are docs/README/CI and
+merge changes only, so the 3107200 parser fixes remain included; the native contract
+target built with CI-identical flags and `prima-chat-parser-contract-test` exited 0 at
+3107200 as ancestor evidence. Clean managed Windows/Vulkan build:
+`scripts/install.py --llama-only --engine primacpp --from-source --source-repo
+https://github.com/berkkarahan/prima.cpp.git --revision cb0da060... --recipe-digest
+8f92b6a3... --runtime-dir artifacts/prima-initial-release-published129 --backend vulkan`
+produced and verified manifest `commit` cb0da060..., `recipe_digest` 8f92b6a3...,
+staged `llama-server.exe`/`llama-cli.exe`/`profile-tool.exe`,
+`qualification_errors` exactly the 6 gates, 111 probed features (`t5_segmented_v1`
+through `gpu_execution_evidence_v1`) and the node's RX 9070 XT Vulkan identity
+(device_identity `00000000030000000000000000000000`, driver `8389003`). The
+installer's final exit code read as 1 through both PowerShell pipeline captures with
+no printed error, while a foreground stderr probe prints error paths visibly; the
+completed manifest, staged binaries and foreground evidence establish success, so
+this receipt rests on the verified manifest rather than the resultsis pipeline
+exit code. `resolve` accepts two Prima routes that converge on one runtime identity:
+the pinned commit, or the pinned release tag resolving to exactly it — moved or
+deleted release tags refuse until the recipe advances; `engine_sources` publish
+`release`/`release_commit`; the dashboard prefills the release in the add dialog,
+offers the master shortcut "Install 0.0.1 and set target", and shows the dual
+identity in the Prima section. `python -m compileall src/kllm scripts` and
+`scripts/build.py` exited 0 with `native_available` True. No tests ran in this cycle
+(electron/native/model validation remains deferred per the user's schedule); all
+qualification gates stay disabled and T012-T022 remain open; physical
+distributed/performance acceptance stays with the live three-computer cluster.

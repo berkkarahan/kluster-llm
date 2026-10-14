@@ -47,7 +47,8 @@ export type RuntimeLibrary = {
   reconcile_error?: string | null;
   bootstrap?: {repository: string; ref: string};
   control?: {available: boolean; message?: string | null};
-  engine_sources?: { engine: 'primacpp'; repository: string; ref: string; ref_type: 'commit'; qualification_errors: string[] }[];
+  engine_sources?: { engine: 'primacpp'; repository: string; ref: string; ref_type: 'commit';
+    release?: string; release_commit?: string; qualification_errors: string[] }[];
 };
 export type RuntimeSources = {
   repository: string; releases: {tag: string; name: string; prerelease: boolean}[];

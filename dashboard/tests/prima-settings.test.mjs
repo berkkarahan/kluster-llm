@@ -28,7 +28,7 @@ test('Prima settings swaps the runtime section on the engine mode and keeps llam
       jobs: [job], selected: null,
       bootstrap: { repository: 'https://github.com/ggml-org/llama.cpp.git', ref: 'v0.5.0' },
       target: { version: prima, revision: 5, cluster_binding_id: 'fixture', master_node_id: 'master' }, running: null,
-      engine_sources: [{ engine: 'primacpp', repository: primaRepo, ref: prima.ref, ref_type: 'commit', qualification_errors: gates }],
+      engine_sources: [{ engine: 'primacpp', repository: primaRepo, ref: prima.ref, ref_type: 'commit', release: '0.0.1', release_commit: prima.commit, qualification_errors: gates }],
       nodes: [
         { node_id: 'master', name: 'control-box', address: '10.10.10.1', role: 'master', capability: 1, phase: 'prepared', prepared: build },
         { node_id: 'worker', name: 'gpu-box', address: '10.10.10.2', role: 'worker', capability: 1, phase: 'building', job }
@@ -109,6 +109,8 @@ test('Prima settings swaps the runtime section on the engine mode and keeps llam
         assert.match(text, /NVIDIA GeForce RTX 3090/);
         assert.match(text, /aaaaaaaaaaaa/i);
         assert.match(text, /probed device/i);
+        assert.match(text, /Install 0\.0\.1 and set target/);
+        assert.match(text, /Prima\.cpp 0\.0\.1/);
         const shot=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,`prima-${width}.png`),Buffer.from(shot.data,'base64'));
       }
 

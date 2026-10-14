@@ -172,6 +172,60 @@ def test_prima_snapshot_reports_probed_build_capabilities(tmp_path):
         registry.close()
 
 
+def test_prima_release_tag_resolves_to_the_pinned_identity(monkeypatch):
+    from kllm.modules.runtimes.interactors import source as source_mod
+
+    definition = recipe()
+
+    def refs(repository):
+        assert repository == definition["source_repository"]
+        return {f"refs/tags/{definition['source_release']}": definition["source_commit"]}
+
+    monkeypatch.setattr(source_mod, "refs", refs)
+    by_tag = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref=definition["source_release"], ref_type="tag", name=f"Prima.cpp {definition['source_release']}",
+    ))
+    by_commit = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref=definition["source_commit"], ref_type="commit",
+    ))
+    assert by_tag.commit == by_commit.commit == definition["source_commit"]
+    assert by_tag.runtime_id == by_commit.runtime_id
+    assert by_tag.recipe_digest == recipe_digest()
+
+
+def test_prima_rejects_foreign_tags_and_moved_releases(monkeypatch):
+    from kllm.modules.runtimes.interactors import source as source_mod
+
+    definition = recipe()
+    monkeypatch.setattr(source_mod, "refs", lambda repository: {
+        "refs/tags/1.0.0": "b" * 40,
+        f"refs/tags/{definition['source_release']}": "c" * 40,
+    })
+    with pytest.raises(ValueError, match="pinned source"):
+        source_mod.resolve(SourceRequest(
+            engine="primacpp", repository=definition["source_repository"],
+            ref="1.0.0", ref_type="tag",
+        ))
+    with pytest.raises(ValueError, match="moved"):
+        source_mod.resolve(SourceRequest(
+            engine="primacpp", repository=definition["source_repository"],
+            ref=definition["source_release"], ref_type="tag",
+        ))
+
+
+def test_prima_snapshot_publishes_the_pinned_release(tmp_path):
+    definition = recipe()
+    registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
+    try:
+        source = registry.snapshot()["engine_sources"][0]
+        assert source["release"] == definition["source_release"]
+        assert source["release_commit"] == definition["source_release_commit"] == definition["source_commit"]
+    finally:
+        registry.close()
+
+
 def test_vulkan_is_an_independent_mandatory_qualification_gate(monkeypatch):
     gates = {key: True for key in recipe()["qualification"]}
     gates["vulkan_gpu_inference"] = False

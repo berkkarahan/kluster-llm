@@ -89,7 +89,12 @@
     sources = null;
     if (value === 'primacpp') {
       const source = library?.engine_sources?.find(s => s.engine === value);
-      if (source) { repository = source.repository; ref = source.ref; refType = source.ref_type; }
+      if (source) {
+        // Prefer the pinned release when the recipe declares one; the commit
+        // ref stays the fallback and both resolve to the same immutable SHA.
+        if (source.release) { repository = source.repository; ref = source.release; refType = 'tag'; }
+        else { repository = source.repository; ref = source.ref; refType = source.ref_type; }
+      }
     } else {
       repository = bootstrap.repository; ref = bootstrap.ref; refType = 'tag';
     }

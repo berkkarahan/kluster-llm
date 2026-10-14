@@ -1419,3 +1419,32 @@ def test_ensure_prima_deps_installs_missing_packages_on_macos_and_linux(
     install.ensure_prima_deps("vulkan")
     assert any(cmd[:3] == ["sudo", "apt-get", "install"] and "fio" in cmd and "libzmq3-dev" in cmd for cmd in commands)
 
+
+def test_cmake_prima_flags_and_windows_env_preserve_cross_platform_compilation(
+    install, monkeypatch, tmp_path
+):
+    # Windows defines NOMINMAX for MSVC without breaking macOS or Linux CMake flags.
+    monkeypatch.setattr(install, "_is_windows", lambda: True)
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    win_flags = install._cmake_prima_flags("vulkan")
+    assert "-DUSE_HIGHS=ON" in win_flags
+    assert "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /W3 /GR /EHsc /DNOMINMAX" in win_flags
+
+    monkeypatch.delenv("CL", raising=False)
+    win_env = install._windows_vulkan_env(None)
+    assert win_env["CL"] == "/DNOMINMAX"
+
+    # macOS and Linux must not receive MSVC-specific flags.
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    mac_flags = install._cmake_prima_flags("metal")
+    assert "-DUSE_HIGHS=ON" in mac_flags
+    assert not any(flag.startswith("-DCMAKE_CXX_FLAGS=") for flag in mac_flags)
+
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: True)
+    linux_flags = install._cmake_prima_flags("vulkan")
+    assert "-DUSE_HIGHS=ON" in linux_flags
+    assert not any(flag.startswith("-DCMAKE_CXX_FLAGS=") for flag in linux_flags)
+

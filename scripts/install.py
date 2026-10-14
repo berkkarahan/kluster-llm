@@ -1095,13 +1095,20 @@ def _windows_vulkan_missing(root: Path | None) -> list[str]:
 
 def _windows_vulkan_env(root: Path | None) -> dict[str, str]:
     """Cmake env extras so this process builds before any shell/env refresh."""
+    existing_cl = os.environ.get("CL", "").strip()
+    cl_flags = (
+        existing_cl
+        if "/DNOMINMAX" in existing_cl or "-DNOMINMAX" in existing_cl
+        else (f"{existing_cl} /DNOMINMAX".strip() if existing_cl else "/DNOMINMAX")
+    )
     if root is None:
-        return {}
+        return {"CL": cl_flags}
     existing = os.environ.get("CMAKE_PREFIX_PATH", "")
     return {
         "VULKAN_SDK": str(root),
         "PATH": os.pathsep.join([str(root / "Bin"), os.environ.get("PATH", "")]),
         "CMAKE_PREFIX_PATH": os.pathsep.join([str(root), existing] if existing else [str(root)]),
+        "CL": cl_flags,
     }
 
 
@@ -1638,7 +1645,7 @@ def _cmake_backend_flags(backend: str) -> list[str]:
 
 def _cmake_prima_flags(backend: str) -> list[str]:
     """CMake flags Kluster passes to compile prima.cpp (explicitly enabling HiGHS)."""
-    return [
+    flags = [
         *_cmake_backend_flags(backend),
         "-DUSE_HIGHS=ON",
         "-DBUILD_SHARED_LIBS=OFF",
@@ -1646,6 +1653,9 @@ def _cmake_prima_flags(backend: str) -> list[str]:
         "-DGGML_BLAS=OFF",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     ]
+    if _is_windows():
+        flags.append("-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /W3 /GR /EHsc /DNOMINMAX")
+    return flags
 
 
 def clone_or_update_llama(tag: str | None = None) -> None:

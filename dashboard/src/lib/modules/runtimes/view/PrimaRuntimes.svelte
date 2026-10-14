@@ -21,7 +21,7 @@
   import type { RuntimesInteractor } from '../interactor.svelte';
   let { presenter = createApp().runtimes }: { presenter?: RuntimesInteractor } = $props();
 
-  /** Source-controlled gates (src/kllm/modules/primacpp/recipe.json). Order matters. */
+  /** Source-controlled gates (src/kllm/modules/primacpp/interactors/recipe.py). Order matters. */
   const GATES = [
     { id: 'vulkan_gpu_inference', label: 'Vulkan GPU inference', description: 'A verified Vulkan inference pass must complete on every physical device selected for a run.' },
     { id: 'api_parity', label: 'API parity', description: "Prima's HTTP surface must match the llama.cpp endpoints the dashboard and clients depend on." },

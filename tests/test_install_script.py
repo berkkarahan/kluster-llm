@@ -1233,13 +1233,30 @@ def test_parse_args_engine_defaults_to_llamacpp_and_accepts_primacpp(install):
     assert prima_args.engine == "primacpp"
 
 
-def test_prima_highs_is_enabled_by_install_script_and_recipe_has_no_local_patches(install):
+def test_prima_highs_is_enabled_by_install_script_and_recipe_is_sqlite_backed(install, tmp_path):
+    from kllm.modules.managed_network.gateways.store import NetworkStore
     from kllm.modules.primacpp.interactors.build import prima_cmake_flags
-    from kllm.modules.primacpp.interactors.recipe import ROOT as PRIMA_ROOT, recipe
+    from kllm.modules.primacpp.interactors.recipe import (
+        ROOT as PRIMA_ROOT,
+        recipe,
+        recipe_digest,
+        save_recipe,
+    )
 
-    # Source changes live in the pinned Prima fork; kluster-llm applies no local patches.
+    # Source changes live in the pinned Prima fork; recipe lives in SQLite, not recipe.json.
     assert "patches" not in recipe()
     assert not (PRIMA_ROOT / "patches").exists()
+    assert not (PRIMA_ROOT / "recipe.json").exists()
+
+    with NetworkStore(tmp_path) as store:
+        seeded = store.prima_recipe()
+        assert seeded["source_commit"] == recipe()["source_commit"]
+    assert (tmp_path / "managed-network.sqlite").is_file()
+    initial_digest = recipe_digest(tmp_path)
+    updated = {**seeded, "build_recipe_version": seeded["build_recipe_version"] + 1}
+    save_recipe(updated, home=tmp_path)
+    assert recipe(tmp_path)["build_recipe_version"] == updated["build_recipe_version"]
+    assert recipe_digest(tmp_path) != initial_digest
 
     flags = install._cmake_prima_flags("cpu")
     assert "-DUSE_HIGHS=ON" in flags

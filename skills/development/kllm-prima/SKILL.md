@@ -24,7 +24,7 @@ condensed Quick rules and keeps the full normative text verbatim beneath them.
 
 1. **Establish both sources** — 01-sources-setup.md: read Kluster's
    `AGENTS.md`/memory workflow/`kllm-develop`, the Prima docs and the spec 017
-   set; treat `recipe.json` pins as authoritative and compute the digest through
+   set; treat `recipe.py` / SQLite recipe pins as authoritative and compute the digest through
    `recipe_digest` (never hardcode it, never read a moving HEAD); use an
    isolated pinned-commit checkout; fix the failing behavior's owner without
    swapping engines.
@@ -47,7 +47,7 @@ condensed Quick rules and keeps the full normative text verbatim beneath them.
 
 | File | Read it for | Keywords |
 |---|---|---|
-| 01-sources-setup.md | Both sources: docs to read, recipe pins/digests, checkout hygiene, failure-ownership boundaries | recipe.json, digest, pin, checkout, owner |
+| 01-sources-setup.md | Both sources: docs to read, recipe pins/digests, checkout hygiene, failure-ownership boundaries | recipe.py, digest, pin, checkout, owner |
 | 02-build-lifecycle.md | Validation schedule, defect reproduction/evidence, managed install builds, worktree labeling, deferred-test phase | validation, reproduce, evidence, install.py, from-source |
 | 03-windows-native.md | Windows Release builds, ISA/CPUID/AVX-512 detection, MSVC /EHsc C boundaries, CPU graph scheduling & cancellation | MSVC, EHsc, CPUID, AVX-512, relocation, cancellation |
 | 04-gpu-vulkan.md | Vulkan logical→physical mapping, explicit devices/visibility, driver-unavailable startup, output-only GPU coordinators | Vulkan, ordinal, UUID, visibility mask, explicit_devices_v1, output_only_gpu_v1 |

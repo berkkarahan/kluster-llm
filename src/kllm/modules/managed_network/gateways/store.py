@@ -51,6 +51,10 @@ def _upsert(table, values, keys, fields):
     )
 
 
+_open_stores: dict[Path, "NetworkStore"] = {}
+_open_stores_lock = threading.RLock()
+
+
 class NetworkStore:
     def __init__(self, home: Path, *, options: SQLiteOptions | None = None):
         self.path = home / "managed-network.sqlite"
@@ -58,6 +62,23 @@ class NetworkStore:
         self.execution_mutex = threading.RLock()
         self._execution_depth = threading.local()
         self._store = SQLiteStore(self.path, tables.schema, options=options)
+        with _open_stores_lock:
+            _open_stores[self._store.path] = self
+
+    @classmethod
+    def active_for(cls, home: Path) -> "NetworkStore | None":
+        target = Path(home).absolute() / "managed-network.sqlite"
+        if target.exists() and not target.is_symlink():
+            target = target.resolve()
+        with _open_stores_lock:
+            store = _open_stores.get(target)
+            if (
+                store is not None
+                and store._store.state == "OPEN"
+                and store._store.pid == os.getpid()
+            ):
+                return store
+            return None
 
     def read(self):
         return self._store.connection()
@@ -69,7 +90,12 @@ class NetworkStore:
         return await self._store.arun(callback, *args, cancellable=cancellable, **kwargs)
 
     async def aclose(self, *, deadline: float | None = None):
-        await self._store.aclose(deadline=deadline)
+        try:
+            await self._store.aclose(deadline=deadline)
+        finally:
+            with _open_stores_lock:
+                if _open_stores.get(self._store.path) is self:
+                    _open_stores.pop(self._store.path, None)
 
     @contextmanager
     def execution(self) -> Iterator[None]:
@@ -144,8 +170,19 @@ class NetworkStore:
         with self.transaction() as db:
             db.execute(_upsert(tables.metadata, {"key": key, "value": value}, ("key",), ("value",)))
 
+    def __enter__(self) -> "NetworkStore":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
     def close(self, *, deadline: float | None = None) -> None:
-        self._store.close(deadline=deadline)
+        try:
+            self._store.close(deadline=deadline)
+        finally:
+            with _open_stores_lock:
+                if _open_stores.get(self._store.path) is self:
+                    _open_stores.pop(self._store.path, None)
 
     def metadata(self, key: str) -> str | None:
         with self.read() as db:
@@ -155,6 +192,28 @@ class NetworkStore:
                 .where((tables.metadata.c.key == key))
             ).fetchone()
             return row[0] if row else None
+
+    def prima_recipe(self) -> dict[str, Any]:
+        from kllm.modules.primacpp.interactors.recipe import DEFAULT_RECIPE, RECIPE_METADATA_KEY
+
+        raw = self.metadata(RECIPE_METADATA_KEY)
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict) and int(loaded.get("build_recipe_version", 0)) >= int(
+                    DEFAULT_RECIPE["build_recipe_version"]
+                ):
+                    return loaded
+            except (ValueError, TypeError):
+                pass
+        return self.set_prima_recipe(DEFAULT_RECIPE)
+
+    def set_prima_recipe(self, value: dict[str, Any]) -> dict[str, Any]:
+        from kllm.modules.primacpp.interactors.recipe import RECIPE_METADATA_KEY
+
+        serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        self.set_metadata(RECIPE_METADATA_KEY, serialized)
+        return json.loads(serialized)
 
     def pin_identity(self, node_id: str, key_id: str) -> None:
         """Pin the signing key; adopt a rebuilt local node label.

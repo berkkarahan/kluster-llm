@@ -16,6 +16,10 @@ SplitMode = Literal["layer", "row", "tensor"]
 DEFAULT_SPLIT_MODE: SplitMode = "layer"
 VALID_SPLIT_MODES = frozenset({"layer", "row", "tensor"})
 
+Engine = Literal["llamacpp", "primacpp"]
+DEFAULT_ENGINE: Engine = "llamacpp"
+VALID_ENGINES = frozenset({"llamacpp", "primacpp"})
+
 DEFAULT_VRAM_PERCENT = 80
 DEFAULT_RAM_PERCENT = 80
 MIN_MEMORY_PERCENT = 10
@@ -53,6 +57,20 @@ def _normalize_split_mode(value: Any) -> SplitMode:
     s = str(value).strip().lower()
     if s not in VALID_SPLIT_MODES:
         raise ValueError(f"split_mode must be one of {sorted(VALID_SPLIT_MODES)}, got {value!r}")
+    return s  # type: ignore[return-value]
+
+
+def _normalize_engine(value: Any) -> Engine:
+    """The node's engine mode: which engine's workflow this launch operates in.
+
+    ``primacpp`` switches the node's dashboard to the Prima settings; inference
+    selection still requires a qualified runtime of that engine.
+    """
+    if value is None:
+        return DEFAULT_ENGINE
+    s = str(value).strip().lower()
+    if s not in VALID_ENGINES:
+        raise ValueError(f"engine must be one of {sorted(VALID_ENGINES)}, got {value!r}")
     return s  # type: ignore[return-value]
 
 
@@ -131,6 +149,7 @@ def default_config() -> dict[str, Any]:
         "vram_percent": DEFAULT_VRAM_PERCENT,
         "ram_percent": DEFAULT_RAM_PERCENT,
         "accel_backend": None,
+        "engine": DEFAULT_ENGINE,
         "split_mode": DEFAULT_SPLIT_MODE,
         "unified_memory": None,
         "flags": default_flags(),
@@ -149,6 +168,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         cfg["ram_percent"] = _normalize_percent(raw["ram_percent"], field="ram_percent")
     if "accel_backend" in raw:
         cfg["accel_backend"] = _normalize_accel_backend(raw["accel_backend"])
+    if "engine" in raw:
+        cfg["engine"] = _normalize_engine(raw["engine"])
     if "split_mode" in raw:
         cfg["split_mode"] = _normalize_split_mode(raw["split_mode"])
     if "unified_memory" in raw:
@@ -176,6 +197,7 @@ def _write_toml(cfg: dict[str, Any]) -> str:
     accel = cfg.get("accel_backend")
     if accel is not None:
         lines.append(f'accel_backend = "{accel}"')
+    lines.append(f'engine = "{cfg["engine"]}"')
     lines.append(f'split_mode = "{cfg["split_mode"]}"')
     if cfg.get("unified_memory") is True:
         lines.append("unified_memory = true")
@@ -219,6 +241,7 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "ram_percent",
         "gpu_ids",
         "accel_backend",
+        "engine",
         "split_mode",
         "unified_memory",
         "flags",
@@ -245,6 +268,11 @@ def get_accel_backend() -> str | None:
 
 def get_split_mode() -> SplitMode:
     return _normalize_split_mode(load_config().get("split_mode"))
+
+
+def get_engine() -> Engine:
+    """The node's configured engine mode (drives the dashboard's Prima settings)."""
+    return _normalize_engine(load_config().get("engine"))
 
 
 def feature_flags() -> dict[str, bool]:

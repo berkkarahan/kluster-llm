@@ -86,6 +86,10 @@ class InferenceDependencies:
     ) = None
     runtime_context: Callable[[], ContextManager[dict[str, Any]]] | None = None
     lifecycle_publisher: Callable[[LifecycleEvent, str | None], None] | None = None
+    prima_run: Callable[[RunBody, Path, dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None
+    prima_stop: Callable[[], None] | None = None
+    prima_plan: Callable[[RunSettingsFields, Path, dict[str, Any]], dict[str, Any]] | None = None
+    runtime_resources: Callable[[], Any] | None = None
 
 
 class InferenceHandlers:
@@ -124,6 +128,13 @@ class InferenceHandlers:
             members = self._deps.network_members(body.network_id)
         result = self._deps.execute_plan(body, members)
         runtime_snapshot = snapshot()
+        if (runtime_snapshot or {}).get("engine") == "primacpp" and result.get("fit_status") != "overflow":
+            planner = getattr(self._deps, "prima_plan", None)
+            if planner:
+                try:
+                    result = planner(body, path, members)
+                except ValueError as error:
+                    raise HTTPException(409, detail={"code": "PRIMA_PLAN_REFUSED", "message": str(error)}) from None
         if runtime_snapshot:
             result["runtime_id"] = runtime_snapshot["runtime_id"]
             result["runtime_required_nodes"] = [state.node_id, *selected_workers(result, members)]
@@ -191,13 +202,53 @@ class InferenceHandlers:
             raise HTTPException(
                 400, plan_result.get("hint") or "model and context exceed cluster budget (overflow)"
             )
-        rpc_context = (
-            self._deps.rpc_context(body, plan_result, members)
-            if self._deps.rpc_context
-            else nullcontext()
-        )
-        with rpc_context:
-            return self._launch(body, path, plan_result, members)
+        if (snapshot() or {}).get("engine") == "primacpp":
+            if self._deps.prima_run is None:
+                raise HTTPException(409, "Recover Prima manifest dispatch before Run")
+            planner = getattr(self._deps, "prima_plan", None)
+            if planner:
+                try:
+                    plan_result = planner(body, path, members)
+                except ValueError as error:
+                    raise HTTPException(409, detail={"code": "PRIMA_PLAN_REFUSED", "message": str(error)}) from None
+            effective = effective_configuration(body, plan_result, path)
+            try:
+                launched = self._deps.prima_run(body, path, plan_result, members)
+            except ValueError as error:
+                raise HTTPException(409, detail={"code": "PRIMA_RUN_REFUSED", "message": str(error)}) from None
+            effective.update({"process_pid": launched["launch"]["pid"], "run_id": launched["run_id"],
+                              "engine": "primacpp", "runtime": snapshot(),
+                              "qualification_context": launched.get("qualification_context")})
+            state.active_config = effective
+            try:
+                self._deps.finish_master_launch(path, plan_result, launched["launch"],
+                    lambda: self._deps.persist_last_settings(body), lambda: self._deps.remember(body))
+            except BaseException:
+                if self._deps.prima_stop:
+                    self._deps.prima_stop()
+                state.process_pid = state.process_role = state.active_config = None
+                state.save()
+                raise
+            return {**launched, "effective_config": effective}
+        lease = None
+        provider = getattr(self._deps, "runtime_resources", None)
+        if provider is not None:
+            from uuid import uuid4
+            try:
+                lease = provider().acquire(("llamacpp", str(uuid4()), "", (snapshot() or {}).get("runtime_id", "bootstrap")), "run")
+            except ValueError as error:
+                raise HTTPException(409, detail={"code": "NODE_RESOURCE_RESERVED", "message": str(error)}) from None
+        try:
+            rpc_context = (
+                self._deps.rpc_context(body, plan_result, members)
+                if self._deps.rpc_context
+                else nullcontext()
+            )
+            with rpc_context:
+                return self._launch(body, path, plan_result, members)
+        finally:
+            if lease is not None:
+                lease.release()
 
     def _launch(
         self, body: RunBody, path: Path, plan_result: dict[str, Any], members: dict[str, Any]
@@ -318,7 +369,22 @@ LEGACY_V1_LOAD: tuple[tuple[str, str, str], ...] = (
 )
 
 LEGACY_V1_PROXY: tuple[tuple[str, str, str], ...] = (
+    ('/v1/embeddings', 'POST', 'embeddings'),
+    ('/embedding', 'POST', 'raw_embeddings'),
+    ('/embeddings', 'POST', 'raw_embeddings'),
+    ('/v1/rerank', 'POST', 'rerank'),
+    ('/v1/reranking', 'POST', 'rerank'),
+    ('/rerank', 'POST', 'rerank'),
+    ('/reranking', 'POST', 'rerank'),
+    ('/tokenize', 'POST', 'tokenize'),
+    ('/detokenize', 'POST', 'detokenize'),
+    ('/apply-template', 'POST', 'apply_template'),
+    ('/infill', 'POST', 'infill'),
+    ('/completion', 'POST', 'raw_completions'),
+    ('/completions', 'POST', 'raw_completions'),
+    ('/v1/completions', 'POST', 'text_completions'),
     ('/v1/chat/completions', 'POST', 'chat_completions'),
+    ('/v1/chat/completions/control', 'POST', 'chat_completion_control'),
     ('/v1/messages', 'POST', 'anthropic_messages'),
     ('/v1/responses', 'POST', 'responses'),
     ('/v1/responses/input_tokens', 'POST', 'response_tokens'),

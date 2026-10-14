@@ -23,15 +23,19 @@ def recipe_digest() -> str:
     return value.hexdigest()
 
 
-def qualification_errors(runtime: dict) -> list[str]:
+def qualification_errors(runtime: dict, *, context: dict | None = None) -> list[str]:
     if runtime.get("engine", "llamacpp") != "primacpp":
         return []
+    if runtime.get("platform") or context is not None:
+        from kllm.modules.primacpp.interactors.qualification import qualification_status
+
+        return qualification_status(runtime, context=context)["qualification_errors"]
     # A source-controlled gate cannot be bypassed by editing ~/.kllm manifests.
     required = recipe()["qualification"]
     return [name for name, passed in required.items() if not passed]
 
 
-def require_qualified(runtime: dict) -> None:
-    missing = qualification_errors(runtime)
+def require_qualified(runtime: dict, *, context: dict | None = None) -> None:
+    missing = qualification_errors(runtime, context=context)
     if missing:
         raise ValueError("Prima is not qualified for inference: " + ", ".join(missing))

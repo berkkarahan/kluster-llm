@@ -1136,7 +1136,8 @@ def test_install_kllm_path_shim_unix(install, monkeypatch, tmp_path):
     assert ' kllm "$@"' in text
     assert str(uv.resolve()) in text
     assert str(repo.resolve()) in text
-    assert (shim.stat().st_mode & 0o111) != 0
+    if os.name != "nt":  # Windows does not expose POSIX executable permission bits.
+        assert (shim.stat().st_mode & 0o111) != 0
 
 
 def test_install_kllm_path_shim_windows(install, monkeypatch, tmp_path):

@@ -2,7 +2,7 @@
   "schema_version": 2,
   "upstream_repository": "https://github.com/OpenCPIL/prima.cpp.git",
   "upstream_commit": "288df6a2cc2120387e12d6f40798f30cc525c9ea",
-  "build_recipe_version": 7,
+  "build_recipe_version": 128,
   "dependencies": {
     "libzmq": "622fc6dde99ee172ebaa9c8628d85a7a1995a21d",
     "cppzmq": "c94c20743ed7d4aa37835a5c46567ab0790d4acc"
@@ -21,5 +21,5 @@
     "hardware_performance_gate": false
   },
   "source_repository": "https://github.com/berkkarahan/prima.cpp.git",
-  "source_commit": "aeb3afdd44b58c93e70e53d47ed4ac7e29452ff8"
+  "source_commit": "31c1e22cf1ff330e5454166d0434a892fd54b77a"
 }

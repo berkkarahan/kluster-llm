@@ -872,6 +872,8 @@ class NetworkStore:
                 raise StoreConflict("command missing or already terminal")
 
     def reservation(self, run: RunNetworkReservation) -> None:
+        # List mutation bypasses pydantic's assignment hooks; validate at storage.
+        run = RunNetworkReservation.model_validate(run.model_dump())
         with self.transaction() as db:
             row = db.execute(
                 select(tables.reservations.c.body)
@@ -881,17 +883,25 @@ class NetworkStore:
             if row:
                 old = RunNetworkReservation.model_validate_json(row[0])
                 if (
+                    old.engine,
+                    old.execution_manifest_digest,
+                    old.authority,
                     old.network_id,
                     old.assignment_revisions,
                     old.logical_endpoints,
                     old.launch_endpoints,
                     old.relay_instance_ids,
+                    old.prima_ports_required,
                 ) != (
+                    run.engine,
+                    run.execution_manifest_digest,
+                    run.authority,
                     run.network_id,
                     run.assignment_revisions,
                     run.logical_endpoints,
                     run.launch_endpoints,
                     run.relay_instance_ids,
+                    run.prima_ports_required,
                 ):
                     raise StoreConflict("reserved endpoints are immutable")
                 allowed = {
@@ -903,6 +913,11 @@ class NetworkStore:
                 }
                 if run.state != old.state and run.state not in allowed[old.state]:
                     raise StoreConflict("invalid reservation transition")
+                if old.state != "reserved" and (
+                    not set(run.prima_port_nodes) <= set(old.prima_port_nodes)
+                    or not set(run.prima_admitted_nodes) <= set(old.prima_admitted_nodes)
+                ):
+                    raise StoreConflict("Prima cleanup cannot acquire new native listeners")
             elif run.state != "reserved":
                 raise StoreConflict("reservation must be persisted before launch")
             db.execute(

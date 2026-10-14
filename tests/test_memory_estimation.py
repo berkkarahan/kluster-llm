@@ -140,6 +140,21 @@ def settings(**kwargs):
     return resolve_launch_settings(RunBody(model="fixture.gguf", **kwargs)).to_mapping()
 
 
+def test_independent_draft_contexts_reserve_each_slots_kv_and_compute(tmp_path):
+    from dataclasses import replace
+
+    raw = synthetic_gguf(tmp_path / "draft.gguf")
+    layout = ModelLayout.from_mapping(raw)
+    single = PlacementSettings(context=4096, parallel_slots=1, draft_contexts=1,
+                               draft_size_bytes=12 * MIB, draft_layout=layout, speculative="none")
+    one = memory_costs(layout, 12 * MIB, 4096, single)
+    many = memory_costs(layout, 12 * MIB, 4096, replace(single, parallel_slots=3, draft_contexts=3, kv_unified=True))
+    assert many.auxiliary_runtime_bytes == 3 * one.auxiliary_runtime_bytes
+    assert many.auxiliary_runtime_bytes > 3 * 4096 * 4 * 2 * 128 * 2
+    restored = PlacementSettings.from_mapping(replace(single, draft_contexts=3).to_mapping())
+    assert restored.draft_contexts == 3
+
+
 def costs(layout, **kwargs):
     resolved = settings(**kwargs)
     return memory_costs(

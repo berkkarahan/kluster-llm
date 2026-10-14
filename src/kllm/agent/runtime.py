@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 import httpx
 from kllm.shared import http_clients, rpc_cache
 from kllm.modules.runtimes.interactors.registry import RuntimeRegistry
+from kllm.modules.runtimes.interactors.selection import snapshot as inference_runtime_snapshot
 from kllm.modules.runtimes.interactors.runtime_control import RuntimeControlService
 from kllm.modules.runtimes.router_http import build_router as build_runtime_router
 import secrets
@@ -1512,15 +1513,26 @@ def _run_settings_handlers() -> RunSettingsHandlers:
 
 
 def _inference_handlers() -> InferenceHandlers:
+    from kllm.shared.runtime_resources import node_resources
+
     service = getattr(app.state, "managed_network", None)
     return InferenceHandlers(
         InferenceDependencies(
             state=state_ref.current(),
+            runtime_resources=(lambda: node_resources(service.runtimes.registry))
+            if service is not None and service.runtimes is not None else None,
             runtime_context=(
                 service.runtimes.operation
                 if service is not None and service.runtimes is not None
                 else None
             ),
+            prima_run=(lambda body, path, plan, members: service.runtimes.prima.runs.launch(body, path, plan, members))
+            if service is not None and service.runtimes is not None else None,
+            prima_stop=(lambda: service.runtimes.prima.runs.stop())
+            if service is not None and service.runtimes is not None else None,
+            prima_plan=(lambda body, path, members: service.runtimes.prima.plan(
+                inference_runtime_snapshot()["runtime_id"], body, model=path, members=members))
+            if service is not None and service.runtimes is not None else None,
             resolve_settings=lambda body: _run_settings_handlers().resolve(body),
             preflight=lambda body, path: _run_settings_handlers().preflight(body, path),
             ensure_master_member=lambda: _ensure_master_member(persist=True),
@@ -1558,7 +1570,11 @@ def _inference_handlers() -> InferenceHandlers:
             network_diagnostics=lambda network_id: _managed_network_service().admission.diagnostics(
                 network_id
             ),
-            network_members=lambda network_id: _managed_network_service().admission.members(
+            network_members=lambda network_id: (
+                _managed_network_service().prima_admission
+                if (inference_runtime_snapshot() or {}).get("engine") == "primacpp"
+                else _managed_network_service().admission
+            ).members(
                 network_id
             ),
             network_run=lambda network_id: (
@@ -1633,6 +1649,16 @@ from kllm.modules.models.endpoints import (  # noqa: E402
 from kllm.modules.inference.endpoints import (  # noqa: E402
     load_progress_endpoint,
     chat_completions,
+    embeddings,
+    raw_embeddings,
+    rerank,
+    tokenize,
+    detokenize,
+    apply_template,
+    text_completions,
+    infill,
+    raw_completions,
+    chat_completion_control,
     anthropic_messages,
     responses,
     response_tokens,
@@ -1702,6 +1728,16 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "fast_subnet_reconnect": fast_subnet_reconnect,
     "list_models": list_models,
     "chat_completions": chat_completions,
+    "embeddings": embeddings,
+    "raw_embeddings": raw_embeddings,
+    "rerank": rerank,
+    "tokenize": tokenize,
+    "detokenize": detokenize,
+    "apply_template": apply_template,
+    "text_completions": text_completions,
+    "infill": infill,
+    "raw_completions": raw_completions,
+    "chat_completion_control": chat_completion_control,
     "anthropic_messages": anthropic_messages,
     "responses": responses,
     "response_tokens": response_tokens,

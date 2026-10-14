@@ -63,6 +63,9 @@ MOE_ARCHITECTURES = frozenset(
     {
         "qwen2moe",
         "qwen3moe",
+        "granitemoe",
+        "olmoe",
+        "granite_swa",
         "qwen35moe",
         "qwen3next",
         "deepseek2",
@@ -86,9 +89,9 @@ def is_moe_architecture(arch: str | None) -> bool:
     return normalized in MOE_ARCHITECTURES
 
 
-# Expert FFN tensors: ``blk.N.ffn_{up,down,gate}_{exps,<i>}.weight``. The router
+# Expert FFN tensors: ``blk.N.ffn_{up,down,gate,gate_up}_{exps,<i>}.weight``. The router
 # ``blk.N.ffn_gate.weight`` and dense ``blk.N.ffn_{up,down}.weight`` are shared.
-_MOE_EXPERT_RE = re.compile(r"^blk\.\d+\.ffn_(?:up|down|gate)(?:_exps\.|\.[0-9]+\.)weight$")
+_MOE_EXPERT_RE = re.compile(r"^blk\.\d+\.ffn_(?:up|down|gate(?:_up)?)(?:_exps\.|\.[0-9]+\.)weight$")
 
 
 def _is_moe_expert_tensor(name: str) -> bool:
@@ -326,8 +329,15 @@ def read_model_layout(path: Path | str) -> dict[str, Any] | None:
     return _read_model_layout(str(p.resolve()), st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
+def read_adapter_layout(path: Path | str) -> dict[str, Any] | None:
+    """Read LoRA metadata/tensor spans without requiring model block metadata."""
+    p = Path(path)
+    st = p.stat()
+    return _read_model_layout(str(p.resolve()), st.st_size, st.st_mtime_ns, st.st_ctime_ns, adapter=True)
+
+
 @lru_cache(maxsize=16)
-def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str, Any] | None:
+def _read_model_layout(path: str, size: int, mtime: int, ctime: int, *, adapter: bool = False) -> dict[str, Any] | None:
     """Read tensor spans without loading weights; spans include alignment padding."""
     del mtime, ctime
     try:
@@ -341,7 +351,16 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
             for _ in range(n_kv):
                 key = _read_string(f)
                 (vtype,) = struct.unpack("<I", f.read(4))
-                if key.startswith("tokenizer."):
+                if adapter and key == "adapter.alora.invocation_tokens":
+                    if vtype != _ARRAY:
+                        raise ValueError("Activated LoRA invocation must be a UINT32 array")
+                    etype, count = struct.unpack("<IQ", f.read(12))
+                    if etype != _UINT32 or count > 100_000:
+                        raise ValueError("Invalid activated LoRA invocation token array")
+                    meta[key] = [_read_scalar(f, etype) for _ in range(count)]
+                    if any(token >= 2**31 for token in meta[key]):
+                        raise ValueError("Activated LoRA invocation exceeds native token bounds")
+                elif key.startswith("tokenizer."):
                     _skip_value(f, vtype)
                 elif vtype == _ARRAY:
                     etype, count = struct.unpack("<IQ", f.read(12))
@@ -372,7 +391,15 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
             if not isinstance(raw_layer_count, (int, float, bool, str)):
                 return None
             n_layers = int(raw_layer_count)
-            if not 0 < n_layers <= 10000:
+            if adapter:
+                if meta.get("general.type") != "adapter" or meta.get("adapter.type") != "lora" or not tensors:
+                    return None
+                indices = [int(match[1]) for tensor in tensors
+                           if (match := re.match(r"blk\.(\d+)\.", tensor["name"]))]
+                n_layers = max(indices, default=-1) + 1
+                if n_layers > 10000:
+                    return None
+            elif not 0 < n_layers <= 10000:
                 return None
             layers = [0] * n_layers
             expert_layers = [0] * n_layers
@@ -389,7 +416,9 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
                     layers[int(match[1])] += nbytes
                     if _is_moe_expert_tensor(tensor["name"]):
                         expert_layers[int(match[1])] += nbytes
-                elif tensor["name"].startswith("output"):
+                elif tensor["name"].startswith("output") or tensor["name"] in (
+                    "dense_2.weight", "dense_2.bias", "dense_3.weight",
+                ):
                     output += nbytes
                     has_output |= tensor["name"] == "output.weight"
                 else:
@@ -406,7 +435,7 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int) -> dict[str
                 output_bytes=output,
                 input_bytes=inputs,
                 tensors=tensors,
-                confidence="metadata" if tensors and all(layers) else "approximate",
+                confidence="metadata" if tensors and (adapter or all(layers)) else "approximate",
             )
     except (OSError, ValueError, struct.error):
         return None

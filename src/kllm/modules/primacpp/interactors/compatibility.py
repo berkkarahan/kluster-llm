@@ -27,7 +27,9 @@ def launch_matrix(prima_binary: Path, baseline_binary: Path) -> dict:
     import inspect
     from kllm.modules.inference.interactors import run_launch
 
-    required = {flag for flag, _, _, _ in PARAMETERS.values()}
+    # Kluster's public flags are not necessarily native launch arguments.
+    required = {alias for _, aliases, _, _ in PARAMETERS.values() for alias in aliases
+                if alias.startswith("--")}
     required.update(re.findall(r'"(--[a-z][\w-]*)"', inspect.getsource(run_launch)))
     baseline, prima = help_flags(baseline_binary), help_flags(prima_binary)
     alternatives = {alias: aliases for _, aliases, _, _ in PARAMETERS.values() for alias in aliases}
@@ -37,7 +39,7 @@ def launch_matrix(prima_binary: Path, baseline_binary: Path) -> dict:
         if not set(alternatives.get(flag, ())) & prima
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "baseline_ref": BASELINE_REF,
         "baseline_commit": BASELINE_COMMIT,
         "launch": [
@@ -61,6 +63,8 @@ def launch_matrix(prima_binary: Path, baseline_binary: Path) -> dict:
                 "scope": group,
                 "implementation_status": "kluster_control_preserved",
                 "native_alias_present": bool(set(aliases) & prima) if aliases else None,
+                "native_aliases_present": sorted(set(aliases) & prima),
+                "translation": "native aliases" if aliases else "Kluster-owned translation; inspect effective launch/request",
                 "parity_check": "paired launch and request using " + name,
                 "behavior": "unverified",
             }

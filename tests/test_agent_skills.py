@@ -53,10 +53,11 @@ def run_installer(tmp_path, *args):
 
 def test_shipped_library_metadata_and_portable_references():
     catalog = skills.discover_skills(ROOT / "skills")
-    assert len(catalog) == 9
-    assert len({s.name for s in catalog}) == 9
+    assert len(catalog) == 10
+    assert len({s.name for s in catalog}) == 10
+    assert any(s.name == "kllm-prima" and s.category == "development" for s in catalog)
     assert len(skills.discover_skills(ROOT / "skills", "operations")) == 6
-    assert len(skills.discover_skills(ROOT / "skills", "development")) == 3
+    assert len(skills.discover_skills(ROOT / "skills", "development")) == 4
     for skill in catalog:
         text = (skill.path / "SKILL.md").read_text()
         metadata = yaml.safe_load(text.split("---", 2)[1])
@@ -315,7 +316,7 @@ def test_lock_blocks_mutation(library, tmp_path):
 def test_standalone_list_and_dry_run_do_not_write(tmp_path):
     destination = tmp_path / "destination"
     listed = run_installer(tmp_path, "--list", "--category", "development")
-    assert listed.returncode == 0 and len(listed.stdout.splitlines()) == 3
+    assert listed.returncode == 0 and len(listed.stdout.splitlines()) == 4
     dry = run_installer(tmp_path, "--dry-run", "--project-root", str(destination))
     assert dry.returncode == 0 and "codex, openclaw" in dry.stdout
     assert "no files changed" in dry.stdout and not destination.exists()
@@ -326,7 +327,7 @@ def test_standalone_installs_all_agents_from_another_directory(tmp_path):
     result = run_installer(tmp_path, "--project-root", str(destination))
     assert result.returncode == 0, result.stderr
     for root in skills.agent_destinations(["all"], "project", destination):
-        assert len(list(root.glob("*/SKILL.md"))) == 9
+        assert len(list(root.glob("*/SKILL.md"))) == 10
         assert (root / "kllm-10gbe/references/linux.md").is_file()
     before = snapshot(destination)
     repeated = run_installer(tmp_path, "--project-root", str(destination))

@@ -7,8 +7,21 @@ import time
 from pathlib import Path
 
 from kllm.modules.primacpp.entities import DeviceProfile, PrimaTopology
+from kllm.modules.primacpp.interactors.devices import stable_device_inventory
 from kllm.modules.runtimes.entities import body_digest
 from kllm.modules.runtimes.interactors.registry import atomic_json
+
+
+def generation_settings(context, threads, gpu_layers, devices, output_gpu=False):
+    return {"context": context, "threads": threads, "mode": "generation", "gpu_layers": gpu_layers,
+            "threads_batch": threads, "batch_size": 512, "micro_batch": 128,
+            "devices": [d["device_identity"] for d in devices], "output_gpu": output_gpu}
+
+
+def generation_hardware(member, devices):
+    return {**{key: member.get(key) for key in ("backend", "total_ram_bytes", "gpu_ids")},
+            "devices": stable_device_inventory(member.get("devices")),
+            "selected_devices": stable_device_inventory(devices)}
 
 
 def profile_key(profile: DeviceProfile) -> str:
@@ -22,6 +35,8 @@ def profile_key(profile: DeviceProfile) -> str:
                 "hardware_digest",
                 "settings_digest",
                 "backend",
+                "device_identity",
+                "driver_identity",
             )
         }
     )
@@ -43,6 +58,7 @@ class ProfileCache:
 
     def get(self, identity: dict, *, now: float | None = None) -> DeviceProfile | None:
         # Reads never create directories, run a profiler, or delete stale records.
+        identity = {"device_identity": "", "driver_identity": "", **identity}
         path = self.root / (body_digest(identity) + ".json")
         try:
             value = DeviceProfile.model_validate(json.loads(path.read_text()))
@@ -77,9 +93,15 @@ def predicted_decode_ms(
             or not 0 <= observed - value.measured_at <= max_age_s
         ):
             return None
+        layers = sum(r.end - r.start for r in rank.layers)
+        if value.measurement_kind == "end_to_end":
+            # Fixed model/output/KV overhead cannot be extrapolated to partial ranks.
+            if (len(topology.ranks) != 1 or layers != value.total_layers
+                    or rank.ngl != value.gpu_layers or rank.output_gpu != value.output_gpu or value.decode_ms is None):
+                return None
+            return value.decode_ms
         if rank.ngl and value.gpu_layer_ms is None:
             return None
-        layers = sum(r.end - r.start for r in rank.layers)
         total += (layers - rank.ngl) * value.cpu_layer_ms + rank.ngl * (value.gpu_layer_ms or 0)
         if len(topology.ranks) > 1:
             latency = link_ms.get((rank.node_id, rank.next_node_id))

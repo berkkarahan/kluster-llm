@@ -112,11 +112,20 @@ class GuidedSetup:
             if grant
             else {"ready": False, "reason": "Join and connect to the intended cluster first"}
         )
+        platform = getattr(getattr(getattr(self, "service", None), "executor", None), "platform", None)
+        from kllm.modules.managed_network.interactors.direct_platform import DirectPortPlatform
+        if isinstance(platform, DirectPortPlatform):
+            direct = platform.client.status()
+            status["prima_listener_recovery"] = direct.get("prima_listener_recovery", [])
+            if direct.get("error_code") in {"TIMEOUT", "HELPER_REFUSED", "UPGRADE_REQUIRED", "ADMIN_REQUIRED", "CLEANUP_PENDING"}:
+                status.update(ready=False, error_code=direct["error_code"], reason=direct.get("reason", ""))
         code = None
         reason = status.get("reason", "")
         if not status.get("ready"):
-            code = "ADMIN_REQUIRED"
-        elif status.get("cleanup_pending"):
+            code = status.get("error_code") if status.get("error_code") in {
+                "TIMEOUT", "HELPER_REFUSED", "UPGRADE_REQUIRED", "CLEANUP_PENDING"
+            } else "ADMIN_REQUIRED"
+        elif status.get("cleanup_pending") or status.get("prima_listener_recovery"):
             code, reason = "CLEANUP_PENDING", MESSAGES["CLEANUP_PENDING"]
         return {
             "capability": "managed-network-v2",
@@ -124,6 +133,7 @@ class GuidedSetup:
             "error_code": code,
             "message": reason,
             "cleanup_pending": status.get("cleanup_pending", []),
+            "prima_listener_recovery": status.get("prima_listener_recovery", []),
         }
 
     async def enable(self, acknowledged: bool) -> dict[str, Any]:
@@ -152,9 +162,13 @@ class GuidedSetup:
                     "OPERATION_IN_PROGRESS",
                     "Stop the private network before changing administrator authorization",
                 )
-            result = await self.helper.enable(repo, grant)
             from kllm.modules.managed_network.interactors.helper_platform import HelperPlatform
 
+            if not isinstance(self.service.executor.platform, HelperPlatform):
+                close = getattr(self.service.executor.platform, "close", None)
+                if close is not None:
+                    await asyncio.to_thread(close)
+            result = await self.helper.enable(repo, grant)
             if not isinstance(self.service.executor.platform, HelperPlatform):
                 self.service.executor.platform = HelperPlatform(
                     self.service.executor.platform, self.helper, self.grant
@@ -182,6 +196,24 @@ class GuidedSetup:
                     journal.phase = "removed_observed"
                     (await store.arun(store.journal, journal))
             return cast(dict[str, Any], result)
+
+    async def recover_prima_ports(self, network_id: UUID, run_id: UUID,
+                                  request: RecoveryRequest | None = None) -> dict[str, Any]:
+        # Local recovery changes only this node's listener ledger. It must not
+        # release the cluster reservation or claim other participants stopped.
+        async with self.service.lock:
+            if self.service.runtimes is None:
+                raise PlatformRefusal("UNSUPPORTED_CAPABILITY", "Prima listener recovery is unavailable")
+            ports = self.service.runtimes.prima.ports
+            try:
+                if request is None:
+                    return await asyncio.to_thread(ports.review, str(network_id), str(run_id))
+                return await asyncio.to_thread(ports.resolve, str(network_id), str(run_id),
+                                               request.decision, request.snapshot_digest)
+            except ValueError as error:
+                raise PlatformRefusal("OWNERSHIP_CONFLICT", str(error)) from None
+            except AttributeError:
+                raise PlatformRefusal("UNSUPPORTED_CAPABILITY", "Update this node's Prima listener backend") from None
 
     @staticmethod
     def adapter_reason(adapter: dict[str, Any], management: set[str]) -> str:

@@ -498,6 +498,12 @@ impl LaunchConfig {
                 argv.extend(["--port".into(), port.to_string()]);
             }
         }
+        let extra = opt_string_list(dict, "extra_args")?;
+        let reserved = ["--model", "-m", "--execution-manifest", "--rank", "--world", "--host", "--port", "--layer-window", "-lw", "--gpu-layers", "-ngl", "--tensor-split", "-ts", "--ctx-size", "-c", "--threads", "-t", "--master", "--next", "--data-port", "--signal-port"];
+        if extra.iter().any(|arg| reserved.contains(&arg.split('=').next().unwrap_or(""))) {
+            return Err(pyo3::exceptions::PyValueError::new_err("Prima extra arguments cannot override execution ownership"));
+        }
+        argv.extend(extra);
         Ok(Self {
             role: if rank == 0 {
                 "master".into()
@@ -720,6 +726,12 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
         cmd.env(path_key, merged);
     }
     cmd.stdin(Stdio::null());
+    // Claim the registry before either child is spawned. A poisoned lock must
+    // never turn an otherwise successful launch into an untracked process.
+    let mut tracked = children()
+        .lock()
+        .map_err(|_| ProcessError::Message("process lock poisoned".into()))?;
+    reap_exited(&mut tracked);
     let mut sink = None;
     match &cfg.log_path {
         Some(path) => {
@@ -736,10 +748,14 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
                     helper.process_group(0);
                 }
                 let mut process = helper.spawn()?;
-                let input = process
-                    .stdin
-                    .take()
-                    .ok_or_else(|| ProcessError::Message("missing log sink input".into()))?;
+                let input = match process.stdin.take() {
+                    Some(input) => input,
+                    None => {
+                        let _ = process.kill();
+                        let _ = process.wait();
+                        return Err(ProcessError::Message("missing log sink input".into()));
+                    }
+                };
                 #[cfg(unix)]
                 let writer = File::from(std::os::fd::OwnedFd::from(input));
                 #[cfg(windows)]
@@ -777,10 +793,6 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
     let log_sink_pid = sink.as_ref().map(Child::id);
     let pid = child.id();
     let identity = crate::usage::process_counters(pid).ok();
-    let mut tracked = children()
-        .lock()
-        .map_err(|_| ProcessError::Message("process lock poisoned".into()))?;
-    reap_exited(&mut tracked);
     tracked.push(TrackedChild { child, sink });
 
     Ok(LaunchResult {

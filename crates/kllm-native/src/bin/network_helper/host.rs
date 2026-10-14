@@ -102,7 +102,7 @@ fn service(scope: &Scope) -> Result<String> {
     Err(refuse("Ethernet adapter has no macOS network service"))
 }
 #[cfg(windows)]
-fn powershell(scope: &Scope, script: &str) -> Result<String> {
+pub(super) fn powershell(scope: &Scope, script: &str) -> Result<String> {
     // Interface IDs are decimal and addresses are validated literals. All script
     // text is fixed here, including the operation and property names.
     if !scope.adapter.chars().all(|c| c.is_ascii_digit()) {

@@ -3,7 +3,7 @@
   import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   import { onDestroy } from 'svelte';
   import { errors } from '#lib/shared/errors';
-  import type { ManagedNetwork } from '#lib/modules/network/entities';
+  import type { ManagedNetwork, PrimaListenerResource, PrimaListenerReview } from '#lib/modules/network/entities';
   import NetworkAdvanced from './NetworkAdvanced.svelte';
   import type { NetworkInteractor } from '../interactor.svelte';
   let { presenter = createApp().network }: { presenter?: NetworkInteractor } = $props();
@@ -11,7 +11,7 @@
   type Adapter = { adapter_id: string; os_interface: string; link_speed_mbps: number | null; reason: string };
   type Computer = { node_id: string; name: string; host: string; master: boolean; administrator_enabled: boolean; adapters: Adapter[]; selected_adapter: string; ready: boolean; error_code: string | null; message: string };
   type Assessment = { administrator_notice: string; master_node_id: string; computers: Computer[]; assessment_revision: string; networks: ManagedNetwork[] };
-  type LocalStatus = { administrator_enabled: boolean; administrator_notice: string; message: string; cleanup_pending?: string[] };
+  type LocalStatus = { administrator_enabled: boolean; administrator_notice: string; message: string; error_code?: string | null; cleanup_pending?: string[]; prima_listener_recovery?: PrimaListenerResource[] };
   const notice = 'Administrator access is required on each computer to configure its dedicated network adapter. Kluster will save the original settings and restore its changes when the network is stopped. After you enable access once on each computer, this cluster’s master can set up the private network.';
   let assessment = $state<Assessment | null>(null);
   let local = $state<LocalStatus | null>(null);
@@ -30,14 +30,21 @@
   let operationRevision = $state(1);
   let phase = $state('');
   let recovery = $state<{network_id: string; snapshot_digest: string; exact_address_prefix: string; current: unknown} | null>(null);
+  let listenerReview = $state<PrimaListenerReview | null>(null);
+  let keepListenersAcknowledged = $state(false);
+  let listenerNotice = $state('');
   let participants = $state<Array<{node_id: string; status: string; stage: string}>>([]);
   let controller: AbortController | null = null;
+  let workRevision = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const master = $derived(presenter.master);
   const network = $derived(assessment?.networks.find(n => n.observed_state !== 'stopped'));
   const selected = $derived(assessment?.computers.filter(c => c.master || included[c.node_id]) ?? []);
-  const canStart = $derived(selected.length >= 2 && selected.every(c => !c.error_code && !!(adapters[c.node_id] || c.selected_adapter)));
+  const helperNeedsAttention = $derived(['TIMEOUT', 'HELPER_REFUSED', 'UPGRADE_REQUIRED'].includes(local?.error_code ?? ''));
+  const canStart = $derived(!helperNeedsAttention && selected.length >= 2 && selected.every(c => !c.error_code && !!(adapters[c.node_id] || c.selected_adapter)));
   const networkLabel = $derived(network?.observed_state === 'ready' ? 'Private network ready' : operation ? 'Setting up' : network ? ({preparing:'Checking computers', applying:'Configuring adapters', verifying:'Testing connections', degraded:'Connection needs attention', failed:'Setup needs attention', stopping:'Restoring settings', cleanup_pending:'Restoration needs attention'}[network.observed_state] ?? 'Not set up') : 'Not set up');
+  const listenersRestorable = $derived(!!listenerReview && listenerReview.rules.every(rule => rule.ownership === 'exact' || rule.ownership === 'absent'));
+  const ownershipLabels = {exact: 'Matches Kluster’s saved rule', changed: 'Changed outside Kluster', unknown: 'Creation receipt missing', absent: 'Already absent'};
 
   function readable(failure: unknown): string {
     const value = String(failure).replace(/^Error:\s*/, '');
@@ -49,12 +56,14 @@
       UNSUPPORTED_CAPABILITY: 'Update Kluster on the computer that needs attention, then refresh.',
       UPGRADE_REQUIRED: 'Update Kluster on this computer to install administrator support.',
       UNPAIRED_IDENTITY: 'A computer’s identity needs attention. Review its pairing in Advanced details.',
-      HELPER_REFUSED: 'Network settings could not be applied safely. Review the diagnostic message in Advanced details.'
+      HELPER_REFUSED: 'Network settings could not be applied safely. Review the diagnostic message in Advanced details.',
+      LOCAL_ONLY: 'Open Kluster at localhost on this computer to change its network settings.'
     };
     return messages[code] ?? value.replace(/^[A-Z_]+:\s*/, '');
   }
 
   async function refresh(signal?: AbortSignal) {
+    listenerReview = null; keepListenersAcknowledged = false;
     const generation = errors.generation;
     const result = await presenter.localSetup<LocalStatus>(signal);
     if (generation !== errors.generation) return;
@@ -71,13 +80,15 @@
   }
 
   async function work(action: () => Promise<void>, explicit = true) {
+    const revision = ++workRevision;
+    const signal = controller?.signal;
     const requestGeneration = errors.generation;
     errorGeneration = requestGeneration;
     busy = true; error = ''; diagnostic = '';
     if (explicit) errors.observe('managed-network', '', '', false, requestGeneration);
     try { await action(); }
-    catch (failure) { if (!controller?.signal.aborted && requestGeneration === errors.generation) { diagnostic = String(failure); error = readable(failure); errors.publish('managed-network', error, errorGeneration); } }
-    finally { busy = false; }
+    catch (failure) { if (revision === workRevision && !signal?.aborted && requestGeneration === errors.generation) { diagnostic = String(failure); error = readable(failure); errors.publish('managed-network', error, errorGeneration); } }
+    finally { if (revision === workRevision) busy = false; }
   }
 
   async function load() {
@@ -109,6 +120,36 @@
       if (!recovery) return;
       await presenter.decideRecovery(recovery.network_id, decision, recovery.snapshot_digest);
       recovery = null; await refresh(controller?.signal);
+    });
+  }
+
+  async function reviewListeners(resource: PrimaListenerResource) {
+    if (busy) return;
+    listenerReview = null; keepListenersAcknowledged = false; listenerNotice = '';
+    const generation = errors.generation;
+    const signal = controller?.signal;
+    await work(async () => {
+      const next = await presenter.primaRecovery(resource, signal);
+      if (!opened || signal?.aborted || generation !== errors.generation) return;
+      listenerReview = next;
+    });
+  }
+
+  async function resolveListeners(decision: 'keep_current' | 'restore_owned') {
+    if (busy || !listenerReview || (decision === 'keep_current' && !keepListenersAcknowledged)
+      || (decision === 'restore_owned' && !listenersRestorable)) return;
+    const reviewed = listenerReview;
+    const generation = errors.generation;
+    const signal = controller?.signal;
+    await work(async () => {
+      // Every attempt consumes the displayed review, including lost/stale replies.
+      listenerReview = null; keepListenersAcknowledged = false;
+      await presenter.decidePrimaRecovery(reviewed, decision, signal);
+      if (!opened || signal?.aborted || generation !== errors.generation) return;
+      listenerNotice = decision === 'keep_current'
+        ? 'Current Prima rules were kept. Manage these rules manually. Retry Stop on the master to finish cluster cleanup.'
+        : 'Owned Prima rules were removed. Retry Stop on the master to finish cluster cleanup.';
+      await refresh(signal);
     });
   }
 
@@ -161,7 +202,7 @@
     if (event.target !== event.currentTarget) return;
     opened = (event.currentTarget as HTMLDetailsElement).open;
     if (opened) { controller = new AbortController(); void load(); }
-    else { controller?.abort(); if (timer) clearTimeout(timer); }
+    else { controller?.abort(); workRevision++; busy = false; listenerReview = null; keepListenersAcknowledged = false; if (timer) clearTimeout(timer); }
   }
   onDestroy(() => { opened = false; controller?.abort(); if (timer) clearTimeout(timer); });
 </script>
@@ -171,6 +212,11 @@
   <div class="guided-content">
     <p class="intro">Connect your computers to a dedicated Ethernet switch or cable. Links at 1 Gbps or faster are supported; 10 Gbps is preferred. Kluster handles the network settings and tests the connection.</p>
     <section class="admin-notice" aria-label="Administrator access requirements">
+      {#if helperNeedsAttention}
+        <strong>Network helper needs attention on this computer</strong>
+        <p>{local?.message}</p>
+        <p class="hint">Refresh after the helper responds or has been updated, then retry cleanup before changing the network.</p>
+      {:else}
       <strong>Administrator access is needed first</strong>
       <p>{assessment?.administrator_notice ?? local?.administrator_notice ?? notice}</p>
       {#if !local?.administrator_enabled}
@@ -178,6 +224,7 @@
         <button class="btn" disabled={!acknowledged || busy || !!operation} onclick={enableAdministrator}>Enable administrator access on this computer</button>
         <p class="hint">Your operating system will ask for permission. Do this once in Kluster on each participating computer.</p>
       {:else}<p class="granted">Administrator access enabled on this computer.</p>{#if local?.message}<p>{local.message}</p>{/if}{/if}
+      {/if}
     </section>
     {#if error}<ErrorMessage source="managed-network" message={error} snapshot={false} generation={errorGeneration} />{/if}
     {#each local?.cleanup_pending ?? [] as pending}
@@ -192,6 +239,35 @@
         <details><summary>Settings to review</summary><pre>{JSON.stringify(recovery.current, null, 2)}</pre></details>
       </section>
     {/if}
+    {#each local?.prima_listener_recovery ?? [] as pending (`${pending.network_id}/${pending.run_id}`)}
+      <section class="admin-notice prima-pending">
+        <p><strong>Prima network rules need review on this computer.</strong></p>
+        <p>Stop inference first, then use the local Kluster app to review run {pending.run_id.slice(0, 8)}.</p>
+        <button class="btn" disabled={busy} onclick={() => reviewListeners(pending)}>Review Prima rules</button>
+      </section>
+    {/each}
+    {#if listenerReview}
+      <section class="admin-notice prima-recovery" aria-label="Prima rule recovery decision">
+        <h3>Review Prima network rules</h3>
+        <p>Remove rules that still match Kluster’s saved changes, or keep all current rules and manage them manually. This decision applies to this computer.</p>
+        <div class="prima-rule-scroll" role="region" aria-label="Prima rule ownership">
+          <table class="prima-rule-table">
+            <thead><tr><th scope="col">TCP port</th><th scope="col">Allowed peers</th><th scope="col">Ownership</th></tr></thead>
+            <tbody>{#each listenerReview.rules as rule}
+              <tr><td>{rule.port}</td><td>{rule.peers.join(', ')}</td><td>{ownershipLabels[rule.ownership]}</td></tr>
+            {/each}</tbody>
+          </table>
+        </div>
+        {#if !listenersRestorable}<p class="hint">Changed rules or missing creation receipts require review. Kluster will preserve these rules.</p>{/if}
+        <div class="prima-actions">
+          <button class="btn" data-prima-restore disabled={busy || !listenersRestorable} onclick={() => resolveListeners('restore_owned')}>Remove unchanged Prima rules</button>
+          <label class="check"><input type="checkbox" data-prima-ack bind:checked={keepListenersAcknowledged} disabled={busy} /> I understand these rules will remain and I will manage them manually.</label>
+          <button class="btn" data-prima-keep disabled={busy || !keepListenersAcknowledged} onclick={() => resolveListeners('keep_current')}>Keep all current Prima rules</button>
+        </div>
+        <details class="prima-snapshots"><summary>Rule details</summary><pre>{JSON.stringify(listenerReview, null, 2)}</pre></details>
+      </section>
+    {/if}
+    {#if listenerNotice}<p role="status">{listenerNotice}</p>{/if}
     {#if master}
       <fieldset disabled={busy || !!operation} class="computer-list">
         <legend>Computers to connect</legend>
@@ -262,4 +338,10 @@
   .ready, .granted { color: var(--success, #69b884); }
   .advanced { border-top: 1px solid var(--border); padding-top: 8px; }
   button { justify-self: start; }
+  .prima-pending, .prima-recovery { min-width: 0; }
+  .prima-rule-scroll { overflow-x: auto; max-width: 100%; }
+  .prima-rule-table { width: 100%; border-collapse: collapse; text-align: left; }
+  .prima-rule-table th, .prima-rule-table td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .prima-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 12px; }
+  .prima-snapshots pre { max-width: 100%; max-height: 320px; overflow: auto; font-size: 12px; }
 </style>

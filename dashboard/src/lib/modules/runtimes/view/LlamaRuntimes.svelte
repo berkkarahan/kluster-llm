@@ -250,6 +250,10 @@
           {#if master}<button class="btn" disabled={busy || draft === version.runtime_id || entry.inference_supported === false} onclick={() => draft = version.runtime_id}>Select</button>{:else if !worker}<button class="btn" disabled={!entry.build || busy || !!running || entry.inference_supported === false} onclick={() => selectLocal(version)}>Use locally</button>{/if}
           <button class="btn runtime-remove" title={protectedVersion(version.runtime_id) ? 'Running, selected, targeted or building versions are protected' : 'Remove this local version'} aria-label={`Remove ${label(version)}`} disabled={busy || worker || protectedVersion(version.runtime_id)} onclick={() => remove(version)}>×</button>
         </div>
+        {#if entry.scope === 'windows-vulkan-local'}
+          <p class="small muted">{entry.inference_supported ? 'Qualified for local Windows/Vulkan' : 'Local Windows/Vulkan qualification pending'}. Multi-node runs require separate physical qualification.</p>
+          {#if entry.inference_supported}<p class="small muted">Qualified models: {entry.qualified_models?.map(model => model.name ?? model.sha256.slice(0, 12)).join(', ')}. Features: {entry.qualified_features?.join(', ')}.</p>{/if}
+        {/if}
         {#if entry.qualification_errors?.length}<p class="version-error small warning">Qualification pending: {entry.qualification_errors.map(value => value.replaceAll('_', ' ')).join(', ')}</p>{/if}
         {#if job?.error}<div class="version-error"><ErrorMessage source={`runtime-job:${job.job_id}`} message={job.error} /></div>{/if}
       </article>

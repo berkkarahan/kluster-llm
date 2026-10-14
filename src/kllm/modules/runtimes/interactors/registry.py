@@ -142,6 +142,11 @@ class RuntimeRegistry:
         for entry in value["versions"]:
             entry["qualification_errors"] = qualification_errors(entry["version"])
             entry["inference_supported"] = not entry["qualification_errors"]
+            if entry["version"].get("engine") == "primacpp":
+                from kllm.modules.primacpp.interactors.qualification import qualification_status
+
+                status = qualification_status(entry.get("build") or entry["version"])
+                entry.update(status)
         prima = recipe()
         value["engine_sources"] = [{
             "engine": "primacpp", "repository": prima["source_repository"],
@@ -258,6 +263,39 @@ class RuntimeRegistry:
         with self.lock:
             self.data["running"] = deepcopy(value)
             self._save()
+
+    def claim_running(self, value: dict) -> None:
+        """Publish a run without replacing another engine or run's record."""
+        if (not isinstance(value, dict) or not isinstance(value.get("engine"), str)
+                or not isinstance(value.get("run_id"), str) or not value["run_id"]):
+            raise ValueError("Running runtime requires an engine and run ID")
+        with self.lock:
+            current = self.data["running"]
+            if current is not None and (not isinstance(current, dict)
+                    or current.get("engine") != value["engine"]
+                    or current.get("run_id") != value["run_id"]):
+                raise ValueError("Another run owns the runtime registry")
+            self.data["running"] = deepcopy(value)
+            try:
+                self._save()
+            except BaseException:
+                self.data["running"] = current
+                raise
+
+    def clear_running(self, *, engine: str, run_id: str) -> bool:
+        """Retire a recorded run only while it still owns the registry slot."""
+        with self.lock:
+            current = self.data["running"]
+            if (not isinstance(current, dict) or current.get("engine") != engine
+                    or current.get("run_id") != run_id):
+                return False
+            self.data["running"] = None
+            try:
+                self._save()
+            except BaseException:
+                self.data["running"] = current
+                raise
+            return True
 
     def remove(self, identity: str):
         with self.lock:

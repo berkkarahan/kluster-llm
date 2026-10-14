@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "scopes": {
+    "windows-vulkan-local": {
+      "platform": "Windows",
+      "backend": "vulkan",
+      "topology": "local",
+      "source_commit": null,
+      "recipe_digest": null,
+      "gates": {
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false
+      },
+      "models": [],
+      "features": [],
+      "placements": [],
+      "devices": [],
+      "execution_scopes": [],
+      "receipts": []
+    },
+    "windows-vulkan-distributed": {
+      "validation_status": "deferred",
+      "deferred_reason": "Physical distributed cluster gates and validations will be tested later, as requested on 2026-10-11; no gate is passed by this deferral.",
+      "platform": "Windows",
+      "backend": "vulkan",
+      "topology": "distributed",
+      "source_commit": null,
+      "recipe_digest": null,
+      "gates": {
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "hardware_performance_gate": false
+      },
+      "models": [],
+      "features": [],
+      "placements": [],
+      "devices": [],
+      "execution_scopes": [],
+      "receipts": []
+    }
+  }
+}

@@ -330,6 +330,34 @@ the preview stale and requires another inspection. The placement table scrolls l
 on narrow screens. Normal Prima target/deployment selection remains disabled while
 qualification is incomplete; this panel provides preparation and assessment groundwork.
 
+### Prima engine settings (on-demand section swap)
+
+When the node runs the primacpp engine, the Settings runtime section renders
+[PrimaRuntimes.svelte](src/lib/modules/runtimes/view/PrimaRuntimes.svelte) instead of
+the llama.cpp panels; the navigation label switches from "llama.cpp" to "Prima" and the
+page header adds a Prima engine chip. The signal is the node's configured engine mode
+(`engine` in the status payload, written by `kllm start/join --engine`; on a worker the
+cluster target's engine also swaps the section, while a master's explicit flag wins over
+a saved Prima target), with the active run's effective configuration and the running
+runtime's engine as fallbacks; the UI introduces no second source of truth.
+`?section=llama` (and `?section=prima`) still address the runtime section, so the
+llama.cpp library stays reachable for adding or managing a Prima source.
+
+The Prima section reuses the runtime module's data and actions: the pinned Prima source
+(identity rows for repository, commit, recipe digest and source identity), the six
+source-controlled qualification gates rendered from `qualification_errors` (missing
+policy data renders closed, never passed), the cluster-target summary with the
+blocked-inference notice, the per-node managed-build table with the llama.cpp build
+contracts (phases, logs, retry, cancel), the existing Prima preparation panel, and a
+Compute panel that reports `GET /v2/node/prima-devices` — the pinned Prima build's own
+physical Vulkan device probe (name, UUID, driver, index) with explicit unavailable
+reasons. Capability badges come from the build's probed `capabilities.features` when the
+manifest carries them, else the recipe-documented set labeled as such. Backend/device
+selection ownership stays in Hardware and the Deploy plan (the planner assigns layers
+and derives the tensor split), and the panel states that instead of adding a parallel
+selector. Unavailable evidence stays an em-dash; the section never claims measured
+performance.
+
 [src/routes/settings/+page.svelte](src/routes/settings/+page.svelte) defaults to Hardware.
 Section order is **Hardware, Network, Tokens, Software, llama.cpp, Paths**.
 The llama section is directly addressable with `/settings?section=llama`.
@@ -425,6 +453,19 @@ computed-style measurement, contrast audit, hardware run or full test suite was 
 Existing test definitions describe coverage, not a new passing result.
 Documentation checks verified all 43 local links and 15 palette values against the checkout;
 `git diff --check` passed after applying the regenerated file.
+
+2026-10-14 Prima settings addition: `npm --prefix dashboard run check` (0 errors, 0 warnings),
+`npm --prefix dashboard run build`, and the dashboard test suite (8/8 pass, including the
+browser fixture tests) were run after adding PrimaRuntimes.svelte and the SettingsPage
+engine swap. No new screenshot or dedicated browser pass for the Prima section was recorded.
+
+2026-10-14 Prima settings completion: dedicated browser test `prima-settings.test.mjs`
+(passes, fixture master at 390/768/1440 + mode-off comparison with screenshots in
+artifacts/prima-settings) locks the engine-mode swap and the llama.cpp fallback. The
+Compute panel now renders `GET /v2/node/prima-devices` device identity probes and
+capabilities come from the build manifest's probed `capabilities` when present
+(endpoint tests in tests/test_runtime_versions.py: selected-build report and the
+explicit unavailable state).
 
 | Evidence | What it exercises |
 | --- | --- |

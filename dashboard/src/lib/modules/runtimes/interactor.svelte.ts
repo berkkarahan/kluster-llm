@@ -2,7 +2,7 @@ import { errors } from '../../shared/errors';
 import type { HttpClient } from '../../shared/http.svelte';
 import type { ClusterInteractor } from '../cluster/interactor.svelte';
 import type { RunInteractor } from '../run/interactor.svelte';
-import type { RuntimeLibrary, RuntimeSources, RuntimeVersion } from './entities';
+import type { RuntimeLibrary, RuntimeSources, RuntimeVersion, PrimaDeviceReport } from './entities';
 
 /** llama.cpp library commands. The view keeps dialogs, busy flags, and focus. */
 export class RuntimesInteractor {
@@ -99,6 +99,12 @@ export class RuntimesInteractor {
       'GET',
       undefined,
       signal
+    );
+  }
+
+  primaDevices(signal?: AbortSignal) {
+    return this.http.networkRequest<PrimaDeviceReport>(
+      '/v2/node/prima-devices', 'GET', undefined, signal
     );
   }
 

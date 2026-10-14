@@ -257,6 +257,44 @@ def test_protected_versions_cannot_be_removed(registry, protection):
         registry.remove(selected.runtime_id)
 
 
+def test_running_registry_clear_requires_the_exact_engine_and_run(registry):
+    owned = {"engine": "primacpp", "run_id": "owned", "runtime_id": "runtime"}
+    registry.running(owned)
+    assert registry.clear_running(engine="llamacpp", run_id="owned") is False
+    assert registry.clear_running(engine="primacpp", run_id="other") is False
+    assert registry.snapshot()["running"] == owned
+    assert registry.clear_running(engine="primacpp", run_id="owned") is True
+    assert registry.snapshot()["running"] is None
+
+
+def test_prima_registry_claim_cannot_replace_another_running_engine_or_run(registry):
+    previous = {"engine": "llamacpp", "run_id": "other", "runtime_id": "baseline"}
+    owned = {"engine": "primacpp", "run_id": "owned", "runtime_id": "prima"}
+    registry.running(previous)
+    with pytest.raises(ValueError, match="Another run owns"):
+        registry.claim_running(owned)
+    assert registry.snapshot()["running"] == previous
+    registry.running(None)
+    registry.claim_running(owned)
+    registry.claim_running({**owned, "pid": 42})
+    assert registry.snapshot()["running"]["pid"] == 42
+    with pytest.raises(ValueError, match="Another run owns"):
+        registry.claim_running({**owned, "run_id": "new"})
+    assert registry.snapshot()["running"]["run_id"] == "owned"
+
+
+def test_running_registry_clear_retains_owner_after_failed_journal(registry, monkeypatch):
+    owned = {"engine": "primacpp", "run_id": "owned", "runtime_id": "runtime"}
+    registry.running(owned)
+    with monkeypatch.context() as scoped:
+        def fail():
+            raise OSError("registry journal unavailable")
+        scoped.setattr(registry, "_save", fail)
+        with pytest.raises(OSError, match="registry journal unavailable"):
+            registry.clear_running(engine="primacpp", run_id="owned")
+    assert registry.snapshot()["running"] == owned
+
+
 def test_removing_unused_version_does_not_remove_another(registry):
     a, b = version(), version("b" * 40)
     prepared(registry, a)
@@ -572,6 +610,112 @@ def test_binding_change_is_surfaced_not_hidden(registry):
     )
     assert applied["version"]["runtime_id"] == selected.runtime_id
     assert manager.target_state()[0] == "current"
+
+
+def _prima_version():
+    from kllm.modules.primacpp.interactors.recipe import recipe as prima_recipe
+    from kllm.modules.primacpp.interactors.recipe import recipe_digest as prima_recipe_digest
+
+    definition = prima_recipe()
+    digest = prima_recipe_digest()
+    return RuntimeVersion(
+        engine="primacpp",
+        repository=definition["source_repository"],
+        ref=definition["source_commit"],
+        ref_type="commit",
+        commit=definition["source_commit"],
+        recipe_digest=digest,
+        runtime_id=runtime_id(definition["source_repository"], definition["source_commit"], "primacpp", digest),
+    )
+
+
+def _prima_artifact(registry, selected):
+    directory = registry.root / selected.runtime_id / "prima" / "bin"
+    directory.mkdir(parents=True, exist_ok=True)
+    names = ("llama-server.exe", "llama-cli.exe", "profile-tool.exe")
+    for name in names:
+        (directory / name).write_text(selected.commit + name)
+    return {
+        **selected.model_dump(),
+        "build_id": "prima-fixture",
+        "backend": "vulkan",
+        "platform": "Windows",
+        "transport": "prima-ring-tcp",
+        "recipe_digest": selected.recipe_digest,
+        "capabilities": {
+            "backends": ["vulkan"],
+            "devices": [],
+            "features": ["ring_tcp", "explicit_devices_v1"],
+        },
+        "artifact_dir": str(directory),
+        "artifacts": {name: file_digest(directory / name) for name in names},
+        "llama_server": str(directory / "llama-server.exe"),
+        "llama_cli": str(directory / "llama-cli.exe"),
+        "profile_tool": str(directory / "profile-tool.exe"),
+    }
+
+
+def _runtimes_client(registry, manager):
+    app = FastAPI()
+    app.include_router(
+        build_router(
+            lambda: registry,
+            lambda: manager,
+            manager.service.state,
+            token_verifier=lambda value: value == "test",
+        )
+    )
+    return TestClient(app, client=("127.0.0.1", 9999))
+
+
+def test_prima_devices_reports_the_selected_prima_build(registry, monkeypatch):
+    from kllm.modules.primacpp.interactors.devices import stable_device_inventory
+
+    selected = _prima_version()
+    registry.add(selected)
+    registry.data["versions"][selected.runtime_id]["build"] = _prima_artifact(registry, selected)
+    registry._save()
+    manager = control(registry)
+    authority = manager.service.channels.master_authority()
+    registry.set_target(
+        RuntimeTarget(
+            version=selected,
+            revision=1,
+            cluster_binding_id=str(authority.cluster_binding_id),
+            master_node_id="master",
+        )
+    )
+
+    def probe(runtime):
+        assert runtime["engine"] == "primacpp"
+        return [
+            {
+                "backend": "vulkan", "name": "Vulkan0", "description": "Fixture GPU",
+                "device_identity": "a" * 32, "driver_identity": "f" * 16,
+                "physical_index": 0, "free_bytes": 5,
+            }
+        ]
+
+    monkeypatch.setattr(
+        "kllm.modules.primacpp.interactors.devices.discover_vulkan_devices", probe
+    )
+    client = _runtimes_client(registry, manager)
+    body = client.get("/v2/node/prima-devices", headers={"x-api-key": "test"}).json()
+    assert body["available"] is True
+    assert body["features"] == ["ring_tcp", "explicit_devices_v1"]
+    reported = stable_device_inventory(body["devices"])
+    assert reported == body["devices"]
+    assert body["devices"][0]["device_identity"] == "a" * 32
+    assert "free_bytes" not in body["devices"][0]
+
+
+def test_prima_devices_is_explicitly_unavailable_without_a_prima_build(registry):
+    prepared(registry, version())
+    manager = control(registry)
+    client = _runtimes_client(registry, manager)
+    body = client.get("/v2/node/prima-devices", headers={"x-api-key": "test"}).json()
+    assert body["available"] is False
+    assert "not prepared" in body["reason"]
 
 
 def test_worker_target_reports_stale_master_label(registry):

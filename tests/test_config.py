@@ -26,6 +26,7 @@ def test_default_config(kllm_home):
         "vram_percent": 80,
         "ram_percent": 80,
         "accel_backend": None,
+        "engine": "llamacpp",
         "split_mode": "layer",
         "unified_memory": None,
         "flags": {"private-network-setup": False},
@@ -79,6 +80,18 @@ def test_save_and_load_split_mode(kllm_home):
     assert config.get_split_mode() == "tensor"
     with pytest.raises(ValueError):
         config.save_config({"split_mode": "pipeline"})
+
+
+def test_save_and_load_engine(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"engine": "primacpp"})
+    assert out["engine"] == "primacpp"
+    assert 'engine = "primacpp"' in (home / "config.toml").read_text(encoding="utf-8")
+    assert config.get_engine() == "primacpp"
+    config.save_config({"engine": "llamacpp"})
+    assert config.get_engine() == "llamacpp"
+    with pytest.raises(ValueError):
+        config.save_config({"engine": "exo"})
 
 
 def test_save_and_load_full_config(kllm_home):

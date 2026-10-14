@@ -374,14 +374,36 @@ class VerificationEvidence(Record):
 class RunNetworkReservation(Record):
     run_id: UUID
     network_id: UUID
+    engine: Literal["llamacpp", "primacpp"] = "llamacpp"
+    execution_manifest_digest: Digest | None = None
+    authority: MasterAuthority | None = None
     assignment_revisions: dict[Identifier, Revision]
     logical_endpoints: list[str]
     launch_endpoints: list[str]
     relay_instance_ids: list[UUID]
     child_pid: Revision | None = None
+    prima_ports_required: bool = False
+    prima_port_nodes: list[Identifier] = Field(default_factory=list)
+    prima_admitted_nodes: list[Identifier] = Field(default_factory=list)
     child_start_token: Identifier | None = None
     state: Literal["reserved", "active", "releasing", "released", "uncertain"]
     created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def engine_contract(self):
+        if self.engine == "primacpp" and (not self.execution_manifest_digest or not self.authority
+                or self.relay_instance_ids):
+            raise ValueError("Prima admission requires manifest/authority and no RPC relays")
+        pending, admitted = set(self.prima_port_nodes), set(self.prima_admitted_nodes)
+        if (len(pending) != len(self.prima_port_nodes) or len(admitted) != len(self.prima_admitted_nodes)
+                or not admitted <= pending or not pending <= self.assignment_revisions.keys()
+                or self.engine != "primacpp" and (self.prima_ports_required or pending or admitted)
+                or not self.prima_ports_required and (pending or admitted)
+                or self.state == "released" and (pending or admitted)
+                or self.prima_ports_required and self.state == "active"
+                   and admitted != self.assignment_revisions.keys()):
+            raise ValueError("Invalid Prima native listener reservation ownership")
+        return self
 
 
 class AdmissionLease(Record):

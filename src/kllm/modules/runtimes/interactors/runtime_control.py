@@ -140,7 +140,9 @@ class RuntimeControlService:
             if request.expected_revision != (prior or {}).get("revision", 0):
                 raise ValueError("Target changed; refresh before applying your selection")
             version = self.registry.data["versions"][request.runtime_id]["version"]
-            require_qualified(version)
+            entry = self.registry.data["versions"][request.runtime_id]
+            require_qualified(self.registry.capture(request.runtime_id)
+                              if version.get("engine") == "primacpp" and entry.get("build") else version)
             target = RuntimeTarget(
                 version=version,
                 revision=request.expected_revision + 1,

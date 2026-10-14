@@ -13,12 +13,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from kllm.modules.inference.entities import RunBody
 from kllm.modules.primacpp.entities import DeviceProfile, ProfileRequest, PrimaTopology
 from kllm.modules.primacpp.interactors.benchmark import Measurement, Workload, evaluate
 from kllm.modules.primacpp.interactors.build import managed_prima_build, parse_device_report
 from kllm.modules.primacpp.interactors.placement import (
     topology_from_plan,
     layer_windows,
+    graph_visits,
+    require_layer_execution,
     rank_launch,
     network_edges,
 )
@@ -140,6 +143,35 @@ def test_prima_stale_saved_build_is_retained_but_requires_rebuild(tmp_path):
         registry.close()
 
 
+def test_prima_snapshot_reports_probed_build_capabilities(tmp_path):
+    """The managed build manifest's capability probe reaches the dashboard."""
+    version = prima_version()
+    capabilities = {
+        "backends": ["vulkan"],
+        "devices": [{"backend": "Vulkan", "name": "Vulkan0", "description": "Fixture GPU"}],
+        "features": ["ring_tcp", "t5_segmented_v1", "explicit_devices_v1"],
+    }
+    registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
+    try:
+        registry.add(version)
+        registry.data["versions"][version.runtime_id]["build"] = {
+            **version.model_dump(), "transport": "prima-ring-tcp",
+            "build_id": "fixture", "backend": "vulkan", "platform": "Windows",
+            "capabilities": capabilities,
+            "artifact_dir": str(registry.root / "fixture-build"),
+        }
+        registry._save()
+    finally:
+        registry.close()
+    registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
+    try:
+        entry = registry.snapshot()["versions"][0]
+        assert entry["build"]["capabilities"]["features"] == capabilities["features"]
+        assert "vulkan" in entry["build"]["capabilities"]["backends"]
+    finally:
+        registry.close()
+
+
 def test_vulkan_is_an_independent_mandatory_qualification_gate(monkeypatch):
     gates = {key: True for key in recipe()["qualification"]}
     gates["vulkan_gpu_inference"] = False
@@ -253,6 +285,34 @@ def test_topology_preserves_roles_allocations_and_local_device_names():
     assert {e["port"] for e in network_edges(value)} == {9000, 9001, 10001}
 
 
+def test_rpc_gpu_indices_and_multidevice_boundaries_preserve_exact_layers():
+    inventory = members()
+    inventory["worker"]["devices"] = [{"device": "Vulkan0"}, {"device": "Vulkan1"}]
+    inventory["worker"]["rpc_devices"] = [
+        {"index": 0, "device": "CPU", "memory_kind": "ram", "backend": "cpu"},
+        {"index": 1, "device": "Vulkan0", "memory_kind": "gpu", "backend": "vulkan"},
+        {"index": 2, "device": "Vulkan1", "memory_kind": "gpu", "backend": "vulkan"},
+    ]
+    source = plan()
+    source["estimated_layers"] = 3
+    source["device_allocations"] = [
+        {"node_id": "worker", "layer_start": start, "layer_end": end,
+         "layers": end - start, "device": f"RPC[10.10.10.3:50052]/{index}",
+         "rpc_index": index, "local": False, "memory_kind": "gpu"}
+        for start, end, index in ((0, 2, 1), (2, 3, 2))
+    ]
+    value = topology_from_plan(source, inventory, "a" * 64)
+    assert value.ranks[1].devices == ["Vulkan0", "Vulkan1"]
+    assert value.ranks[1].tensor_split == [2.0, 1.0]
+    assert rank_launch(value, "worker")["tensor_split"] == "2,1"
+    source["device_allocations"].append({
+        **source["device_allocations"][0], "layer_start": 3, "layer_end": 4, "layers": 1,
+    })
+    source["estimated_layers"] = 4
+    with pytest.raises(ValueError, match="interleaved GPU device"):
+        topology_from_plan(source, inventory, "a" * 64)
+
+
 def test_cpu_worker_and_zero_layer_master_are_preserved():
     source = plan()
     source["device_allocations"] = [
@@ -300,6 +360,45 @@ def test_master_cpu_prefix_and_gpu_suffix_are_not_silently_reordered():
     value = topology_from_plan(source, members(), "a" * 64)
     with pytest.raises(ValueError, match="window order"):
         layer_windows(value)
+
+
+def test_segmented_graph_visits_match_absolute_rank_transitions():
+    source = plan()
+    source["cpu_layers"] = 2
+    source["device_allocations"][0].update(layer_start=2, layers=3)
+    value = topology_from_plan(source, members(), "a" * 64)
+    assert graph_visits(value) == {"master": 4, "worker": 1}
+    with pytest.raises(ValueError, match="window order"):
+        require_layer_execution(value, set(), {})
+    with pytest.raises(ValueError, match="per-visit graph reservations"):
+        require_layer_execution(value, {"segmented_placement"}, {
+            "prima_graphs": True, "prima_graph_counts": {"master": 3, "worker": 1}})
+    require_layer_execution(value, {"segmented_placement"}, {
+        "prima_graphs": True, "prima_graph_counts": {"master": 4, "worker": 1}})
+
+
+def test_preview_refuses_missing_segmented_graph_capacity(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = plan()
+    source["cpu_layers"] = 2
+    source["device_allocations"][0].update(layer_start=2, layers=3)
+    source["resolved_launch_settings"] = {"prima_graphs": True}
+    source["prima_graph_counts"] = {"master": 3, "worker": 1}
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": ["segmented_placement"]}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+
+    def preview():
+        return planner.preview(body, runtime, members(), model, lambda *_: source)
+
+    blocked = preview()
+    assert blocked["inference_supported"] is False
+    assert any("per-visit graph reservations" in error for error in blocked["qualification_errors"])
+    source["prima_graph_counts"]["master"] = 4
+    assert preview()["inference_supported"] is True
 
 
 @pytest.mark.parametrize("change", [{"split_mode": "tensor"}, {"expert_offloaded": True}])
@@ -543,7 +642,7 @@ def test_real_profile_process_and_owned_logs(tmp_path, backend):
         result = jobs.job(job["job_id"])
         if backend == "vulkan":
             assert result["phase"] == "failed", result
-            assert "vulkan GPU profiling is unavailable" in result["error"]
+            assert "physical Vulkan profiler device evidence" in result["error"]
             assert not jobs.cache.root.exists()
         else:
             assert result["phase"] == "prepared", result

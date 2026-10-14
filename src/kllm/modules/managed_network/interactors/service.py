@@ -67,6 +67,7 @@ class ManagedNetworkService:
                 self.store, self.identity, state, platform or platform_adapter(), repository
             )
             self.executor.guided_status = self.guided.local_status
+            self._default_platform = platform is None
             if platform is None and not is_admin():
                 from kllm.modules.managed_network.interactors.helper_platform import HelperPlatform
 
@@ -97,20 +98,64 @@ class ManagedNetworkService:
             self._close_complete = False
             self._close_jobs: set[asyncio.Task] = set()
             from kllm.modules.managed_network.interactors.run_admission import RunAdmission
+            from kllm.modules.managed_network.interactors.prima_admission import PrimaNetworkAdmission
 
             self.admission = RunAdmission(self)
+            self.prima_admission = PrimaNetworkAdmission(self)
             self.loop: asyncio.AbstractEventLoop | None = None
         except BaseException:
             self.store.close()
             raise
 
+    def _prima_busy(self):
+        prima = getattr(getattr(self, "runtimes", None), "_prima", None)
+        return bool(prima and (prima.rank.owner or prima.ports.owner or prima.runs.busy))
+
+    def _configure_direct_platform(self):
+        import json
+        import os
+        from kllm.modules.managed_network.interactors.helper_platform import HelperPlatform
+        from kllm.modules.managed_network.interactors.direct_platform import DirectPortPlatform
+        from kllm.modules.managed_network.interactors.direct_client import DirectClient
+
+        if not self._default_platform or os.name != "nt" or isinstance(self.executor.platform, DirectPortPlatform):
+            return
+        saved_direct = (self.home / "prima-direct" / "authorization.json").exists()
+        if not saved_direct and not is_admin():
+            return
+        # Older production port ownership belongs to the protected service. Never
+        # release it through a different, empty ledger merely because privileges changed.
+        old_ports = None
+        if self.runtimes is not None:
+            path = self.runtimes.registry.root / "prima-control" / "ports.json"
+            if path.exists():
+                old_ports = json.loads(path.read_text())
+        if not saved_direct and (old_ports or self.guided.helper.status(self.guided.grant()).get("ready")):
+            if not isinstance(self.executor.platform, HelperPlatform):
+                self.executor.platform = HelperPlatform(self.executor.platform, self.guided.helper, self.guided.grant)
+            return
+        underlying = self.executor.platform.underlying if isinstance(self.executor.platform, HelperPlatform) else self.executor.platform
+        self.executor.platform = DirectPortPlatform(underlying,
+            DirectClient(self.home, self.executor.repository, self.guided.grant), self.guided.grant, self._prima_busy)
+
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         (await self.store.arun(self.store.recover))
+        await asyncio.to_thread(self._configure_direct_platform)
         if self.state().role == "master":
             await asyncio.to_thread(self.sync_directory)
         await self.channels.start()
         if self.runtimes is not None:
+            prima_root = self.runtimes.registry.root / "prima-control"
+            if ((prima_root / "rank" / "rank.json").exists()
+                    or (prima_root / "distributed" / "run.json").exists()
+                    or (prima_root / "ports.json").exists()):
+                prima = self.runtimes.prima
+                try:
+                    await asyncio.to_thread(prima.expire)
+                except (PlatformRefusal, OSError, RuntimeError, ValueError) as error:
+                    self.state().apply_error = f"Prima cleanup pending after restart: {error}"
+                    self.state().save()
             self.runtimes.task = asyncio.create_task(
                 self.runtimes.reconcile(), name="kllm-runtime-target"
             )
@@ -157,6 +202,9 @@ class ManagedNetworkService:
                 if self.runtimes is None:
                     raise ValueError("Upgrade this worker for Prima control")
                 return await self.runtimes.prima.execute(command, deadline, authorize_sync)
+            prima = getattr(self.runtimes, "_prima", None)
+            if command.action == "start" and prima is not None and (prima.rank.owner or prima.ports.owner):
+                raise ValueError("Stop the owned Prima rank or listener admission before starting RPC inference")
             if command.action in (
                 "prepare_runtime",
                 "runtime_status",
@@ -191,8 +239,9 @@ class ManagedNetworkService:
             await asyncio.sleep(1)
             try:
                 await asyncio.to_thread(self.worker_rpc.expire)
-                if self.runtimes and hasattr(self.runtimes, "_prima"):
-                    await asyncio.to_thread(self.runtimes._prima.expire)
+                prima = getattr(self.runtimes, "_prima", None)
+                if prima is not None:
+                    await asyncio.to_thread(prima.expire)
             except (PlatformRefusal, OSError, RuntimeError, ValueError):
                 pass  # Owned process and cleanup_pending remain available for retry.
 
@@ -1534,6 +1583,8 @@ class ManagedNetworkService:
                                 (await self.store.arun(self._publish, network, "ready"))
                         runtime_stage = True
                         for run in active:
+                            if run.engine == "primacpp":
+                                continue  # Prima's coordinator owns all-rank leases and cleanup.
                             if run.child_pid and (
                                 not native.process_alive(run.child_pid)
                                 or native._managed_native()._process_identity(run.child_pid)[0]
@@ -1660,6 +1711,9 @@ class ManagedNetworkService:
                 deadline,
             )
         self.master_bridges.clear()
+        close_platform = getattr(self.executor.platform, "close", None)
+        if close_platform is not None:
+            await self._await_close(asyncio.to_thread(close_platform), deadline)
         await self.store.aclose(deadline=deadline)
         self._close_complete = True
 

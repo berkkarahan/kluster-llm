@@ -62,6 +62,11 @@ def parse_device_report(install, stdout: str, stderr: str = "") -> dict:
     ):
         raise ValueError("Prima capability report contains an invalid device entry")
     capabilities["backends"] = sorted(reported)
+    if "vulkan_device_identity_v1" in features:
+        from kllm.modules.primacpp.interactors.devices import select_vulkan_devices
+
+        vulkan = [d for d in devices if d["backend"].lower() == "vulkan"]
+        select_vulkan_devices(vulkan, [d["name"] for d in vulkan])
     return capabilities
 
 

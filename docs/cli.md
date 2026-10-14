@@ -30,8 +30,8 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 
 | Command | Description |
 |---------|-------------|
-| `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
-| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
+| `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1] [--backend BACKEND] [--engine llamacpp\|primacpp]` | Start as master, advertise via mDNS, print join key |
+| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1] [--backend BACKEND] [--engine llamacpp\|primacpp]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm config [--split-mode layer\|row\|tensor]` | Show local system settings or set the persistent split-mode default |
 | `kllm flags [<name>] [--enable\|--disable]` | Show or change local dashboard feature flags. `private-network-setup` gates the Home → Private 10GbE network panel (disabled by default); omit `<name>` to list all flags |
@@ -99,10 +99,13 @@ gpu_ids = [0, 1]      # optional; omitted = all discrete local GPUs at Start/Joi
 vram_percent = 80     # used when device = gpu (scales selected VRAM)
 ram_percent = 80      # used when device = cpu (scales total RAM)
 accel_backend = "vulkan"  # optional; Cluster Backend selector (metal|cuda|rocm|vulkan)
+engine = "llamacpp"       # node engine mode: llamacpp | primacpp
 split_mode = "layer"      # layer (pipeline), row (legacy), or tensor (experimental)
 ```
 
 Precedence for the local engine preference on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Omit `accel_backend` (or choose **auto** in the dashboard) to expose every device the installed llama.cpp binary lists. Each cluster node may use a different backend (Metal, Vulkan, CUDA, ROCm); RPC layer splits are designed for that mix. `kllm start --backend vulkan` and `kllm join --backend metal` write config before registering.
+
+`engine` is the node's engine mode, written by `kllm start --engine primacpp` / `kllm join --engine primacpp` (default `llamacpp`). It is reported as `engine` in the dashboard status and switches that node's Settings runtime section to the Prima settings (identity, qualification gates, builds, preparation). It does not change inference selection: a Prima target or local selection is still refused while Prima's qualification gates are open, and llama.cpp keeps serving. `scripts/install.py --engine primacpp` is the separate build-time flag that selects which engine artifact the managed installer builds.
 
 Precedence for `plan` / `run`: CLI `--device` (or dashboard/API request body) → master config → `gpu`. For local-only CLI/API clients, split mode follows explicit request `--split-mode` → master `split_mode` config → `layer`. The dashboard always requests `layer` for estimates, plans, and runs, even when an older config contains `row` or `tensor`; its next hardware-settings save also persists `layer`.
 

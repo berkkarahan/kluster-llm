@@ -12,11 +12,18 @@
   import Tokens from '#lib/modules/node-settings/view/Tokens.svelte';
   import Software from '#lib/modules/node-settings/view/Software.svelte';
   import LlamaRuntimes from '#lib/modules/runtimes/view/LlamaRuntimes.svelte';
+  import PrimaRuntimes from '#lib/modules/runtimes/view/PrimaRuntimes.svelte';
   import type { App } from '#lib/app.svelte';
-  let { settings = createApp().settings, cluster = createApp().cluster, runtimes = createApp().runtimes }: {
+  let {
+    settings = createApp().settings,
+    cluster = createApp().cluster,
+    runtimes = createApp().runtimes,
+    run = createApp().run
+  }: {
     settings?: App['settings'];
     cluster?: App['cluster'];
     runtimes?: App['runtimes'];
+    run?: App['run'];
   } = $props();
 
   let section = $state('hardware');
@@ -31,8 +38,41 @@
     { id: 'paths', label: 'Paths' }
   ];
 
+  /**
+   * Prima launches replace only the runtime section: the llama.cpp panel keeps
+   * its engine indicator and the llama.cpp settings stay available through
+   * /settings?section=llama for a llama.cpp library. The signal is the active
+   * engine state the agent already reports (the launch flag feeds it), so no
+   * second source of truth is introduced here.
+   */
+  const activeEngine = $derived.by(() => {
+    const status = cluster.status;
+    const configured = status?.engine;
+    // Master/idle: the launch flag (--engine) is authoritative, even over a
+    // saved Prima cluster target. Workers follow the master's assigned target:
+    // they prepare what the cluster points at, flag or no flag.
+    if (configured === 'primacpp') return 'primacpp';
+    if (configured === 'llamacpp' && status?.role !== 'worker') return 'llamacpp';
+    if (runtimes.status?.runtimes?.target?.version.engine === 'primacpp') return 'primacpp';
+    // Older payloads without the engine field: derive from the active run and
+    // the running runtime instead.
+    const config = (run.activeRunConfig ?? status?.active_config ?? null) as Record<string, unknown> | null;
+    const values = (config?.values ?? config) as Record<string, unknown> | undefined;
+    if (values?.executor === 'primacpp' || values?.engine === 'primacpp') return 'primacpp';
+    if (runtimes.status?.runtimes?.running?.engine === 'primacpp') return 'primacpp';
+    return 'llamacpp';
+  });
+  const primaMode = $derived(activeEngine === 'primacpp');
+  const runtimeSectionLabel = $derived(primaMode ? 'Prima' : 'llama.cpp');
+  const runtimeIntro = $derived(
+    primaMode
+      ? 'Prima replaces llama.cpp for this launch. Evaluation builds and placement previews only; inference stays blocked until every qualification gate passes.'
+      : 'Version changes apply to the next model run. Preparation keeps active inference on its current version.'
+  );
+
   onMount(async () => {
-    if (new URLSearchParams(location.search).get('section') === 'llama') section = 'llama';
+    const requested = new URLSearchParams(location.search).get('section');
+    if (requested === 'llama' || requested === 'prima') section = 'llama';
     void settings.loadHome();
   });
 </script>
@@ -42,15 +82,18 @@
     <div>
       <p class="eyebrow">Settings</p>
       <h1 id="page-title">Node settings</h1>
-      <p>{section === 'llama' ? 'Version changes apply to the next model run. Preparation keeps active inference on its current version.' : 'Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.'}</p>
+      <p>{section === 'llama' ? runtimeIntro : 'Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.'}</p>
     </div>
-    <p class="mono small muted">node {cluster.status?.node_id ?? '—'} · probed {settings.probedBackend}</p>
+    <p class="mono small muted">
+      node {cluster.status?.node_id ?? '—'} · probed {settings.probedBackend}
+      {#if primaMode}<span class="chip chip-info">Prima engine</span>{/if}
+    </p>
   </header>
 
   <div class="settings-layout">
     <nav class="settings-nav" aria-label="Settings sections">
       {#each sections as item}
-        <button type="button" class:active={section === item.id} aria-current={section === item.id ? 'true' : undefined} onclick={() => section = item.id}>{item.label}</button>
+        <button type="button" class:active={section === item.id} aria-current={section === item.id ? 'true' : undefined} onclick={() => section = item.id}>{item.id === 'llama' ? runtimeSectionLabel : item.label}</button>
       {/each}
     </nav>
     <div class="settings-body">
@@ -62,7 +105,7 @@
     <div hidden={section !== 'network'}><NetworkSecurity presenter={cluster} /></div>
     <div hidden={section !== 'tokens'}><Tokens /></div>
     <div hidden={section !== 'software'}><Software presenter={cluster} /></div>
-    {#if section === 'llama'}<LlamaRuntimes presenter={runtimes} />{/if}
+    {#if section === 'llama'}{#if primaMode}<PrimaRuntimes presenter={runtimes} />{:else}<LlamaRuntimes presenter={runtimes} />{/if}{/if}
 
     <section class="panel panel-pad" aria-labelledby="data-label" hidden={section !== 'paths'}>
       <h2 id="data-label">Paths</h2>

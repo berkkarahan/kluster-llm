@@ -22,17 +22,10 @@ def build_router(
 
     def profiler():
         # Optional service is owned and closed by the runtime registry.
-        from kllm.modules.primacpp.interactors.preparation import ProfileJobs
+        from kllm.modules.primacpp.interactors.preparation import get_profile_jobs
         from kllm.modules import models as model_ops
 
-        local = registry()
-        with local.lock:
-            if getattr(local, "prima_profiles", None) is None:
-                local.prima_profiles = ProfileJobs(
-                    local.root / "prima-profiles", local.capture,
-                    model_ops.resolve_local_model, state, local._kill,
-                )
-            return local.prima_profiles
+        return get_profile_jobs(registry(), state, model_ops.resolve_local_model)
 
     def authorize(request: Request, *, mutation=False, master=False):
         if not token_verifier(
@@ -84,6 +77,44 @@ def build_router(
     async def library(request: Request):
         authorize(request)
         return await work(cluster_status)
+
+    @router.get("/node/prima-devices")
+    async def prima_devices(request: Request):
+        """The selected Prima build's own physical Vulkan device report.
+
+        The generic node inventory serves planning; this probe reads the exact
+        physical identity (UUID/driver) the pinned Prima runtime itself sees.
+        """
+        authorize(request)
+        from kllm.modules.primacpp.interactors.devices import (
+            discover_vulkan_devices,
+            stable_device_inventory,
+        )
+
+        def probe():
+            try:
+                runtime = registry().capture(None)
+            except ValueError as error:
+                return {"available": False, "reason": str(error)}
+            if runtime.get("engine") != "primacpp":
+                return {
+                    "available": False,
+                    "reason": "The selected runtime is not Prima; prepare a Prima build to probe its devices",
+                }
+            try:
+                devices = stable_device_inventory(discover_vulkan_devices(runtime))
+            except (ValueError, OSError) as error:
+                return {"available": False, "reason": str(error)[:500]}
+            capabilities = runtime.get("capabilities") or {}
+            return {
+                "available": True,
+                "devices": devices,
+                "features": capabilities.get("features", []),
+                "backends": capabilities.get("backends", []),
+            }
+
+        return await work(probe)
+
 
     @router.post("/node/runtimes/{identity}/prima-plan")
     async def prima_plan(identity: str, request: Request):

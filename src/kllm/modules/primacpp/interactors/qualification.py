@@ -409,7 +409,7 @@ def _scope_errors(record: dict, runtime: dict, topology: str, context: dict | No
     errors: list[str] = []
     unrestricted = record.get("unrestricted") is True
     expected_commit = (
-        recipe()["source_commit"]
+        runtime.get("commit")
         if unrestricted and record.get("source_commit") is None
         else record.get("source_commit")
     )
@@ -418,8 +418,12 @@ def _scope_errors(record: dict, runtime: dict, topology: str, context: dict | No
         if unrestricted and record.get("recipe_digest") is None
         else record.get("recipe_digest")
     )
-    if (expected_commit != recipe()["source_commit"]
-            or runtime.get("commit") != expected_commit
+    commit_valid = (
+        bool(expected_commit) and runtime.get("commit") == expected_commit
+        if unrestricted and record.get("source_commit") is None
+        else expected_commit == recipe()["source_commit"] and runtime.get("commit") == expected_commit
+    )
+    if (not commit_valid
             or expected_digest != recipe_digest()
             or runtime.get("recipe_digest") != expected_digest):
         errors.append("qualification_identity_mismatch")

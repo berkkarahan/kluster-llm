@@ -18,9 +18,11 @@
     initial,
     datalistId,
     saveLabel = 'Save version',
+    saveTargetLabel,
     footNote = 'Tags and branches resolve to one immutable commit. Nodes build that exact snapshot using their own backend.',
     placeholder = 'https://github.com/ggml-org/llama.cpp.git',
     onsave,
+    onsaveTarget,
     onclose
   }: {
     presenter: RuntimesInteractor;
@@ -29,8 +31,10 @@
     initial: { repository: string; ref: string; refType: 'tag' | 'branch' | 'commit'; name: string };
     datalistId: string;
     saveLabel?: string;
+    saveTargetLabel?: string;
     footNote?: string;
     onsave: (value: RuntimeVersion) => Promise<unknown>;
+    onsaveTarget?: (value: RuntimeVersion) => Promise<unknown>;
     onclose: () => void;
     placeholder?: string;
   } = $props();
@@ -98,6 +102,15 @@
       onclose();
     });
   }
+
+  async function saveTarget() {
+    const value = resolved;
+    if (!value || !onsaveTarget) return;
+    await actions.action(async () => {
+      await onsaveTarget(value);
+      onclose();
+    });
+  }
 </script>
 
 <ErrorMessage source={actions.section} message={actions.message} />
@@ -112,5 +125,8 @@
 <div class="runtime-dialog-foot">
   <button class="btn" onclick={onclose}>Close</button>
   <button class="btn" disabled={actions.busy || !ref || !repository} onclick={resolveSource}>Resolve revision</button>
-  <button class="btn btn-accent" disabled={actions.busy || !resolved || !repository} onclick={save}>{saveLabel}</button>
+  <button class="btn" class:btn-accent={!onsaveTarget} disabled={actions.busy || !resolved || !repository} onclick={save}>{saveLabel}</button>
+  {#if onsaveTarget}
+    <button class="btn btn-accent" disabled={actions.busy || !resolved || !repository} onclick={saveTarget}>{saveTargetLabel ?? 'Save version & set target'}</button>
+  {/if}
 </div>

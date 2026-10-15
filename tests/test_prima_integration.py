@@ -225,19 +225,36 @@ def test_prima_release_tag_resolves_to_the_pinned_identity(monkeypatch):
     assert by_tag.recipe_digest == recipe_digest()
 
 
-def test_prima_rejects_foreign_tags_and_moved_releases(monkeypatch):
+def test_prima_resolves_custom_tags_branches_commits_and_rejects_moved_release(monkeypatch):
     from kllm.modules.runtimes.interactors import source as source_mod
 
     definition = recipe()
     monkeypatch.setattr(source_mod, "refs", lambda repository: {
         "refs/tags/1.0.0": "b" * 40,
+        "refs/heads/feat/ring": "d" * 40,
         f"refs/tags/{definition['source_release']}": "c" * 40,
     })
-    with pytest.raises(ValueError, match="pinned source"):
-        source_mod.resolve(SourceRequest(
-            engine="primacpp", repository=definition["source_repository"],
-            ref="1.0.0", ref_type="tag",
-        ))
+    by_tag = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref="1.0.0", ref_type="tag",
+    ))
+    assert by_tag.commit == "b" * 40
+    assert by_tag.recipe_digest == recipe_digest()
+
+    by_branch = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository="https://github.com/example-lab/prima.cpp.git",
+        ref="feat/ring", ref_type="branch",
+    ))
+    assert by_branch.commit == "d" * 40
+    assert by_branch.recipe_digest == recipe_digest()
+
+    by_commit = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref="e" * 40, ref_type="commit",
+    ))
+    assert by_commit.commit == "e" * 40
+    assert by_commit.recipe_digest == recipe_digest()
+
     with pytest.raises(ValueError, match="moved"):
         source_mod.resolve(SourceRequest(
             engine="primacpp", repository=definition["source_repository"],

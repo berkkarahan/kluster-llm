@@ -107,7 +107,7 @@
 :is(.runtime-settings,.runtime-dialog) .empty p{color:var(--muted);font-size:14px;max-width:46ch}
 
 /* runtime dialog */
-.runtime-dialog{padding:0;width:min(680px,calc(100% - 32px));max-height:calc(100dvh - 48px);overflow-y:auto;background:var(--surface);color:var(--fg,var(--text));border:1px solid var(--control,#647181);border-radius:8px}
+.runtime-dialog{margin:auto;inset:0;padding:0;width:min(680px,calc(100% - 32px));max-height:calc(100dvh - 48px);overflow-y:auto;background:var(--surface);color:var(--fg,var(--text));border:1px solid var(--control,#647181);border-radius:8px}
 .runtime-dialog::backdrop{background:#000b}
 .runtime-dialog-head,.runtime-dialog-foot{padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line,var(--border))}
 .runtime-dialog-head h2{font-size:22px}

@@ -8,7 +8,7 @@ import subprocess
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
-from kllm.modules.runtimes.entities import RuntimeVersion, SourceRequest, runtime_id
+from kllm.modules.runtimes.entities import UPSTREAM, RuntimeVersion, SourceRequest, runtime_id
 from kllm.modules.primacpp.interactors.recipe import recipe_digest, recipe
 
 
@@ -68,19 +68,30 @@ def resolve(source: SourceRequest) -> RuntimeVersion:
 
 
 def accept_prima_source(source: SourceRequest, commit: str, pinned: dict) -> None:
-    """Accept the pinned commit, or the pinned release resolving to exactly it."""
-    if source.repository != pinned["source_repository"]:
-        raise ValueError("Prima requires the supported pinned source repository and commit")
-    if commit == pinned["source_commit"]:
-        return
+    """Allow tags, branches, and commits on Prima repositories while rejecting unpatched upstream."""
+    rejected = {
+        UPSTREAM.removesuffix(".git").rstrip("/").lower(),
+        str(pinned.get("upstream_repository") or "").removesuffix(".git").rstrip("/").lower(),
+    }
+    repo = source.repository.removesuffix(".git").rstrip("/").lower()
+    if repo in rejected:
+        raise ValueError(
+            "Prima requires the pinned source repository or a Kluster-compatible Prima fork, not unpatched upstream"
+        )
     release = str(pinned.get("source_release") or "")
-    if source.ref_type == "tag" and release and source.ref == release:
+    release_commit = str(pinned.get("source_release_commit") or pinned.get("source_commit") or "")
+    if (
+        source.repository == pinned.get("source_repository")
+        and source.ref_type == "tag"
+        and release
+        and source.ref == release
+        and release_commit
+        and commit != release_commit
+    ):
         raise ValueError(
             f"Prima release {release!r} moved; the recipe pin stands at "
-            f"{pinned['source_commit'][:12]}. Use it, or advance the recipe"
+            f"{release_commit[:12]}. Use it, or advance the recipe"
         )
-    supported = "the pinned release" if release else "the pinned commit"
-    raise ValueError(f"Prima requires the supported pinned source ({supported} at commit {pinned['source_commit'][:12]})")
 
 
 def discover(repository: str) -> dict:

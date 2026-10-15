@@ -18,7 +18,7 @@ from kllm.modules.primacpp.interactors.recipe import (
 from kllm.modules.runtimes.entities import SourceRequest, runtime_id
 from kllm.modules.runtimes.interactors.build import _materialize_source, _vulkan_build_environment
 from kllm.modules.runtimes.interactors.registry import atomic_json, file_digest
-from kllm.modules.runtimes.interactors.source import git_environment
+from kllm.modules.runtimes.interactors.source import accept_prima_source, git_environment
 
 
 def prima_cmake_flags(install, resolved: str) -> list[str]:
@@ -318,13 +318,7 @@ def managed_prima_build(
     digest = recipe_digest()
     if expected_recipe != digest:
         raise ValueError("Prima build recipe changed; resolve the source again before building")
-    if (
-        source.repository != definition["source_repository"]
-        or commit != definition["source_commit"]
-    ):
-        raise ValueError(
-            "This Prima recipe requires the pinned source repository and commit"
-        )
+    accept_prima_source(source, commit, definition)
     destination.mkdir(parents=True, exist_ok=True)
     vendor, output = destination / "source", destination / "bin"
     if vendor.exists():

@@ -7,12 +7,26 @@ export type LoadProgress = {
   fraction: number;
   rate_bps?: number | null;
   eta_seconds?: number | null;
+  detail?: string | null;
   error?: string;
   operation_id?: string | null;
   started_at?: string | null;
   updated_at?: string | null;
   finished_at?: string | null;
 };
+
+export type PrimaPreparationProgress = {
+  fraction: number;
+  step: number;
+  steps_total: number;
+  label: string;
+  detail?: string | null;
+  bytes_done: number;
+  bytes_total: number;
+  rate_bps?: number | null;
+  eta_seconds?: number | null;
+};
+
 
 /** Per-model run settings as stored by PUT /v2/inference/model-settings/{model}. */
 export type ParameterSet = Record<string, unknown>;
@@ -117,7 +131,57 @@ export type HighsScheduleReport = {
   evaluated_cycles: HighsCycleCandidate[];
 };
 
+export type PrimaLayerRange = {
+  start: number;
+  end: number;
+};
+
+export type PrimaRankAllocation = {
+  node_id: string;
+  role: 'master' | 'worker';
+  rank: number;
+  address: string;
+  next_node_id: string;
+  layers: PrimaLayerRange[];
+  ngl: number;
+  devices: string[];
+  tensor_split: number[];
+  output_gpu: boolean;
+};
+
+export type PrimaTopology = {
+  schema_version: number;
+  runtime_id: string;
+  master_node_id: string;
+  total_layers: number;
+  data_port: number;
+  signal_port: number;
+  ranks: PrimaRankAllocation[];
+};
+
+export type PrimaNetworkEdge = {
+  source: string;
+  target: string;
+  address: string;
+  port: number;
+};
+
+export type PrimaModelSupport = {
+  supported: boolean | null;
+  error: string | null;
+  warning: string | null;
+};
+
 export type PlacementPlan = {
+  engine?: 'llamacpp' | 'primacpp';
+  transport?: string;
+  plan_digest?: string;
+  prima_topology?: PrimaTopology;
+  network_edges?: PrimaNetworkEdge[];
+  inference_supported?: boolean;
+  qualification_errors?: string[];
+  qualification_warnings?: string[];
+  model_support?: PrimaModelSupport;
   required_nodes?: string[];
   node_priority?: string[];
   placement_strategy?: PlacementStrategyMode;
@@ -135,6 +199,44 @@ export type PlacementPlan = {
   cpu_alloc_bytes?: number;
   [key: string]: unknown;
 };
+
+export function resolveActiveEngine(
+  status: {
+    engine?: 'llamacpp' | 'primacpp';
+    role?: string;
+    active_config?: Record<string, unknown> | null;
+    runtimes?: {
+      target?: { version?: { engine?: string } } | null;
+      running?: { engine?: string } | null;
+    } | null;
+  } | null | undefined,
+  activeRunConfig?: Record<string, unknown> | null,
+  planResult?: PlacementPlan | null,
+  queryOverride?: string | null
+): 'llamacpp' | 'primacpp' {
+  const override = queryOverride?.trim().toLowerCase();
+  if (override === 'prima' || override === 'primacpp') return 'primacpp';
+  if (override === 'llama' || override === 'llamacpp') return 'llamacpp';
+
+  const configured = status?.engine;
+  if (configured === 'primacpp') return 'primacpp';
+  if (configured === 'llamacpp' && status?.role !== 'worker') return 'llamacpp';
+  if (status?.runtimes?.target?.version?.engine === 'primacpp') return 'primacpp';
+
+  const config = (activeRunConfig ?? status?.active_config ?? null) as Record<string, unknown> | null;
+  const values = (config?.values ?? config) as Record<string, unknown> | undefined;
+  if (values?.executor === 'primacpp' || values?.engine === 'primacpp') return 'primacpp';
+  if (status?.runtimes?.running?.engine === 'primacpp') return 'primacpp';
+
+  if (
+    planResult?.engine === 'primacpp' ||
+    Boolean(planResult?.prima_topology) ||
+    Boolean(planResult?.scheduler)
+  ) {
+    return 'primacpp';
+  }
+  return 'llamacpp';
+}
 
 export const MIN_CONTEXT = 512;
 export const CONTEXT_STEP = 512;

@@ -283,9 +283,16 @@ def test_plan_uses_matching_cached_generation_and_refuses_unmeasured_candidates(
     feasible = [(plan, members)]
     scored = measured_planning.measured_local_candidates(feasible, body, {"runtime_id": "a" * 64}, model, cache)
     assert scored[1]["predicted_decode_ms"] == 8.0
+    assert "reason" not in scored[1]
+    # A single-node placement profiles against its own rank only; other cluster
+    # members without profiles must not force a fallback.
+    multi = {"master": member, "worker-cpu": {"backend": "cpu", "total_ram_bytes": 8000}}
+    multi_scored = measured_planning.measured_local_candidates([(plan, multi)], body, {"runtime_id": "a" * 64}, model, cache)
+    assert multi_scored[1]["predicted_decode_ms"] == 8.0
     mismatched_threads = body.model_copy(update={"threads_batch": 4})
-    assert measured_planning.measured_local_candidates(feasible, mismatched_threads,
-        {"runtime_id": "a" * 64}, model, cache)[1]["status"] == "unmeasured"
+    refused = measured_planning.measured_local_candidates(feasible, mismatched_threads,
+        {"runtime_id": "a" * 64}, model, cache)[1]
+    assert refused["status"] == "unmeasured" and "matching batch threads" in refused["reason"]
     matching_threads = body.model_copy(update={"threads_batch": 8})
     assert measured_planning.measured_local_candidates(feasible, matching_threads,
         {"runtime_id": "a" * 64}, model, cache)[1]["predicted_decode_ms"] == 8.0
@@ -298,9 +305,11 @@ def test_plan_uses_matching_cached_generation_and_refuses_unmeasured_candidates(
     different = {**plan, "topology": topology.model_copy(update={"ranks": [rank.model_copy(update={"ngl": 3})]})}
     unknown = measured_planning.measured_local_candidates([*feasible, (different, members)], body, {"runtime_id": "a" * 64}, model, cache)
     assert unknown[0] == feasible[0] and unknown[1]["status"] == "unmeasured"
+    assert "No cached end-to-end profile" in unknown[1]["reason"]
     model.write_bytes(b"afterr")
     invalid = measured_planning.measured_local_candidates(feasible, body, {"runtime_id": "a" * 64}, model, cache)
     assert invalid[1]["status"] == "unmeasured"
+    assert "No cached end-to-end profile" in invalid[1]["reason"]
 
 
 def test_serving_qualification_rejects_unqualified_request_time_features(monkeypatch):

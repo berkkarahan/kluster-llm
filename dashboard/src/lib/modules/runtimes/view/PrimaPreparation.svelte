@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { RuntimesInteractor } from '../interactor.svelte';
+  import type { PrimaPreparationProgress } from '#lib/modules/run/entities';
+  import { composeProgressLabel } from '#lib/shared/format-transfer';
   import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   let { presenter }: { presenter: RuntimesInteractor } = $props();
   let runtimeId = $state('');
@@ -19,6 +21,35 @@
   const ranks = $derived(preview?.prima_topology?.ranks ?? []);
   const scheduler = $derived(preview?.scheduler ?? preview?.profiling?.scheduler ?? null);
   const active = $derived(job && !['prepared', 'failed', 'cancelled', 'interrupted'].includes(job.phase));
+  const liveJob = $derived(
+    (presenter.primaPreparation ?? presenter.status?.runtimes?.prima_preparation ?? null) as Record<string, any> | null
+  );
+  $effect(() => {
+    if (!liveJob) return;
+    if (!job || liveJob.job_id === job.job_id || !active) {
+      job = liveJob;
+    }
+  });
+  const progress = $derived((job?.progress as PrimaPreparationProgress | undefined) ?? null);
+  const pct = $derived(
+    progress
+      ? Math.min(100, Math.max(0, Math.round(Number(progress.fraction ?? 0) * 100)))
+      : job?.phase === 'prepared'
+        ? 100
+        : active
+          ? 5
+          : 0
+  );
+  const transferLabel = $derived(
+    progress && Number(progress.bytes_total ?? 0) > 0
+      ? composeProgressLabel(
+          Number(progress.bytes_done ?? 0),
+          Number(progress.bytes_total ?? 0),
+          progress.rate_bps ?? null,
+          progress.eta_seconds ?? null
+        )
+      : ''
+  );
   async function inspect() {
     const seq = ++generation;
     busy = true; error = ''; preview = null;
@@ -34,7 +65,7 @@
       const data = await presenter.primaJob(id);
       if (seq !== generation) return;
       job = data;
-      if (!['prepared', 'failed', 'cancelled', 'interrupted'].includes(data.phase)) timer = setTimeout(() => void poll(id, seq), 2000);
+      if (!['prepared', 'failed', 'cancelled', 'interrupted'].includes(data.phase)) timer = setTimeout(() => void poll(id, seq), 1000);
     } catch (e) { if (seq === generation) error = String(e); }
   }
   async function prepare(profile: boolean) {
@@ -95,7 +126,24 @@
     </div>
     <details><summary>Qualification blockers and network edges</summary><pre>{JSON.stringify({ blockers: preview.qualification_errors, edges: preview.network_edges }, null, 2)}</pre></details>
   {/if}
-  {#if job}<p aria-live="polite">Preparation: {job.phase}</p>{#if job.error}<ErrorMessage source="prima-prepare" message={job.error} />{/if}<details><summary>Participant status</summary><pre>{JSON.stringify(job.nodes ?? {}, null, 2)}</pre></details>{/if}
+  {#if job}
+    <div class="prep-progress" aria-live="polite">
+      <div class="flex items-center gap-2">
+        {#if active}<span class="spinner" aria-hidden="true"></span>{/if}
+        <span>Preparation: {job.phase}{#if progress?.label} · {progress.label}{/if}</span>
+        {#if progress?.steps_total}<span class="mono">({progress.step}/{progress.steps_total})</span>{/if}
+        <span class="ml-auto mono">{pct}%</span>
+      </div>
+      <div class="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label="Prima preparation progress">
+        <span style:width={`${pct}%`}></span>
+      </div>
+      {#if progress?.detail || transferLabel}
+        <p class="hint mono">{progress?.detail ?? ''}{progress?.detail && transferLabel ? ' · ' : ''}{transferLabel}</p>
+      {/if}
+    </div>
+    {#if job.error}<ErrorMessage source="prima-prepare" message={job.error} />{/if}
+    <details><summary>Participant status</summary><pre>{JSON.stringify(job.nodes ?? {}, null, 2)}</pre></details>
+  {/if}
   {#if error}<ErrorMessage source="prima-prepare" message={error} />{/if}
 </section>
 {/if}
@@ -103,8 +151,10 @@
   .prima-preparation {padding:24px;display:grid;gap:16px;min-width:0}
   label {display:grid;gap:8px;min-width:0}
   .actions {display:flex;gap:8px;flex-wrap:wrap}
+  .prep-progress {display:grid;gap:8px}
   .table-scroll {overflow:auto;max-width:100%}
   table {min-width:600px;width:100%;text-align:left}
   td,th {padding:8px;overflow-wrap:anywhere}
   pre {white-space:pre-wrap;overflow-wrap:anywhere}
 </style>
+

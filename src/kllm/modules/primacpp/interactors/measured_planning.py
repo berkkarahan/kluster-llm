@@ -20,35 +20,60 @@ def _model_digest(path, size, modified, changed):
     return digest
 
 
+def _unmeasured(feasible, reason):
+    return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None, "reason": reason}
+
+
+def _settings_decline(settings, body, threads, threads_batch):
+    """Effective settings typed end-to-end costs do not cover, or None."""
+    unsupported = []
+    if settings.get("cache_type_k") != "f16" or settings.get("cache_type_v") != "f16":
+        unsupported.append("f16 K/V cache")
+    if settings.get("flash_attention") != "off":
+        unsupported.append("flash attention off")
+    if settings.get("parallel_slots") != 1:
+        unsupported.append("one parallel slot")
+    if settings.get("batch_size") != 512 or settings.get("micro_batch") != 128:
+        unsupported.append("batch 512 / micro-batch 128")
+    if settings.get("checkpoints", 0) or settings.get("cache_ram", 0):
+        unsupported.append("no context checkpoints or prompt cache")
+    if body.draft_model or body.vision or body.extra_args:
+        unsupported.append("no draft model, vision or extra arguments")
+    if body.mmap_mlock not in ("auto", "mmap"):
+        unsupported.append("mmap load mode")
+    if threads_batch not in (None, threads):
+        unsupported.append("matching batch threads")
+    if not unsupported:
+        return None
+    return "Profiled costs do not cover these effective execution settings: " + ", ".join(unsupported)
+
+
 def measured_local_candidates(feasible, body, runtime, model, cache):
     from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
 
-    fallback = feasible[0], {"status": "unmeasured", "predicted_decode_ms": None}
-    if getattr(body, "placement_strategy", "auto") in ("capacity_first", "priority"):
-        return fallback
+    strategy = getattr(body, "placement_strategy", "auto")
+    if strategy in ("capacity_first", "priority"):
+        return _unmeasured(feasible, f"Operator selected {strategy} placement strategy")
     candidates = []
     for plan, members in feasible:
         try:
             topology = topology_from_plan(plan, members, runtime["runtime_id"])
         except ValueError:
-            return fallback
+            return _unmeasured(feasible, "Candidate placement cannot be represented for profiling")
         settings = plan.get("resolved_launch_settings", {})
         threads = settings.get("threads", body.threads)
         threads_batch = settings.get("threads_batch", body.threads_batch)
-        if (len(topology.ranks) != 1 or settings.get("cache_type_k") != "f16"
-                or settings.get("cache_type_v") != "f16" or settings.get("flash_attention") != "off"
-                or settings.get("parallel_slots") != 1 or settings.get("batch_size") != 512
-                or settings.get("micro_batch") != 128 or settings.get("checkpoints", 0)
-                or settings.get("cache_ram", 0) or body.draft_model or body.vision
-                or body.extra_args or body.mmap_mlock not in ("auto", "mmap")
-                or threads_batch not in (None, threads)):
-            return fallback
+        if len(topology.ranks) != 1:
+            return _unmeasured(feasible, "Profiled planning covers only single-node placement")
+        decline = _settings_decline(settings, body, threads, threads_batch)
+        if decline:
+            return _unmeasured(feasible, decline)
         rank = topology.ranks[0]
         if not rank.ngl or (members[rank.node_id].get("actual_backend") or members[rank.node_id].get("backend")) != "vulkan":
-            return fallback
+            return _unmeasured(feasible, "Profiled planning requires a Vulkan GPU rank")
         candidates.append((plan, members, topology, rank))
     if not cache.root.exists():
-        return fallback
+        return _unmeasured(feasible, "No profile cache exists; prepare and profile this model in Prima Preparation")
     try:
         inventory = discover_vulkan_devices(runtime)
         stat = model.stat()
@@ -58,7 +83,7 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
         for plan, members, topology, rank in candidates:
             selected = select_vulkan_devices(inventory, rank.devices)
             if len(selected) != 1:
-                return fallback
+                return _unmeasured(feasible, "Profiled planning requires exactly one selected Vulkan device")
             context = plan.get("context_effective", body.context)
             threads = plan.get("resolved_launch_settings", {}).get("threads", body.threads)
             settings = generation_settings(context, threads, rank.ngl, selected, rank.output_gpu)
@@ -70,17 +95,17 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
                     or profile.total_layers != topology.total_layers or profile.gpu_layers != rank.ngl
                     or profile.output_gpu != rank.output_gpu
                     or profile.decode_ms is None or profile.prefill_ms is None or profile.peak_memory_bytes is None):
-                return fallback
+                return _unmeasured(feasible, "No cached end-to-end profile matches this model, node and settings; profile this configuration")
             scores.append(profile.decode_ms)
             candidate_profiles.append((rank.node_id, profile))
     except (OSError, ValueError):
-        return fallback
+        return _unmeasured(feasible, "Profile cache or model identity changed while checking measured costs")
     index = min(range(len(scores)), key=lambda i: (scores[i], i))
     chosen_node_id, chosen_profile = candidate_profiles[index]
     scheduler_report = solve_highs_halda_schedule(
         body=body,
         runtime=runtime,
-        members=feasible[index][1],
+        members={chosen_node_id: feasible[index][1][chosen_node_id]},
         base_plan=feasible[index][0],
         profiles={chosen_node_id: chosen_profile},
     )

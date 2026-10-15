@@ -220,6 +220,10 @@ async def test_four_agent_preparation_covers_removed_worker_link_or_refuses_old_
             if (r["source_node_id"], r["target_node_id"]) != ("worker-a", "worker-c")]
         incomplete = await asyncio.to_thread(control.plan, runtime["runtime_id"], body)
         assert incomplete["profiling"]["status"] == "unmeasured"
+        # The report must carry the measured-scorer reason, not claim profiles are
+        # missing when they merely do not cover the current candidate.
+        assert incomplete["scheduler"]["fallback_reason"] == "Every candidate needs fresh exact directed private links"
+        assert incomplete["scheduler"]["missing_profile_nodes"] == []
         assert incomplete["plan_digest"] == preview["plan_digest"]
     finally:
         for control in controls:

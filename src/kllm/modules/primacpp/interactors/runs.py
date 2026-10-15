@@ -75,7 +75,13 @@ class LocalPrimaRuns:
                 self._check()
                 return self._launch(body, model, plan, members)
             except BaseException:
-                self.stop()
+                try:
+                    self.stop()
+                except BaseException:
+                    # Cleanup failures must never mask the startup failure; the
+                    # rank supervisor keeps cleanup_pending ownership and the
+                    # monitor retries it.
+                    pass
                 raise
             finally:
                 self.starting = False
@@ -115,9 +121,48 @@ class LocalPrimaRuns:
             if self.control.rank.owner:
                 raise ValueError("Reconcile the previous owned Prima rank before starting another run")
             self._check()
-            for asset, path in files:
-                self.control.receiver.stager.prepare(asset.sha256, asset.size,
-                    lambda offset, path=path: self.control._file_chunks(path, offset), check=self._check)
+            import inspect
+            from kllm.modules.inference.interactors import load_progress
+
+            total_asset_bytes = sum(asset.size for asset, _ in files)
+            load_progress.begin(
+                model.name,
+                None,
+                total_asset_bytes,
+                detail="Staging model assets…",
+            )
+            stager_prepare = self.control.receiver.stager.prepare
+            supports_progress = (
+                "progress" in inspect.signature(stager_prepare).parameters
+                if callable(stager_prepare)
+                else False
+            )
+            prior_bytes = 0
+            try:
+                for asset, path in files:
+                    def _on_stage(done: int, size: int, _prior=prior_bytes, _name=asset.name):
+                        agg = _prior + done
+                        frac = 0.02 + (agg / max(1, total_asset_bytes)) * 0.26
+                        load_progress.update(
+                            bytes_loaded=agg,
+                            total_bytes=total_asset_bytes,
+                            fraction=frac,
+                            phase="loading",
+                            detail=f"Staging {_name}…",
+                        )
+                    stage_kwargs = {"check": self._check}
+                    if supports_progress:
+                        stage_kwargs["progress"] = _on_stage
+                    stager_prepare(
+                        asset.sha256,
+                        asset.size,
+                        lambda offset, path=path: self.control._file_chunks(path, offset),
+                        **stage_kwargs,
+                    )
+                    prior_bytes += asset.size
+            except BaseException as error:
+                load_progress.fail(str(error))
+                raise
             self.manifest = manifest
             try:
                 model_asset = next(a for a in manifest.assets if a.kind == "model")
@@ -126,15 +171,32 @@ class LocalPrimaRuns:
                     self.control.jobs[manifest.run_id] = {"job_id": manifest.run_id, "request_id": manifest.run_id,
                         "phase": "prepared", "assets": [a.model_dump() for a in manifest.assets]}
                     self.control._save()
+                load_progress.update(
+                    bytes_loaded=0,
+                    total_bytes=model_asset.size,
+                    fraction=0.28,
+                    phase="loading",
+                    detail="Starting Prima rank 0 & loading model weights…",
+                )
                 start = getattr(self.control, "start_rank", self.control.rank.start)
                 launch = start(manifest, self.control.cached_model(model_asset.sha256), self._check)
+                if launch.get("pid"):
+                    load_progress.update(
+                        pid=int(launch["pid"]),
+                        total_bytes=model_asset.size,
+                        fraction=0.30,
+                        phase="loading",
+                        detail="Loading model weights into memory…",
+                    )
                 report = self._wait_ready(manifest, int(settings["assessment_port"]))
                 self.control.rank.ready(manifest.run_id, report, self._check)
+                load_progress.sample(int(settings["assessment_port"]))
                 self.control.registry.claim_running({**runtime, "pid": launch["pid"], "run_id": manifest.run_id})
                 return {"plan": {**plan, **planned}, "launch": {**launch, "binary": runtime["llama_server"], "role": "master"},
                         "run_id": manifest.run_id, "engine": "primacpp", "runtime_id": runtime["runtime_id"],
                         "qualification_context": qualification_context}
-            except BaseException:
+            except BaseException as error:
+                load_progress.fail(str(error))
                 self.stop()
                 raise
 
@@ -148,18 +210,50 @@ class LocalPrimaRuns:
             raise ValueError("Prima inventory changed; refresh the plan")
 
     def _wait_ready(self, manifest, port):
+        from kllm.modules.inference.interactors import load_progress
+
         until = time.monotonic() + 300
         renewed = time.monotonic()
+        last_marker: tuple[int, float, int] | None = None
+        log_path = self.control.rank.root / manifest.run_id / "rank.log"
         while time.monotonic() < until:
             self._check()
+            pid = None
             with self.control.rank.lock:
                 if not self.control.rank._owned_child_alive():
                     raise ValueError(_exit_before_readiness(self.control.rank.root, manifest.run_id))
+                if self.control.rank.owner:
+                    pid = self.control.rank.owner.get("pid")
+            if pid is not None:
+                rss = 0
+                cpu_total = 0.0
+                try:
+                    import psutil
+
+                    proc = psutil.Process(int(pid))
+                    rss = int(proc.memory_info().rss)
+                    ct = proc.cpu_times()
+                    cpu_total = round(float(ct.user + ct.system), 2)
+                except Exception:
+                    pass
+                try:
+                    log_bytes = log_path.stat().st_size if log_path.exists() else 0
+                except OSError:
+                    log_bytes = 0
+                marker = (rss // (4 * 1024 * 1024), cpu_total, log_bytes)
+                if last_marker is not None and marker != last_marker and log_bytes <= 4 * 1024 * 1024:
+                    until = max(until, time.monotonic() + 300)
+                last_marker = marker
             if time.monotonic() - renewed >= 5:
                 self.control.rank.renew(manifest.run_id, self._check)
                 renewed = time.monotonic()
             report = self.control.rank.readiness_report(manifest.run_id, self._check)
             if report is not None:
+                load_progress.update(
+                    fraction=0.95,
+                    phase="loading",
+                    detail="Warming up model & verifying HTTP health…",
+                )
                 try:
                     with httpx.Client(timeout=1, trust_env=False) as client:
                         if client.get(f"http://127.0.0.1:{port}/health").status_code == 200:

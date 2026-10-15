@@ -1,8 +1,34 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { createApp } from '#lib/app.svelte';
+  import { resolveActiveEngine } from '#lib/modules/run/entities';
   import RunPage from '#lib/modules/run/view/RunPage.svelte';
+  import PrimaRunPage from '#lib/modules/run/view/PrimaRunPage.svelte';
 
   const app = createApp();
+  let queryEngine = $state<string | null>(null);
+
+  onMount(() => {
+    queryEngine = new URLSearchParams(location.search).get('engine');
+  });
+
+  const activeEngine = $derived(
+    resolveActiveEngine(
+      app.cluster.status
+        ? {
+            ...app.cluster.status,
+            runtimes: app.runtimes.status?.runtimes ?? app.cluster.status.runtimes
+          }
+        : null,
+      app.run.activeRunConfig,
+      app.run.planResult,
+      queryEngine
+    )
+  );
 </script>
 
-<RunPage presenter={app.run} />
+{#if activeEngine === 'primacpp'}
+  <PrimaRunPage presenter={app.run} runtimes={app.runtimes} />
+{:else}
+  <RunPage presenter={app.run} />
+{/if}

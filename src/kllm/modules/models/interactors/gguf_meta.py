@@ -401,10 +401,21 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int, *, adapter:
                     return None
             elif not 0 < n_layers <= 10000:
                 return None
+            declared_layers = n_layers
+            nextn_layers = 0
+            if not adapter and arch == "qwen35":
+                nextn_layers = meta.get("qwen35.nextn_predict_layers", 0)
+                if type(nextn_layers) is not int or nextn_layers not in (0, 1) or nextn_layers >= n_layers:
+                    return None
+                # The GGUF block count includes MTP; neither the primary llama
+                # graph nor Prima's non-speculative graph executes these blocks.
+                # Keep the declared metadata intact but plan only trunk layers.
+                n_layers -= nextn_layers
             layers = [0] * n_layers
             expert_layers = [0] * n_layers
             output = inputs = token_embd = 0
             has_output = False
+            skipped_tensors = []
             for i, tensor in enumerate(tensors):
                 end = tensors[i + 1]["offset"] if i + 1 < len(tensors) else size - data_start
                 nbytes = end - tensor["offset"]
@@ -412,6 +423,9 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int, *, adapter:
                     raise ValueError("invalid tensor span")
                 tensor["size_bytes"] = nbytes
                 match = re.match(r"blk\.(\d+)\.", tensor["name"])
+                if nextn_layers and match and n_layers <= int(match[1]) < declared_layers:
+                    skipped_tensors.append(tensor)
+                    continue
                 if match and int(match[1]) < n_layers:
                     layers[int(match[1])] += nbytes
                     if _is_moe_expert_tensor(tensor["name"]):
@@ -434,7 +448,8 @@ def _read_model_layout(path: str, size: int, mtime: int, ctime: int, *, adapter:
                 expert_layers=expert_layers,
                 output_bytes=output,
                 input_bytes=inputs,
-                tensors=tensors,
+                tensors=[t for t in tensors if t not in skipped_tensors] if skipped_tensors else tensors,
+                **({"skipped_predictor_tensors": skipped_tensors} if skipped_tensors else {}),
                 confidence="metadata" if tensors and (adapter or all(layers)) else "approximate",
             )
     except (OSError, ValueError, struct.error):

@@ -20,6 +20,10 @@ export class RuntimesInteractor {
     return this.run.planResult;
   }
 
+  get primaPreparation() {
+    return this.status?.runtimes?.prima_preparation ?? null;
+  }
+
   async refresh(signal?: AbortSignal) {
     const generation = errors.generation;
     const data = await this.http.networkRequest<RuntimeLibrary>('/v2/node/runtimes', 'GET', undefined, signal);

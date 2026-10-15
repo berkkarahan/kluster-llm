@@ -49,7 +49,8 @@ export type RuntimeLibrary = {
   bootstrap?: {repository: string; ref: string};
   control?: {available: boolean; message?: string | null};
   engine_sources?: { engine: 'primacpp'; repository: string; ref: string; ref_type: 'commit';
-    release?: string; release_commit?: string; qualification_errors: string[] }[];
+    release?: string; release_commit?: string; recipe_digest?: string; qualification_errors: string[] }[];
+  prima_preparation?: Record<string, any> | null;
 };
 export type RuntimeSources = {
   repository: string; releases: {tag: string; name: string; prerelease: boolean}[];

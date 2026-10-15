@@ -109,6 +109,34 @@ class ProfileJobs:
     def _save(self):
         atomic_json(self.root / "jobs.json", self.jobs)
 
+    def _update_progress(
+        self,
+        identity: str,
+        *,
+        phase: str,
+        label: str,
+        fraction: float,
+        bytes_done: int = 0,
+        bytes_total: int = 0,
+        save: bool = False,
+    ) -> None:
+        clamped = max(0.0, min(1.0, float(fraction)))
+        with self.lock:
+            job = self.jobs.get(identity)
+            if not job:
+                return
+            job["progress"] = {
+                "phase": phase,
+                "label": label,
+                "fraction": round(clamped, 4),
+                "pct": round(clamped * 100.0, 1),
+                "bytes_done": max(0, int(bytes_done)),
+                "bytes_total": max(0, int(bytes_total)),
+                "updated_at": time.time(),
+            }
+            if save:
+                self._save()
+
     def start(self, request: ProfileRequest, *, control_owner=None, check=None, resolve_model=None) -> dict:
         # Verify before persisting any work. Profiling must not disturb a serving process.
         runtime = self.capture(request.runtime_id)
@@ -147,6 +175,7 @@ class ProfileJobs:
                     lease.release()
                     self.reservations.pop(identity, None)
                 raise
+            now = time.time()
             self.jobs[identity] = {
                 "job_id": identity,
                 "request_id": request.request_id,
@@ -154,8 +183,17 @@ class ProfileJobs:
                 "runtime_id": request.runtime_id,
                 "phase": "queued",
                 "error": None,
-                "created_at": time.time(),
+                "created_at": now,
                 "control_owner": deepcopy(control_owner),
+                "progress": {
+                    "phase": "queued",
+                    "label": "Queued for device profiling…",
+                    "fraction": 0.0,
+                    "pct": 0.0,
+                    "bytes_done": 0,
+                    "bytes_total": 0,
+                    "updated_at": now,
+                },
             }
             if check is not None:
                 self.checks[identity] = check
@@ -213,6 +251,7 @@ class ProfileJobs:
                 if future is None or future.done():
                     self.processes.pop(identity, None)
                 job.update(phase="cancelled", finished_at=time.time())
+                self._update_progress(identity, phase="cancelled", label="Profiling cancelled", fraction=0.0)
                 self._save()
                 self._settle_reservation(identity)
             return deepcopy(job)
@@ -238,8 +277,25 @@ class ProfileJobs:
                 return
             # Hashing preserves a provenance check across changes during the profile.
             initial = (model.stat().st_size, model.stat().st_mtime_ns)
+            model_size = initial[0]
+            self._update_progress(
+                identity,
+                phase="profiling",
+                label="Verifying model digest…",
+                fraction=0.08,
+                bytes_done=0,
+                bytes_total=model_size,
+            )
             storage = storage_identity(model)
             digest = file_digest(model)
+            self._update_progress(
+                identity,
+                phase="profiling",
+                label="Probing device capabilities…",
+                fraction=0.20,
+                bytes_done=model_size,
+                bytes_total=model_size,
+            )
             member = deepcopy(self.state().members.get(self.state().node_id, {}))
             hardware = {
                 key: member.get(key) for key in ("devices", "backend", "total_ram_bytes", "gpu_ids")
@@ -297,11 +353,43 @@ class ProfileJobs:
                         pid=process.pid,
                         process_created_at=created,
                     )
+                    self._update_progress(
+                        identity,
+                        phase="profiling",
+                        label=f"Profiling {backend.upper()} device kernels…",
+                        fraction=0.30,
+                        bytes_done=0,
+                        bytes_total=model_size,
+                    )
                     self._save()
                 until = time.monotonic() + 600
+                last_marker: tuple[int, float, int] | None = None
                 while process.poll() is None:
                     self._check(identity)
-                    if time.monotonic() >= until or output.stat().st_size > 1024 * 1024:
+                    log_bytes = output.stat().st_size if output.exists() else 0
+                    rss = 0
+                    cpu_total = 0.0
+                    try:
+                        proc = psutil.Process(process.pid)
+                        rss = proc.memory_info().rss
+                        ct = proc.cpu_times()
+                        cpu_total = round(float(ct.user + ct.system), 2)
+                    except (psutil.Error, OSError, AttributeError):
+                        pass
+                    marker = (rss // (4 * 1024 * 1024), cpu_total, log_bytes)
+                    if last_marker is not None and marker != last_marker and log_bytes <= 1024 * 1024:
+                        until = max(until, time.monotonic() + 600)
+                    last_marker = marker
+                    frac = min(0.92, 0.30 + (min(rss, model_size) / max(1, model_size)) * 0.60) if model_size else 0.55
+                    self._update_progress(
+                        identity,
+                        phase="profiling",
+                        label=f"Profiling {backend.upper()} device kernels…",
+                        fraction=frac,
+                        bytes_done=min(rss, model_size),
+                        bytes_total=model_size,
+                    )
+                    if time.monotonic() >= until or log_bytes > 1024 * 1024:
                         raise ValueError("Prima profile exceeded its time or output limit")
                     time.sleep(0.1)
             if process.returncode:
@@ -377,12 +465,26 @@ class ProfileJobs:
                     measurement_kind="typed kernel roofline estimate" if typed else "Q4K kernel estimate",
                     metrics=metrics,
                 )
+                self._update_progress(
+                    identity,
+                    phase="prepared",
+                    label="Device profile complete",
+                    fraction=1.0,
+                    bytes_done=model_size,
+                    bytes_total=model_size,
+                )
                 self._save()
         except Exception as error:
             with self.lock:
                 if identity not in self.cancelled:
                     self.jobs[identity].update(
                         phase="failed", error=str(error)[:1000], finished_at=time.time()
+                    )
+                    self._update_progress(
+                        identity,
+                        phase="failed",
+                        label=str(error)[:240],
+                        fraction=self.jobs[identity].get("progress", {}).get("fraction", 0.0),
                     )
                     self._save()
         finally:
@@ -401,10 +503,20 @@ class ProfileJobs:
                 self.checks.pop(identity, None)
 
     def _run_generation(self, identity, request, runtime, model):
+        import inspect
         from kllm.modules.primacpp.interactors.generation_profile import profile_generation
         from kllm.modules.primacpp.interactors.profiles import generation_settings, generation_hardware
 
         initial = (model.stat().st_size, model.stat().st_mtime_ns)
+        model_size = initial[0]
+        self._update_progress(
+            identity,
+            phase="profiling",
+            label="Verifying model digest…",
+            fraction=0.05,
+            bytes_done=0,
+            bytes_total=model_size,
+        )
         digest = file_digest(model)
         member = deepcopy(self.state().members.get(self.state().node_id, {}))
         if (request.backend not in (None, "vulkan") or profiling_backend(runtime, member) != "vulkan"):
@@ -420,8 +532,22 @@ class ProfileJobs:
                     process_created_at=psutil.Process(process.pid).create_time())
                 self._save()
                 self._check(identity)
+        def on_progress(label: str, fraction: float, bytes_done: int, bytes_total: int):
+            self._update_progress(
+                identity,
+                phase="profiling",
+                label=label,
+                fraction=0.10 + fraction * 0.88,
+                bytes_done=bytes_done,
+                bytes_total=bytes_total,
+            )
+        extra_kwargs = (
+            {"progress": on_progress}
+            if "progress" in inspect.signature(profile_generation).parameters
+            else {}
+        )
         result = profile_generation(runtime, model, request, selected, directory,
-            check=lambda: self._check(identity), track=track, stop=self.kill)
+            check=lambda: self._check(identity), track=track, stop=self.kill, **extra_kwargs)
         self._check(identity)
         if initial != (model.stat().st_size, model.stat().st_mtime_ns):
             raise ValueError("Model changed during generation profiling")
@@ -443,6 +569,14 @@ class ProfileJobs:
             key = self.cache.put(profile)
             self.jobs[identity].update(phase="prepared", finished_at=time.time(), profile_key=key,
                 profile=profile.model_dump(), measurement_kind="model-backed CPU and Vulkan generation", metrics=result)
+            self._update_progress(
+                identity,
+                phase="prepared",
+                label="Device profile complete",
+                fraction=1.0,
+                bytes_done=model_size,
+                bytes_total=model_size,
+            )
             self._save()
 
     def logs(self, identity: str) -> str:

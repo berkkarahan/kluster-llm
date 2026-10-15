@@ -153,6 +153,7 @@ class PrimaControl:
         )
         self.closed = False
         self.cancelled: set[str] = set()
+        self._job_samples: dict[str, list[tuple[float, int]]] = {}
         self.jobs = {}
         path = self.root / "jobs.json"
         if path.exists():
@@ -462,6 +463,7 @@ class PrimaControl:
             identity = str(uuid4())
             lease = self.resources.acquire(prima_scope(identity, authority_owner(self.service.channels.master_authority()), expected_digest), "prepare")
             self.preparation_reservations[identity] = lease
+            now = time.time()
             self.jobs[identity] = {
                 "job_id": identity,
                 "request_id": request_id,
@@ -471,8 +473,21 @@ class PrimaControl:
                 "plan_digest": expected_digest,
                 "nodes": {},
                 "error": None,
-                "created_at": time.time(),
+                "created_at": now,
                 "request_settings_digest": body_digest(body.model_dump()),
+                "progress": {
+                    "phase": "queued",
+                    "label": "Queued for Prima preparation…",
+                    "step_index": 1,
+                    "step_total": 2 if include_profile else 1,
+                    "fraction": 0.0,
+                    "pct": 0.0,
+                    "bytes_done": 0,
+                    "bytes_total": 0,
+                    "rate_bps": None,
+                    "eta_seconds": None,
+                    "updated_at": now,
+                },
             }
             try:
                 self._save()
@@ -492,9 +507,81 @@ class PrimaControl:
             if future is not None and not future.done():
                 return
             self.preparation_futures.pop(identity, None)
+            self._job_samples.pop(identity, None)
             lease = self.preparation_reservations.pop(identity, None)
             if lease is not None:
                 lease.release()
+
+    def _update_job_progress(
+        self,
+        identity: str,
+        *,
+        phase: str,
+        label: str,
+        step_index: int = 1,
+        step_total: int = 1,
+        fraction: float = 0.0,
+        bytes_done: int = 0,
+        bytes_total: int = 0,
+    ) -> None:
+        clamped = max(0.0, min(1.0, float(fraction)))
+        done = max(0, int(bytes_done))
+        total = max(0, int(bytes_total))
+        mono = time.monotonic()
+        rate_bps: float | None = None
+        eta_seconds: float | None = None
+        samples = self._job_samples.setdefault(identity, [])
+        if done > 0 and total > 0:
+            if not samples or done >= samples[-1][1]:
+                samples.append((mono, done))
+                samples[:] = [(t, b) for t, b in samples if mono - t <= 8.0]
+            if len(samples) >= 2:
+                dt = samples[-1][0] - samples[0][0]
+                db = samples[-1][1] - samples[0][1]
+                if dt >= 0.05 and db > 0:
+                    rate_bps = round(db / dt, 1)
+                    if done < total:
+                        eta_seconds = round((total - done) / (db / dt), 1)
+        job = self.jobs.get(identity)
+        if not job:
+            return
+        job["progress"] = {
+            "phase": phase,
+            "label": label,
+            "step_index": max(1, int(step_index)),
+            "step_total": max(1, int(step_total)),
+            "fraction": round(clamped, 4),
+            "pct": round(clamped * 100.0, 1),
+            "bytes_done": done,
+            "bytes_total": total,
+            "rate_bps": rate_bps,
+            "eta_seconds": eta_seconds,
+            "updated_at": time.time(),
+        }
+
+    def _on_link_progress(
+        self, identity: str, completed_pairs: int, total_pairs: int, source: str, target: str
+    ) -> None:
+        pair_frac = (completed_pairs / max(1, total_pairs)) if total_pairs else 1.0
+        overall = 0.85 + pair_frac * 0.14
+        self._update_job_progress(
+            identity,
+            phase="links",
+            label=f"Measuring Ring-TCP link {source} → {target} ({completed_pairs}/{total_pairs})…",
+            step_index=3,
+            step_total=3,
+            fraction=overall,
+        )
+
+    def latest_preparation(self) -> dict | None:
+        with self.lock:
+            if not self.jobs:
+                return None
+            latest = max(self.jobs.values(), key=lambda item: float(item.get("created_at") or 0.0))
+            result = deepcopy(latest)
+            if result["phase"] == "prepared" and result["job_id"] in self.preparation_reservations:
+                result["phase"] = "settling"
+            return result
 
     def start_rank(self, manifest, model, check, *, command_owner=None):
         owner = command_owner or authority_owner(self.service.channels.master_authority())
@@ -543,6 +630,14 @@ class PrimaControl:
             leases.check()
         try:
             self._check(identity)
+            self._update_job_progress(
+                identity,
+                phase="planning",
+                label="Materializing placement manifest & verifying assets…",
+                step_index=1,
+                step_total=2 if include_profile else 1,
+                fraction=0.04,
+            )
             runtime = self.registry.capture(runtime_id)
             companions = {
                 kind: self.resolve_model(value)
@@ -567,6 +662,8 @@ class PrimaControl:
             )
             manifest = manifest.model_copy(update={"settings": execution_settings(body, planned, model,
                 getattr(self.service.state(), "infer_port", 18080))})
+            step_total = 1 + (1 if include_profile else 0) + (1 if include_profile and len(manifest.ranks) > 1 else 0)
+            stage_span = 0.45 if include_profile else 0.96
             if manifest.settings.get("prima_lora"):
                 for rank in manifest.ranks:
                     if (rank.node_id != self.service.state().node_id
@@ -634,21 +731,61 @@ class PrimaControl:
                 )
             )
             validate_asset_batch([asset for asset, _ in files], include_manifest=True)
+            node_asset_bytes = sum(asset.size for asset, _ in files)
+            total_stage_bytes = node_asset_bytes * max(1, len(manifest.ranks))
             self.jobs[identity].update(
                 phase="preparing", manifest=manifest.model_dump(), manifest_digest=manifest.digest
             )
+            self._update_job_progress(
+                identity,
+                phase="staging",
+                label=f"Staging model assets across {len(manifest.ranks)} node{'s' if len(manifest.ranks) != 1 else ''}…",
+                step_index=1,
+                step_total=step_total,
+                fraction=0.05,
+                bytes_done=0,
+                bytes_total=total_stage_bytes,
+            )
             self._save()
-            for rank in manifest.ranks:
+            completed_nodes_bytes = 0
+            for rank_idx, rank in enumerate(manifest.ranks, start=1):
                 self._check(identity)
                 if rank.node_id == self.service.state().node_id:
+                    self.jobs[identity]["nodes"][rank.node_id] = {
+                        "phase": "preparing",
+                        "transferred_bytes": 0,
+                        "asset_size": node_asset_bytes,
+                    }
+                    prior_asset_bytes = 0
                     for asset, path in files:
+                        def _on_local_stage(done: int, size: int, _node=rank.node_id, _prior=prior_asset_bytes, _name=asset.name):
+                            node_done = _prior + done
+                            agg_done = completed_nodes_bytes + node_done
+                            frac = 0.05 + (agg_done / max(1, total_stage_bytes)) * stage_span
+                            self.jobs[identity]["nodes"][_node].update(
+                                phase="preparing",
+                                transferred_bytes=node_done,
+                                asset_size=node_asset_bytes,
+                            )
+                            self._update_job_progress(
+                                identity,
+                                phase="staging",
+                                label=f"Staging {_name} on {_node} ({rank_idx}/{len(manifest.ranks)})…",
+                                step_index=1,
+                                step_total=step_total,
+                                fraction=frac,
+                                bytes_done=agg_done,
+                                bytes_total=total_stage_bytes,
+                            )
                         self.receiver.stager.prepare(
                             asset.sha256,
                             asset.size,
                             lambda offset, path=path: self._file_chunks(path, offset),
                             check=lambda: self._check(identity),
+                            progress=_on_local_stage,
                         )
-                    result = {"phase": "prepared"}
+                        prior_asset_bytes += asset.size
+                    result = {"phase": "prepared", "transferred_bytes": node_asset_bytes, "asset_size": node_asset_bytes}
                 else:
                     if (members[rank.node_id].get("prima_control_version") != 1
                             or type(members[rank.node_id].get("prima_asset_lease_version")) is not int
@@ -671,6 +808,7 @@ class PrimaControl:
                     self.jobs[identity]["nodes"][rank.node_id] = result
                     self._save()
                     offsets = dict(result["offsets"])
+                    prior_asset_bytes = 0
                     for asset, path in files:
                         offset = offsets.get(asset.sha256, 0)
                         if type(offset) is not int or not 0 <= offset <= asset.size:
@@ -693,16 +831,31 @@ class PrimaControl:
                             leases.advance(acknowledged - offset)
                             offset = acknowledged
                             offsets[asset.sha256] = offset
+                            node_done = prior_asset_bytes + offset
+                            agg_done = completed_nodes_bytes + node_done
+                            frac = 0.05 + (agg_done / max(1, total_stage_bytes)) * stage_span
                             self.jobs[identity]["nodes"][rank.node_id].update(
                                 phase="preparing", transferred_bytes=offset, asset_size=asset.size
                             )
+                            self._update_job_progress(
+                                identity,
+                                phase="staging",
+                                label=f"Transferring {asset.name} to {rank.node_id} ({rank_idx}/{len(manifest.ranks)})…",
+                                step_index=1,
+                                step_total=step_total,
+                                fraction=frac,
+                                bytes_done=agg_done,
+                                bytes_total=total_stage_bytes,
+                            )
                             if offset % (24 * 1024 * 256) == 0 or offset == asset.size:
                                 self._save()
+                        prior_asset_bytes += asset.size
                     result = self._call(
                         rank.node_id, operation, "prima_status", {"job_id": remote_job}
                     )
                     if result["phase"] != "prepared":
                         raise ValueError(result.get("error") or "Worker preparation failed")
+                completed_nodes_bytes += node_asset_bytes
                 self.jobs[identity]["nodes"][rank.node_id] = result
                 leases.advance()
                 self._save()
@@ -710,8 +863,20 @@ class PrimaControl:
             if self.plan(runtime_id, body)["plan_digest"] != digest:
                 raise ValueError("Inventory or settings changed during preparation; re-plan")
             if include_profile:
-                for rank in manifest.ranks:
+                profile_span = 0.35 if len(manifest.ranks) > 1 else 0.49
+                rank_count = max(1, len(manifest.ranks))
+                for rank_idx, rank in enumerate(manifest.ranks, start=1):
                     self._check(identity)
+                    rank_base = 0.50 + ((rank_idx - 1) / rank_count) * profile_span
+                    rank_width = profile_span / rank_count
+                    self._update_job_progress(
+                        identity,
+                        phase="profiling",
+                        label=f"Profiling hardware on {rank.node_id} ({rank_idx}/{rank_count})…",
+                        step_index=2,
+                        step_total=step_total,
+                        fraction=rank_base,
+                    )
                     request = ProfileRequest(
                         runtime_id=runtime_id,
                         model=next(a.sha256 for a in manifest.assets if a.kind == "model"),
@@ -741,8 +906,22 @@ class PrimaControl:
                             check()
                             if profile.get("pid") and profile.get("process_created_at"):
                                 leases.advance()
+                            prof_prog = profile.get("progress") or {}
+                            sub_frac = float(prof_prog.get("fraction") or 0.1)
+                            sub_label = prof_prog.get("label") or f"Profiling {rank.node_id}…"
+                            self._update_job_progress(
+                                identity,
+                                phase="profiling",
+                                label=f"{rank.node_id}: {sub_label}",
+                                step_index=2,
+                                step_total=step_total,
+                                fraction=rank_base + sub_frac * rank_width,
+                                bytes_done=int(prof_prog.get("bytes_done") or 0),
+                                bytes_total=int(prof_prog.get("bytes_total") or 0),
+                            )
                             time.sleep(0.2)
                             profile = self.profiles.job(profile["job_id"])
+                            self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
                     else:
                         remote_preparation = self.jobs[identity]["nodes"][rank.node_id]["job_id"]
                         scope = {**self.jobs[identity]["command_owner"], "sender": manifest.ranks[0].node_id,
@@ -761,6 +940,19 @@ class PrimaControl:
                             check()
                             if profile.get("pid") and profile.get("process_created_at"):
                                 leases.advance()
+                            prof_prog = profile.get("progress") or {}
+                            sub_frac = float(prof_prog.get("fraction") or 0.1)
+                            sub_label = prof_prog.get("label") or f"Profiling {rank.node_id}…"
+                            self._update_job_progress(
+                                identity,
+                                phase="profiling",
+                                label=f"{rank.node_id}: {sub_label}",
+                                step_index=2,
+                                step_total=step_total,
+                                fraction=rank_base + sub_frac * rank_width,
+                                bytes_done=int(prof_prog.get("bytes_done") or 0),
+                                bytes_total=int(prof_prog.get("bytes_total") or 0),
+                            )
                             time.sleep(0.2)
                             profile = self._call(
                                 rank.node_id,
@@ -768,6 +960,7 @@ class PrimaControl:
                                 "prima_status",
                                 {"profile_job_id": profile["job_id"]},
                             )
+                            self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
                     self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
                     if profile["phase"] != "prepared":
                         raise ValueError(profile.get("error") or "Rank profiling failed")
@@ -777,14 +970,44 @@ class PrimaControl:
             if include_profile and len(manifest.ranks) > 1:
                 from kllm.modules.primacpp.interactors.link_profile import collect_links
 
+                self._update_job_progress(
+                    identity,
+                    phase="links",
+                    label="Measuring Ring-TCP private links…",
+                    step_index=3,
+                    step_total=step_total,
+                    fraction=0.85,
+                )
                 self.jobs[identity]["links"] = collect_links(self, manifest, identity, check, leases.advance)
                 self._save()
             leases.advance()
             leases.check(force=True)  # Align every complete worker approval with final preparation.
+            self._update_job_progress(
+                identity,
+                phase="prepared",
+                label="Prima assets prepared and profiled" if include_profile else "Prima assets prepared",
+                step_index=step_total,
+                step_total=step_total,
+                fraction=1.0,
+                bytes_done=total_stage_bytes,
+                bytes_total=total_stage_bytes,
+            )
             self.jobs[identity].update(phase="prepared", finished_at=time.time(), expires_at=time.time() + 600)
         except Exception as error:
+            final_phase = "cancelled" if identity in self.cancelled else "failed"
+            prev_prog = self.jobs.get(identity, {}).get("progress") or {}
+            self._update_job_progress(
+                identity,
+                phase=final_phase,
+                label=str(error)[:240],
+                step_index=int(prev_prog.get("step_index") or 1),
+                step_total=int(prev_prog.get("step_total") or 1),
+                fraction=float(prev_prog.get("fraction") or 0.0),
+                bytes_done=int(prev_prog.get("bytes_done") or 0),
+                bytes_total=int(prev_prog.get("bytes_total") or 0),
+            )
             self.jobs[identity].update(
-                phase="cancelled" if identity in self.cancelled else "failed",
+                phase=final_phase,
                 error=str(error)[:1000],
                 finished_at=time.time(),
             )
@@ -836,6 +1059,15 @@ class PrimaControl:
                 job.update(phase="cancelled", finished_at=time.time())
                 if reason is not None:
                     job["error"] = reason
+                prev_prog = job.get("progress") or {}
+                self._update_job_progress(
+                    identity,
+                    phase="cancelled",
+                    label=reason or "Preparation cancelled",
+                    step_index=int(prev_prog.get("step_index") or 1),
+                    step_total=int(prev_prog.get("step_total") or 1),
+                    fraction=float(prev_prog.get("fraction") or 0.0),
+                )
                 self._save()
                 self._settle_preparation(identity)
             return deepcopy(job)

@@ -1,0 +1,157 @@
+/*
+ * Shared visual language for the Llama and Prima runtime settings views.
+ * Rules are namespaced under the view root (.runtime-settings) and its modal
+ * (.runtime-dialog) so nothing leaks into other settings sections.
+ */
+.runtime-settings{display:grid;gap:24px;min-width:0}
+
+:is(.runtime-settings,.runtime-dialog) .notice{display:flex;align-items:flex-start;gap:12px;padding:14px 16px;border:1px solid var(--line,var(--border));background:#1b1e24;color:var(--muted);font-size:14px;overflow-wrap:anywhere}
+:is(.runtime-settings,.runtime-dialog) .notice strong{color:inherit}
+:is(.runtime-settings,.runtime-dialog) .notice.warn{background:#252219;color:var(--warning)}
+:is(.runtime-settings,.runtime-dialog) .section-intro{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+:is(.runtime-settings,.runtime-dialog) .section-intro h2{font-size:28px}
+:is(.runtime-settings,.runtime-dialog) .section-intro p{color:var(--muted);font-size:14px;margin-top:8px}
+:is(.runtime-settings,.runtime-dialog) .runtime-panel-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;padding:24px;border-bottom:1px solid var(--line,var(--border))}
+:is(.runtime-settings,.runtime-dialog) .runtime-panel-head h3{font-size:18px}
+:is(.runtime-settings,.runtime-dialog) .runtime-panel-head p{font-size:14px;color:var(--muted);margin-top:4px}
+:is(.runtime-settings,.runtime-dialog) .runtime-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border:1px solid var(--line,var(--border));font:11px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.4px;color:var(--muted);white-space:nowrap}
+:is(.runtime-settings,.runtime-dialog) .runtime-head-meta{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
+:is(.runtime-settings,.runtime-dialog) .green{color:var(--accent)}
+:is(.runtime-settings,.runtime-dialog) .runtime-badge.green{background:var(--green-wash,#132b22);border-color:#2b5a44}
+:is(.runtime-settings,.runtime-dialog) .warning{color:var(--warn,var(--warning))}
+:is(.runtime-settings,.runtime-dialog) .field{display:grid;gap:8px;font-size:14px}
+:is(.runtime-settings,.runtime-dialog) .field small{color:var(--warn,#f2c76a)}
+:is(.runtime-settings,.runtime-dialog) input,
+:is(.runtime-settings,.runtime-dialog) select{min-width:0;width:100%;padding:10px 12px;min-height:48px;border:1px solid var(--control,#647181);border-radius:4px;background:var(--bg);color:var(--fg,var(--text));font:inherit}
+:is(.runtime-settings,.runtime-dialog) .break{overflow-wrap:anywhere}
+
+/* llama target picker */
+.runtime-settings .target-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+.runtime-settings .target-picker{padding:24px;display:grid;gap:16px;min-width:0}
+.runtime-settings .target-control{display:flex;align-items:flex-end;gap:12px}
+.runtime-settings .target-control .field{flex:1;min-width:0}
+.runtime-settings .target-control .btn{min-height:48px}
+.runtime-settings .target-meta{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12px;color:var(--muted);align-items:center}
+.runtime-settings .pending-note{padding:16px 24px;background:#29251b;border-top:1px solid var(--line,var(--border));font-size:14px}
+.runtime-settings .pending-note span{margin-left:12px}
+.runtime-settings .pending-note p{color:var(--muted);font-size:12px;margin-top:4px}
+
+/* llama saved-versions list */
+.runtime-settings .version-row{display:grid;grid-template-columns:minmax(0,2fr) minmax(100px,1fr) 80px minmax(250px,1.5fr);gap:24px;padding:24px;border-bottom:1px solid var(--line,var(--border));align-items:center}
+.runtime-settings .version-info,.runtime-settings .version-backend{display:grid;gap:8px;min-width:0}
+.runtime-settings .version-name{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.runtime-settings .version-name .text-button{font-size:16px;color:var(--fg,var(--text));text-align:left;overflow-wrap:anywhere}
+.runtime-settings .version-source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.runtime-settings .version-ref{display:flex;flex-wrap:wrap;gap:8px;font:12px var(--mono);color:var(--muted)}
+.runtime-settings .version-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+.runtime-settings .version-actions .btn{font-size:12px;padding:8px 10px;min-height:44px}
+.runtime-settings .runtime-remove{width:36px}
+.runtime-settings .version-error{grid-column:1/-1}
+.runtime-settings .library-foot{padding:16px 24px;font-size:12px;color:var(--muted);border-top:1px solid var(--line,var(--border))}
+
+/* running/target summary boxes shared by both engines */
+:is(.runtime-settings,.runtime-dialog) .running-box{padding:24px;display:grid;gap:16px;min-width:0;border-left:1px solid var(--line,var(--border))}
+:is(.runtime-settings,.runtime-dialog) .running-top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+:is(.runtime-settings,.runtime-dialog) .running-value{font-size:24px;font-weight:500;overflow-wrap:anywhere}
+:is(.runtime-settings,.runtime-dialog) .running-value small{font-size:12px;margin-left:8px;color:var(--muted)}
+.runtime-settings .target-summary{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+.runtime-settings .target-summary>div{padding:24px;display:grid;gap:16px;min-width:0;align-content:start}
+.runtime-settings .target-summary>div+div{border-left:1px solid var(--line,var(--border))}
+
+:is(.runtime-settings,.runtime-dialog) .policy-strip{display:grid;gap:4px;padding:16px 24px;border-top:1px solid var(--line,var(--border));font-size:14px}
+:is(.runtime-settings,.runtime-dialog) .policy-strip span{color:var(--muted)}
+:is(.runtime-settings,.runtime-dialog) .table-note{padding:16px 24px;font-size:12px;color:var(--muted);border-top:1px solid var(--line,var(--border))}
+:is(.runtime-settings,.runtime-dialog) .readiness-summary{display:flex;justify-content:space-between;flex-wrap:wrap;gap:16px;padding:16px 24px;border-bottom:1px solid var(--line,var(--border));font-size:14px}
+
+/* Prima identity, capabilities and qualification gates */
+.runtime-settings .detail-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+.runtime-settings .detail-col{padding:24px;display:grid;gap:16px;min-width:0;align-content:start}
+.runtime-settings .detail-col+.detail-col{border-left:1px solid var(--line,var(--border))}
+.runtime-settings .detail-rows{display:grid}
+.runtime-settings .detail-row{display:flex;justify-content:space-between;align-items:start;gap:24px;padding:12px 0;border-bottom:1px solid var(--line,var(--border));font-size:14px}
+.runtime-settings .detail-row:last-child{border-bottom:0}
+.runtime-settings .detail-row>span:first-child{color:var(--muted);flex:none}
+.runtime-settings .detail-row>span:last-child,.runtime-settings .detail-row>code:last-child{text-align:right;min-width:0;font-size:13px}
+:is(.runtime-settings,.runtime-dialog) .cap-wrap{display:flex;flex-wrap:wrap;gap:8px}
+.runtime-settings .cap-details{padding:24px;border-top:1px solid var(--line,var(--border))}
+.runtime-settings .cap-details summary{cursor:pointer;font-size:14px}
+.runtime-settings .cap-details>div{margin-top:16px;display:grid;gap:16px}
+.runtime-settings .gate-list{display:grid}
+.runtime-settings .gate-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:16px;align-items:center;padding:14px 24px;border-top:1px solid var(--line,var(--border))}
+.runtime-settings .gate-row:first-child{border-top:0}
+.runtime-settings .gate-lock{display:grid;place-items:center;width:32px;height:32px;border:1px solid var(--line,var(--border));border-radius:4px;color:var(--muted)}
+.runtime-settings .gate-row h4{margin:0;font-size:14px;font-weight:500}
+.runtime-settings .gate-row p{font-size:13px;color:var(--muted);margin-top:4px}
+
+/* per-node build tables */
+.runtime-settings .table-scroll{min-width:0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.runtime-settings table{width:100%;border-collapse:collapse;font-size:14px;text-align:left}
+.runtime-settings th{padding:12px 16px;text-align:left;background:var(--bg);font:11px var(--mono);text-transform:uppercase;letter-spacing:.5px;color:var(--muted);white-space:nowrap}
+.runtime-settings td{padding:16px;border-top:1px solid var(--line,var(--border));vertical-align:middle}
+.runtime-settings td strong{font-size:15px;font-weight:500}
+.runtime-settings td small{display:block;margin-top:6px;font-size:11px;color:var(--muted)}
+.runtime-settings .table-scroll table.wide{min-width:930px}
+.runtime-settings progress{display:block;width:140px;height:4px;margin-top:8px;accent-color:var(--accent)}
+.runtime-settings .node-error{max-width:220px;overflow-wrap:anywhere;margin-top:8px}
+:is(.runtime-settings,.runtime-dialog) .table-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+:is(.runtime-settings,.runtime-dialog) .table-actions .btn{font-size:12px;padding:8px 10px;min-height:44px}
+:is(.runtime-settings,.runtime-dialog) .state-label{text-transform:capitalize;font-size:12px}
+:is(.runtime-settings,.runtime-dialog) .state-label.green{color:var(--accent)}
+:is(.runtime-settings,.runtime-dialog) .state-label.warning{color:var(--warn,var(--warning))}
+@media(hover:hover){.runtime-settings tbody tr:hover td{background:var(--raised,#181c22)}}
+
+/* empty states */
+:is(.runtime-settings,.runtime-dialog) .empty{display:grid;justify-items:center;text-align:center;gap:12px;padding:40px 24px}
+:is(.runtime-settings,.runtime-dialog) .empty svg{width:32px;height:32px;color:var(--muted)}
+:is(.runtime-settings,.runtime-dialog) .empty h4{margin:0;font-size:15px;font-weight:500}
+:is(.runtime-settings,.runtime-dialog) .empty p{color:var(--muted);font-size:14px;max-width:46ch}
+
+/* runtime dialog */
+.runtime-dialog{padding:0;width:min(680px,calc(100% - 32px));max-height:calc(100dvh - 48px);overflow-y:auto;background:var(--surface);color:var(--fg,var(--text));border:1px solid var(--control,#647181);border-radius:8px}
+.runtime-dialog::backdrop{background:#000b}
+.runtime-dialog-head,.runtime-dialog-foot{padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line,var(--border))}
+.runtime-dialog-head h2{font-size:22px}
+.runtime-dialog-body{padding:24px;display:grid;gap:24px}
+.runtime-dialog-foot{flex-wrap:wrap;border-bottom:0;border-top:1px solid var(--line,var(--border))}
+:is(.runtime-settings,.runtime-dialog) dl{display:grid;grid-template-columns:130px minmax(0,1fr);gap:16px;font-size:14px;margin:0}
+:is(.runtime-settings,.runtime-dialog) dt{color:var(--muted);font-size:13px}
+:is(.runtime-settings,.runtime-dialog) dd{margin:0;font-size:14px;min-width:0;overflow-wrap:anywhere}
+:is(.runtime-settings,.runtime-dialog) .ref-grid{display:grid;grid-template-columns:150px minmax(0,1fr);gap:16px}
+:is(.runtime-settings,.runtime-dialog) .resolved-box{padding:16px;border:1px solid #2b5a44;background:#132b22;display:grid;gap:8px;font-size:14px}
+:is(.runtime-settings,.runtime-dialog) .resolved-box code{font-size:12px;overflow-wrap:anywhere}
+:is(.runtime-settings,.runtime-dialog) .log-console{background:var(--bg);border:1px solid var(--line,var(--border));padding:16px;font:12px/1.8 var(--mono);max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;width:100%}
+
+@media(max-width:1200px){
+  .runtime-settings .version-row{grid-template-columns:minmax(0,1fr) 140px}
+  .runtime-settings .version-actions{grid-column:1/-1;justify-content:flex-start}
+  .runtime-settings .version-disk{grid-column:2;grid-row:1;align-self:end}
+  .runtime-settings .version-backend{grid-column:2;grid-row:1;align-self:start}
+  .runtime-settings .target-control{flex-direction:column;align-items:stretch}
+}
+@media(max-width:1023px){
+  .runtime-settings .detail-grid,.runtime-settings .target-grid,.runtime-settings .target-summary{grid-template-columns:1fr}
+  .runtime-settings .detail-col+.detail-col,.runtime-settings .target-summary>div+div{border-left:0;border-top:1px solid var(--line,var(--border))}
+  .runtime-settings .running-box{border-left:0;border-top:1px solid var(--line,var(--border))}
+}
+@media(max-width:768px){
+  .runtime-settings .target-grid{grid-template-columns:1fr}
+  .runtime-settings .target-control{flex-direction:row;align-items:flex-end}
+  .runtime-settings .version-row{gap:16px}
+  .runtime-settings .detail-col,.runtime-settings .target-summary>div{padding:20px}
+  .runtime-settings .gate-row{padding:16px 20px;gap:12px;grid-template-columns:auto minmax(0,1fr)}
+  .runtime-settings .gate-row .chip{grid-column:2;justify-self:start}
+  :is(.runtime-settings,.runtime-dialog) .runtime-panel-head,:is(.runtime-settings,.runtime-dialog) .target-picker,:is(.runtime-settings,.runtime-dialog) .running-box,:is(.runtime-settings,.runtime-dialog) .version-row{padding:20px}
+  :is(.runtime-settings,.runtime-dialog) .table-actions{justify-content:flex-start}
+}
+@media(max-width:520px){
+  .runtime-settings .target-control{flex-direction:column;align-items:stretch}
+  .runtime-settings .version-row{grid-template-columns:1fr}
+  .runtime-settings .version-backend,.runtime-settings .version-disk{grid-column:auto;grid-row:auto}
+  .runtime-settings .version-backend{display:flex;justify-content:space-between}
+  .runtime-settings .version-actions{grid-column:auto}
+  .runtime-settings .runtime-panel-head{align-items:flex-start}
+  .runtime-dialog-head,.runtime-dialog-body,.runtime-dialog-foot{padding:20px}
+  :is(.runtime-settings,.runtime-dialog) dl{grid-template-columns:1fr;gap:8px}
+  :is(.runtime-settings,.runtime-dialog) .ref-grid{grid-template-columns:1fr}
+  :is(.runtime-settings,.runtime-dialog) .running-top{flex-wrap:wrap}
+}

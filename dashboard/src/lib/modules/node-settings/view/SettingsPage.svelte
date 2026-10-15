@@ -13,6 +13,7 @@
   import Software from '#lib/modules/node-settings/view/Software.svelte';
   import LlamaRuntimes from '#lib/modules/runtimes/view/LlamaRuntimes.svelte';
   import PrimaRuntimes from '#lib/modules/runtimes/view/PrimaRuntimes.svelte';
+  import { resolveActiveEngine } from '#lib/modules/run/entities';
   import type { App } from '#lib/app.svelte';
   let {
     settings = createApp().settings,
@@ -45,23 +46,18 @@
    * engine state the agent already reports (the launch flag feeds it), so no
    * second source of truth is introduced here.
    */
-  const activeEngine = $derived.by(() => {
-    const status = cluster.status;
-    const configured = status?.engine;
-    // Master/idle: the launch flag (--engine) is authoritative, even over a
-    // saved Prima cluster target. Workers follow the master's assigned target:
-    // they prepare what the cluster points at, flag or no flag.
-    if (configured === 'primacpp') return 'primacpp';
-    if (configured === 'llamacpp' && status?.role !== 'worker') return 'llamacpp';
-    if (runtimes.status?.runtimes?.target?.version.engine === 'primacpp') return 'primacpp';
-    // Older payloads without the engine field: derive from the active run and
-    // the running runtime instead.
-    const config = (run.activeRunConfig ?? status?.active_config ?? null) as Record<string, unknown> | null;
-    const values = (config?.values ?? config) as Record<string, unknown> | undefined;
-    if (values?.executor === 'primacpp' || values?.engine === 'primacpp') return 'primacpp';
-    if (runtimes.status?.runtimes?.running?.engine === 'primacpp') return 'primacpp';
-    return 'llamacpp';
-  });
+  const activeEngine = $derived(
+    resolveActiveEngine(
+      cluster.status
+        ? {
+            ...cluster.status,
+            runtimes: runtimes.status?.runtimes ?? cluster.status.runtimes
+          }
+        : runtimes.status,
+      run.activeRunConfig,
+      run.planResult
+    )
+  );
   const primaMode = $derived(activeEngine === 'primacpp');
   const runtimeSectionLabel = $derived(primaMode ? 'Prima' : 'llama.cpp');
   const runtimeIntro = $derived(

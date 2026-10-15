@@ -54,10 +54,20 @@ class DistributedPrimaRuns:
         if self.coordinator.active or self.control.rank.owner or self.control.service.state().process_pid:
             raise ValueError("Stop and reconcile the previous Prima run before starting another")
         self.starting = True
+        from kllm.modules.inference.interactors import load_progress
+
         try:
             runtime = self.control.registry.capture((snapshot() or {}).get("runtime_id"))
             require_qualified(runtime)
             manifest, owner = self._prepared(body, plan, runtime)
+            model_asset = next((a for a in manifest.assets if a.kind == "model"), None)
+            total_bytes = model_asset.size if model_asset else (model.stat().st_size if model.exists() else 0)
+            load_progress.begin(
+                model.name,
+                None,
+                total_bytes,
+                detail="Verifying distributed Prima contract…",
+            )
             self.control.runs.bind_resources(manifest, owner)
             self.run_id = manifest.run_id
             if len(manifest.ranks) < 2 or not body.network_id or manifest.network_id != body.network_id:
@@ -77,11 +87,13 @@ class DistributedPrimaRuns:
             self.runtime = runtime
             self.coordinator.start(manifest, command_owner=owner)
             self._serving(manifest)
+            load_progress.sample(int(settings["assessment_port"]))
             launch = self.control.rank.status(manifest.run_id, command_owner=owner)
             return {"plan": plan, "launch": {**launch, "binary": runtime["llama_server"], "role": "master"},
                 "run_id": manifest.run_id, "engine": "primacpp", "runtime_id": manifest.runtime_id,
                 "qualification_context": self.context}
-        except BaseException:
+        except BaseException as error:
+            load_progress.fail(str(error))
             self.stop()
             raise
         finally:
@@ -220,6 +232,14 @@ class DistributedPrimaRuns:
                 lambda: control.start_rank(manifest, control.cached_model(asset.sha256, job_id=self.preparation),
                     self._check, command_owner=owner), self._check)
             self._renew_ports(node, manifest)
+            if result.get("pid"):
+                from kllm.modules.inference.interactors import load_progress
+
+                load_progress.update(
+                    pid=int(result["pid"]),
+                    phase="loading",
+                    detail="Loading model weights into memory…",
+                )
             return result
         if action == "prima_stop":
             owned_pid = (control.rank.owner or {}).get("pid")

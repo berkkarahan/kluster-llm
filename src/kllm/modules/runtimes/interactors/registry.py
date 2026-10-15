@@ -156,6 +156,9 @@ class RuntimeRegistry:
         source_entry = {
             "engine": "primacpp", "repository": prima["source_repository"],
             "ref": prima["source_commit"], "ref_type": "commit",
+            # The digest every saved pin is checked against: the dashboard marks
+            # a saved source stale instead of offering a rebuild that cannot run.
+            "recipe_digest": recipe_digest(),
         }
         if prima.get("source_release"):
             source_entry["release"] = prima["source_release"]
@@ -352,6 +355,14 @@ class RuntimeRegistry:
                 ):
                     return deepcopy(job)
             entry = self.data["versions"][request.runtime_id]
+            version = RuntimeVersion.model_validate(entry["version"])
+            # A saved pin from an earlier build recipe can never satisfy the
+            # installer's recipe contract: refuse before spawning it so the
+            # retry keeps an actionable error instead of a doomed build log.
+            if version.engine == "primacpp" and version.recipe_digest != recipe_digest():
+                raise ValueError(
+                    "Prima build recipe changed; resolve the source again and re-apply the target"
+                )
             if entry["build"]:
                 try:
                     self.verify(entry["build"])

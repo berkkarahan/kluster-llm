@@ -17,7 +17,7 @@ requests recheck it, including policy revocation. All production scopes remain e
 The runtime library can resolve and save the supported Prima source through its
 existing endpoints using `engine: "primacpp"`, repository
 `https://github.com/berkkarahan/prima.cpp.git`, and either the pinned commit ref
-(ref_type `"commit"`) or the pinned release — recipe 129 pins
+(ref_type `"commit"`) or the pinned release — recipe 133 pins
 `berkkarahan/prima.cpp` release `0.0.1` (`source_release` /
 `source_release_commit`) whose tag resolves to exactly the pinned commit; both
 routes produce the same immutable identity. A moved or deleted release tag refuses
@@ -30,6 +30,39 @@ Build using the existing `/v2/node/runtime-builds` resource. Settings → llama.
 Add version offers Prima under qualification (the dialog prefills the pinned
 release); the Prima settings section offers "Install 0.0.1 and set target" for the
 master. Build and logs are available; selection requires completed qualification.
+
+## Recipe 133 — Saluki / Qwen3.5 dense text
+
+| Recipe | Fork commit | Release | Recipe digest |
+| --- | --- | --- | --- |
+| 133 | `bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554` | `0.0.1` (moved from `be162f6`) | `27782ffb7cc01334f7305e78b1fd40550ed157d9bf8668aa3674917db40c26cf` |
+
+This pin adds `qwen35` text inference on CPU and Vulkan, including separate
+attention/recurrent cache state and original mixed IQ weight formats. Saluki's
+GGUF declares 65 blocks including one MTP predictor; the execution plan has 64
+trunk layers. MTP tensors are skipped and speculative execution stays disabled.
+Model-layout accounting preserves the declared metadata but excludes predictor
+weights from active placement. `qwen35moe` and vision are not included.
+
+The runtime publishes registry-derived `architectures` and
+`qwen35_segmented_v1`. Prima plan previews and the rank spawn boundary refuse
+unimplemented families with `PRIMA_MODEL_UNSUPPORTED`; older reports without
+the field produce `PRIMA_MODEL_SUPPORT_UNKNOWN` warnings instead. Native load
+errors name the architecture, readiness failures include the rank-log tail, and
+the dashboard uses the preview's refusal. This gate does not affect llama.cpp.
+
+Local Windows/RX 9070 XT development runs matched 16 greedy token pieces against
+the pinned llama.cpp reference for 5- and 104-token prompts on CPU. Vulkan also
+matched those continuations and served chat; GPU sequence-state receipts include
+all 64 trunk blocks and the output projection in both prefill and decode. Input
+embedding lookup remains CPU-resident by design. Original IQ block/gather/matrix
+checks and CPU/Vulkan save/restore/copy contracts passed. These results do not
+establish distributed or performance qualification, and recipe 133 does not change
+the existing qualification policy. Fresh managed-build and deployment receipts
+are recorded separately in [spec 020](../specs/020-prima-qwen35-model-support/validation.md).
+
+The moved-release guard remains intact: the tag must resolve to this exact commit.
+Older prepared builds stay in the library but cannot stand in for this recipe.
 
 Recipe22 corrects native kernel-profile operands: floats are encoded into actual
 F16/quantized storage, completed multiplication is checked against decoded operands,

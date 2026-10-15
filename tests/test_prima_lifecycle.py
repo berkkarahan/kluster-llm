@@ -511,6 +511,49 @@ def test_rank_status_does_not_report_a_dead_process_ready(tmp_path):
     assert supervisor.stop(value.run_id)["phase"] == "idle"
 
 
+def test_rank_settles_an_unreaped_exited_child_instead_of_failing_cleanup(tmp_path):
+    value = manifest()
+    stopped = []
+
+    def identity(pid):
+        # Windows reports a terminated child as alive while its native identity
+        # read already reports the exit.
+        raise RuntimeError("process_exited")
+
+    supervisor = RankSupervisor(tmp_path, "worker",
+        capture=lambda _: {"capabilities": {"features": list(BASELINE_FEATURES)}},
+        spawn=lambda *_: {"pid": 123, "start_token": "owned"},
+        stop=lambda pid: stopped.append(pid) or True, alive=lambda _: True, identity=identity)
+    supervisor.start(value, tmp_path / "model", lambda: None, assessment=True)
+    supervisor.owner["phase"] = "ready"
+    assert supervisor.status(value.run_id)["phase"] == "failed"
+    with pytest.raises(ValueError, match="no longer alive"):
+        supervisor.renew(value.run_id, lambda: None)
+    assert supervisor.stop(value.run_id) == {"phase": "idle"}
+    assert stopped == []  # An unreaped exited child is never signalled.
+    assert supervisor.owner is None
+    assert json.loads(supervisor.record_path.read_text()) is None
+
+
+def test_rank_retains_cleanup_when_identity_cannot_be_read(tmp_path):
+    value = manifest()
+    supervisor = RankSupervisor(tmp_path, "worker",
+        capture=lambda _: {"capabilities": {"features": list(BASELINE_FEATURES)}},
+        spawn=lambda *_: {"pid": 123, "start_token": "owned"}, stop=lambda _: True,
+        alive=lambda _: True, identity=lambda _: "owned")
+    supervisor.start(value, tmp_path / "model", lambda: None, assessment=True)
+
+    def unreadable(pid):
+        raise RuntimeError("permission_denied")
+
+    supervisor.identity = unreadable
+    with pytest.raises(ValueError, match="identity unavailable"):
+        supervisor.stop(value.run_id)
+    assert supervisor.status()["phase"] == "cleanup_pending"
+    with pytest.raises(ValueError, match="identity unavailable"):
+        supervisor.renew(value.run_id, lambda: None)
+
+
 def test_cleanup_retains_foreign_process_identity(tmp_path):
     value = manifest()
     supervisor = RankSupervisor(
@@ -1057,3 +1100,139 @@ async def test_real_signed_channel_pushes_only_operation_bound_assets(tmp_path, 
         control.close()
         for store in stores:
             store.close()
+
+
+def test_prima_launch_settings_resolve_f16_kv_and_flash_attention_off(monkeypatch):
+    from fastapi import HTTPException
+    from kllm.modules.inference.entities import RunBody
+    from kllm.modules.inference.interactors import run_settings_resolution as rsr
+
+    monkeypatch.setattr(rsr, "snapshot", lambda: {"engine": "primacpp", "runtime_id": "a" * 64})
+    resolved = rsr.resolve_launch_settings(RunBody(model="fixture.gguf"))
+    assert resolved.flash_attention == "off"
+    assert resolved.cache_type_k == "f16"
+    assert resolved.cache_type_v == "f16"
+
+    with pytest.raises(HTTPException) as exc_info:
+        rsr.resolve_launch_settings(
+            RunBody(model="fixture.gguf", flash_attention="off", cache_type_v="q8_0")
+        )
+    assert exc_info.value.status_code == 400
+
+
+def test_single_node_vulkan_generation_profile_populates_required_settings_and_reports_progress(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from kllm.modules.primacpp.entities import ProfileRequest
+    from kllm.modules.primacpp.interactors import generation_profile as gp
+
+    model_path = tmp_path / "fixture.gguf"
+    model_path.write_bytes(b"gguf")
+    monkeypatch.setattr(
+        gp,
+        "require_native",
+        lambda: SimpleNamespace(_read_gguf_metadata_json=lambda *_: json.dumps({"block_count": 4})),
+    )
+    seen_manifests = []
+    progress_events = []
+    real_require = gp.require_execution_capabilities
+
+    def spy_require(manifest_obj, capabilities):
+        real_require(manifest_obj, capabilities)
+        seen_manifests.append(dict(manifest_obj.settings))
+        raise RuntimeError("stop-after-manifest-check")
+
+    monkeypatch.setattr(gp, "require_execution_capabilities", spy_require)
+    req = ProfileRequest(
+        runtime_id="a" * 64,
+        model="fixture.gguf",
+        mode="generation",
+        backend="vulkan",
+        devices=["1" * 32],
+        gpu_layers=2,
+        context=512,
+        threads=4,
+        request_id=str(uuid4()),
+    )
+    runtime = {
+        "runtime_id": "a" * 64,
+        "engine": "primacpp",
+        "backend": "vulkan",
+        "llama_server": "llama-server",
+        "capabilities": {
+            "backends": ["cpu", "vulkan"],
+            "features": list(BASELINE_FEATURES),
+        },
+    }
+    selected = [
+        {
+            "backend": "vulkan",
+            "name": "Vulkan0",
+            "device_identity": "1" * 32,
+            "driver_identity": "drv",
+            "physical_index": 0,
+            "memory_bytes": 4 * 1024**3,
+        }
+    ]
+    with pytest.raises(RuntimeError, match="stop-after-manifest-check"):
+        gp.profile_generation(
+            runtime,
+            model_path,
+            req,
+            selected,
+            tmp_path,
+            check=lambda: None,
+            track=lambda *_: None,
+            stop=lambda *_: None,
+            progress=lambda label, frac, done, total: progress_events.append((label, frac, done, total)),
+        )
+    assert len(seen_manifests) == 1
+    assert seen_manifests[0]["swa_full"] is False
+    assert seen_manifests[0]["parallel_slots"] == 1
+    assert seen_manifests[0]["prima_kv_sequences"] == 2
+    assert len(progress_events) == 1
+    assert "Pass 1/2 (CPU)" in progress_events[0][0]
+
+
+def test_stager_and_load_progress_track_pre_spawn_prima_stages(tmp_path):
+    from kllm.modules.inference.interactors import load_progress as lp
+    from kllm.modules.primacpp.interactors.staging import ModelStager
+
+    stager = ModelStager(tmp_path / "staging")
+    payload = b"hello-prima-staging"
+    digest = hashlib.sha256(payload).hexdigest()
+    seen_progress = []
+    staged = stager.prepare(
+        digest,
+        len(payload),
+        lambda _: [payload[:5], payload[5:]],
+        check=lambda: None,
+        progress=lambda offset, total: seen_progress.append((offset, total)),
+    )
+    assert staged.read_bytes() == payload
+    assert seen_progress[0] == (0, len(payload))
+    assert (5, len(payload)) in seen_progress
+    assert seen_progress[-1] == (len(payload), len(payload))
+
+    lp.end()
+    try:
+        lp.begin("fixture.gguf", None, 1000, detail="Staging model files (1/1): fixture.gguf")
+        sample1 = lp.sample(8080)
+        assert sample1["phase"] == "starting"
+        assert sample1["detail"] == "Staging model files (1/1): fixture.gguf"
+
+        lp.update(bytes_loaded=500, fraction=0.25, phase="starting", detail="Starting Ring-TCP rank 1/1 (master)…")
+        sample2 = lp.sample(8080)
+        assert sample2["bytes_loaded"] == 500
+        assert sample2["fraction"] == pytest.approx(0.25, abs=0.01)
+        assert sample2["detail"] == "Starting Ring-TCP rank 1/1 (master)…"
+
+        lp.fail("Rank 0 failed to start")
+        terminal = lp.sample(8080)
+        assert terminal["phase"] == "error"
+        assert "Rank 0 failed to start" in terminal["error"]
+    finally:
+        lp.end()
+
+

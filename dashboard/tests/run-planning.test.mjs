@@ -138,6 +138,94 @@ test('run page cache dropdowns and required-node checkbox update the visible pla
       assert.equal(requests.at(-1).node_shares, null);
       assert.deepEqual(requests.at(-1).required_nodes, ['worker']);
       assert.equal(await evaluate("Boolean(document.querySelector('[id^=share-]'))"), false);
+
+      // Switch to Prima mode and verify f16 KV + flash_attention='off' defaults and progress bars.
+      await evaluate(`(async () => {
+        const { createApp } = await import('/src/lib/app.svelte.ts');
+        const appStore = createApp();
+        const primaVersion = {
+          runtime_id: 'a'.repeat(64),
+          name: 'Prima.cpp 0.0.1',
+          engine: 'primacpp',
+          repository: 'https://github.com/berkkarahan/prima.cpp.git',
+          ref: '0.0.1',
+          ref_type: 'tag',
+          commit: '1'.repeat(40)
+        };
+        appStore.cluster.status = {
+          ...appStore.cluster.status,
+          engine: 'primacpp',
+          runtimes: {
+            versions: [{ version: primaVersion, build: { runtime_id: primaVersion.runtime_id, build_id: 'b1', backend: 'vulkan', commit: primaVersion.commit } }],
+            jobs: [],
+            selected: primaVersion.runtime_id,
+            target: { version: primaVersion, revision: 1, cluster_binding_id: 'c1', master_node_id: 'master' },
+            running: null,
+            prima_preparation: {
+              job_id: 'prep-1',
+              phase: 'profiling',
+              progress: {
+                fraction: 0.65,
+                step: 2,
+                steps_total: 3,
+                label: 'Profiling devices (1/1): master',
+                detail: 'Pass 2/2 (VULKAN): running benchmark request…',
+                bytes_done: 536870912,
+                bytes_total: 1073741824,
+                rate_bps: 268435456,
+                eta_seconds: 2
+              },
+              nodes: {
+                master: {
+                  phase: 'profiling',
+                  progress: {
+                    fraction: 0.65,
+                    step: 2,
+                    steps_total: 3,
+                    label: 'Profiling Vulkan0',
+                    detail: 'Pass 2/2 (VULKAN)'
+                  }
+                }
+              }
+            }
+          }
+        };
+        appStore.run.resetRunSettings();
+      })()`);
+      await wait("document.querySelector('.prima-deploy-page') && document.body.innerText.includes('K cache: f16')");
+      assert.equal(requests.at(-1).cache_type_k, 'f16');
+      assert.equal(requests.at(-1).cache_type_v, 'f16');
+      assert.equal(requests.at(-1).flash_attention, 'off');
+
+      // Navigate to Step 3 (Review & deploy) and check both progress bars
+      await evaluate("[...document.querySelectorAll('.steps .step')].at(-1).click()");
+      await wait("document.querySelector('[aria-label=\"Prima preparation and profiling progress\"]')");
+      const prepVal = await evaluate("document.querySelector('[aria-label=\"Prima preparation and profiling progress\"]').getAttribute('aria-valuenow')");
+      assert.equal(prepVal, '65');
+      const step3Text = await evaluate('document.body.innerText');
+      assert.match(step3Text, /Step 2 of 3/);
+      assert.match(step3Text, /Pass 2\/2 \(VULKAN\)/);
+
+      // Verify deployment progress bar appears immediately above .form-foot when busy or loading
+      await evaluate(`(async () => {
+        const { createApp } = await import('/src/lib/app.svelte.ts');
+        const appStore = createApp();
+        appStore.run.busy = '/v2/inference/runs';
+        appStore.run.loadProgress = {
+          phase: 'starting',
+          model: 'fixture.gguf',
+          bytes_loaded: 536870912,
+          bytes_total: 1073741824,
+          fraction: 0.42,
+          rate_bps: 134217728,
+          eta_seconds: 4,
+          detail: 'Starting Ring-TCP rank 1/2 (master)…'
+        };
+      })()`);
+      await wait("document.querySelector('.deploy-progress-slot [aria-label=\"Model load\"]')");
+      const loadVal = await evaluate("document.querySelector('.deploy-progress-slot [aria-label=\"Model load\"]').getAttribute('aria-valuenow')");
+      assert.equal(loadVal, '42');
+      assert.match(await evaluate('document.body.innerText'), /Starting Ring-TCP rank 1\/2 \(master\)…/);
     } finally {
       ws?.close();
       if (browser && browser.exitCode === null) {
@@ -150,3 +238,4 @@ test('run page cache dropdowns and required-node checkbox update the visible pla
       process.chdir(cwd);
     }
   });
+

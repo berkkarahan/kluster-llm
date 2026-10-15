@@ -74,10 +74,29 @@ class RankSupervisor:
                 and self.owner.get("command_owner") != command_owner):
             raise ValueError("Rank command authority differs from its persisted owner")
 
+    def _identity_or_exited(self, pid):
+        """Native identity token, or None when the process no longer exists."""
+        try:
+            return self.identity(pid)
+        except RuntimeError as error:
+            # Windows keeps a terminated-but-unreaped child visible to a liveness
+            # probe; the native identity read is what reports the exit.
+            if "process_exited" in str(error):
+                return None
+            raise
+
     def _owned_child_alive(self):
         if not self.owner or not self.alive(self.owner["pid"]):
             return False
-        if self.identity(self.owner["pid"]) != self.owner["start_token"]:
+        try:
+            token = self._identity_or_exited(self.owner["pid"])
+        except RuntimeError as error:
+            self.owner["phase"] = "cleanup_pending"
+            self._save()
+            raise ValueError("Rank process identity unavailable; cleanup retained") from error
+        if token is None:
+            return False
+        if token != self.owner["start_token"]:
             self.owner["phase"] = "cleanup_pending"
             self._save()
             raise ValueError("Rank process identity changed; cleanup retained")
@@ -263,14 +282,24 @@ class RankSupervisor:
                 return {"phase": "idle"}
             pid = self.owner["pid"]
             if self.alive(pid):
-                if self.identity(pid) != self.owner["start_token"]:
+                try:
+                    token = self._identity_or_exited(pid)
+                except RuntimeError as error:
                     self.owner["phase"] = "cleanup_pending"
                     self._save()
-                    raise ValueError("Rank process identity changed; cleanup retained")
-                if not self.stop_process(pid) or self.alive(pid):
-                    self.owner["phase"] = "cleanup_pending"
-                    self._save()
-                    raise ValueError("Owned rank has not stopped; cleanup retained")
+                    raise ValueError("Rank process identity unavailable; cleanup retained") from error
+                # A None token means the child exited between the liveness probe
+                # and the identity read: there is no live process left to fence
+                # or stop, so ownership is cleared below.
+                if token is not None:
+                    if token != self.owner["start_token"]:
+                        self.owner["phase"] = "cleanup_pending"
+                        self._save()
+                        raise ValueError("Rank process identity changed; cleanup retained")
+                    if not self.stop_process(pid) or self.alive(pid):
+                        self.owner["phase"] = "cleanup_pending"
+                        self._save()
+                        raise ValueError("Owned rank has not stopped; cleanup retained")
             stopped = self.owner
             self.owner = None
             try:
@@ -397,15 +426,29 @@ class PrimaCoordinator:
             return self._start(manifest, generation)
 
     def _start(self, manifest, generation):
+        from kllm.modules.inference.interactors import load_progress
+
         self.active = manifest
         self.started = []
         self.phase = "admitting"
+        total_ranks = max(1, len(manifest.ranks))
         try:
             self._persist()
             self._check(generation)
+            load_progress.update(
+                fraction=0.08,
+                phase="starting",
+                detail="Admitting private Ring-TCP listener ports…",
+            )
             self.admit(manifest.transfer_edges)
-            for rank in manifest.ranks[1:] + manifest.ranks[:1]:
+            ordered_ranks = manifest.ranks[1:] + manifest.ranks[:1]
+            for idx, rank in enumerate(ordered_ranks, start=1):
                 self._check(generation)
+                load_progress.update(
+                    fraction=0.12 + (idx / total_ranks) * 0.25,
+                    phase="starting",
+                    detail=f"Starting Ring-TCP rank {idx}/{total_ranks} ({rank.node_id})…",
+                )
                 self.started.append(rank.node_id)
                 # Journal intent before sending. The remote may start even if its
                 # response or the master process is lost immediately afterwards.
@@ -418,6 +461,7 @@ class PrimaCoordinator:
             # Readiness is a barrier, never inferred from process presence.
             until = time.monotonic() + 300
             renewed = time.monotonic()
+            last_ready_count = -1
             while time.monotonic() < until:
                 self._check(generation)
                 if time.monotonic() - renewed >= MONITOR_SECONDS:
@@ -434,7 +478,17 @@ class PrimaCoordinator:
                         raise ValueError("A Prima rank failed before distributed readiness")
                     self._validate_result(rank, result)
                     results.append(result)
-                if all(r["phase"] == "ready" for r in results):
+                ready_count = sum(1 for r in results if r["phase"] == "ready")
+                if ready_count > last_ready_count:
+                    if last_ready_count >= 0:
+                        until = max(until, time.monotonic() + 300)
+                    last_ready_count = ready_count
+                load_progress.update(
+                    fraction=0.40 + (ready_count / total_ranks) * 0.55,
+                    phase="loading",
+                    detail=f"Loading model weights across Ring-TCP ranks ({ready_count}/{total_ranks} ready)…",
+                )
+                if ready_count == len(results):
                     self._check(generation)
                     self.phase = "serving"
                     self.misses = 0

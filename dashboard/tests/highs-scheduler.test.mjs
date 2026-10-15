@@ -11,6 +11,7 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
   const cwd = process.cwd();
   const originalFetch = globalThis.fetch;
   const requests = [];
+  let missingProfiles = false;
   let server;
   let store;
 
@@ -26,9 +27,15 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
       const body = JSON.parse(String(options.body ?? '{}'));
       requests.push(body);
       const isFallback = body.placement_strategy !== 'auto';
-      const scheduler = isFallback
-        ? buildFallbackHighsReport(body.placement_strategy)
-        : SAMPLE_HIGHS_REPORT;
+      const scheduler = missingProfiles && body.placement_strategy === 'auto'
+        ? {
+            ...buildFallbackHighsReport('auto'),
+            fallback_reason: 'missing_device_profiles',
+            missing_profile_nodes: ['master'],
+          }
+        : isFallback
+          ? buildFallbackHighsReport(body.placement_strategy)
+          : SAMPLE_HIGHS_REPORT;
 
       return new Response(
         JSON.stringify({
@@ -44,6 +51,48 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
           auxiliary_runtime_bytes: 0,
           execution_overhead_bytes: 512 * 1024 ** 2,
           placement_mode: scheduler.scheduler_mode,
+          engine: 'primacpp',
+          transport: 'prima-ring-tcp',
+          prima_topology: {
+            schema_version: 1,
+            runtime_id: '1'.repeat(64),
+            master_node_id: 'master',
+            total_layers: 32,
+            data_port: 51052,
+            signal_port: 51053,
+            ranks: [
+              {
+                node_id: 'master',
+                role: 'master',
+                rank: 0,
+                address: '10.0.0.1',
+                next_node_id: 'worker-fast',
+                layers: [{ start: 0, end: 20 }],
+                ngl: 16,
+                devices: ['Vulkan0'],
+                tensor_split: [16],
+                output_gpu: false,
+              },
+              {
+                node_id: 'worker-fast',
+                role: 'worker',
+                rank: 1,
+                address: '10.0.0.2',
+                next_node_id: 'master',
+                layers: [{ start: 20, end: 32 }],
+                ngl: 12,
+                devices: ['Vulkan0'],
+                tensor_split: [12],
+                output_gpu: true,
+              },
+            ],
+          },
+          model_support: {
+            supported: true,
+            error: null,
+            warning: null,
+          },
+          qualification_errors: ['vulkan_gpu_inference'],
           scheduler,
           resolved_launch_settings: {
             context: body.context,
@@ -58,18 +107,49 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
       );
     };
 
+    const { parsePrimaExtras, serializePrimaExtras } = await server.ssrLoadModule(
+      '/src/lib/modules/run/configuration.ts'
+    );
+    const { resolveActiveEngine } = await server.ssrLoadModule(
+      '/src/lib/modules/run/entities.ts'
+    );
+
+    // Verify Prima extra_args round-tripping
+    const serializedExtras = serializePrimaExtras({
+      swaMode: 'full',
+      headMode: 'embedding',
+      pooling: 'mean',
+      loraAdapters: [
+        { path: '/models/adapter-a.gguf', scale: '1' },
+        { path: '/models/adapter-b.gguf', scale: '0.75' },
+      ],
+      templateKwargsText: '{"enable_thinking":true}',
+      otherTokens: [],
+    });
+    const parsedExtras = parsePrimaExtras(serializedExtras);
+    assert.equal(parsedExtras.swaMode, 'full');
+    assert.equal(parsedExtras.headMode, 'embedding');
+    assert.equal(parsedExtras.pooling, 'mean');
+    assert.deepEqual(parsedExtras.loraAdapters, [
+      { path: '/models/adapter-a.gguf', scale: '1' },
+      { path: '/models/adapter-b.gguf', scale: '0.75' },
+    ]);
+    assert.equal(parsedExtras.templateKwargsText, '{"enable_thinking":true}');
+
     store = (await server.ssrLoadModule('/src/lib/app.svelte.ts')).createApp();
     store.models.models = [{ id: 'prima-model.gguf' }];
     store.models.selectedModel = 'prima-model.gguf';
     store.cluster.status = {
       role: 'master',
       node_id: 'master',
+      engine: 'primacpp',
       members: {
         master: { node_id: 'master', role: 'master' },
         'worker-fast': { node_id: 'worker-fast', role: 'worker' },
       },
     };
 
+    assert.equal(resolveActiveEngine(store.cluster.status, null, null), 'primacpp');
     assert.equal(store.run.placementStrategy, 'auto');
     assert.equal(store.run.planPayload().placement_strategy, 'auto');
 
@@ -77,9 +157,16 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
     assert.equal(requests.at(-1)?.placement_strategy, 'auto');
 
     const { render } = await server.ssrLoadModule('svelte/server');
-    const { default: RunPage } = await server.ssrLoadModule('/src/routes/run/+page.svelte');
-    const htmlAuto = render(RunPage).body;
+    const { default: RunRoute } = await server.ssrLoadModule('/src/routes/run/+page.svelte');
+    const htmlAuto = render(RunRoute).body;
 
+    // Dedicated PrimaRunPage header, status strip, Ring-TCP rank badges & Halda MILP telemetry
+    assert.match(htmlAuto, /Deploy · Prima\.cpp/);
+    assert.match(htmlAuto, /prima-ring-tcp/);
+    assert.match(htmlAuto, /Architecture supported/);
+    assert.match(htmlAuto, /Evaluation &amp; profiling mode/);
+    assert.match(htmlAuto, /Ring-TCP: 2 rank\(s\) · ports 51052\/51053/);
+    assert.match(htmlAuto, /Rank 0 → worker-fast · -lw 0–19 · -ngl 16/);
     assert.match(htmlAuto, /Automatic \(HiGHS \/ Profiled\)/);
     assert.match(htmlAuto, /Capacity-first/);
     assert.match(htmlAuto, /Priority/);
@@ -90,7 +177,7 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
     assert.match(htmlAuto, /M4/);
     assert.match(htmlAuto, /forced M4/);
     assert.match(htmlAuto, /graphs=4/);
-    assert.match(htmlAuto, /worker-weak \(weak_device_w_le_1_ngl_0\)/);
+    assert.match(htmlAuto, /worker-weak \(weak_device_w_le_1_ngl_0/);
 
     store.run.setPlacementStrategy('capacity_first');
     if (store.run.estimateTimer) clearTimeout(store.run.estimateTimer);
@@ -100,7 +187,7 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
 
     await store.run.refreshEstimate();
     assert.equal(requests.at(-1)?.placement_strategy, 'capacity_first');
-    const htmlCap = render(RunPage).body;
+    const htmlCap = render(RunRoute).body;
     assert.match(htmlCap, /capacity_first · k=1 · W=32/);
     assert.match(htmlCap, /Fallback reason: operator_selected_capacity_first/);
     assert.match(htmlCap, /missing profiles: worker-fast/);
@@ -113,9 +200,33 @@ test('HiGHS scheduler placement strategy selector, payload serialization, and te
 
     await store.run.refreshEstimate();
     assert.equal(requests.at(-1)?.placement_strategy, 'priority');
-    const htmlPrio = render(RunPage).body;
+    const htmlPrio = render(RunRoute).body;
     assert.match(htmlPrio, /priority · k=1 · W=32/);
     assert.match(htmlPrio, /Fallback reason: operator_selected_priority/);
+
+    // A genuinely unprofiled cluster keeps the accurate reason and points at
+    // the Prima preparation that enables HiGHS / Profiled placement.
+    missingProfiles = true;
+    store.run.setPlacementStrategy('auto');
+    if (store.run.estimateTimer) clearTimeout(store.run.estimateTimer);
+    assert.equal(store.run.planPayload().placement_strategy, 'auto');
+    await store.run.refreshEstimate();
+    const htmlProfiles = render(RunRoute).body;
+    assert.match(htmlProfiles, /Fallback reason: missing_device_profiles/);
+    assert.match(htmlProfiles, /missing profiles: master/);
+    assert.match(htmlProfiles, /Settings → Prima/);
+    assert.match(htmlProfiles, /enable HiGHS \/ Profiled placement/);
+    assert.match(htmlProfiles, /Prepare &amp; profile in Step 3 →/);
+
+    // Switching the node engine to llamacpp cleanly renders the standard RunPage
+    store.cluster.status = {
+      ...store.cluster.status,
+      engine: 'llamacpp',
+    };
+    assert.equal(resolveActiveEngine(store.cluster.status, null, store.run.planResult), 'llamacpp');
+    const htmlLlama = render(RunRoute).body;
+    assert.doesNotMatch(htmlLlama, /Deploy · Prima\.cpp/);
+    assert.match(htmlLlama, /What would you like to run\?/);
   } finally {
     store?.stop();
     globalThis.fetch = originalFetch;

@@ -276,21 +276,26 @@ Cancel download is an actual store action, and terminal state is tied to an oper
 
 ### Deploy and effective configuration
 
-[src/routes/run/+page.svelte](src/routes/run/+page.svelte) implements **Select → Configure → Review & deploy**.
-Select chooses a local model, inference network and Automatic/Priority placement.
+[src/routes/run/+page.svelte](src/routes/run/+page.svelte) implements **Select → Configure → Review & deploy** and automatically swaps between [RunPage.svelte](src/lib/modules/run/view/RunPage.svelte) (`llama.cpp`) and [PrimaRunPage.svelte](src/lib/modules/run/view/PrimaRunPage.svelte) (`prima.cpp`) via `resolveActiveEngine()` in [entities.ts](src/lib/modules/run/entities.ts) (matching Settings' engine derivation, with `?engine=prima|llama` URL query override support).
+Select chooses a local model, inference network and Automatic (`auto`, HiGHS / Profiled for Prima), Capacity-first (`capacity_first`), or Priority (`priority`) placement.
 “Must use this node” means at least one model layer; unchecked nodes remain eligible.
 Each node row shows that node's GPU names beside the node id (membership device names, or the plan's `node_gpu_names` when membership has none).
 Priority has explicit up/down actions and removal for unavailable saved entries.
 Configure begins with context, concurrent slots, response limit and thinking controls.
-Disclosures group Capacity & performance, Memory & loading, Generation defaults,
+In `llama.cpp` mode, disclosures group Capacity & performance, Memory & loading, Generation defaults,
 Model features & templates, and Expert engine options.
-[ParameterControl.svelte](src/lib/components/ParameterControl.svelte) uses descriptors, bounds, availability reasons,
+In `prima.cpp` mode ([PrimaRunPage.svelte](src/lib/modules/run/view/PrimaRunPage.svelte)):
+- Header and status strip surface model architecture compatibility (`model_support`), qualification status (`qualification_errors`), and active scheduler (`highs_halda`, `capacity_first`, `priority`).
+- Step 1 shows per-node Ring-TCP rank assignments (`Rank k → next_node_id`, `-lw`, `-ngl`), Halda MILP telemetry (`w_m`, `n_m`, memory pressure sets `M1`–`M4`, `forced M4`, `graphs`, step latency breakdown), and pruned weak workers (`pruned_nodes`), plus a one-click sanitizer if saved settings contain `llama.cpp`-only flags (`vision`, `moe_offload`).
+- Step 2 replaces `llama.cpp`-only controls with Prima-native configuration backed by `parsePrimaExtras()` / `serializePrimaExtras()` in [configuration.ts](src/lib/modules/run/configuration.ts): Sliding-Window Attention layout (`--swa-compact` / `--swa-full`), head server mode (`generation` / `--embedding` + `--pooling` / `--rerank`), managed LoRA adapters (`--lora` / `--lora-scaled`), Rank 0 CPU draft-simple speculative decoding, and `--chat-template-kwargs`.
+- Step 3 embeds Prima asset preparation and native device profiling (`Inspect placement`, `Prepare files`, `Prepare & profile`, participant status polling, and automatic estimate refresh on completion) alongside the Ring-TCP rank placement table and evaluated Halda cycle candidates (`evaluated_cycles`).
+[ParameterControl.svelte](src/lib/modules/run/view/ParameterControl.svelte) uses descriptors, bounds, availability reasons,
 inherit/automatic modes and effective values/sources/adjustments. Its scope label is “Next deployment”.
-[ExpertArguments.svelte](src/lib/components/ExpertArguments.svelte) exposes installed-engine options and structured argv;
+[ExpertArguments.svelte](src/lib/modules/run/view/ExpertArguments.svelte) exposes installed-engine options and structured argv;
 JSON arrays preserve literal values. Extra arguments can make the memory estimate incomplete.
 
-[DeploymentPlan.svelte](src/lib/components/DeploymentPlan.svelte) keeps memory totals, components, usable budgets,
-resolved settings, incomplete-estimate warnings and Refresh estimate beside the form.
+[DeploymentPlan.svelte](src/lib/modules/run/view/DeploymentPlan.svelte) keeps memory totals, components, usable budgets,
+Ring-TCP rank/port summary, HiGHS Halda scheduler summary, resolved settings, incomplete-estimate warnings and Refresh estimate beside the form.
 Review lists requested/effective/source values, highlights differences from saved configuration,
 shows device allocation and provides CLI/JSON export.
 Saving model defaults, reverting, restoring defaults and saving after successful deployment are separate actions.
@@ -299,7 +304,7 @@ The active configuration comes from status.active_config/run results; draft chan
 Plan requests debounce by 300ms, invalidate stale estimates and use remember:false.
 Progression validates fields and attempts to focus the offending control; deploy requires a ready fit and runtime readiness.
 An active model changes the final action to “Replace running model”; do not describe this as hot editing.
-[JinjaEditor.svelte](src/lib/components/JinjaEditor.svelte) uses CodeMirror/Jinja/One Dark, server validation and a 65,536-byte limit;
+[JinjaEditor.svelte](src/lib/modules/run/view/JinjaEditor.svelte) uses CodeMirror/Jinja/One Dark, server validation and a 65,536-byte limit;
 syntax checks are explicitly not model-compatibility verification.
 
 ### Activity and Connect

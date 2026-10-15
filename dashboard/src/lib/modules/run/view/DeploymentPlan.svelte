@@ -4,11 +4,18 @@
   import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   import { formatGib, formatMemoryComponent } from '#lib/shared/format-memory';
   import { runtimeRunReason } from '#lib/modules/run/runtime-readiness';
-  import type { HighsScheduleReport } from '#lib/modules/run/entities';
+  import type { HighsScheduleReport, PrimaTopology } from '#lib/modules/run/entities';
   import type { RunInteractor } from '../interactor.svelte';
-  let { presenter = createApp().run }: { presenter?: RunInteractor } = $props();
+  let {
+    presenter = createApp().run,
+    onRequestProfile
+  }: {
+    presenter?: RunInteractor;
+    onRequestProfile?: () => void;
+  } = $props();
   const plan = $derived(presenter.planResult);
   const scheduler = $derived((plan?.scheduler as HighsScheduleReport | undefined) ?? null);
+  const topology = $derived((plan?.prima_topology as PrimaTopology | undefined) ?? null);
   const runtimeBlocked = $derived(runtimeRunReason(presenter.status?.runtimes, presenter.status?.node_id ?? '', presenter.planResult));
   const resolved = $derived((plan?.resolved_launch_settings ?? {}) as Record<string, unknown>);
   const fit = $derived(String(plan?.fit_status ?? ''));
@@ -58,6 +65,9 @@
       {#if plan.vram_alloc_bytes != null}<p class="small">Estimated GPU memory: {formatGib(Number(plan.vram_alloc_bytes))}</p>{/if}
       {#if plan.cpu_alloc_bytes != null}<p class="small">Estimated master CPU RAM: {formatGib(Number(plan.cpu_alloc_bytes))}</p>{/if}
     {/if}
+    {#if topology?.ranks?.length}
+      <p class="small muted mono">Ring-TCP: {topology.ranks.length} rank(s) · ports {topology.data_port}/{topology.signal_port}</p>
+    {/if}
     {#if scheduler}
       <div class="scheduler-card stack-sm" aria-label="Prima scheduler summary">
         <div class="od-row">
@@ -68,6 +78,14 @@
           <p class="small muted">Step objective: {scheduler.objective_step_ms.toFixed(2)} ms (compute {scheduler.compute_step_ms.toFixed(2)} ms · disk reload {scheduler.disk_reload_step_ms.toFixed(2)} ms · network {scheduler.network_step_ms.toFixed(2)} ms)</p>
         {:else if scheduler.fallback_reason}
           <p class="small muted">Fallback reason: {scheduler.fallback_reason}{scheduler.missing_profile_nodes?.length ? ` (missing profiles: ${scheduler.missing_profile_nodes.join(', ')})` : ''}</p>
+          {#if scheduler.fallback_reason === 'missing_device_profiles'}
+            <p class="small muted">
+              Prepare and profile this model under <a href={routes.settingsLlama}>Settings → Prima</a> to enable HiGHS / Profiled placement.
+              {#if onRequestProfile}
+                <button type="button" class="text-button" onclick={onRequestProfile}>Prepare &amp; profile in Step 3 →</button>
+              {/if}
+            </p>
+          {/if}
         {/if}
         {#if scheduler.node_allocations?.length}
           <div class="stack-sm">
@@ -95,7 +113,7 @@
     {#if plan.hint}<p class="small warning">{String(plan.hint)}</p>{/if}
   {/if}
   {#if runtimeBlocked}
-    <p class="notice small" role="status">{runtimeBlocked} <a href={routes.settingsLlama}>Open llama.cpp settings →</a></p>
+    <p class="notice small" role="status">{runtimeBlocked} <a href={routes.settingsLlama}>{plan?.engine === 'primacpp' || presenter.status?.engine === 'primacpp' ? 'Open Prima settings →' : 'Open llama.cpp settings →'}</a></p>
   {/if}
   {#if presenter.estimateError}<ErrorMessage source="estimate" message={presenter.estimateError} snapshot={false} />{/if}
   {#if presenter.estimateNote}<p class="small muted" aria-live="polite">{presenter.estimateNote}</p>{/if}

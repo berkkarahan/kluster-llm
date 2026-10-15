@@ -60,6 +60,8 @@ def parse_device_report(
     features = capabilities.get("features")
     devices = capabilities.get("devices")
     reported_backends = capabilities.get("backends")
+    if isinstance(features, list) and any(not isinstance(feature, str) or not feature for feature in features):
+        raise ValueError("Prima capability report contains an invalid feature entry")
     if (
         capabilities.get("schema_version") != 1
         or capabilities.get("ring_protocol_version") != 1
@@ -82,12 +84,10 @@ def parse_device_report(
     ):
         raise ValueError("Prima capability report contains an invalid device entry")
     capabilities["backends"] = sorted(reported)
-    if any(not isinstance(feature, str) or not feature for feature in features):
-        raise ValueError("Prima capability report contains an invalid feature entry")
     # A pinned build may not advertise its model architectures (older pins). When it
     # does, the list must be well formed; support decisions are made from it later.
     reported_architectures = capabilities.get("architectures")
-    if reported_architectures is not None and (
+    if "architectures" in capabilities and (
         not isinstance(reported_architectures, list)
         or any(not isinstance(name, str) or not name for name in reported_architectures)
     ):

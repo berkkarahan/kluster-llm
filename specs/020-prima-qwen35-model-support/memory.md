@@ -29,31 +29,33 @@ Scratch context for this feature only. Durable knowledge belongs in `docs/memory
   flush; `rank.log` ends after the GGUF tensor-type dump.
 - Reproduces with `-ngl 0`, so it is not an offload/sizing problem.
 - The same file loads and generates correctly on this machine's llama.cpp runtime.
-- The fork already contains a `throw ... "unknown model architecture: '...'"` on the architecture
-  dispatch path, yet the process still fast-fails — so the abort origin is **not yet located**.
-  Finding it is T009.
+- M2 located and fixed the abort origin: the architecture exception escaped the
+  unguarded `llama_init_from_gpt_params` composition root. Fork commit `0972754`
+  now logs the exception and returns an empty init result; see the M2 receipt.
 
 ## Environment facts
 
-- Fork checkout: `D:\dev\prima.cpp`, branch `main` at `be162f6` (clean), tag `0.0.1` = `be162f6`.
+- Fork checkout: `D:\dev\prima.cpp`, branch `main` and remote tag `0.0.1` at
+  `bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554` (published after local CPU/Vulkan acceptance).
 - Fork source layout: monolithic `src/llama.cpp` (~31.6k lines) with an architecture enum, a
   name table, KV/metadata tables, a clean unknown-arch `throw`, two segmented-execution allowlist
   assertions, a `build_mamba_segmented` precedent, and a graph dispatch table.
-- Fork Vulkan backend `ggml/src/ggml-vulkan.cpp` currently has **no** SSM/gated-delta kernels, and
-  `ggml/include/ggml.h` lacks `GGML_OP_GATED_DELTA_NET` entirely — both must be added.
+- The M1 baseline Vulkan backend `ggml/src/ggml-vulkan.cpp` had no SSM/GDN kernels.
+  Qwen3.5 needs SSM convolution and the compositional delta-net primitives;
+  neither `SSM_SCAN` nor a fused `GATED_DELTA_NET` is used by this graph.
 - Reference upstream source available locally: `C:\Users\karah\.kllm\runtimes\9ca5f9df41e27be6\05cf2709-c8c\source`
   = llama.cpp `v0.5.0` @ `7fe450e`. It uses per-architecture files (`src/models/qwen35.cpp`,
   `qwen35moe.cpp`), a gated delta-net build base (`llm_build_delta_net_base`), vocab pre-type 46
   (`LLAMA_VOCAB_PRE_TYPE_QWEN35`) with `unicode_regex_split_custom_qwen35`, and asserts
   `n_layer_nextn == 1` for MTP. It is a **shallow** clone — a full clone is required before any
   cherry-pick/archaeology work (T003).
-- The fork has no `qwen3next`/`nextn`/`hybrid` code, so the port is additive rather than a merge.
+- The M1 baseline had no `qwen3next`/`nextn`/`hybrid` code, so the port was additive rather than a merge.
 - Kluster-side touch points: `primacpp/interactors/{recipe,build,runs,lifecycle,planner}.py`,
   `modules/inference/router_http.py` (409 codes), `modules/runtimes/interactors/source.py`
   (moved-release guard), `dashboard/src/lib/modules/run/interactor.svelte.ts` (once blocked only
   on `fit_status: overflow`), `docs/prima-integration.md` (recipe ledger),
   `specs/017-prima-integration/validation.md` (receipt conventions).
-- Current pin: Prima target `3ccb9038…`, build `6285acda-3fb`, recipe 132, digest `4169b81e…`.
+- Pre-feature pin: Prima target `3ccb9038…`, build `6285acda-3fb`, recipe 132, digest `4169b81e…`.
   llama.cpp runtime `9ca5f9df…` = upstream `v0.5.0` `7fe450e`, build `05cf2709-c8c`, loads the
   model today and is therefore the correctness oracle.
 - `vendor/prima.cpp` inside this repository is stale (tag `0.0.1` = `6d0f7c4` there).
@@ -85,8 +87,10 @@ Fork anchors verified by reading `D:\dev\prima.cpp` at `be162f6`.
   `n_v_heads = ssm_dt_rank`; `key_dim = d_state*n_group`; `value_dim = d_state*dt_rank`;
   `conv_dim = 2*key_dim + value_dim`.
 - Tensors — every layer: `attn_norm`, `attn_post_norm` (`blk.%d.post_attention_norm`),
-  `ffn_{gate,down,up}`. Full-attention layers add the Qwen3Next-style fused
-  `wqkv` (`{n_embd, n_embd_head_k*n_head*2}`) + `wo` + `attn_q_norm`/`attn_k_norm`.
+  `ffn_{gate,down,up}`. Full-attention layers add a Q projection containing
+  interleaved query/gate heads (`{n_embd, n_embd_head_k*n_head*2}`), separate K/V
+  projections (or a combined QKV tensor), `wo`, and `attn_q_norm`/`attn_k_norm`.
+  The supplied file uses separate Q/K/V tensors, not a combined QKV tensor here.
   Linear-attention (recurrent) layers add `wqkv` `{n_embd, key_dim*2+value_dim}`,
   `attn_gate` `{n_embd, value_dim}`, `ssm_conv1d` `{d_conv, conv_dim}`,
   `ssm_dt`(bias) `{dt_rank}`, `ssm_a` (`blk.%d.ssm_a`), `ssm_beta`/`ssm_alpha`
@@ -110,7 +114,7 @@ Fork anchors verified by reading `D:\dev\prima.cpp` at `be162f6`.
 ### B. ggml ops the family needs
 
 Already in the fork (no work): `ssm_conv`, `silu`, `sigmoid`, `mul_mat`, `rms_norm`,
-`rope_multi`, attention, `pad`, `diag`, `permute`, `add`, `sub`, `mul`, `view`, `cont`,
+ordinary/NeoX RoPE, attention, `pad`, `diag`, `permute`, `add`, `sub`, `mul`, `view`, `cont`,
 `transpose`, `scale`, `exp`, `neg`, `reshape`, `sum_rows`, `repeat`, `set_inplace`.
 
 Missing — **must add on CPU and Vulkan**:
@@ -120,13 +124,24 @@ Missing — **must add on CPU and Vulkan**:
 | `GGML_UNARY_OP_SOFTPLUS` + `ggml_softplus(_inplace)` | unary op | Used by the gated delta-net decay pathway |
 | `GGML_OP_FILL` + `ggml_fill(_inplace)` | op | Chunked delta-net masks |
 | `GGML_OP_TRI` + `ggml_tri` (+ `enum ggml_tri_type`) | op | Causal triangular mask |
-| `GGML_OP_CUMSUM` + `ggml_cumsum` (+ `ggml_vec_cumsum_f32`) | op | Prefix sums over the gate |
+| `GGML_OP_CUMSUM` + `ggml_cumsum` | op | Prefix sums over the gate; the scalar prefix loop is inlined in the CPU kernel |
 | `GGML_OP_SOLVE_TRI` + `ggml_solve_tri` | op | Forward substitution in chunked attention |
 | `ggml_repeat_4d` | helper only | Trivial: `GGML_OP_REPEAT` with an explicit target shape (the fork's REPEAT kernel derives the target from `dst->ne`, so no kernel work) |
 
 The chunked delta-net path is *compositional* — it needs no fused `GGML_OP_GATED_DELTA_NET`.
 The fork has no `fused_gdn_*` parameters, so the fused op and its Vulkan kernel are **not**
 needed for this feature (recorded as a deliberate scope decision, not an oversight).
+
+**M3 inventory correction:** `ggml_rope_multi` is not present in this fork. The
+earlier list incorrectly classified it as existing. Upstream text positions are
+`[p,p,p,0]` (`llama-graph.cpp::llm_graph_input_pos::set_input`), and its
+interleaved-MRoPE cache advances all four theta streams at every pair
+(`ggml-cpu/ops.cpp::ggml_mrope_cache_init`). For this file's `[11,11,10,0]`
+sections and 64 rotary dimensions, every rotated pair selects one of the first
+three streams, so the text-only rotation reduces to ordinary partial NeoX RoPE.
+The model builder must validate that reduction, or implement the missing
+multi-position operation; do not silently apply it to other section layouts or
+claim image/video support. Numerical parity is still unverified.
 
 ### C. Fork insertion points (verified line anchors at `be162f6`)
 
@@ -157,6 +172,11 @@ others, with recurrent dimensions taken from the linear layers only. The port th
 teach the fork's cache a hybrid mode (attention slots + per-layer recurrent state) — this is the
 largest structural change in M3 and must be prototyped before the graph work.
 
+Resolved in the published port with `kv_self.recurrent_state`: attention token
+rows and F32 recurrent sequence rows remain independent, including sequence
+operations and versioned paired snapshots. CPU/Vulkan save/restore/copy checks
+preserve continuation logits.
+
 ## Milestone state
 
 | Milestone | State |
@@ -164,29 +184,113 @@ largest structural change in M3 and must be prototyped before the graph work.
 | M0 spec + tracking | done (spec set authored; workman unavailable — see T002) |
 | M1 recon | **done** — frozen port list at the top of this file |
 | M2 rejection fix | **done and verified** — `common/common.cpp` + `src/llama.cpp`; receipts in `validation.md` |
-| M3 CPU correctness | not started (port list frozen; hybrid cache identified as the blocking design) |
-| M4 Vulkan kernels | not started (depends on M3) |
-| M5 segmented + capabilities | not started (allowlist anchors recorded) |
-| M6 end-to-end | not started |
-| M7 publish 0.0.1 | not started |
-| M8 recipe 133 + gate | Kluster half **implemented and tested**; pin bump blocked on M7 |
-| M9 docs/receipts | pending (partial receipts written) |
+| M3 CPU correctness | **passed** — 5/104-token prompts, 16 matching greedy pieces each versus upstream; chat and state replay/copy pass |
+| M4 Vulkan kernels | **passed locally** — original IQ blocks, compositional ops, generation/chat, state replay/copy and complete trunk/output matrix evidence on RX 9070 XT |
+| M5 segmented + capabilities | implemented; 56 registry-derived architectures, `qwen35_segmented_v1`, `highs` verified; physical distributed execution unverified |
+| M6 end-to-end | **managed Vulkan passed and left running**; managed CPU correctly refused by unchanged Vulkan-only participant policy (standalone CPU passed) |
+| M7 publish 0.0.1 | **done** — remote `main` / tag both `bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554` |
+| M8 recipe 133 + gate | **pinned and tested** — digest `27782ffb7cc01334f7305e78b1fd40550ed157d9bf8668aa3674917db40c26cf`, no qualification-policy change |
+| M9 docs/receipts | updated with published pin, managed artifacts, generation/stop/readiness and explicit limits |
 
-### Fork working state (not yet committed)
+### Fork working state
 
-`D:\dev\prima.cpp` at `be162f6` + local changes:
+`D:\dev\prima.cpp` at published `bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554`
+(includes M2 `0972754`):
 
 - `common/common.cpp`: `llama_init_from_gpt_params` is now a guarded wrapper around
   `llama_init_from_gpt_params_impl` (catches, logs, returns an empty result).
 - `src/llama.cpp`: the unknown-architecture message now reads
   `unsupported model architecture: '<name>' is not implemented by this build`.
+- `ggml/include/ggml.h`, `ggml/src/ggml.c`: append four op IDs and one unary ID
+  without renumbering existing ops; constructors, names/symbols, CPU dispatch,
+  thread planning, F32 softplus/cumsum/tri/solve, F32/F16 fill, and `repeat_4d`.
+  Cumsum follows row strides; fill/tri/solve require contiguous operands as in
+  upstream. Softplus matches upstream's `x > 20 ? x : logf(1 + expf(x))`.
+- `src/llama.cpp`: hybrid hparams and per-layer storage-width helpers;
+  `kv_self` keeps token-addressed attention rows, `recurrent_state` owns a
+  separate F32 sequence-addressed conv/SSM store. Recurrent metadata admission
+  is prepared on a shadow before attention admission. Equal-length batching,
+  state-copy/mask inputs, clear/copy/keep/remove/position transforms,
+  attention-only defrag/shift, memory sizing, and versioned paired snapshot
+  save/restore are wired. Snapshot restore checks matching terminal positions
+  and clears both stores on failure. The loader activates this layout; CPU and
+  Vulkan model-backed state checks passed.
+- `llm_build_context::build_qwen35_delta_net`: single-token autoregressive and
+  64-token compositional chunk paths ported from the pinned upstream reference.
+  `build_qwen35_linear`: input projections, sigmoid beta/softplus decay,
+  convolution history, L2-normalized/repeated Q/K heads, delta-net state update,
+  gated RMS norm and output projection. Full-attention and model/segmented
+  dispatch are connected. The V projection is flattened to Prima's cache-writer
+  contract before storage; RMS-norm views are made contiguous for Vulkan.
+- `include/llama.h`, `src/llama-vocab.cpp`, `src/unicode.cpp`, vocab loading:
+  pre-type 46, exact Qwen3.5 split expression and custom combining-mark-aware
+  splitting, with `tokenizer_clean_spaces=false` matching the reference.
+- `tests/test-qwen35-primitives.cpp`, `tests/CMakeLists.txt`: deterministic
+  primitive/tokenizer contracts, CPU thread counts 1/4, and optional exact
+  backend-device selection with no CPU fallback. Passed CPU and Vulkan; optional
+  real-GGUF tests check all eight IQ decoders/gather/matrix paths against decoded
+  original operands. `test-qwen35-state` passes CPU/Vulkan replay/copy.
+- `prima_gdn.comp`, `prima_iq.comp`, Vulkan dispatch/pipelines: depthwise
+  convolution, compositional primitives and IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S,
+  IQ4_XS original-block F32 row reductions/gather. No CPU weight dequantization
+  or model-performance claim; actual embedding lookup stays CPU by native design.
+- `llama_model_supported_architectures` derives capability names from the registry.
+  `--output-gpu` exposes the existing GPU-output selection on Vulkan as well as
+  CUDA/Metal/HIP, retaining the old CUDA-named alias.
 - Dev build tree `build-dev/` (untracked): `-DBUILD_SHARED_LIBS=OFF -DGGML_VULKAN=ON
-  -DUSE_HIGHS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5`. **Note for reproducibility:**
+  -DUSE_HIGHS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5` (initial development used
+  HiGHS OFF). **Note for reproducibility:**
   `cmake` defaults `BUILD_SHARED_LIBS=ON` here, which fails to link because
   `gpt_log_verbosity_thold` is not exported from the DLL; the recipe's
   `-DBUILD_SHARED_LIBS=OFF` is required and matches the shipped configuration.
+- Tests were enabled in the existing dev CMake tree with
+  `cmake -S . -B build-dev -DLLAMA_BUILD_TESTS=ON -DBUILD_TESTING=ON`.
+  Latest successful build targets: `llama-cli llama-server profile-tool
+  test-qwen35-primitives test-qwen35-state`.
 
-### Kluster working state (not yet committed)
+### Supplied GGUF inventory (read directly during M3; no inference run)
+
+`Underdog-Saluki-27B-1.0-IQ2-mix-MTP.gguf` reports:
+
+| Field | Observed |
+| --- | --- |
+| `block_count` / `nextn_predict_layers` | 65 / 1 — execute 64 trunk layers; skip `blk.64.*` MTP |
+| Embedding / FFN widths | 5120 / 17408 |
+| Attention heads / KV heads / head width | 24 / 4 / 256 |
+| Rotary dimensions / sections / base | 64 / `[11,11,10,0]` / 10000000 |
+| SSM conv / state / groups / value heads / inner | 4 / 128 / 16 / 48 / 6144 |
+| Full attention interval / RMS epsilon | 4 / approximately `1e-6` |
+| Linear `attn_qkv` / `attn_gate` | `[5120,10240]` / `[5120,6144]`, IQ3_S |
+| Linear conv / alpha+beta / out | `[4,10240]` F32 / `[5120,48]` Q8_0 / `[6144,5120]` IQ4_XS |
+| Full-attention Q / K / V / out | `[5120,12288]` IQ2_XXS / `[5120,1024]` IQ2_XXS / `[5120,1024]` IQ2_S / `[6144,5120]` IQ1_S |
+
+The loader subtracts MTP before ownership/cache/graph sizing. Kluster's model
+layout excludes predictor tensors from active placement while preserving the
+65-block metadata; the managed topology now reports 64 executed trunk layers.
+
+### Published recipe / managed runtime
+
+- Recipe 133 source: `bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554`, release `0.0.1`.
+- Digest: `27782ffb7cc01334f7305e78b1fd40550ed157d9bf8668aa3674917db40c26cf`.
+- Runtime ID: `97baff6d71ecd9c3d73947a5b6bb2d51f9e8a0aab50d054371d5f9a63688a165`.
+- Fresh isolated managed build: `5b2fefc0-625c-40fe-8c79-72635a93e668`, prepared.
+- Current live single-node master during managed acceptance: `049f6c77`,
+  `10.10.10.3`, RX 9070 XT. Earlier scratch IDs (`66cbaf05`, later `278bcac8`)
+  belonged to earlier local agent sessions. The idle local agent was restarted
+  to load this Python code, retaining its current key and private interface.
+- Model SHA-256: `98f6ebb527917a2541df8e667d51c3ec8a8bb135b44c606d40cc6ed924e89e52`.
+- Managed GPU acceptance: preparation `cd939c18-eaff-4ae6-a761-77845ffb9ee3`,
+  run `a617a618-0bd8-4db2-9461-70ecd0cd663d` generated and stopped normally.
+- Final live deployment: run `6cc40213-41bc-41d6-a069-7d08a43bb472`, PID 34232,
+  serving the exact Saluki ID via the Kluster gateway on port 18765 (native 8080),
+  context 2048 / one slot / F16 K/V / 64 GPU trunk layers plus GPU output.
+- Managed CPU attempt was refused with `participant_platform_backend_not_qualified`;
+  no qualification policy was weakened to bypass it. CPU preparation was cancelled.
+- `bootstrap_prima_build` rematerializes from the recipe when explicitly invoked;
+  no tracked vendored Prima source exists to restage here. The existing ignored
+  vendor cache was left untouched; this deployment uses the isolated managed source.
+
+### Kluster implementation (committed as `79ed916`)
 
 | File | Change |
 | --- | --- |
@@ -199,5 +303,9 @@ largest structural change in M3 and must be prototyped before the graph work.
 | `tests/test_prima_model_support.py` | NEW — 7 tests (support rule, GGUF arch read, report validation, pre-spawn no-spawn refusal, log tail) |
 | `tests/test_prima_integration.py` | plan-time refusal test |
 
-Full Python suite: 1737 passed, 19 skipped. Dashboard: `svelte-check` 0 errors/0 warnings,
-64 module tests + 10 browser tests passed.
+Latest full Python suite: **1741 passed, 19 skipped**, serial (`-n 0`). Parallel
+runs encountered Windows probe timeouts under native compilation and a SQLite
+two-writer PermissionError; isolated affected files passed (19/7 skipped and
+22 passed), and the complete serial run passed without changing unrelated code.
+Prior unchanged-dashboard checks: `svelte-check` 0 errors/0 warnings, 64 module
+tests + 10 browser tests passed.

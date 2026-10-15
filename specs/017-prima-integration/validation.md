@@ -1,5 +1,26 @@
 # Verification — 2026-10-10
 
+## Spec 020 continuation — 2026-10-15
+
+Recipe 133 pins fork `bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554`, release
+`0.0.1`, digest `27782ffb7cc01334f7305e78b1fd40550ed157d9bf8668aa3674917db40c26cf`.
+The dense `qwen35` port runs Saluki with 64 trunk blocks, separate recurrent state
+and skipped MTP tensors. CPU/Vulkan greedy continuations matched the pinned
+upstream reference; original IQ block checks and state replay/copy passed on the
+Windows/RX 9070 XT host. No distributed/performance qualification is inferred.
+
+A fresh isolated managed build (`5b2fefc0-625c-40fe-8c79-72635a93e668`)
+prepared runtime `97baff6d71ecd9c3d73947a5b6bb2d51f9e8a0aab50d054371d5f9a63688a165`.
+The normal managed Vulkan prepare/run/chat/stop cycle passed; the final Saluki
+deployment was left running. The exact served ID is
+`Underdog-Saluki-27B-1.0-IQ2-mix-MTP.gguf`. Managed CPU launch remained refused by
+the unchanged Vulkan-only participant policy, rather than bypassing it.
+
+Latest full serial Python suite: 1741 passed, 19 skipped. Dashboard diagnostics
+and production build passed. Full commands, artifact/model hashes, live readiness,
+parallel-test caveats and remaining limits are recorded in
+[spec 020 validation](../020-prima-qwen35-model-support/validation.md).
+
 ## Captured results
 
 | Check | Result |

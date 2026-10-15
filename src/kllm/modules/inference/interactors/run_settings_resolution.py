@@ -165,6 +165,16 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         raise HTTPException(400, "unsupported cache type")
     if result["flash_attention"] not in ("auto", "on", "off"):
         raise HTTPException(400, "flash attention must be auto, on, or off")
+    if prima and result["flash_attention"] == "auto":
+        result["flash_attention"] = "off"
+        if result["cache_type_v"] not in ("f32", "f16", "bf16"):
+            result["cache_type_v"] = "f16"
+        if result["cache_type_k"] not in ("f32", "f16", "bf16") and not any(
+            t in ("-ctk", "--cache-type-k") for t in tokens
+        ):
+            result["cache_type_k"] = "f16"
+        if body.draft_enabled() and result["draft_cache_type_v"] not in ("f32", "f16", "bf16"):
+            result["draft_cache_type_v"] = "f16"
     quantized_v = result["cache_type_v"] not in ("f32", "f16", "bf16")
     if body.draft_enabled():
         quantized_v |= result["draft_cache_type_v"] not in ("f32", "f16", "bf16")
@@ -174,8 +184,6 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         )
     if result["flash_attention"] == "auto" and quantized_v:
         result["flash_attention"] = "on"
-    if prima and result["flash_attention"] == "auto":
-        result["flash_attention"] = "off"
     if result["threads"] > available_threads():
         raise HTTPException(400, f"threads must be 1–{available_threads()} on the master")
     result["requested_batch_size"] = result["batch_size"]

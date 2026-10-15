@@ -166,7 +166,10 @@ def collect_links(control, manifest, operation_id, check, progress):
 
     measured = []
     pairs = sorted(profile_pairs(manifest))
-    for source, target in pairs:
+    total_pairs = len(pairs)
+    for index, (source, target) in enumerate(pairs, start=1):
+        if hasattr(control, "_on_link_progress"):
+            control._on_link_progress(operation_id, index - 1, total_pairs, source, target)
         scope = StreamScope(
             probe_id=uuid4(),
             operation_id=UUID(operation_id),
@@ -219,5 +222,7 @@ def collect_links(control, manifest, operation_id, check, progress):
         measured.append(
             {"scope": scope.model_dump(mode="json"), **receipt, "received_at": time.time()}
         )
+        if hasattr(control, "_on_link_progress"):
+            control._on_link_progress(operation_id, index, total_pairs, source, target)
         progress()
     return measured

@@ -151,6 +151,10 @@ def test_device_report_validates_the_advertised_architectures():
     for malformed in ([1, 2], ["qwen35", ""], "qwen35", {"qwen35": True}):
         with pytest.raises(ValueError, match="model architecture list"):
             parse_device_report(install, _report(malformed))
+    report = json.loads(_report().split("KLLM_PRIMA_CAPABILITIES=", 1)[1])
+    report["architectures"] = None
+    with pytest.raises(ValueError, match="model architecture list"):
+        parse_device_report(install, "KLLM_PRIMA_CAPABILITIES=" + json.dumps(report))
 
 
 def test_device_report_rejects_malformed_feature_entries():
@@ -161,6 +165,11 @@ def test_device_report_rejects_malformed_feature_entries():
             _report(features=["layer_window", "tensor_split", "ngl", "ring_tcp",
                               "execution_manifest_v1", 7]),
         )
+
+    for nested in ({"qwen35_segmented_v1": True}, ["qwen35_segmented_v1"]):
+        with pytest.raises(ValueError, match="feature entry"):
+            parse_device_report(install, _report(features=["layer_window", "tensor_split", "ngl", "ring_tcp",
+                                                         "execution_manifest_v1", nested]))
     with pytest.raises(ValueError, match="feature entry"):
         parse_device_report(
             install,

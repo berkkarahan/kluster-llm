@@ -45,21 +45,76 @@ _latest_terminal: dict[str, Any] | None = None
 _samples: deque[tuple[float, int]] = deque()
 
 
-def begin(model_name: str, pid: int, total_bytes: int) -> None:
-    """Arm progress sampling for a freshly launched inference process."""
+def begin(
+    model_name: str,
+    pid: int | None,
+    total_bytes: int,
+    *,
+    detail: str | None = None,
+) -> None:
+    """Arm progress sampling for a freshly launched or staging inference run."""
     global _active
     with _lock:
         stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         _active = {
             "operation_id": str(uuid.uuid4()),
             "model": model_name,
-            "pid": int(pid),
+            "pid": int(pid) if pid is not None else None,
             "total_bytes": max(0, int(total_bytes)),
+            "bytes_loaded": 0,
+            "fraction": 0.0,
+            "phase": "starting",
+            "detail": detail,
             "started_at": stamp,
             "updated_at": stamp,
             "finished_at": None,
         }
         _samples.clear()
+
+
+def update(
+    *,
+    pid: int | None = None,
+    bytes_loaded: int | None = None,
+    total_bytes: int | None = None,
+    fraction: float | None = None,
+    phase: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Update active load progress during pre-spawn staging, rank startup, or loading."""
+    with _lock:
+        if _active is None or _active.get("phase") in {"ready", "error", "cancelled"}:
+            return
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if pid is not None:
+            _active["pid"] = int(pid)
+        if total_bytes is not None:
+            _active["total_bytes"] = max(0, int(total_bytes))
+        if bytes_loaded is not None:
+            loaded = max(0, int(bytes_loaded))
+            _active["bytes_loaded"] = loaded
+            _record_sample(loaded)
+        if fraction is not None:
+            _active["fraction"] = round(max(0.0, min(1.0, float(fraction))), 4)
+        if phase is not None:
+            _active["phase"] = phase
+        if detail is not None:
+            _active["detail"] = detail
+        _active["updated_at"] = stamp
+
+
+def fail(error: str) -> None:
+    """Transition the active load into an error state."""
+    with _lock:
+        active = dict(_active) if _active is not None else None
+    if active is not None and active.get("phase") not in {"ready", "error", "cancelled"}:
+        _terminal_snapshot(
+            active,
+            "error",
+            int(active.get("bytes_loaded") or 0),
+            float(active.get("fraction") or 0.0),
+            error,
+        )
 
 
 def end() -> None:
@@ -139,6 +194,7 @@ def sample(infer_port: int) -> dict[str, Any]:
             "fraction": 0.0,
             "rate_bps": None,
             "eta_seconds": None,
+            "detail": None,
             "started_at": None,
             "updated_at": None,
             "finished_at": None,
@@ -154,8 +210,48 @@ def sample(infer_port: int) -> dict[str, Any]:
     if active.get("phase") in {"ready", "error", "cancelled"}:
         return active
 
-    pid = active["pid"]
-    total = active["total_bytes"]
+    pid = active.get("pid")
+    total = int(active.get("total_bytes") or 0)
+    reported_loaded = int(active.get("bytes_loaded") or 0)
+    reported_fraction = float(active.get("fraction") or 0.0)
+    detail = active.get("detail")
+
+    if pid is None:
+        loaded = reported_loaded
+        fraction = (
+            reported_fraction
+            if reported_fraction > 0
+            else (min(1.0, loaded / total) if total > 0 else 0.0)
+        )
+        phase = active.get("phase") or ("loading" if loaded > 0 else "starting")
+        with _lock:
+            if len(_samples) >= 2:
+                t0, b0 = _samples[0]
+                t1, b1 = _samples[-1]
+                dt = t1 - t0
+                rate = (b1 - b0) / dt if dt > 0 and b1 > b0 else None
+            else:
+                rate = None
+            eta = (
+                max(0.0, (total - loaded) / rate)
+                if rate is not None and rate > 0 and total > loaded
+                else None
+            )
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return {
+            "operation_id": active["operation_id"],
+            "phase": phase,
+            "model": active["model"],
+            "bytes_loaded": loaded,
+            "bytes_total": total,
+            "fraction": round(fraction, 4),
+            "rate_bps": rate,
+            "eta_seconds": eta,
+            "detail": detail,
+            "started_at": active["started_at"],
+            "updated_at": stamp,
+            "finished_at": None,
+        }
 
     if not _alive(pid):
         terminal = _terminal_snapshot(
@@ -168,9 +264,10 @@ def sample(infer_port: int) -> dict[str, Any]:
         return terminal if terminal is not None else sample(infer_port)
 
     rss = _rss_bytes(pid)
-    loaded = rss if rss is not None else 0
-    fraction = min(1.0, loaded / total) if total > 0 else 0.0
-    phase = "loading" if loaded > 0 else "starting"
+    loaded = max(rss if rss is not None else 0, reported_loaded)
+    raw_fraction = min(1.0, loaded / total) if total > 0 else 0.0
+    fraction = max(reported_fraction, raw_fraction)
+    phase = "loading" if loaded > 0 or reported_fraction > 0 else "starting"
     with _lock:
         # Drop samples if begin()/end() raced us away.
         if _active is None or _active.get("operation_id") != active["operation_id"]:
@@ -192,6 +289,7 @@ def sample(infer_port: int) -> dict[str, Any]:
         "fraction": round(fraction, 4),
         "rate_bps": rate,
         "eta_seconds": eta,
+        "detail": detail,
         "started_at": active["started_at"],
         "updated_at": stamp,
         "finished_at": None,
@@ -216,6 +314,7 @@ def _terminal_snapshot(
         "fraction": fraction,
         "rate_bps": None,
         "eta_seconds": None,
+        "detail": active.get("detail"),
         "started_at": active["started_at"],
         "updated_at": stamp,
         "finished_at": stamp,

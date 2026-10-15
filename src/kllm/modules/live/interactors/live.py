@@ -127,7 +127,7 @@ class LiveFeed:
             cached = self._areas.get(topic)
             age_limit = (
                 0.5
-                if topic == "download"
+                if topic in ("download", "load")
                 else 30
                 if cached and cached[1]["availability"] == "denied"
                 else 1
@@ -188,7 +188,7 @@ class LiveFeed:
             cached = self._areas.get(topic)
             age_limit = (
                 0.5
-                if topic == "download"
+                if topic in ("download", "load")
                 else 30
                 if cached and cached[1]["availability"] == "denied"
                 else 1

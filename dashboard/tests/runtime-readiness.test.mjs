@@ -26,3 +26,11 @@ test('missing selection is actionable without treating unknown data as readiness
   assert.match(runtimeRunReason({nodes: []}, 'master', null), /Choose and prepare/);
   assert.match(runtimeRunReason({target: {version: {runtime_id: 'target'}}, nodes: []}, 'master', null), /master/);
 });
+
+test('the readiness reason names the selected engine', () => {
+  const prima = structuredClone(library);
+  prima.target.version.engine = 'primacpp';
+  prima.nodes[1].prepared.runtime_id = 'stale';
+  assert.match(runtimeRunReason(prima, 'master', {runtime_required_nodes: ['master', 'selected']}),
+    /Prepare the target Prima version on selected\./);
+});

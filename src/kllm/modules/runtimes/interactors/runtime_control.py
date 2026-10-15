@@ -353,6 +353,9 @@ class RuntimeControlService:
         data["reconcile_error"] = self.reconcile_error or (
             target_error if kind == "binding_stale" else None
         )
+        prima_ctrl = getattr(self, "prima", None)
+        if prima_ctrl is not None and hasattr(prima_ctrl, "latest_preparation"):
+            data["prima_preparation"] = prima_ctrl.latest_preparation()
         return data
 
     @contextmanager

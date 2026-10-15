@@ -18,7 +18,7 @@ DEFAULT_RECIPE: dict[str, Any] = {
     "schema_version": 2,
     "upstream_repository": "https://github.com/OpenCPIL/prima.cpp.git",
     "upstream_commit": "288df6a2cc2120387e12d6f40798f30cc525c9ea",
-    "build_recipe_version": 132,
+    "build_recipe_version": 133,
     "dependencies": {
         "libzmq": "622fc6dde99ee172ebaa9c8628d85a7a1995a21d",
         "cppzmq": "c94c20743ed7d4aa37835a5c46567ab0790d4acc",
@@ -39,8 +39,8 @@ DEFAULT_RECIPE: dict[str, Any] = {
     },
     "source_repository": "https://github.com/berkkarahan/prima.cpp.git",
     "source_release": "0.0.1",
-    "source_release_commit": "be162f6bdad8aa72efec41ac7f898574b80f76a1",
-    "source_commit": "be162f6bdad8aa72efec41ac7f898574b80f76a1",
+    "source_release_commit": "bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554",
+    "source_commit": "bfef1ac1277dd5d260cfc7d3397ac23b9cf1c554",
 }
 
 

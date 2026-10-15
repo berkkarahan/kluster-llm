@@ -39,6 +39,7 @@ class ModelStager:
         *,
         check: Callable[[], None],
         reserve_bytes: int = 64 * 1024 * 1024,
+        progress: Callable[[int, int], None] | None = None,
     ) -> Path:
         if isinstance(size, bool) or size <= 0 or reserve_bytes < 0:
             raise ValueError("Model size and disk reserve must be valid")
@@ -49,12 +50,16 @@ class ModelStager:
         final, partial = self._paths(digest)
         offset = self.offset(digest)
         if final.exists() and final.stat().st_size == size and file_digest(final) == digest:
+            if progress is not None:
+                progress(size, size)
             return final
         if offset > size:
             partial.unlink()
             offset = 0
         if self.disk_free(self.root) < size - offset + reserve_bytes:
             raise ValueError("Not enough disk space to stage the selected model")
+        if progress is not None:
+            progress(offset, size)
         with partial.open("ab") as output:
             for chunk in chunks(offset):
                 check()
@@ -62,6 +67,8 @@ class ModelStager:
                     raise ValueError("Model transfer exceeds the declared asset size")
                 output.write(chunk)
                 offset += len(chunk)
+                if progress is not None:
+                    progress(offset, size)
         check()
         if offset != size:
             raise ValueError("Model transfer incomplete; resume from the cached offset")
@@ -70,4 +77,6 @@ class ModelStager:
             raise ValueError("Model transfer digest mismatch; retry from the beginning")
         check()
         replace_file(partial, final)
+        if progress is not None:
+            progress(size, size)
         return final

@@ -37,7 +37,7 @@ from kllm.modules.primacpp.interactors.profiles import (
 )
 from kllm.modules.primacpp.interactors.recipe import recipe, recipe_digest, require_qualified
 from kllm.modules.primacpp.interactors.staging import ModelStager
-from kllm.modules.runtimes.entities import SourceRequest, RuntimeVersion, runtime_id
+from kllm.modules.runtimes.entities import BuildRequest, SourceRequest, RuntimeVersion, runtime_id
 from kllm.modules.runtimes.interactors.source import resolve
 from kllm.modules.runtimes.interactors.registry import RuntimeRegistry, file_digest
 from kllm.modules.runtimes.interactors.runtime_control import RuntimeControlService
@@ -143,6 +143,36 @@ def test_prima_stale_saved_build_is_retained_but_requires_rebuild(tmp_path):
         registry.close()
 
 
+def test_prima_stale_pin_never_reaches_the_installer(tmp_path):
+    """A pin saved under an earlier recipe is refused before any build starts."""
+    definition = recipe()
+    old_digest = "0" * 64
+    stale = RuntimeVersion(
+        engine="primacpp", repository=definition["source_repository"],
+        ref=definition["source_commit"], ref_type="commit",
+        commit=definition["source_commit"], recipe_digest=old_digest,
+        runtime_id=runtime_id(
+            definition["source_repository"], definition["source_commit"], "primacpp", old_digest
+        ),
+    )
+    started = []
+    registry = RuntimeRegistry(
+        tmp_path, lambda: tmp_path,
+        builder=lambda version, backend, identity: started.append(identity),
+    )
+    try:
+        registry.add(stale)
+        with pytest.raises(ValueError, match="resolve the source again"):
+            registry.build(BuildRequest(
+                runtime_id=stale.runtime_id, backend="vulkan", request_id=str(uuid4()),
+            ))
+        assert started == []
+        assert registry.data["jobs"] == {}
+        assert registry.data["versions"][stale.runtime_id]["build"] is None
+    finally:
+        registry.close()
+
+
 def test_prima_snapshot_reports_probed_build_capabilities(tmp_path):
     """The managed build manifest's capability probe reaches the dashboard."""
     version = prima_version()
@@ -222,6 +252,7 @@ def test_prima_snapshot_publishes_the_pinned_release(tmp_path):
         source = registry.snapshot()["engine_sources"][0]
         assert source["release"] == definition["source_release"]
         assert source["release_commit"] == definition["source_release_commit"] == definition["source_commit"]
+        assert source["recipe_digest"] == recipe_digest()
     finally:
         registry.close()
 
@@ -487,6 +518,36 @@ def test_preview_refuses_a_family_the_runtime_does_not_implement(tmp_path, monke
     )
     assert unknown["inference_supported"] is True
     assert any("PRIMA_MODEL_SUPPORT_UNKNOWN" in w for w in unknown["qualification_warnings"])
+
+
+def test_preview_reports_a_measured_decline_instead_of_missing_profiles(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = plan()
+    members_value = members()
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": []}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+
+    def declined(feasible):
+        return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None,
+            "reason": "Profiled costs do not cover these effective execution settings: f16 K/V cache"}
+
+    result = planner.preview(body, runtime, members_value, model, lambda *_: source, score=declined)
+    assert result["scheduler"]["fallback_reason"].startswith("Profiled costs do not cover")
+    assert result["scheduler"]["missing_profile_nodes"] == []
+    assert result["profiling"]["status"] == "unmeasured"
+    assert result["profiling"]["reason"].startswith("Profiled costs do not cover")
+
+    # Without a measured reason the honest missing-profile gate is preserved.
+    def silent(feasible):
+        return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None}
+
+    plain = planner.preview(body, runtime, members_value, model, lambda *_: source, score=silent)
+    assert plain["scheduler"]["fallback_reason"] == "missing_device_profiles"
+    assert plain["scheduler"]["missing_profile_nodes"]
 
 
 @pytest.mark.parametrize("change", [{"split_mode": "tensor"}, {"expert_offloaded": True}])

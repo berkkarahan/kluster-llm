@@ -107,6 +107,16 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
             members=selected_members,
             base_plan=plan,
         )
+        measured_reason = profiling.get("reason") if isinstance(profiling, dict) else None
+        if (scheduler_report.fallback_reason == "missing_device_profiles"
+                and scheduler_report.requested_strategy == "auto"
+                and isinstance(measured_reason, str) and measured_reason):
+            # The measured scorer declined for a concrete reason; never claim
+            # profiles are missing when they merely do not cover this candidate.
+            scheduler_report = scheduler_report.model_copy(update={
+                "fallback_reason": measured_reason,
+                "missing_profile_nodes": [],
+            })
         profiling = {
             **(profiling if isinstance(profiling, dict) else {}),
             "scheduler": scheduler_report.model_dump(),

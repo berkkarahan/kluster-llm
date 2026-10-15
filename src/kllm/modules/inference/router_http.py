@@ -214,7 +214,7 @@ class InferenceHandlers:
             effective = effective_configuration(body, plan_result, path)
             try:
                 launched = self._deps.prima_run(body, path, plan_result, members)
-            except ValueError as error:
+            except (ValueError, RuntimeError) as error:
                 raise HTTPException(409, detail={"code": "PRIMA_RUN_REFUSED", "message": str(error)}) from None
             effective.update({"process_pid": launched["launch"]["pid"], "run_id": launched["run_id"],
                               "engine": "primacpp", "runtime": snapshot(),

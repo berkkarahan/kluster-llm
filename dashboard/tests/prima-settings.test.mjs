@@ -224,7 +224,7 @@ test('Prima settings swaps the runtime section on the engine mode and keeps llam
         assert.match(text, /0 of 6 passed/i);
         assert.match(text, /Runtime identity/);
         assert.match(text, /Qualification gates/);
-        assert.match(text, /Managed build/);
+        assert.match(text, /Build & run/);
         assert.match(text, /control-box/);
         assert.match(text, /10\.10\.10\.2/);
         assert.match(text, /Blocked by qualification/i);
@@ -251,6 +251,128 @@ test('Prima settings swaps the runtime section on the engine mode and keeps llam
       assert.doesNotMatch(llamaText, /Prima is not qualified for inference/);
       assert.equal(await evaluate("[...document.querySelectorAll('.settings-nav button')].some(b => b.textContent.trim() === 'llama.cpp')"), true);
       const shot=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,'llama-1440.png'),Buffer.from(shot.data,'base64'));
+    } finally {
+      socket?.close(); browser?.kill();
+      if(browser && browser.exitCode===null)await new Promise(r=>browser.once('exit',r));
+      await vite?.close();if(server)await new Promise(r=>server.close(r));
+      removeBrowserProfile(profile);
+    }
+  });
+
+test('a Prima pin saved under an earlier recipe is surfaced as stale and recovered by re-resolving',
+  { skip: !chrome && 'Chrome required for Prima stale-pin browser check' }, async () => {
+    const primaRepo = 'https://github.com/berkkarahan/prima.cpp.git';
+    const staleDigest = '2'.repeat(64);
+    // The saved pin: the source commit the recipe still names, but an earlier
+    // recipe digest — it can never be built again.
+    const stale = {
+      name: 'Prima.cpp 0.0.1', engine: 'primacpp', repository: primaRepo, ref: '0.0.1',
+      ref_type: 'tag', commit: '1'.repeat(40), runtime_id: '5'.repeat(64), recipe_digest: staleDigest
+    };
+    const currentDigest = '9'.repeat(64);
+    const currentId = '6'.repeat(64);
+    const staleBuild = { runtime_id: stale.runtime_id, commit: stale.commit, build_id: 'fixture',
+      backend: 'vulkan', recipe_digest: staleDigest, transport: 'prima-ring-tcp', size_bytes: 512 * 1024 ** 2 };
+    // The mismatch is the only blocking reason: the six gate ids still pass, so
+    // the panel must not render an empty reason list.
+    const library = {
+      versions: [{ version: stale, build: staleBuild, inference_supported: false, qualification_errors: ['qualification_identity_mismatch'] }],
+      jobs: [], selected: null,
+      bootstrap: { repository: 'https://github.com/ggml-org/llama.cpp.git', ref: 'v0.5.0' },
+      target: { version: stale, revision: 33, cluster_binding_id: 'fixture', master_node_id: 'master' }, running: null,
+      engine_sources: [{ engine: 'primacpp', repository: primaRepo, ref: stale.commit, ref_type: 'commit',
+        release: '0.0.1', release_commit: stale.commit, recipe_digest: currentDigest, qualification_errors: [] }],
+      nodes: [{ node_id: 'master', name: 'control-box', address: '10.10.10.1', role: 'master', capability: 1, phase: 'failed' }]
+    };
+    const status = () => ({ role: 'master', node_id: 'master', members: {}, process_pid: 99,
+      process_role: 'master', inference_up: false, engine: 'primacpp', runtimes: library, capacity: { backend: 'vulkan' },
+      accel_backend: 'vulkan', software: { git_head: 'fixture', llama_release: 'v0.5.0' } });
+    const commands = [];
+    const profile = mkdtempSync(join(tmpdir(), 'kllm-prima-stale-'));
+    const screenshots = resolve('../artifacts/prima-settings');
+    mkdirSync(screenshots, { recursive: true });
+    let vite, server, browser, socket;
+    try {
+      vite = await createServer({server: {middlewareMode: true, hmr: false, ws: false, watch: null}, appType: 'custom'});
+      server = httpServer(async (req, res) => {
+        const url = new URL(req.url, 'http://fixture'), path = url.pathname;
+        const json = (value, code = 200) => res.writeHead(code, {'Content-Type': 'application/json'}).end(JSON.stringify(value));
+        if (!path.startsWith('/v2/')) return vite.middlewares(req, res, () => res.writeHead(404).end());
+        if (req.method !== 'GET') {
+          let raw = ''; for await (const chunk of req) raw += chunk;
+          const value = raw ? JSON.parse(raw) : {};
+          commands.push({path, value});
+          if (path === '/v2/node/runtimes/resolve') return json({...value, commit: stale.commit, recipe_digest: currentDigest, runtime_id: currentId});
+          if (path === '/v2/node/runtimes') library.versions.push({version: value, build: null, inference_supported: true, qualification_errors: []});
+          if (path === '/v2/cluster/runtime-target') {
+            const version = library.versions.find(entry => entry.version.runtime_id === value.runtime_id)?.version ?? value;
+            library.target = {version, revision: value.expected_revision + 1, cluster_binding_id: 'fixture', master_node_id: 'master'};
+          }
+          return json({ok: true});
+        }
+        if (path === '/v2/node/runtimes') return json(library);
+        if (path === '/v2/credentials/api-token') return json({api_token: 'fixture-token'});
+        if (path === '/v2/node') return json(status());
+        if (path === '/v2/node/home') return json({home: '/fixture', models: '/fixture/models', logs: '/fixture/logs'});
+        if (path === '/v2/node/config') return json({device: 'gpu', gpu_ids: [0], ram_percent: 80, vram_percent: 80, accel_backend: 'vulkan', engine: 'primacpp'});
+        if (path === '/v2/node/devices') return json({devices: [], backend: 'vulkan', installed_backends: ['vulkan'], allowed_backends: ['vulkan']});
+        if (path === '/v2/node/prima-devices') return json({available: false, features: [], backends: [], devices: []});
+        if (path === '/v2/models') return json({data: []});
+        if (path === '/v2/events') {
+          const area = data => ({revision: 1, sampled_at: new Date().toISOString(), availability: 'available', coverage: 'local', upstream_last_success_at: null, error: null, data});
+          const areas = {status: area(status()), usage: area({nodes: {}, relationships: [], recording: {recording: 'stopped'}}), load: area({current: null, last_terminal: null}), download: area({current: null, last_terminal: null})};
+          const topics = url.searchParams.get('topics')?.split(',') ?? Object.keys(areas);
+          return json({version: 1, transport: 'websocket', epoch: '00000000-0000-4000-8000-000000000004', server_time: new Date().toISOString(),
+            areas: Object.fromEntries(topics.filter(t => t in areas).map(t => [t, areas[t]])), logs: null});
+        }
+        return json({});
+      });
+      await new Promise(r => server.listen(0, '127.0.0.1', r));
+      const base = `http://127.0.0.1:${server.address().port}`;
+      browser = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], {stdio: 'ignore'});
+      for (let i=0; i<100 && !existsSync(join(profile, 'DevToolsActivePort')); i++) await pause(100);
+      const port = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0];
+      const tab = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(t => t.type === 'page');
+      socket = new WebSocket(tab.webSocketDebuggerUrl);
+      await new Promise(r => socket.onopen = r);
+      let id=0; const pending = new Map();
+      socket.onmessage = ({data}) => {const message=JSON.parse(data); pending.get(message.id)?.(message); pending.delete(message.id);};
+      async function call(method, params={}) {
+        const request = ++id;
+        const result = new Promise((resolve, reject) => {const timer=setTimeout(()=>reject(new Error(method)), 15000);pending.set(request,m=>{clearTimeout(timer);resolve(m);});});
+        socket.send(JSON.stringify({id:request,method,params}));
+        const message=await result; assert.equal(message.error,undefined);return message.result;
+      }
+      async function evaluate(expression) {const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});assert.equal(r.exceptionDetails,undefined,JSON.stringify(r.exceptionDetails));return r.result.value;}
+      async function wait(expression) {for(let i=0;i<100;i++){if(await evaluate(`Boolean(${expression})`))return;await pause(100);}assert.fail(`Timeout: ${expression}; ${await evaluate('document.body.innerText')}`);}
+      async function click(text) {await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)} && b.getClientRects().length).click()`);}
+      async function navigate(section) {await call('Page.navigate',{url:`${base}/settings?section=${section}`});await wait("document.querySelector('.settings-nav')");await evaluate('document.fonts.ready');await pause(150);}
+
+      // Stale state: the saved pin belongs to an earlier recipe and says so,
+      // including the identity-mismatch reason no gate label covers.
+      await call('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+      await navigate('prima');
+      const staleText = await evaluate('document.body.innerText');
+      assert.match(staleText, /build stale · recipe changed/i);
+      assert.match(staleText, /The saved pin is stale/);
+      assert.match(staleText, /blocked by stale build/i);
+      assert.match(staleText, /Inference remains blocked while qualification is incomplete: qualification identity mismatch\./);
+      const shot=await call('Page.captureScreenshot',{format:'png'});writeFileSync(join(screenshots,'prima-stale-1440.png'),Buffer.from(shot.data,'base64'));
+
+      // Recover: the install action re-resolves the release against the current
+      // recipe instead of reusing the saved (stale) identity; past builds stay.
+      assert.equal(await evaluate("[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Install 0.0.1 and set target').disabled"), false);
+      await click('Install 0.0.1 and set target');
+      await wait("!document.body.innerText.includes('The saved pin is stale')");
+      assert.deepEqual(commands.map(c => c.path), ['/v2/node/runtimes/resolve', '/v2/node/runtimes', '/v2/cluster/runtime-target']);
+      assert.deepEqual([commands[0].value.engine, commands[0].value.ref, commands[0].value.ref_type], ['primacpp', '0.0.1', 'tag']);
+      assert.equal(commands[1].value.runtime_id, currentId);
+      assert.equal(commands[2].value.runtime_id, currentId);
+      assert.equal(commands[2].value.expected_revision, 33);
+      const recovered = await evaluate('document.body.innerText');
+      assert.match(recovered, /build required/i);
+      assert.doesNotMatch(recovered, /build stale/i);
+      assert.equal(library.versions.length, 2);
     } finally {
       socket?.close(); browser?.kill();
       if(browser && browser.exitCode===null)await new Promise(r=>browser.once('exit',r));

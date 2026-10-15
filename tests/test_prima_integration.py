@@ -455,6 +455,40 @@ def test_preview_refuses_missing_segmented_graph_capacity(tmp_path, monkeypatch)
     assert preview()["inference_supported"] is True
 
 
+def test_preview_refuses_a_family_the_runtime_does_not_implement(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = plan()
+    runtime = {
+        "runtime_id": "a" * 64,
+        "capabilities": {"features": [], "architectures": ["llama", "qwen35"]},
+    }
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+    monkeypatch.setattr(planner, "model_architecture", lambda _: "kolibri1")
+
+    blocked = planner.preview(body, runtime, members(), model, lambda *_: source)
+    assert blocked["inference_supported"] is False
+    assert blocked["model_support"]["supported"] is False
+    assert any("PRIMA_MODEL_UNSUPPORTED" in error for error in blocked["qualification_errors"])
+
+    monkeypatch.setattr(planner, "model_architecture", lambda _: "qwen35")
+    allowed = planner.preview(body, runtime, members(), model, lambda *_: source)
+    assert allowed["inference_supported"] is True
+    assert allowed["qualification_warnings"] == []
+    assert allowed["model_support"] == {"supported": True, "error": None, "warning": None}
+
+    # A runtime that does not advertise its families plans with a warning, never a refusal.
+    monkeypatch.setattr(planner, "model_architecture", lambda _: None)
+    unknown = planner.preview(
+        body, {**runtime, "capabilities": {"features": []}}, members(), model, lambda *_: source
+    )
+    assert unknown["inference_supported"] is True
+    assert any("PRIMA_MODEL_SUPPORT_UNKNOWN" in w for w in unknown["qualification_warnings"])
+
+
 @pytest.mark.parametrize("change", [{"split_mode": "tensor"}, {"expert_offloaded": True}])
 def test_incompatible_placement_is_not_approximated(change):
     with pytest.raises(ValueError, match="compatibility"):

@@ -18,6 +18,29 @@ from kllm.modules.primacpp.interactors.execution import inventory_identity, auth
 from kllm.modules.runtimes.interactors.selection import snapshot
 from kllm.modules.primacpp.interactors.adapters import adapter_paths
 
+RANK_LOG_TAIL_BYTES = 4096
+
+
+def rank_log_tail(path: Path, *, max_bytes: int = RANK_LOG_TAIL_BYTES) -> str:
+    """Trailing text of a rank log, so a native startup failure stays diagnosable."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read(max_bytes)
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+
+
+def _exit_before_readiness(root: Path, run_id: str, *, max_chars: int = 2000) -> str:
+    """Readiness failure text carrying the rank log tail that explains it."""
+    tail = rank_log_tail(root / run_id / "rank.log")
+    if not tail:
+        return "Prima exited before model readiness"
+    return f"Prima exited before model readiness; rank log tail: {tail[-max_chars:]}"
+
 
 class LocalPrimaRuns:
     def __init__(self, control):
@@ -131,7 +154,7 @@ class LocalPrimaRuns:
             self._check()
             with self.control.rank.lock:
                 if not self.control.rank._owned_child_alive():
-                    raise ValueError("Prima exited before model readiness")
+                    raise ValueError(_exit_before_readiness(self.control.rank.root, manifest.run_id))
             if time.monotonic() - renewed >= 5:
                 self.control.rank.renew(manifest.run_id, self._check)
                 renewed = time.monotonic()

@@ -554,7 +554,17 @@ export class RunInteractor {
     if (this.status?.role !== 'master') return 'Start as cluster master before Plan & Run.';
     const members = this.status?.members ?? {};
     if (Object.keys(members).length === 0) return 'Register at least one cluster member.';
+    const unsupported = this.planUnsupportedReason();
+    if (unsupported) return unsupported;
     return null;
+  }
+
+  /** Same detail code the API returns, so the dashboard refuses before a request is sent. */
+  planUnsupportedReason(): string | null {
+    if (this.planResult?.inference_supported !== false) return null;
+    const errors = this.planResult.qualification_errors;
+    if (Array.isArray(errors) && errors.length) return String(errors[0]);
+    return 'This model cannot run on the selected engine and runtime.';
   }
 
   validateRunSettings(explicit = false): boolean {

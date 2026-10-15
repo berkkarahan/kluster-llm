@@ -12,6 +12,7 @@ from kllm.modules.primacpp.interactors.execution import (
     ExecutionManifest,
     require_execution_capabilities,
 )
+from kllm.modules.primacpp.interactors.model_support import require_model_support
 from kllm.modules.runtimes.interactors.registry import atomic_json
 from kllm.shared.runtime_resources import prima_scope
 
@@ -104,6 +105,8 @@ class RankSupervisor:
                     observe_participant(runtime, self.node_id, local_rank, manifest.backends[self.node_id]))
             require_qualified(runtime, context=manifest_context(manifest, runtime, devices=selected))
         require_execution_capabilities(manifest, runtime.get("capabilities", {}))
+        # Refuse a family this build cannot load before any process or reservation exists.
+        require_model_support(model, runtime.get("capabilities", {}))
         rank = next((r for r in manifest.ranks if r.node_id == self.node_id), None)
         if rank is None:
             raise ValueError("This node is not a manifest participant")

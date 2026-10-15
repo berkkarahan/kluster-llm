@@ -17,6 +17,7 @@ from kllm.modules.primacpp.interactors.execution import (
 from kllm.modules.primacpp.interactors.placement import (
     topology_from_plan, network_edges, require_layer_execution,
 )
+from kllm.modules.primacpp.interactors.model_support import architecture_support, model_architecture
 from kllm.modules.primacpp.interactors.platforms import normalize_platform
 from kllm.modules.primacpp.interactors.recipe import qualification_errors
 from kllm.modules.runtimes.entities import body_digest
@@ -146,6 +147,10 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
             })
         except ValueError as error:
             errors = [*errors, str(error)]
+    support = architecture_support(model_architecture(model), runtime.get("capabilities") or {})
+    if support["error"]:
+        errors = [*errors, support["error"]]
+    warnings = [support["warning"]] if support["warning"] else []
     return {
         **plan,
         "engine": "primacpp",
@@ -163,6 +168,8 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         "placement_mode": scheduler_report.scheduler_mode,
         "inference_supported": not errors,
         "qualification_errors": errors,
+        "qualification_warnings": warnings,
+        "model_support": support,
     }
 
 

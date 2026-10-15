@@ -200,10 +200,14 @@ class NetworkStore:
         if raw:
             try:
                 loaded = json.loads(raw)
-                if isinstance(loaded, dict) and int(loaded.get("build_recipe_version", 0)) >= int(
-                    DEFAULT_RECIPE["build_recipe_version"]
-                ):
-                    return loaded
+                if isinstance(loaded, dict):
+                    version = int(loaded.get("build_recipe_version", 0))
+                    default_version = int(DEFAULT_RECIPE["build_recipe_version"])
+                    if version > default_version or (
+                        version == default_version
+                        and loaded.get("qualification") == DEFAULT_RECIPE["qualification"]
+                    ):
+                        return loaded
             except (ValueError, TypeError):
                 pass
         return self.set_prima_recipe(DEFAULT_RECIPE)

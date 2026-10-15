@@ -988,15 +988,27 @@ target_link_libraries(rpc-server ggml-rpc)
     return commit
 
 
+def _load_install(root: Path | None = None):
+    import importlib.util
+    import sys
+
+    path = (root or Path(__file__).resolve().parents[1]) / "scripts" / "install.py"
+    spec = importlib.util.spec_from_file_location("kllm_install_script", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["kllm_install_script"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_real_git_cmake_build_is_isolated_from_bootstrap(tmp_path, monkeypatch):
     import shutil
-    from kllm.shared.llama_pack import _load_install
     from kllm.modules.runtimes.interactors.build import managed_build
 
     if not shutil.which("git") or not shutil.which("cmake"):
         pytest.skip("Git and CMake required for installer boundary check")
     commit = _source_fixture_repository(tmp_path, monkeypatch)
-    install = _load_install(Path(__file__).resolve().parents[1])
+    install = _load_install()
     old_bin = install.BIN_DIR
     output = tmp_path / "managed-artifact"
     manifest = managed_build(
@@ -1323,9 +1335,8 @@ def test_release_for_commit_requires_exact_commit_and_github_host():
 
 
 def _load_install_module():
-    from kllm.shared.llama_pack import _load_install
 
-    return _load_install(Path(__file__).resolve().parents[1])
+    return _load_install()
 
 
 def _write_pack_zip(path: Path, install, members=("llama-server", "rpc-server")):

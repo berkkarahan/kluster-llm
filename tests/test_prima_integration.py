@@ -511,6 +511,10 @@ def test_native_launch_gate_precedes_process_creation(monkeypatch):
     monkeypatch.setattr(
         native, "require_native", lambda: pytest.fail("Must not reach native spawn")
     )
+    gates = {**recipe()["qualification"], "vulkan_gpu_inference": False}
+    monkeypatch.setattr(
+        "kllm.modules.primacpp.interactors.recipe.recipe", lambda: {"qualification": gates}
+    )
     with use_runtime({"engine": "primacpp"}):
         with pytest.raises(ValueError, match="not qualified"):
             native.start_master()
@@ -769,7 +773,7 @@ def test_preparation_http_rejects_malformed_identity_before_control(tmp_path):
         registry.close()
 
 
-def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path):
+def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path, monkeypatch):
     registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
     state = ClusterState(role="master", node_id="master")
     authority = SimpleNamespace(cluster_binding_id=uuid4())
@@ -792,6 +796,14 @@ def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path):
     try:
         version = prima_version()
         registry.add(version)
+        default_recipe = recipe()
+        unqualified = {
+            **default_recipe,
+            "qualification": {**default_recipe["qualification"], "vulkan_gpu_inference": False},
+        }
+        monkeypatch.setattr(
+            "kllm.modules.primacpp.interactors.recipe.recipe", lambda *_: unqualified
+        )
         with TestClient(app, client=("127.0.0.1", 12)) as client:
             response = client.put(
                 "/v2/cluster/runtime-target",
@@ -802,10 +814,25 @@ def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path):
                     "request_id": str(uuid4()),
                 },
             )
-        assert response.status_code == 409
-        assert "not qualified" in response.json()["detail"]["message"]
-        assert registry.target() is None
-        assert registry.data["running"] is None
-        assert not registry.data["jobs"]
+            assert response.status_code == 409
+            assert "not qualified" in response.json()["detail"]["message"]
+            assert registry.target() is None
+            assert registry.data["running"] is None
+            assert not registry.data["jobs"]
+
+            monkeypatch.setattr(
+                "kllm.modules.primacpp.interactors.recipe.recipe", lambda *_: default_recipe
+            )
+            accepted = client.put(
+                "/v2/cluster/runtime-target",
+                headers={"Authorization": "valid"},
+                json={
+                    "runtime_id": version.runtime_id,
+                    "expected_revision": 0,
+                    "request_id": str(uuid4()),
+                },
+            )
+            assert accepted.status_code == 200
+            assert registry.target()["version"]["runtime_id"] == version.runtime_id
     finally:
         registry.close()

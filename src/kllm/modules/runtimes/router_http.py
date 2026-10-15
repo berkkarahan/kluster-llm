@@ -305,10 +305,7 @@ def build_router(
 
     return router
 
-LEGACY_V1: tuple[tuple[str, str, str], ...] = (
-    ('/v1/llama/setup', 'POST', 'llama_setup'),
-)
+# Runtime installation belongs to scripts/install.py; the agent exposes no install routes.
+LEGACY_V1: tuple[tuple[str, str, str], ...] = ()
 
-CONTROL_V2: tuple[tuple[str, str, str], ...] = (
-    ('/node/runtime', 'POST', 'llama_setup'),
-)
+CONTROL_V2: tuple[tuple[str, str, str], ...] = ()

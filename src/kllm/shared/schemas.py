@@ -197,12 +197,6 @@ class DeleteBody(BaseModel):
     name: str
 
 
-class LlamaSetupBody(BaseModel):
-    tag: str | None = None
-    backend: str = "auto"
-    force: bool = False
-
-
 class TemplateCheckBody(BaseModel):
     text: str
 

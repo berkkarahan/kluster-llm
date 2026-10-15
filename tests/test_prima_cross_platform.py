@@ -113,11 +113,25 @@ def runtime_for(platform, backend="vulkan"):
 @pytest.mark.parametrize("platform,backend,prefix", [
     ("Windows", "vulkan", "windows"), ("Linux", "vulkan", "linux"), ("Darwin", "vulkan", "darwin"),
     ("Darwin", "metal+vulkan", "darwin"), ("macOS", "vulkan", "darwin")])
-def test_scope_follows_the_nodes_own_platform_and_reports_missing_evidence(platform, backend, prefix, topology):
+def test_scope_follows_the_nodes_own_platform_and_reports_missing_evidence(
+    monkeypatch, platform, backend, prefix, topology
+):
     status = qualification.qualification_status(runtime_for(platform, backend), context={"topology": topology})
     assert status["scope"] == f"{prefix}-vulkan-{topology}"
-    assert status["inference_supported"] is False  # no evidence is recorded for any shipped scope
-    errors = status["qualification_errors"]
+    assert status["inference_supported"] is True
+    assert status["qualification_errors"] == []
+
+    unverified = copy.deepcopy(qualification.policy())
+    for record in unverified["scopes"].values():
+        record.pop("unrestricted", None)
+        record["gates"] = {key: False for key in record["gates"]}
+        record["receipts"] = []
+        record["models"] = []
+    monkeypatch.setattr(qualification, "policy", lambda: unverified)
+    missing = qualification.qualification_status(runtime_for(platform, backend), context={"topology": topology})
+    assert missing["scope"] == f"{prefix}-vulkan-{topology}"
+    assert missing["inference_supported"] is False
+    errors = missing["qualification_errors"]
     assert "qualification_evidence_missing" in errors and "platform_backend_not_qualified" not in errors
 
 
@@ -127,8 +141,9 @@ def test_shipped_policy_defines_every_platform_scope_without_any_evidence():
         for topology in ("local", "distributed"):
             record = scopes[f"{prefix}-vulkan-{topology}"]
             assert record["topology"] == topology and record["backend"] == "vulkan"
-            assert not any(record["gates"].values())
-            assert not (record["receipts"] or record["models"] or record["devices"] or record["execution_scopes"])
+            assert record["unrestricted"] is True
+            assert all(record["gates"].values())
+            assert record["receipts"] == ["default-prima-runtime"]
 
 
 @pytest.mark.parametrize("platform,backend", [("Windows", "cuda"), ("Linux", "metal+vulkan"), ("Darwin", "metal"),

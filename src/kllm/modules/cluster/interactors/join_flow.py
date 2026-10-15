@@ -170,16 +170,3 @@ def post_register(
     if not isinstance(payload, dict):
         raise HTTPException(502, "master returned an invalid response")
     return payload
-
-
-def cached_llama_pack_warning(backend: str) -> str | None:
-    """Install a cached llama pack. Return a warning, or None when nothing should be recorded."""
-    try:
-        from kllm.shared.llama_pack import PackNotInstallable, install_cached_llama_pack
-
-        install_cached_llama_pack(backend=str(backend), force=False)
-    except PackNotInstallable as exc:
-        return str(exc)
-    except Exception:
-        return None
-    return None

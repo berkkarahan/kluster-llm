@@ -1624,9 +1624,6 @@ def _mount_dashboard() -> None:
     _mount_dashboard_routes(app, _dashboard_dir())
 
 
-from kllm.modules.runtimes.endpoints import (  # noqa: E402
-    llama_setup,
-)
 from kllm.modules.cluster.endpoints import (  # noqa: E402
     discover,
     status,
@@ -1713,7 +1710,6 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_config": get_config,
     "put_config": put_config,
     "get_home": get_home,
-    "llama_setup": llama_setup,
     "start_master": start_master,
     "stop": stop,
     "join_cluster": join_cluster,

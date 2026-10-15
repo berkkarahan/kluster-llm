@@ -142,10 +142,15 @@ class RuntimeRegistry:
         for entry in value["versions"]:
             entry["qualification_errors"] = qualification_errors(entry["version"])
             entry["inference_supported"] = not entry["qualification_errors"]
-            if entry["version"].get("engine") == "primacpp":
+            if entry["version"].get("engine") == "primacpp" and entry.get("build"):
                 from kllm.modules.primacpp.interactors.qualification import qualification_status
 
-                status = qualification_status(entry.get("build") or entry["version"])
+                status = qualification_status(entry["build"])
+                if entry["qualification_errors"]:
+                    status["qualification_errors"] = list(
+                        dict.fromkeys([*entry["qualification_errors"], *status["qualification_errors"]])
+                    )
+                    status["inference_supported"] = False
                 entry.update(status)
         prima = recipe()
         source_entry = {

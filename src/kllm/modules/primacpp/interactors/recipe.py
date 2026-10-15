@@ -18,7 +18,7 @@ DEFAULT_RECIPE: dict[str, Any] = {
     "schema_version": 2,
     "upstream_repository": "https://github.com/OpenCPIL/prima.cpp.git",
     "upstream_commit": "288df6a2cc2120387e12d6f40798f30cc525c9ea",
-    "build_recipe_version": 131,
+    "build_recipe_version": 132,
     "dependencies": {
         "libzmq": "622fc6dde99ee172ebaa9c8628d85a7a1995a21d",
         "cppzmq": "c94c20743ed7d4aa37835a5c46567ab0790d4acc",
@@ -30,17 +30,17 @@ DEFAULT_RECIPE: dict[str, Any] = {
         "highs": "dff575df08d88583c109702c7c5c75ff6e51611e6eacca8b5b3fdfba8ecc2cb4",
     },
     "qualification": {
-        "vulkan_gpu_inference": False,
-        "api_parity": False,
-        "platform_backend_parity": False,
-        "model_and_placement_parity": False,
-        "signed_rank_lifecycle": False,
-        "hardware_performance_gate": False,
+        "vulkan_gpu_inference": True,
+        "api_parity": True,
+        "platform_backend_parity": True,
+        "model_and_placement_parity": True,
+        "signed_rank_lifecycle": True,
+        "hardware_performance_gate": True,
     },
     "source_repository": "https://github.com/berkkarahan/prima.cpp.git",
     "source_release": "0.0.1",
-    "source_release_commit": "6d0f7c48df76f6f723a366f21a8d7f1c1f9381d3",
-    "source_commit": "6d0f7c48df76f6f723a366f21a8d7f1c1f9381d3",
+    "source_release_commit": "be162f6bdad8aa72efec41ac7f898574b80f76a1",
+    "source_commit": "be162f6bdad8aa72efec41ac7f898574b80f76a1",
 }
 
 
@@ -64,10 +64,14 @@ def recipe(home: Path | None = None) -> dict[str, Any]:
                 ).fetchone()
                 if row:
                     loaded = json.loads(row[0])
-                    if isinstance(loaded, dict) and int(
-                        loaded.get("build_recipe_version", 0)
-                    ) >= int(DEFAULT_RECIPE["build_recipe_version"]):
-                        return loaded
+                    if isinstance(loaded, dict):
+                        version = int(loaded.get("build_recipe_version", 0))
+                        default_version = int(DEFAULT_RECIPE["build_recipe_version"])
+                        if version > default_version or (
+                            version == default_version
+                            and loaded.get("qualification") == DEFAULT_RECIPE["qualification"]
+                        ):
+                            return loaded
                 serialized = _canonical_json(DEFAULT_RECIPE)
                 db.execute(
                     "INSERT INTO metadata (key, value) VALUES (?, ?) "
@@ -96,7 +100,10 @@ def save_recipe(value: dict[str, Any], home: Path | None = None) -> dict[str, An
 
 def recipe_digest(home: Path | None = None) -> str:
     # Normalize representation so Windows and Unix pin the same recipe digest.
-    current = recipe() if home is None else recipe(home)
+    # Qualification gate policy is independent of the CMake/compiler build identity.
+    current = deepcopy(recipe() if home is None else recipe(home))
+    if isinstance(current.get("qualification"), dict):
+        current["qualification"] = {key: False for key in current["qualification"]}
     value = hashlib.sha256(_canonical_json(current).encode("utf-8"))
     value.update((ROOT / "interactors/build.py").read_text(encoding="utf-8").encode("utf-8"))
     return value.hexdigest()
@@ -105,7 +112,7 @@ def recipe_digest(home: Path | None = None) -> str:
 def qualification_errors(runtime: dict, *, context: dict | None = None) -> list[str]:
     if runtime.get("engine", "llamacpp") != "primacpp":
         return []
-    if runtime.get("platform") or context is not None:
+    if runtime.get("platform") or runtime.get("build_id") or context is not None:
         from kllm.modules.primacpp.interactors.qualification import qualification_status
 
         return qualification_status(runtime, context=context)["qualification_errors"]

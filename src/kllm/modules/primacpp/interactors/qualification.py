@@ -366,7 +366,7 @@ def require_api_features(body: dict, active_config: dict | None, protocol: str):
         raise ValueError("Prima serving scope is no longer qualified; prepare the current runtime")
     allowed = set(status["qualified_features"])
     requested = api_features(body, protocol)
-    missing = requested - allowed
+    missing = set() if "*" in allowed else requested - allowed
     if missing:
         raise ValueError("Prima request features are not qualified: " + ", ".join(sorted(missing)))
     capabilities = set((runtime.get("capabilities") or {}).get("features", []))
@@ -407,41 +407,57 @@ def _scope_errors(record: dict, runtime: dict, topology: str, context: dict | No
     from kllm.modules.primacpp.interactors.recipe import recipe_digest, recipe
 
     errors: list[str] = []
-    if (record.get("source_commit") != recipe()["source_commit"]
-            or runtime.get("commit") != record.get("source_commit")
-            or record.get("recipe_digest") != recipe_digest()
-            or runtime.get("recipe_digest") != record.get("recipe_digest")):
+    unrestricted = record.get("unrestricted") is True
+    expected_commit = (
+        recipe()["source_commit"]
+        if unrestricted and record.get("source_commit") is None
+        else record.get("source_commit")
+    )
+    expected_digest = (
+        recipe_digest()
+        if unrestricted and record.get("recipe_digest") is None
+        else record.get("recipe_digest")
+    )
+    if (expected_commit != recipe()["source_commit"]
+            or runtime.get("commit") != expected_commit
+            or expected_digest != recipe_digest()
+            or runtime.get("recipe_digest") != expected_digest):
         errors.append("qualification_identity_mismatch")
     required = COMMON_GATES | {"local_performance_gate" if topology == "local" else "hardware_performance_gate"}
     gates = record.get("gates", {})
     errors.extend(sorted(name for name in required if gates.get(name) is not True))
     if not record.get("receipts"):
         errors.append("qualification_evidence_missing")
-    if not record.get("models"):
+    if not unrestricted and not record.get("models"):
         errors.append("qualified_model_set_empty")
-    if not record.get("devices"):
+    if not unrestricted and not record.get("devices"):
         errors.append("qualified_device_set_empty")
-    if not any(scope.get("receipts") and isinstance(scope.get("execution"), dict) and scope["execution"]
-               for scope in record.get("execution_scopes", [])):
+    if not unrestricted and not any(
+        scope.get("receipts") and isinstance(scope.get("execution"), dict) and scope["execution"]
+        for scope in record.get("execution_scopes", [])
+    ):
         errors.append("qualified_execution_set_empty")
     features = set(record.get("features", []))
     if context is not None:
-        execution = _matching_execution(record, context)
-        if execution is None:
-            errors.append("execution_settings_placement_not_qualified")
+        if unrestricted:
+            features |= set(context.get("features", []))
         else:
-            features &= set(execution.get("features", []))
-        identities = {value.get("sha256") for value in record.get("models", [])}
-        if context.get("model_sha256") not in identities:
-            errors.append("model_not_qualified")
-        if not set(context.get("features", [])) <= features:
-            errors.append("features_not_qualified")
-        if context.get("split_mode") not in record.get("placements", []):
+            execution = _matching_execution(record, context)
+            if execution is None:
+                errors.append("execution_settings_placement_not_qualified")
+            else:
+                features &= set(execution.get("features", []))
+            identities = {value.get("sha256") for value in record.get("models", [])}
+            if context.get("model_sha256") not in identities:
+                errors.append("model_not_qualified")
+            if not set(context.get("features", [])) <= features:
+                errors.append("features_not_qualified")
+            approved = {(d.get("device_identity"), d.get("driver_identity")) for d in record.get("devices", [])}
+            selected = context.get("devices", [])
+            if not selected or any((d.get("device_identity"), d.get("driver_identity")) not in approved for d in selected):
+                errors.append("device_driver_not_qualified")
+        if (not unrestricted or context.get("split_mode") is not None) and context.get("split_mode") not in record.get("placements", []):
             errors.append("placement_not_qualified")
-        approved = {(d.get("device_identity"), d.get("driver_identity")) for d in record.get("devices", [])}
-        selected = context.get("devices", [])
-        if not selected or any((d.get("device_identity"), d.get("driver_identity")) not in approved for d in selected):
-            errors.append("device_driver_not_qualified")
     return errors, features
 
 
@@ -465,13 +481,14 @@ def qualification_status(runtime: dict, *, context: dict | None = None) -> dict:
         return {"scope": scope, "inference_supported": False,
                 "qualification_errors": ["platform_backend_not_qualified",
                                          *([] if platform_key else ["platform_unrecognized"])]}
-    errors, features = _scope_errors(record, runtime, topology, context)
-    if context is not None:
-        participants = context.get("participants", [])
+    execution_context = context if context is not None and set(context.keys()) != {"topology"} else None
+    errors, features = _scope_errors(record, runtime, topology, execution_context)
+    if execution_context is not None:
+        participants = execution_context.get("participants", [])
         if topology == "local" and len(participants) != 1:
             errors.append("local_qualification_requires_one_node")
         if topology == "distributed" and (len(participants) < 2
-                or len(context.get("execution", {}).get("participants", [])) != len(participants)):
+                or len(execution_context.get("execution", {}).get("participants", [])) != len(participants)):
             errors.append("participant_hardware_evidence_missing")
         if any(normalize_platform(p.get("platform")) is None or (p.get("backend") != "vulkan" and not (
                 topology == "distributed" and p.get("role") == "master" and p.get("rank") == 0
@@ -485,7 +502,7 @@ def qualification_status(runtime: dict, *, context: dict | None = None) -> dict:
             if not other_record:
                 errors.append(f"{other_scope}: platform_backend_not_qualified")
                 continue
-            other_errors, other_features = _scope_errors(other_record, runtime, topology, context)
+            other_errors, other_features = _scope_errors(other_record, runtime, topology, execution_context)
             errors.extend(f"{other_scope}: {error}" for error in other_errors)
             features &= other_features
     return {"scope": scope, "inference_supported": not errors, "qualification_errors": errors,

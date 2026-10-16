@@ -61,6 +61,21 @@ def test_device_capability_requires_matching_binary_and_selected_device_support(
     monkeypatch.setattr(launch, "help_flags", lambda _: set())
     with pytest.raises(ValueError, match="disagrees"):
         launch.device_arguments(Path("binary"), {"capabilities": {"features": ["explicit_devices_v1"]}}, rank, selected=[])
+    monkeypatch.setattr(launch, "help_flags", lambda _: {"--device"})
+    with pytest.raises(ValueError, match="strict device KV"):
+        launch.device_arguments(
+            Path("binary"),
+            {"capabilities": {"features": ["explicit_devices_v1", "strict_device_kv_v1"]}},
+            rank,
+            selected=[],
+        )
+    monkeypatch.setattr(launch, "help_flags", lambda _: {"--device", "--strict-device-kv"})
+    assert launch.device_arguments(
+        Path("binary"),
+        {"capabilities": {"features": ["explicit_devices_v1", "strict_device_kv_v1"]}},
+        rank,
+        selected=[],
+    ) == ["--device", "Vulkan0,Vulkan1", "--strict-device-kv"]
 
 
 def execution_fixture(split, layers=4):

@@ -1,5 +1,16 @@
 # Troubleshooting Guide
 
+### Prima profiler exits before readiness
+
+Inspect the preparation/profile job logs, including `inspection.log` and each
+CPU/Vulkan `profile.log`. Errors include the phase, child exit code and native
+diagnostic. `Absolute ownership differs from the model layer count` means the
+execution manifest and native loader disagree; increasing a timeout cannot fix it.
+Prepare the current managed Prima runtime with `model_structure_v1`, refresh the
+placement, and retry Prepare & profile. The profiler obtains executable layers
+from that exact runtime and checks approved preparation ownership. Do not edit
+model metadata or remove auxiliary tensors to work around this error.
+
 Use the Python installer and `kllm` CLI for every supported platform. Avoid manual binary copies or alternate launch scripts until the recovery steps in [agent-install.md](agent-install.md) are exhausted.
 
 ## Installation

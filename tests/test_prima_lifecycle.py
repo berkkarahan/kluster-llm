@@ -106,6 +106,59 @@ def test_native_capabilities_do_not_claim_unimplemented_placements():
         )
 
 
+@pytest.mark.parametrize("backend", ["vulkan", "Vulkan"])
+def test_vulkan_offload_refuses_quantized_kv_cache_before_launch(backend):
+    value = manifest()
+    value.ranks[1].ngl = 8
+    value.ranks[1].devices = ["Vulkan0"]
+    value.ranks[1].tensor_split = [1.0]
+    value.backends["worker"] = backend
+    quantized = value.model_copy(update={"settings": {
+        **value.settings, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attention": "on"}})
+    with pytest.raises(ValueError, match="Vulkan backend cannot store a q8_0 K/V cache"):
+        require_execution_capabilities(quantized, {"features": BASELINE_FEATURES})
+    # f16 storage is writable by the Vulkan copy kernel.
+    require_execution_capabilities(value.model_copy(update={"settings": {
+        **value.settings, "cache_type_k": "f16", "cache_type_v": "f16"}}),
+        {"features": BASELINE_FEATURES})
+    # Legacy feature gate and structured vulkan_kv capabilities both admit all 9 KV types.
+    require_execution_capabilities(quantized, {"features": [*BASELINE_FEATURES, "vulkan_quantized_kv_v1"]})
+    all_kv_types = ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl"]
+    vk_caps = {
+        "features": [*BASELINE_FEATURES, "vulkan_kv_cache_v1", "vulkan_flash_attn_v1"],
+        "vulkan_kv": {
+            "write_types": all_kv_types,
+            "mul_mat_k_types": all_kv_types,
+            "mul_mat_v_types": ["f32", "f16", "bf16"],
+            "flash_attn": {"types": all_kv_types, "head_sizes": [64, 80, 96, 112, 128, 192, 256], "sinks": True},
+        },
+    }
+    for kv_type in all_kv_types:
+        require_execution_capabilities(
+            value.model_copy(update={"settings": {
+                **value.settings, "cache_type_k": kv_type, "cache_type_v": kv_type, "flash_attention": "on"}}),
+            vk_caps,
+        )
+        require_execution_capabilities(
+            value.model_copy(update={"settings": {
+                **value.settings, "cache_type_k": kv_type, "cache_type_v": "f16", "flash_attention": "off"}}),
+            vk_caps,
+        )
+    with pytest.raises(ValueError, match="requires Flash Attention"):
+        require_execution_capabilities(
+            value.model_copy(update={"settings": {
+                **value.settings, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attention": "off"}}),
+            vk_caps,
+        )
+
+
+def test_cpu_ranks_keep_quantized_kv_cache():
+    value = manifest()
+    require_execution_capabilities(value.model_copy(update={"settings": {
+        **value.settings, "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attention": "on"}}),
+        {"features": BASELINE_FEATURES})
+
+
 @pytest.mark.parametrize("reported_backend", ["Vulkan", "vulkan", "VULKAN"])
 def test_rank_backend_names_are_case_insensitive_but_do_not_substitute(tmp_path, reported_backend):
     value = manifest()
@@ -1113,6 +1166,27 @@ def test_prima_launch_settings_resolve_f16_kv_and_flash_attention_off(monkeypatc
     assert resolved.cache_type_k == "f16"
     assert resolved.cache_type_v == "f16"
 
+    explicit_quant = rsr.resolve_launch_settings(
+        RunBody(model="fixture.gguf", cache_type_k="q8_0", cache_type_v="q8_0")
+    )
+    assert explicit_quant.cache_type_k == "q8_0"
+    assert explicit_quant.cache_type_v == "q8_0"
+    assert explicit_quant.flash_attention == "on"
+
+    monkeypatch.setattr(
+        rsr,
+        "snapshot",
+        lambda: {
+            "engine": "primacpp",
+            "runtime_id": "a" * 64,
+            "capabilities": {"features": ["vulkan_flash_attn_v1"]},
+        },
+    )
+    fa_resolved = rsr.resolve_launch_settings(RunBody(model="fixture.gguf"))
+    assert fa_resolved.cache_type_k == "q8_0"
+    assert fa_resolved.cache_type_v == "q8_0"
+    assert fa_resolved.flash_attention == "on"
+
     with pytest.raises(HTTPException) as exc_info:
         rsr.resolve_launch_settings(
             RunBody(model="fixture.gguf", flash_attention="off", cache_type_v="q8_0")
@@ -1123,7 +1197,6 @@ def test_prima_launch_settings_resolve_f16_kv_and_flash_attention_off(monkeypatc
 def test_single_node_vulkan_generation_profile_populates_required_settings_and_reports_progress(
     tmp_path, monkeypatch
 ):
-    from types import SimpleNamespace
     from kllm.modules.primacpp.entities import ProfileRequest
     from kllm.modules.primacpp.interactors import generation_profile as gp
 
@@ -1131,8 +1204,8 @@ def test_single_node_vulkan_generation_profile_populates_required_settings_and_r
     model_path.write_bytes(b"gguf")
     monkeypatch.setattr(
         gp,
-        "require_native",
-        lambda: SimpleNamespace(_read_gguf_metadata_json=lambda *_: json.dumps({"block_count": 4})),
+        "inspect_model",
+        lambda *_, **kw: {"stored_blocks": 5, "execution_layers": 4},
     )
     seen_manifests = []
     progress_events = []

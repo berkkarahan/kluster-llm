@@ -296,6 +296,17 @@ def test_plan_uses_matching_cached_generation_and_refuses_unmeasured_candidates(
     matching_threads = body.model_copy(update={"threads_batch": 8})
     assert measured_planning.measured_local_candidates(feasible, matching_threads,
         {"runtime_id": "a" * 64}, model, cache)[1]["predicted_decode_ms"] == 8.0
+    quantized = {**plan, "resolved_launch_settings": {**settings,
+        "cache_type_k": "q8_0", "cache_type_v": "q8_0", "flash_attention": "on"}}
+    assert measured_planning.measured_local_candidates([(quantized, members)], body,
+        {"runtime_id": "a" * 64}, model, cache)[1]["status"] == "unmeasured"
+    cache.put(cached.model_copy(update={"decode_ms": 6.0, "settings_digest": body_digest(
+        generation_settings(body.context, 8, 2, [device()], cache_type_k="q8_0", cache_type_v="q8_0", flash_attention="on"))}))
+    assert measured_planning.measured_local_candidates([(quantized, members)], body,
+        {"runtime_id": "a" * 64}, model, cache)[1]["predicted_decode_ms"] == 6.0
+    changed_flash = {**quantized, "resolved_launch_settings": {**quantized["resolved_launch_settings"], "flash_attention": "off"}}
+    assert measured_planning.measured_local_candidates([(changed_flash, members)], body,
+        {"runtime_id": "a" * 64}, model, cache)[1]["status"] == "unmeasured"
     output_gpu = {**plan, "topology": topology.model_copy(update={"ranks": [rank.model_copy(update={"output_gpu": True})]})}
     assert measured_planning.measured_local_candidates([(output_gpu, members)], body, {"runtime_id": "a" * 64}, model, cache)[1]["status"] == "unmeasured"
     gpu_profile = cached.model_copy(update={"output_gpu": True, "decode_ms": 7.0,

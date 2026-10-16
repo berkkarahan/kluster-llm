@@ -119,6 +119,7 @@ def worker(tmp_path, monkeypatch):
     control.resources = NodeResources()
     control.preparation_reservations = {}
     control.preparation_futures = {}
+    control._job_samples = {}
     control.jobs = {}
     control.closed = False
     control.cancelled = set()

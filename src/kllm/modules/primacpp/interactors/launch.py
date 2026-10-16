@@ -15,18 +15,25 @@ from kllm.modules.primacpp.interactors.adapters import adapter_bindings, adapter
 
 def device_arguments(binary, runtime: dict, allocation, *, selected: list[dict]) -> list[str]:
     """The visibility mask and ordered native selection describe the same devices."""
-    if "explicit_devices_v1" not in (runtime.get("capabilities") or {}).get("features", []):
+    features = set((runtime.get("capabilities") or {}).get("features", []))
+    if "explicit_devices_v1" not in features:
         if allocation.ngl or allocation.output_gpu:
             raise ValueError("Upgrade Prima for explicit selected-device placement")
         return []
-    if "--device" not in help_flags(binary):
+    flags = help_flags(binary)
+    if "--device" not in flags:
         raise ValueError("Prima device capability disagrees with the selected rank binary")
     if not allocation.ngl and not allocation.output_gpu:
         return ["--device", "none"]
     names = remapped_vulkan_names(selected) if selected else list(allocation.devices)
     if not names or len(names) != len(allocation.devices):
         raise ValueError("Prima offload devices disagree with the approved allocation")
-    return ["--device", ",".join(names)]
+    arguments = ["--device", ",".join(names)]
+    if allocation.ngl and "strict_device_kv_v1" in features:
+        if "--strict-device-kv" not in flags:
+            raise ValueError("Prima strict device KV capability disagrees with the selected rank binary")
+        arguments.append("--strict-device-kv")
+    return arguments
 
 
 def execution_settings(body, plan: dict, model, port: int) -> dict:

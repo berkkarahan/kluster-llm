@@ -295,10 +295,17 @@ class PrimaControl:
             raise ValueError("Profile differs from the approved model, runtime, rank or settings")
         if len(manifest.ranks) > 1 and request.mode != "kernel":
             raise ValueError("Distributed preparation requires per-layer kernel profiling")
+        if request.mode == "generation" and (request.gpu_layers != rank.ngl or request.output_gpu != rank.output_gpu):
+            raise ValueError("Generation profile differs from the approved GPU/output placement")
+        if request.mode == "generation" and any(
+                (getattr(request, key) or default) != manifest.settings.get(key, default)
+                for key, default in (("cache_type_k", "f16"), ("cache_type_v", "f16"), ("flash_attention", "off"))):
+            raise ValueError("Generation profile differs from the approved cache/attention settings")
         return {**command_owner, "operation_id": operation_id, "preparation_job_id": preparation_job_id,
                 "manifest_digest": manifest_digest, "runtime_id": request.runtime_id,
                 "model_sha256": request.model, "node_id": rank.node_id, "backend": backend,
-                "context": request.context, "threads": request.threads}
+                "context": request.context, "threads": request.threads,
+                **({"total_layers": manifest.total_layers} if request.mode == "generation" else {})}
 
     def _profile_owner_check(self, scope, authorize):
         authorize()
@@ -326,6 +333,10 @@ class PrimaControl:
         if (value.node_id != rank.node_id or value.runtime_id != manifest.runtime_id
                 or value.model_sha256 != request.model or value.backend != manifest.backends[rank.node_id]):
             raise ValueError("Participant profile does not match its node/model/runtime/backend")
+        if request.mode == "generation" and (
+                value.measurement_kind != "end_to_end" or value.total_layers != manifest.total_layers
+                or value.gpu_layers != rank.ngl or value.output_gpu != rank.output_gpu):
+            raise ValueError("Participant generation profile differs from approved execution ownership")
         if value.kernel_profile_version == 2:
             from kllm.modules.primacpp.interactors.kernel_profile import kernel_hardware, kernel_settings
             if rank.node_id == self.service.state().node_id:
@@ -893,11 +904,16 @@ class PrimaControl:
                         request_id=str(uuid4()),
                         output_gpu=rank.output_gpu,
                     )
+                    if request.mode == "generation":
+                        request = ProfileRequest.model_validate({**request.model_dump(), **{
+                            key: manifest.settings.get(key, default) for key, default in
+                            (("cache_type_k", "f16"), ("cache_type_v", "f16"), ("flash_attention", "off"))}})
                     if rank.node_id == self.service.state().node_id:
                         scope = {**authority_owner(self.service.channels.master_authority()), "sender": rank.node_id,
                             "operation_id": operation, "preparation_job_id": identity, "manifest_digest": manifest.digest,
                             "runtime_id": runtime_id, "model_sha256": request.model, "node_id": rank.node_id,
-                            "backend": request.backend, "context": request.context, "threads": request.threads}
+                            "backend": request.backend, "context": request.context, "threads": request.threads,
+                            **({"total_layers": manifest.total_layers} if request.mode == "generation" else {})}
                         profile = self.profiles.start(request, control_owner=scope, check=lambda: self._check(identity))
                         self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
                         while profile["phase"] not in TERMINAL:

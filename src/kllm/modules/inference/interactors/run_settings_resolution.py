@@ -42,7 +42,17 @@ def _file_size_bytes(path: str | None) -> int:
 
 def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
     """Normalize overlapping flags once, before both planning and launch."""
-    prima = (snapshot() or {}).get("engine") == "primacpp"
+    current_runtime = snapshot() or {}
+    prima = current_runtime.get("engine") == "primacpp"
+    runtime_caps = (
+        current_runtime.get("capabilities")
+        if isinstance(current_runtime.get("capabilities"), dict)
+        else {}
+    )
+    runtime_features = set(runtime_caps.get("features") or ())
+    prima_vulkan_fa = "vulkan_flash_attn_v1" in runtime_features or isinstance(
+        runtime_caps.get("vulkan_kv"), dict
+    )
     result: dict[str, Any] = {
         "parallel_slots": 1 if body.parallel_slots == "auto" else int(body.parallel_slots),
         "batch_size": 512 if body.batch_size == "auto" else int(body.batch_size),
@@ -166,15 +176,20 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
     if result["flash_attention"] not in ("auto", "on", "off"):
         raise HTTPException(400, "flash attention must be auto, on, or off")
     if prima and result["flash_attention"] == "auto":
-        result["flash_attention"] = "off"
-        if result["cache_type_v"] not in ("f32", "f16", "bf16"):
-            result["cache_type_v"] = "f16"
-        if result["cache_type_k"] not in ("f32", "f16", "bf16") and not any(
+        explicit_k = "cache_type_k" in body.model_fields_set or any(
             t in ("-ctk", "--cache-type-k") for t in tokens
-        ):
+        )
+        explicit_v = "cache_type_v" in body.model_fields_set or any(
+            t in ("-ctv", "--cache-type-v") for t in tokens
+        )
+        if not prima_vulkan_fa and not explicit_v and result["cache_type_v"] not in ("f32", "f16", "bf16"):
+            result["cache_type_v"] = "f16"
+        if not prima_vulkan_fa and not explicit_k and result["cache_type_k"] not in ("f32", "f16", "bf16"):
             result["cache_type_k"] = "f16"
-        if body.draft_enabled() and result["draft_cache_type_v"] not in ("f32", "f16", "bf16"):
+        if not prima_vulkan_fa and body.draft_enabled() and result["draft_cache_type_v"] not in ("f32", "f16", "bf16"):
             result["draft_cache_type_v"] = "f16"
+        if result["cache_type_v"] in ("f32", "f16", "bf16"):
+            result["flash_attention"] = "off"
     quantized_v = result["cache_type_v"] not in ("f32", "f16", "bf16")
     if body.draft_enabled():
         quantized_v |= result["draft_cache_type_v"] not in ("f32", "f16", "bf16")

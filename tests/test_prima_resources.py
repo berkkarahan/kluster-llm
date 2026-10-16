@@ -31,7 +31,7 @@ def profile_service(tmp_path, resources, kill):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"controlled model bytes")
     state = SimpleNamespace(node_id="node", process_pid=None, members={"node": {"backend": "cpu"}})
-    runtime = {"engine": "primacpp", "backend": "cpu"}
+    runtime = {"engine": "primacpp", "backend": "cpu", "capabilities": {"features": ["model_structure_v1"]}}
     return ProfileJobs(tmp_path / "jobs", lambda _: runtime, lambda _: model, lambda: state, kill,
                        resources=resources)
 

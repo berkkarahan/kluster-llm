@@ -27,10 +27,10 @@ def _unmeasured(feasible, reason):
 def _settings_decline(settings, body, threads, threads_batch):
     """Effective settings typed end-to-end costs do not cover, or None."""
     unsupported = []
-    if settings.get("cache_type_k") != "f16" or settings.get("cache_type_v") != "f16":
-        unsupported.append("f16 K/V cache")
-    if settings.get("flash_attention") != "off":
-        unsupported.append("flash attention off")
+    if settings.get("cache_type_k") not in ("f16", "q8_0") or settings.get("cache_type_v") not in ("f16", "q8_0"):
+        unsupported.append("f16 or q8_0 K/V cache")
+    if settings.get("flash_attention") not in ("on", "off"):
+        unsupported.append("explicit flash attention on/off")
     if settings.get("parallel_slots") != 1:
         unsupported.append("one parallel slot")
     if settings.get("batch_size") != 512 or settings.get("micro_batch") != 128:
@@ -86,7 +86,9 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
                 return _unmeasured(feasible, "Profiled planning requires exactly one selected Vulkan device")
             context = plan.get("context_effective", body.context)
             threads = plan.get("resolved_launch_settings", {}).get("threads", body.threads)
-            settings = generation_settings(context, threads, rank.ngl, selected, rank.output_gpu)
+            launch_settings = plan.get("resolved_launch_settings", {})
+            settings = generation_settings(context, threads, rank.ngl, selected, rank.output_gpu,
+                **{key: launch_settings.get(key) for key in ("cache_type_k", "cache_type_v", "flash_attention")})
             profile = cache.get({"runtime_id": runtime["runtime_id"], "model_sha256": digest,
                 "node_id": rank.node_id, "backend": "vulkan", "hardware_digest": body_digest(generation_hardware(members[rank.node_id], selected)),
                 "settings_digest": body_digest(settings), "device_identity": selected[0]["device_identity"],
@@ -111,7 +113,7 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
     )
     return feasible[index], {"status": "profiled_model_probe", "predicted_decode_ms": scores[index],
         "model_sha256": digest, "measurement_kind": "end_to_end",
-        "scope": "matching local full-model f16/one-slot generation probe",
+        "scope": "matching local full-model cache/attention/one-slot generation probe",
         "scheduler": scheduler_report.model_dump()}
 
 

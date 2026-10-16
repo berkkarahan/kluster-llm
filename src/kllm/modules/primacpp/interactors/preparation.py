@@ -142,6 +142,9 @@ class ProfileJobs:
         runtime = self.capture(request.runtime_id)
         if runtime.get("engine") != "primacpp":
             raise ValueError("Profiling requires a prepared Prima runtime")
+        if request.mode == "generation":
+            from kllm.modules.primacpp.interactors.model_structure import require_model_inspection
+            require_model_inspection(runtime)
         if check is not None:
             check()
         if self.state().process_pid:
@@ -546,6 +549,11 @@ class ProfileJobs:
             if "progress" in inspect.signature(profile_generation).parameters
             else {}
         )
+        scope = self.jobs[identity].get("control_owner")
+        if scope is not None:
+            if type(scope.get("total_layers")) is not int or scope["total_layers"] <= 0:
+                raise ValueError("Generation profile lacks approved execution layers; prepare again with the current agent")
+            extra_kwargs["expected_layers"] = scope["total_layers"]
         result = profile_generation(runtime, model, request, selected, directory,
             check=lambda: self._check(identity), track=track, stop=self.kill, **extra_kwargs)
         self._check(identity)
@@ -555,7 +563,8 @@ class ProfileJobs:
         current_devices = select_vulkan_devices(discover_vulkan_devices(runtime), request.devices)
         if generation_hardware(current_member, current_devices) != hardware:
             raise ValueError("Host/device hardware changed during generation profiling")
-        settings = generation_settings(request.context, request.threads, request.gpu_layers, selected, request.output_gpu)
+        settings = generation_settings(request.context, request.threads, request.gpu_layers, selected, request.output_gpu,
+            cache_type_k=request.cache_type_k, cache_type_v=request.cache_type_v, flash_attention=request.flash_attention)
         profile = DeviceProfile(runtime_id=request.runtime_id, model_sha256=digest, node_id=self.state().node_id,
             hardware_digest=body_digest(hardware), settings_digest=body_digest(settings), backend="vulkan",
             measured_at=time.time(), cpu_layer_ms=result["cpu"]["decode_ms"] / result["layers"],
@@ -584,7 +593,9 @@ class ProfileJobs:
         path = self.root / identity / "profile.log"
         if not path.exists():
             directory = self.root / identity
-            return "\n".join(p.read_text(errors="replace")[-32768:] for p in directory.glob("*/profile.log"))[-65536:]
+            from kllm.modules.primacpp.interactors.model_structure import log_tail
+            paths = [directory / "inspection.log", *sorted(directory.glob("*/profile.log"))]
+            return "\n".join(f"[{p.parent.name}/{p.name}]\n{log_tail(p, 32768)}" for p in paths if p.exists())[-65536:]
         with path.open("rb") as source:
             source.seek(max(0, path.stat().st_size - 65536))
             return source.read(65536).decode("utf-8", errors="replace")

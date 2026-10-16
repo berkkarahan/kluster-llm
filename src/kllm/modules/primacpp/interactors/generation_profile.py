@@ -14,27 +14,30 @@ from uuid import uuid4
 import httpx
 import psutil
 
-from kllm.shared.native import require_native
 from kllm.modules.primacpp.entities import LayerRange, RankAllocation
 from kllm.modules.primacpp.interactors.devices import vulkan_environment
 from kllm.modules.primacpp.interactors.execution import ExecutionManifest, Segment, asset_files, require_execution_capabilities
 from kllm.modules.primacpp.interactors.evidence import execution_reports, verify_vulkan_execution
+from kllm.modules.primacpp.interactors.model_structure import inspect_model, process_failure, OUTPUT_LIMIT
+from kllm.modules.primacpp.interactors.launch import device_arguments
 
 
 PROMPT = "This is an inference profiling request. Continue this sentence with a description of a clear morning: The sky is"
 
 
-def profile_generation(runtime: dict, model: Path, request, selected: list[dict], directory: Path, *, check, track, stop, progress=None):
+def profile_generation(runtime: dict, model: Path, request, selected: list[dict], directory: Path, *, check, track, stop, progress=None, expected_layers=None):
     """Return CPU and selected-offload measurements; never qualifies inference."""
     if request.gpu_layers is None or request.gpu_layers <= 0 or len(selected) != 1:
         raise ValueError("Generation profiling requires one selected Vulkan device and an explicit positive gpu_layers count")
-    metadata = json.loads(require_native()._read_gguf_metadata_json(str(model), False))
-    layers = metadata.get("block_count") or metadata.get("n_layer")
-    if not layers:
-        layers = next(v for k, v in metadata.get("metadata", metadata).items() if k.endswith(".block_count"))
+    structure = inspect_model(runtime, model, directory, check=check, track=track, stop=stop)
+    layers = structure["execution_layers"]
+    if expected_layers is not None and layers != expected_layers:
+        raise ValueError(f"Native execution layers ({layers}) differ from approved preparation ({expected_layers}); refresh the plan")
     if request.gpu_layers > layers:
         raise ValueError("Profile GPU offload exceeds the model's transformer layers")
     files = asset_files(model)
+    cache_k, cache_v = request.cache_type_k or "f16", request.cache_type_v or "f16"
+    flash = request.flash_attention or "off"
     model_size = sum(path.stat().st_size for _, path in files if path.exists())
     measured = {}
     for pass_index, (backend, ngl) in enumerate((("cpu", 0), ("vulkan", request.gpu_layers)), start=1):
@@ -50,7 +53,8 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
             devices=["Vulkan0"] if ngl else [], tensor_split=[1.0] if ngl else [], output_gpu=bool(ngl and request.output_gpu))
         manifest = ExecutionManifest(runtime_id=runtime["runtime_id"], run_id=str(uuid4()), plan_digest="a" * 64,
             total_layers=layers, ranks=[rank], assets=[a for a, _ in files],
-            settings={"context": request.context, "swa_full": False, "parallel_slots": 1, "prima_kv_sequences": 2},
+            settings={"context": request.context, "swa_full": False, "parallel_slots": 1, "prima_kv_sequences": 2,
+                      "cache_type_k": cache_k, "cache_type_v": cache_v, "flash_attention": flash},
             inventory_digest="b" * 64,
             segments=[Segment(start=0, end=layers, node_id="profile")], backends={"profile": backend})
         require_execution_capabilities(manifest, runtime.get("capabilities", {}))
@@ -68,7 +72,9 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
                 "--port", str(port), "--ctx-size", str(request.context), "--threads", str(request.threads),
                 "--threads-batch", str(request.threads),
                 "--parallel", "1", "--batch-size", "512", "--ubatch-size", "128",
-                "--cache-type-k", "f16", "--cache-type-v", "f16", "--execution-manifest", str(contract)],
+                "--cache-type-k", cache_k, "--cache-type-v", cache_v, "--execution-manifest", str(contract),
+                *(["--flash-attn"] if flash == "on" else []),
+                *device_arguments(Path(runtime["llama_server"]), runtime, rank, selected=selected if ngl else [])],
                 env=environment, stdout=output, stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
             try:
                 track(process)
@@ -79,7 +85,7 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
                     while time.monotonic() < deadline:
                         check()
                         if process.poll() is not None:
-                            raise ValueError("Generation profiler exited before readiness")
+                            raise ValueError("profiler exited before readiness")
                         rss = child.memory_info().rss
                         peak = max(peak, rss)
                         try:
@@ -88,6 +94,8 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
                         except (psutil.Error, OSError, AttributeError):
                             cpu_total = 0.0
                         log_bytes = log_path.stat().st_size if log_path.exists() else 0
+                        if log_bytes > OUTPUT_LIMIT:
+                            raise ValueError("Generation profiler exceeded its output limit")
                         marker = (rss // (4 * 1024 * 1024), cpu_total, log_bytes)
                         if last_marker is not None and marker != last_marker:
                             deadline = max(deadline, time.monotonic() + 300)
@@ -145,20 +153,23 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
                 output.flush()
                 proof = None
                 if ngl:
-                    proof = verify_vulkan_execution(execution_reports(log_path.read_text(errors="replace")), manifest, rank, selected)
+                    proof = verify_vulkan_execution(execution_reports(log_path.read_text(errors="replace")), manifest, rank, selected,
+                        require_graph_contract="graph_execution_evidence_v1" in runtime.get("capabilities", {}).get("features", []))
                 measured[backend] = {"samples": samples, "prefill_ms": median(s["prefill_ms"] for s in samples),
                     "decode_ms": median(s["decode_ms"] for s in samples), "peak_memory_bytes": peak,
                     "manifest_digest": manifest.digest, "execution_proof": proof}
                 if progress is not None:
                     progress(f"{pass_label}: completed ({measured[backend]['decode_ms']:.1f} ms/tok)", base_fraction + 0.5, model_size, model_size)
+            except (ValueError, OSError, httpx.HTTPError, psutil.Error) as error:
+                raise process_failure(pass_label, process, log_path, str(error)) from error
             finally:
                 if process.poll() is None:
                     stop(process)
                     process.wait(timeout=10)
-    return {"measurement_kind": "end_to_end", "layers": layers, "gpu_layers": request.gpu_layers,
-            "settings": {"context": request.context, "threads": request.threads, "cache_type_k": "f16",
+    return {"measurement_kind": "end_to_end", "model_structure": structure, "layers": layers, "gpu_layers": request.gpu_layers,
+            "settings": {"context": request.context, "threads": request.threads, "cache_type_k": cache_k,
                          "threads_batch": request.threads, "batch_size": 512, "micro_batch": 128,
-                         "cache_type_v": "f16", "flash_attention": "off", "parallel_slots": 1,
+                         "cache_type_v": cache_v, "flash_attention": flash, "parallel_slots": 1,
                          "output_gpu": request.output_gpu},
             "cpu": measured["cpu"], "vulkan": measured["vulkan"],
             "memory_measurement": "sampled process RSS at startup and streamed events; GPU proof assessed separately"}

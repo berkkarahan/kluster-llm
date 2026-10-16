@@ -12,10 +12,13 @@ from kllm.modules.runtimes.entities import body_digest
 from kllm.modules.runtimes.interactors.registry import atomic_json
 
 
-def generation_settings(context, threads, gpu_layers, devices, output_gpu=False):
+def generation_settings(context, threads, gpu_layers, devices, output_gpu=False, *,
+                        cache_type_k=None, cache_type_v=None, flash_attention=None):
     return {"context": context, "threads": threads, "mode": "generation", "gpu_layers": gpu_layers,
             "threads_batch": threads, "batch_size": 512, "micro_batch": 128,
-            "devices": [d["device_identity"] for d in devices], "output_gpu": output_gpu}
+            "devices": [d["device_identity"] for d in devices], "output_gpu": output_gpu,
+            "cache_type_k": cache_type_k or "f16", "cache_type_v": cache_type_v or "f16",
+            "flash_attention": flash_attention or "off"}
 
 
 def generation_hardware(member, devices):

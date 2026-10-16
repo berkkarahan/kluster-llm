@@ -96,7 +96,8 @@ def _verify_adapter_work(report, manifest, rank, names, owners, output_owner, as
 
 
 def verify_vulkan_execution(reports: list[dict], manifest, rank, devices: list[dict], *, logical_names: list[str] | None = None,
-                            lora_revision: int = 0, lora_scales: dict[int, float] | None = None) -> dict:
+                            lora_revision: int = 0, lora_scales: dict[int, float] | None = None,
+                            require_graph_contract: bool = False) -> dict:
     if rank.ngl <= 0 and not rank.output_gpu:
         raise ValueError("Vulkan execution evidence requires transformer or output GPU work")
     assigned = [layer for window in rank.layers for layer in range(window.start, window.end)]
@@ -125,6 +126,8 @@ def verify_vulkan_execution(reports: list[dict], manifest, rank, devices: list[d
     output_phases = set()
     adapter_expected = {phase: set() for phase in phases}
     adapter_completed = {phase: set() for phase in phases}
+    graph_required = {phase: set() for phase in phases}
+    graph_phases = set()
     for report in reports:
         if (report.get("schema_version") != 1 or report.get("completed") is not True
                 or report.get("runtime_id") != manifest.runtime_id
@@ -145,6 +148,34 @@ def verify_vulkan_execution(reports: list[dict], manifest, rank, devices: list[d
         weights = report.get("executed_weights")
         if not isinstance(weights, dict):
             raise ValueError("GPU execution evidence has invalid tensor ownership")
+        graph_contract = report.get("graph_contract_version")
+        if require_graph_contract or graph_contract is not None:
+            expected = report.get("graph_weights")
+            count = report.get("graph_count")
+            if (type(graph_contract) is not int or graph_contract != 1
+                    or type(count) is not int or count <= 0
+                    or type(report.get("completed_graphs")) is not int or report["completed_graphs"] != count
+                    or not isinstance(expected, list) or not expected
+                    or any(not isinstance(w, str) or not w for w in expected)
+                    or len(set(expected)) != len(expected)):
+                raise ValueError("Missing complete native graph execution contract")
+            completed_weights = set()
+            for values in weights.values():
+                if not isinstance(values, list) or any(not isinstance(w, str) for w in values):
+                    raise ValueError("GPU execution evidence has invalid weights")
+                completed_weights.update(values)
+            if not set(expected) <= completed_weights:
+                raise ValueError("Native graph contains model matrix work that did not complete")
+            for weight in expected:
+                match = re.fullmatch(r"blk\.(\d+)\..+\.weight", weight)
+                if match:
+                    if int(match[1]) not in assigned:
+                        raise ValueError("Native graph requires another rank's layer")
+                    if int(match[1]) in gpu_layers:
+                        graph_required[phase].add(weight)
+                elif weight not in ("output.weight", "token_embd.weight"):
+                    raise ValueError("Native graph has an invalid model tensor name")
+            graph_phases.add(phase)
         for backend, values in weights.items():
             if not isinstance(values, list) or any(not isinstance(w, str) for w in values):
                 raise ValueError("GPU execution evidence has invalid weights")
@@ -177,6 +208,11 @@ def verify_vulkan_execution(reports: list[dict], manifest, rank, devices: list[d
         raise ValueError("Missing completed Vulkan output projection work")
     for phase, weights in phases.items():
         for layer in gpu_layers:
+            if phase in graph_phases:
+                required = {w for w in graph_required[phase] if w.startswith(f"blk.{layer}.")}
+                if not required or not required <= weights:
+                    raise ValueError(f"Missing completed Vulkan native graph work for {phase} layer {layer}")
+                continue
             suffixes = {w.split(".", 2)[2].removesuffix(".weight") for w in weights if w.startswith(f"blk.{layer}.")}
             dense_ffn = {"ffn_gate", "ffn_up", "ffn_down"}
             moe_ffn = {"ffn_gate_inp", "ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}

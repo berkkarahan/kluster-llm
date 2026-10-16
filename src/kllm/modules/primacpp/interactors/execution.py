@@ -250,6 +250,98 @@ def asset_files(model: Path, companions: dict[str, Path] | None = None, *, adapt
     return result
 
 
+VULKAN_KV_CACHE_TYPES = ("f16", "f32")
+VULKAN_QUANTIZED_KV_CACHE_TYPES = (
+    "f32",
+    "f16",
+    "bf16",
+    "q8_0",
+    "q4_0",
+    "q4_1",
+    "q5_0",
+    "q5_1",
+    "iq4_nl",
+)
+VULKAN_NON_FA_V_CACHE_TYPES = ("f32", "f16", "bf16")
+
+
+def vulkan_kv_cache_error(
+    ranks,
+    backends: dict,
+    settings: dict,
+    features,
+    *,
+    capabilities: dict | None = None,
+) -> str | None:
+    """Offloaded layers keep K/V in device buffers; Vulkan must be able to write and attend to them."""
+    if not any(
+        rank.ngl and str(backends.get(rank.node_id) or "").lower() == "vulkan"
+        for rank in ranks
+    ):
+        return None
+    feature_set = set(features or ())
+    if "vulkan_quantized_kv_v1" in feature_set:
+        return None
+    type_k = str(settings.get("cache_type_k") or "f16")
+    type_v = str(settings.get("cache_type_v") or "f16")
+    flash = str(settings.get("flash_attention") or "off")
+    vk_kv = (capabilities or {}).get("vulkan_kv") if isinstance(capabilities, dict) else None
+    if isinstance(vk_kv, dict):
+        write_types = {str(t) for t in (vk_kv.get("write_types") or VULKAN_KV_CACHE_TYPES)}
+        if flash == "on":
+            fa_info = vk_kv.get("flash_attn") if isinstance(vk_kv.get("flash_attn"), dict) else {}
+            fa_types = {str(t) for t in (fa_info.get("types") or ())}
+            unsupported = sorted({t for t in (type_k, type_v) if t not in (write_types & fa_types)})
+            if unsupported:
+                return (
+                    "Prima's Vulkan backend cannot run Flash Attention on a "
+                    + "/".join(unsupported)
+                    + " K/V cache on offloaded layers; upgrade Prima or keep transformer layers on CPU"
+                )
+            return None
+        mul_mat_k = {str(t) for t in (vk_kv.get("mul_mat_k_types") or VULKAN_KV_CACHE_TYPES)}
+        mul_mat_v = {str(t) for t in (vk_kv.get("mul_mat_v_types") or VULKAN_KV_CACHE_TYPES)}
+        if type_v not in (write_types & mul_mat_v) and type_v in write_types:
+            return (
+                f"Prima's Vulkan backend requires Flash Attention for a {type_v} V cache on offloaded layers; "
+                "enable Flash Attention or select f16/bf16/f32 V cache"
+            )
+        unsupported = sorted(
+            {
+                *([type_k] if type_k not in (write_types & mul_mat_k) else []),
+                *([type_v] if type_v not in (write_types & mul_mat_v) else []),
+            }
+        )
+        if unsupported:
+            return (
+                "Prima's Vulkan backend cannot store a "
+                + "/".join(unsupported)
+                + " K/V cache on offloaded layers; select f16 K and V cache precision"
+                + " (Flash Attention off) or keep transformer layers on CPU"
+            )
+        return None
+    if "vulkan_kv_cache_v1" in feature_set:
+        if flash == "on" and "vulkan_flash_attn_v1" not in feature_set:
+            return "Upgrade Prima for Vulkan Flash Attention on offloaded layers"
+        if flash != "on" and type_v not in VULKAN_NON_FA_V_CACHE_TYPES:
+            return (
+                f"Prima's Vulkan backend requires Flash Attention for a {type_v} V cache on offloaded layers; "
+                "enable Flash Attention or select f16/bf16/f32 V cache"
+            )
+        unsupported = sorted({t for t in (type_k, type_v) if t not in VULKAN_QUANTIZED_KV_CACHE_TYPES})
+        if not unsupported:
+            return None
+    quantized = sorted({t for t in (type_k, type_v) if t not in VULKAN_KV_CACHE_TYPES})
+    if not quantized:
+        return None
+    return (
+        "Prima's Vulkan backend cannot store a "
+        + "/".join(quantized)
+        + " K/V cache on offloaded layers; select f16 K and V cache precision"
+        + " (Flash Attention off) or keep transformer layers on CPU"
+    )
+
+
 def require_execution_capabilities(manifest: ExecutionManifest, capabilities: dict) -> None:
     features = set(capabilities.get("features", []))
     if "logical_context_sequences_v1" not in features:
@@ -334,6 +426,11 @@ def require_execution_capabilities(manifest: ExecutionManifest, capabilities: di
         raise ValueError("Prima output GPU placement requires an updated native runtime")
     if any(r.output_gpu and not r.ngl for r in manifest.ranks) and "output_only_gpu_v1" not in features:
         raise ValueError("Upgrade Prima for output GPU execution without transformer offload")
+    kv_error = vulkan_kv_cache_error(
+        manifest.ranks, manifest.backends, manifest.settings, features, capabilities=capabilities
+    )
+    if kv_error:
+        raise ValueError(kv_error)
     if "execution_manifest_v1" not in features:
         raise ValueError("Upgrade this Prima runtime for explicit execution manifests")
     if manifest.split_mode != "layer" and manifest.split_mode + "_placement" not in features:

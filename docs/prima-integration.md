@@ -1,5 +1,38 @@
 # Prima.cpp preparation and qualification
 
+Generation profiling requires the prepared server's `model_structure_v1` capability.
+Its `--inspect-model --model FILE` mode reports a versioned
+`KLLM_PRIMA_MODEL_STRUCTURE` record with `architecture`, `stored_blocks`, and
+`execution_layers`, using the same native hyperparameter loader as inference,
+without loading weights or starting a server. Stored GGUF block counts are not
+execution ownership: auxiliary predictor blocks can be excluded by the runtime.
+Both profiling passes use the executable count; preparation-bound profiles must
+also match the approved manifest. Older runtimes require preparing the current
+managed Prima version. Inspection and generation logs retain native failure details.
+
+Recipe 136 (Prima 0.0.3) also advertises `graph_execution_evidence_v1`: completed
+prefill/decode matrix work is checked against the native graph and exact physical
+device ownership, including fused and recurrent layers. Generation profiles bind
+the approved F16/Q8 K/V cache and explicit Flash Attention setting into their cache
+identity; a different setting cannot reuse the measurements. CPU and Vulkan passes
+each require one warm-up and three completed measured samples before publication.
+
+Recipe 137 (Prima 0.0.4) restores Llama's existing rank-aware Q/K/V tensor loader.
+A stale dispatch had sent Llama into MiniCPM3's low-rank attention loader, causing
+`tensor '__missing__' not found` after successful metadata inspection. The native
+structure contract test now also loads a complete small Llama tensor fixture;
+metadata inspection alone is not model-loading acceptance.
+
+Local hardware verification on 2026-10-16 used the freshly managed 0.0.4 build
+(`0832998f8ff6eb1194d2ffa49165cbaef8836cd8`), Windows, and an AMD Radeon RX
+9070 XT. Saluki Qwen3.5 (65 stored blocks / 64 executable layers), TinyLlama
+(22 / 22), and GPT-OSS-20B MXFP4 (24 / 24) each completed CPU and Vulkan
+warm-up plus all three measured samples, passed device execution evidence,
+published their profile cache, and had the matching measurements accepted by
+HiGHS placement. GPT-OSS also served a successful authenticated chat completion.
+These are single-node, single-device results; distributed and other hardware
+coverage remain separate acceptance work.
+
 Prima is an optional engine **under development**. The current integration supports
 isolated source builds, topology previews and local profiling. It is not yet a
 drop-in inference replacement. Normal target/local selection and inference launch
@@ -17,8 +50,8 @@ requests recheck it, including policy revocation. All production scopes remain e
 The runtime library can resolve and save the supported Prima source through its
 existing endpoints using `engine: "primacpp"`, repository
 `https://github.com/berkkarahan/prima.cpp.git`, and either the pinned commit ref
-(ref_type `"commit"`) or the pinned release — recipe 133 pins
-`berkkarahan/prima.cpp` release `0.0.1` (`source_release` /
+(ref_type `"commit"`) or the pinned release — recipe 137 pins
+`berkkarahan/prima.cpp` release `0.0.4` (`source_release` /
 `source_release_commit`) whose tag resolves to exactly the pinned commit; both
 routes produce the same immutable identity. A moved or deleted release tag refuses
 until the recipe is advanced. The response includes `recipe_digest`. The recipe

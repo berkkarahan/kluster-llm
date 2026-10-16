@@ -324,6 +324,9 @@ class ProfileRequest(Record):
     mode: Literal["kernel", "generation"] | None = None
     gpu_layers: int | None = Field(default=None, ge=0)
     output_gpu: bool = False
+    cache_type_k: Literal["f16", "q8_0"] | None = None
+    cache_type_v: Literal["f16", "q8_0"] | None = None
+    flash_attention: Literal["on", "off"] | None = None
     request_id: str = Field(pattern="^[0-9a-f-]{36}$")
 
 

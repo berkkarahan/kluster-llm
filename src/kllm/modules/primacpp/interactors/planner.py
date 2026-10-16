@@ -13,6 +13,7 @@ from kllm.modules.primacpp.interactors.execution import (
     Segment,
     asset_files,
     inventory_identity,
+    vulkan_kv_cache_error,
 )
 from kllm.modules.primacpp.interactors.placement import (
     topology_from_plan, network_edges, require_layer_execution,
@@ -157,6 +158,17 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
             })
         except ValueError as error:
             errors = [*errors, str(error)]
+    if topology is not None:
+        resolved = plan.get("resolved_launch_settings") or {}
+        capabilities = runtime.get("capabilities") or {}
+        kv_error = vulkan_kv_cache_error(
+            topology.ranks,
+            {node: info["backend"] for node, info in participant_platforms(topology, members).items()},
+            resolved if isinstance(resolved, dict) else {},
+            capabilities.get("features", []),
+            capabilities=capabilities)
+        if kv_error:
+            errors = [*errors, kv_error]
     support = architecture_support(model_architecture(model), runtime.get("capabilities") or {})
     if support["error"]:
         errors = [*errors, support["error"]]

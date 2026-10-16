@@ -12,11 +12,11 @@ from pydantic import Field, field_validator, model_validator, model_serializer
 from kllm.modules.primacpp.entities import Record, RankAllocation
 from kllm.modules.primacpp.interactors.devices import stable_device_inventory
 from kllm.modules.runtimes.entities import body_digest
-from kllm.modules.runtimes.interactors.registry import file_digest
 from kllm.modules.primacpp.interactors.participants import ParticipantEvidence
 from kllm.modules.primacpp.interactors.draft import draft_mode
 from kllm.modules.primacpp.interactors.extras import template_kwargs, adapter_requests
 from kllm.modules.primacpp.interactors.adapters import adapter_bindings
+from kllm.modules.primacpp.interactors.preparation_metrics import digest_file, measured
 
 
 class Asset(Record):
@@ -218,6 +218,7 @@ def authority_owner(authority) -> dict:
             "authority_digest": body_digest({key: str(getattr(authority, key)) for key in fields})}
 
 
+@measured("asset_enumeration")
 def asset_files(model: Path, companions: dict[str, Path] | None = None, *, adapters: list[Path] | None = None) -> list[tuple[Asset, Path]]:
     primary = [("model", model), *(companions or {}).items(), *(("adapter", path) for path in adapters or [])]
     files: list[tuple[str, str, Path]] = []
@@ -240,7 +241,7 @@ def asset_files(model: Path, companions: dict[str, Path] | None = None, *, adapt
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"Missing or unsafe required asset: {name}")
         before = path.stat()
-        asset = Asset(name=name, kind=kind, sha256=file_digest(path), size=before.st_size)
+        asset = Asset(name=name, kind=kind, sha256=digest_file(path), size=before.st_size)
         after = path.stat()
         if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
             raise ValueError("Asset changed while hashing")

@@ -35,6 +35,42 @@ SQLite-backed telemetry and managed-network operations return the existing sanit
 
 ### Optional Prima preparation resources
 
+Preparation and profile HTTP job status may include `diagnostics.version: 1`.
+These node-local diagnostics are outside execution/profile identity and are
+omitted from legacy signed job replies (remote collection needs future capability
+negotiation). `local_chunk_bytes` records admission-time local staging tuning;
+see [CLI environment usage](cli.md#prima-local-staging-buffer).
+
+`diagnostics.stages` is bounded to 128 stage/node/asset aggregates; excess calls
+increment `omitted_stage_calls`. Monotonic times are comparable only within that
+process. Nested phases overlap: do not sum parent wall times with their children.
+`calls` and byte counters are exact; hot-call durations use `sample_every: 64`.
+`elapsed_seconds` is the sum of **timed calls**, not extrapolated total time;
+`timed_calls` and six latency buckets (≤1 ms, ≤10 ms, ≤100 ms, ≤1 s, ≤10 s, >10 s)
+make that coverage explicit. Long hash/copy/profile phases are timed in full.
+Counters distinguish read/hashed/copied/acknowledged/encoded bytes, resume/cache
+reuse and publications. Checkpoint measurements retain the existing persistence
+contract; the final checkpoint's own duration is visible in memory after saving.
+
+The master measures complete signed-command round trips and separate sampled
+channel signing, send (with and without queueing), and acknowledgement-wait
+durations. Acknowledgement wait includes peer work and reply validation; this is
+**not pure network RTT**. Receiver decode/write/final-verification costs remain on the owning node.
+Private-link profile durations are separate from transfer rates and adapter speed.
+Native profiler RSS is exposed only as `process_observation.rss_bytes`, never
+transfer bytes or kernel completion. Unknown kernel progress stays indeterminate.
+
+Legacy `progress` fields and labels remain. `progress.stage` identifies local
+copy, cache verification, final verification or publication. Regular snapshots
+are limited to four per second, with immediate boundaries and terminal events;
+`progress_bytes` retains exact logical completion between snapshots and
+`progress_statistics` counts callbacks/publications. Rates use stage-local copy
+or acknowledged payload deltas (`rate_kind`), excluding resume/cache bytes.
+Hash stages use `rate_kind: hash` and only estimate their own remaining work after
+enough samples; `stage_bytes_done/total` stay separate from cumulative completion.
+Hashing/cache verification does not show a copy ETA. Complete copy bytes do not
+mean preparation is complete: final SHA-256 and publication still have to succeed.
+
 Runtime source requests accept `engine: "primacpp"` for the supported pinned snapshot.
 Prima versions carry a `recipe_digest` and an engine-specific identity. Existing llama.cpp
 identity hashes and default wire records are unchanged. The library reports

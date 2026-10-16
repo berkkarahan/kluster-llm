@@ -17,12 +17,16 @@ import psutil
 from kllm.modules.primacpp.entities import DeviceProfile, ProfileRequest
 from kllm.modules.primacpp.interactors.profiles import ProfileCache
 from kllm.modules.runtimes.entities import body_digest
-from kllm.modules.runtimes.interactors.registry import atomic_json, file_digest
+from kllm.modules.runtimes.interactors.registry import atomic_json
 from kllm.modules.primacpp.interactors.devices import discover_vulkan_devices, select_vulkan_devices, vulkan_environment
 from kllm.modules.primacpp.interactors.kernel_profile import (decode_kernel_profile,
     kernel_settings, kernel_hardware, storage_identity, require_vulkan_profile_device)
 from kllm.modules.primacpp.interactors.qualification import execution_host
 from kllm.shared.runtime_resources import node_resources, prima_scope
+
+from kllm.modules.primacpp.interactors.preparation_metrics import (
+    ProgressWindow, diagnostics_scope, digest_file, measure,
+)
 
 TERMINAL = {"prepared", "failed", "cancelled", "interrupted"}
 
@@ -83,6 +87,7 @@ class ProfileJobs:
         self.processes: dict[str, subprocess.Popen] = {}
         self.cancelled: set[str] = set()
         self.checks = {}
+        self._progress_windows = {}
         self.closed = False
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prima-profile")
         try:
@@ -107,7 +112,9 @@ class ProfileJobs:
             self._save()
 
     def _save(self):
-        atomic_json(self.root / "jobs.json", self.jobs)
+        with self.lock, measure("profile_checkpoint") as counts:
+            atomic_json(self.root / "jobs.json", self.jobs)
+            counts["publications"] = 1
 
     def _update_progress(
         self,
@@ -119,14 +126,22 @@ class ProfileJobs:
         bytes_done: int = 0,
         bytes_total: int = 0,
         save: bool = False,
+        stage: str = "",
     ) -> None:
         clamped = max(0.0, min(1.0, float(fraction)))
         with self.lock:
             job = self.jobs.get(identity)
-            if not job:
+            if not job or (job["phase"] in TERMINAL and phase != job["phase"]):
+                return
+            if identity in self.cancelled and phase != "cancelled":
+                return
+            window = self._progress_windows.setdefault(identity, ProgressWindow())
+            if window.update((phase, stage, label), bytes_done, bytes_total, time.monotonic(),
+                             force=save or phase in TERMINAL) is None:
                 return
             job["progress"] = {
                 "phase": phase,
+                "stage": stage or phase,
                 "label": label,
                 "fraction": round(clamped, 4),
                 "pct": round(clamped * 100.0, 1),
@@ -134,6 +149,8 @@ class ProfileJobs:
                 "bytes_total": max(0, int(bytes_total)),
                 "updated_at": time.time(),
             }
+            if phase in TERMINAL:
+                self._progress_windows.pop(identity, None)
             if save:
                 self._save()
 
@@ -171,8 +188,11 @@ class ProfileJobs:
                     "primacpp", identity, "", digest)
                 lease = self.resources.acquire(scope, "profile")
                 self.reservations[identity] = lease
+            diagnostic_job = {}
             try:
-                model = (resolve_model or self.resolve_model)(request.model)
+                with diagnostics_scope(diagnostic_job, self.lock, check or (lambda: None), self.state().node_id):
+                    with measure("profile_model_layout"):
+                        model = (resolve_model or self.resolve_model)(request.model)
             except BaseException:
                 if lease is not None:
                     lease.release()
@@ -188,6 +208,7 @@ class ProfileJobs:
                 "error": None,
                 "created_at": now,
                 "control_owner": deepcopy(control_owner),
+                **diagnostic_job,
                 "progress": {
                     "phase": "queued",
                     "label": "Queued for device profiling…",
@@ -224,6 +245,7 @@ class ProfileJobs:
             if future is not None and not future.done():
                 return
             self.futures.pop(identity, None)
+            self._progress_windows.pop(identity, None)
             lease = self.reservations.pop(identity, None)
             if lease is not None:
                 lease.release()
@@ -272,7 +294,12 @@ class ProfileJobs:
             raise ValueError("Profile job cancelled")
 
     def _run(self, identity: str, request: ProfileRequest, runtime: dict, model: Path):
+        with diagnostics_scope(self.jobs[identity], self.lock, lambda: self._check(identity), self.state().node_id):
+            return self._run_owned(identity, request, runtime, model)
+
+    def _run_owned(self, identity: str, request: ProfileRequest, runtime: dict, model: Path):
         process = None
+        validation_started = None
         try:
             self._check(identity)
             if request.mode == "generation":
@@ -290,14 +317,14 @@ class ProfileJobs:
                 bytes_total=model_size,
             )
             storage = storage_identity(model)
-            digest = file_digest(model)
+            digest = self._digest_model(identity, model)
             self._update_progress(
                 identity,
                 phase="profiling",
                 label="Probing device capabilities…",
                 fraction=0.20,
-                bytes_done=model_size,
-                bytes_total=model_size,
+                bytes_done=0,
+                bytes_total=0,
             )
             member = deepcopy(self.state().members.get(self.state().node_id, {}))
             hardware = {
@@ -325,7 +352,7 @@ class ProfileJobs:
             directory.mkdir(parents=True, exist_ok=True)
             output = directory / "profile.log"
             self._check(identity)
-            with output.open("w") as log:
+            with measure("native_kernel_profiler"), output.open("w") as log:
                 process = subprocess.Popen(
                     [
                         runtime["profile_tool"],
@@ -362,7 +389,7 @@ class ProfileJobs:
                         label=f"Profiling {backend.upper()} device kernels…",
                         fraction=0.30,
                         bytes_done=0,
-                        bytes_total=model_size,
+                        bytes_total=0,
                     )
                     self._save()
                 until = time.monotonic() + 600
@@ -383,14 +410,17 @@ class ProfileJobs:
                     if last_marker is not None and marker != last_marker and log_bytes <= 1024 * 1024:
                         until = max(until, time.monotonic() + 600)
                     last_marker = marker
-                    frac = min(0.92, 0.30 + (min(rss, model_size) / max(1, model_size)) * 0.60) if model_size else 0.55
+                    # RSS is a liveness observation, not bytes read or kernel completion.
+                    with self.lock:
+                        self.jobs[identity]["process_observation"] = {"rss_bytes": rss, "cpu_seconds": cpu_total}
                     self._update_progress(
                         identity,
                         phase="profiling",
                         label=f"Profiling {backend.upper()} device kernels…",
-                        fraction=frac,
-                        bytes_done=min(rss, model_size),
-                        bytes_total=model_size,
+                        fraction=0.30,
+                        bytes_done=0,
+                        bytes_total=0,
+                        stage="native_kernel_profiler",
                     )
                     if time.monotonic() >= until or log_bytes > 1024 * 1024:
                         raise ValueError("Prima profile exceeded its time or output limit")
@@ -409,6 +439,7 @@ class ProfileJobs:
             )
             if raw is None:
                 raise ValueError("Prima profiler did not produce structured output")
+            validation_started = time.monotonic()
             metrics = json.loads(raw)
             if backend == "vulkan":
                 require_vulkan_profile_device(metrics, selected_devices[0])
@@ -459,7 +490,12 @@ class ProfileJobs:
             )
             with self.lock:
                 self._check(identity)
-                key = self.cache.put(profile)
+                with measure("profile_validation", started_at=validation_started):
+                    pass
+                validation_started = None
+                with measure("profile_cache_publication") as counts:
+                    key = self.cache.put(profile)
+                    counts["publications"] = 1
                 self.jobs[identity].update(
                     phase="prepared",
                     finished_at=time.time(),
@@ -473,11 +509,14 @@ class ProfileJobs:
                     phase="prepared",
                     label="Device profile complete",
                     fraction=1.0,
-                    bytes_done=model_size,
-                    bytes_total=model_size,
+                    bytes_done=0,
+                    bytes_total=0,
                 )
                 self._save()
         except Exception as error:
+            if validation_started is not None:
+                with measure("profile_validation", started_at=validation_started) as counts:
+                    counts["failed_calls"] = 1
             with self.lock:
                 if identity not in self.cancelled:
                     self._record_refusal(identity, error)
@@ -506,6 +545,12 @@ class ProfileJobs:
                 self.processes.pop(identity, None)
                 self.checks.pop(identity, None)
 
+    def _digest_model(self, identity, model):
+        return digest_file(model, check=lambda: self._check(identity), stage="profile_preflight_hash",
+            progress=lambda done, total: self._update_progress(identity, phase="profiling",
+                stage="profile_preflight_hash", label="Verifying model digest…", fraction=0.08,
+                bytes_done=done, bytes_total=total))
+
     def _run_generation(self, identity, request, runtime, model):
         import inspect
         from kllm.modules.primacpp.interactors.generation_profile import profile_generation
@@ -521,7 +566,7 @@ class ProfileJobs:
             bytes_done=0,
             bytes_total=model_size,
         )
-        digest = file_digest(model)
+        digest = self._digest_model(identity, model)
         member = deepcopy(self.state().members.get(self.state().node_id, {}))
         if (request.backend not in (None, "vulkan") or profiling_backend(runtime, member) != "vulkan"):
             raise ValueError("Model-backed generation profiling currently requires Vulkan")
@@ -542,8 +587,8 @@ class ProfileJobs:
                 phase="profiling",
                 label=label,
                 fraction=0.10 + fraction * 0.88,
-                bytes_done=bytes_done,
-                bytes_total=bytes_total,
+                bytes_done=0,
+                bytes_total=0,
             )
         extra_kwargs = (
             {"progress": on_progress}
@@ -555,8 +600,9 @@ class ProfileJobs:
             if type(scope.get("total_layers")) is not int or scope["total_layers"] <= 0:
                 raise ValueError("Generation profile lacks approved execution layers; prepare again with the current agent")
             extra_kwargs["expected_layers"] = scope["total_layers"]
-        result = profile_generation(runtime, model, request, selected, directory,
-            check=lambda: self._check(identity), track=track, stop=self.kill, **extra_kwargs)
+        with measure("generation_profile"):
+            result = profile_generation(runtime, model, request, selected, directory,
+                check=lambda: self._check(identity), track=track, stop=self.kill, **extra_kwargs)
         self._check(identity)
         if initial != (model.stat().st_size, model.stat().st_mtime_ns):
             raise ValueError("Model changed during generation profiling")
@@ -576,7 +622,9 @@ class ProfileJobs:
             peak_memory_bytes=max(result[b]["peak_memory_bytes"] for b in ("cpu", "vulkan")))
         with self.lock:
             self._check(identity)
-            key = self.cache.put(profile)
+            with measure("profile_cache_publication") as counts:
+                key = self.cache.put(profile)
+                counts["publications"] = 1
             self.jobs[identity].update(phase="prepared", finished_at=time.time(), profile_key=key,
                 profile=profile.model_dump(), measurement_kind="model-backed CPU and Vulkan generation", metrics=result)
             self._update_progress(
@@ -584,8 +632,8 @@ class ProfileJobs:
                 phase="prepared",
                 label="Device profile complete",
                 fraction=1.0,
-                bytes_done=model_size,
-                bytes_total=model_size,
+                bytes_done=0,
+                bytes_total=0,
             )
             self._save()
 

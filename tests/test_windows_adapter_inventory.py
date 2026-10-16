@@ -103,22 +103,62 @@ def test_batch_inventory_skips_malformed_entries(monkeypatch):
     assert [a.adapter_id for a in adapters] == ["7"]
 
 
+def test_inspect_uses_one_batched_powershell_call(monkeypatch):
+    calls: list[str] = []
+
+    def fake(script: str, values: dict[str, str]) -> str:
+        calls.append(script)
+        return json.dumps(
+            {
+                "Guid": "{3DF37FC4-B750-4BDE-8C16-785AA5010934}",
+                "MAC": "34-5A-60-4E-4B-42",
+                "Index": 7,
+                "Addresses": [{"IPAddress": "10.10.10.3", "PrefixLength": 24}],
+                "AddressStates": [
+                    {
+                        "IPAddress": "10.10.10.3",
+                        "PrefixLength": 24,
+                        "AddressState": 4,
+                        "SkipAsSource": False,
+                        "InstanceID": None,
+                    }
+                ],
+                "Name": "Ethernet",
+                "Status": "Up",
+                "LinkSpeed": "1 Gbps",
+                "Hardware": True,
+                "Description": "Realtek PCIe 5GbE Family Controller",
+                "Default": False,
+                "Dhcp": False,
+                "Routes": ["10.10.10.0/24"],
+            }
+        )
+
+    monkeypatch.setattr(windows_module, "powershell", fake)
+    snapshot = WindowsAdapter().inspect("7")
+    assert len(calls) == 1
+    assert snapshot.mac == "34:5a:60:4e:4b:42"
+    assert snapshot.state.speed_mbps == 1000 and snapshot.state.dhcp is False
+    assert snapshot.state.physical_ethernet and not snapshot.state.default_route
+    assert [str(a) for a in snapshot.state.addresses] == ["10.10.10.3/24"]
+    assert snapshot.facts["address_states"][0]["AddressState"] == 4
+
+
 def test_inventory_falls_back_to_per_adapter_scripts(monkeypatch):
     state_payload = {
+        "Guid": "{3DF37FC4-B750-4BDE-8C16-785AA5010934}",
+        "MAC": "34-5A-60-4E-4B-42",
+        "Index": 7,
+        "Addresses": [{"IPAddress": "10.10.10.3", "PrefixLength": 24}],
+        "AddressStates": [{"IPAddress": "10.10.10.3", "PrefixLength": 24, "AddressState": 4}],
         "Name": "Ethernet",
         "Status": "Up",
         "LinkSpeed": "1 Gbps",
         "Hardware": True,
         "Description": "Realtek PCIe 5GbE Family Controller",
+        "Default": False,
         "Dhcp": False,
-        "Addresses": [{"IPAddress": "10.10.10.3", "PrefixLength": 24}],
         "Routes": ["10.10.10.0/24"],
-    }
-    extra_payload = {
-        "Guid": "{3DF37FC4-B750-4BDE-8C16-785AA5010934}",
-        "MAC": "34-5A-60-4E-4B-42",
-        "Index": 7,
-        "Addresses": [{"IPAddress": "10.10.10.3", "PrefixLength": 24, "AddressState": 4}],
     }
     calls: list[str] = []
 
@@ -128,15 +168,13 @@ def test_inventory_falls_back_to_per_adapter_scripts(monkeypatch):
             raise PlatformRefusal("TIMEOUT", "Platform command exceeded its deadline")
         if "ExpandProperty ifIndex" in script:
             return json.dumps([7])
-        if "HardwareInterface" in script:
+        if "AddressStates=" in script:
             return json.dumps(state_payload)
-        if "MAC=$a.MacAddress;Index" in script:
-            return json.dumps(extra_payload)
         raise AssertionError(f"unexpected script: {script[:80]}")
 
     monkeypatch.setattr(windows_module, "powershell", fake)
     adapters = WindowsAdapter().inventory()
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert [a.adapter_id for a in adapters] == ["7"]
     assert adapters[0].mac == "34:5a:60:4e:4b:42"
     assert adapters[0].state.speed_mbps == 1000

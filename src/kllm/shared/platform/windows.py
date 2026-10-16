@@ -7,7 +7,7 @@ import json
 from kllm.modules.managed_network.entities import NodeAssignment
 from kllm.modules.managed_network.gateways.store import digest
 from kllm.shared.platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal, run_fixed
-from kllm.shared.platform.inspection import NetworkError, _inspect_windows, _windows_state
+from kllm.shared.platform.inspection import NetworkError, _windows_state
 
 
 def powershell(script: str, values: dict[str, str]) -> str:
@@ -29,6 +29,18 @@ $all=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Sile
 $active=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Select-Object IPAddress,PrefixLength,AddressState,SkipAsSource,InstanceID)
 [pscustomobject]@{Index=$i;Guid=$(if($_.InterfaceGuid){$_.InterfaceGuid.ToString()}else{''});MAC=$_.MacAddress;Name=$_.Name;Status=$_.Status.ToString();LinkSpeed=$(if($_.LinkSpeed){$_.LinkSpeed.ToString()}else{''});Hardware=[bool]$_.HardwareInterface;Description=$_.InterfaceDescription;Default=($defaults -contains $i);HasIpif=[bool]$ipif;Dhcp=$(if($ipif){$ipif.Dhcp -eq 'Enabled'}else{$false});Addresses=$all;AddressStates=$active;Routes=$routes}})
 ConvertTo-Json -InputObject $out -Compress -Depth 5
+"""
+
+
+_INSPECT_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$i = [int]$env:KLLM_10GBE_INTERFACE
+$a = Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop
+$ipif = Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop
+$addresses = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ IPAddress=$_.IPAddress; PrefixLength=$_.PrefixLength } })
+$active = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -PolicyStore ActiveStore | Select-Object IPAddress,PrefixLength,AddressState,SkipAsSource,InstanceID)
+$routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -ne '0.0.0.0/0' } | Select-Object -ExpandProperty DestinationPrefix)
+[pscustomobject]@{ Guid=$a.InterfaceGuid.ToString(); MAC=$a.MacAddress; Index=$a.ifIndex; Addresses=$addresses; AddressStates=$active; Name=$a.Name; Status=$a.Status.ToString(); LinkSpeed=$a.LinkSpeed.ToString(); Hardware=[bool]$a.HardwareInterface; Description=$a.InterfaceDescription; Default=(@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count -gt 0); Dhcp=($ipif.Dhcp -eq 'Enabled'); Routes=$routes } | ConvertTo-Json -Compress -Depth 5
 """
 
 
@@ -91,24 +103,24 @@ class WindowsAdapter(PlatformAdapter):
         )
 
     def inspect(self, adapter_id: str) -> AdapterSnapshot:
+        """One batched PowerShell query; the manual CLI keeps `_inspect_windows`.
+
+        A per-adapter inspection used to spawn two PowerShell processes
+        (~1.5-2s together on real hardware), which cannot fit the bounded
+        dedicated-verification and health budgets.
+        """
         if not adapter_id.isdigit():
             raise PlatformRefusal(
                 "INVALID_ADAPTER", "Windows selection requires an interface index"
             )
-        state = _inspect_windows(adapter_id, powershell)
-        data = json.loads(
-            powershell(
-                r"""
-$ErrorActionPreference='Stop'
-$i=[int]$env:KLLM_10GBE_INTERFACE
-$a=Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop
-$addresses=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -PolicyStore ActiveStore | Select-Object IPAddress,PrefixLength,AddressState,SkipAsSource,InstanceID)
-[pscustomobject]@{Guid=$a.InterfaceGuid.ToString();MAC=$a.MacAddress;Index=$a.ifIndex;Addresses=$addresses} | ConvertTo-Json -Compress -Depth 4
-""",
-                {"interface": adapter_id},
+        try:
+            data = json.loads(powershell(_INSPECT_SCRIPT, {"interface": adapter_id}))
+            state = _windows_state(adapter_id, data)
+            return self._snapshot(
+                int(adapter_id), data["Guid"], data["MAC"], state, data["AddressStates"]
             )
-        )
-        return self._snapshot(int(adapter_id), data["Guid"], data["MAC"], state, data["Addresses"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise NetworkError(f"could not read Windows adapter state: {exc}") from exc
 
     def conflict_preflight(self, snapshot: AdapterSnapshot, address: str) -> None:
         result = powershell(

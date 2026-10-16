@@ -1034,6 +1034,7 @@ async def test_real_signed_channel_pushes_only_operation_bound_assets(tmp_path, 
                         "assets": [asset.model_dump(), first_manifest_asset.model_dump()],
                     },
                 )
+                assert "diagnostics" not in prepared  # Legacy signed replies stay bounded.
                 manifest_payload = {
                     "job_id": prepared["job_id"],
                     "chunk": {
@@ -1056,8 +1057,19 @@ async def test_real_signed_channel_pushes_only_operation_bound_assets(tmp_path, 
                 }
                 refused = await master.request_runtime(uuid4(), "prima_asset_chunk", body=payload)
                 assert refused["status"] == "failed"
-                copied = await master.request_runtime(run, "prima_asset_chunk", body=payload)
+                from kllm.modules.primacpp.interactors.preparation_metrics import diagnostics_scope, channel_timing
+                observed = {}
+                with diagnostics_scope(observed, threading.RLock(), lambda: None, "master"):
+                    copied = await master.request_runtime(run, "prima_asset_chunk", body=payload,
+                        timing=channel_timing("worker", 1))
                 assert copied["phase"] == "prepared"
+                stages = {r["stage"]: r for r in observed["diagnostics"]["stages"]}
+                assert {"channel_sign", "channel_send", "channel_send_with_queue", "channel_ack_wait"} == set(stages)
+                assert all(r["timed_calls"] == 1 and r["elapsed_seconds"] >= 0 for r in stages.values())
+                receiver_stages = control.job(prepared["job_id"])["diagnostics"]["stages"]
+                hashed = sum(r["counters"].get("hashed_bytes", 0) for r in receiver_stages
+                             if r["stage"] == "receiver_final_verify")
+                assert hashed == len(data) + len(first_encoded)
                 assert control.cached_model(asset.sha256).read_bytes() == data
                 assert state.process_pid is None
                 for action in ("prima_status", "prima_cancel"):

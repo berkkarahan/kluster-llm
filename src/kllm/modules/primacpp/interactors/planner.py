@@ -90,6 +90,28 @@ def candidates(body, members, execute_plan, *, limit=32):
     return results
 
 
+def _stable_placement(plan: dict) -> dict:
+    """Digest identity for the selected placement, without live measurements.
+
+    Device allocations carry ``budget_bytes`` (derived from live available
+    memory), ``latency_ms`` (probe EMA) and ``score`` (a function of both):
+    all three change between consecutive plans on a live cluster, so binding
+    them into the plan digest makes preparation and Run unable to match their
+    own re-planned digest.
+    """
+    volatile = ("budget_bytes", "latency_ms", "score")
+    placement = {}
+    for key in ("device_allocations", "cpu_layers", "ngl", "tensor_split_csv", "tensor_overrides"):
+        value = plan.get(key)
+        if key == "device_allocations" and isinstance(value, list):
+            value = [
+                {name: item for name, item in entry.items() if name not in volatile}
+                for entry in value
+            ]
+        placement[key] = value
+    return placement
+
+
 def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, score=None) -> dict:
     from kllm.modules.primacpp.entities import HighsScheduleReport
     from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
@@ -129,16 +151,7 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         "settings": body.model_dump(),
         "model": {"name": model.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
         "inventory_digest": inventory_identity(members, body.network_id),
-        "placement": {
-            k: plan.get(k)
-            for k in (
-                "device_allocations",
-                "cpu_layers",
-                "ngl",
-                "tensor_split_csv",
-                "tensor_overrides",
-            )
-        },
+        "placement": _stable_placement(plan),
     }
     errors = qualification_errors(runtime)
     topology = None

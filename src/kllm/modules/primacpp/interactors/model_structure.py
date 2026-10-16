@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from kllm.modules.primacpp.interactors.preparation_metrics import measured
 
 
 FEATURE = "model_structure_v1"
@@ -33,6 +34,7 @@ def process_failure(phase, process, path, reason):
     return ValueError(f"{phase}: {reason} (exit={process.poll()}): {diagnostic}")
 
 
+@measured("model_inspection")
 def inspect_model(runtime, model, directory, *, check, track, stop):
     require_model_inspection(runtime)
     check()

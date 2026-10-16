@@ -204,6 +204,12 @@ async def test_three_agent_signed_start_idempotency_and_safe_refusal(tmp_path, m
                 )
             ).json()
             assert result["phase"] == "failed"
+            assert result["terminal_result"]["error_code"] == "UNSUPPORTED_CAPABILITY"
+            assert "Controlled adapter refuses host mutation" in result["terminal_result"]["message"]
+            guided = (await request(
+                0, "GET", f"/v2/cluster/network-setup/operations/{accepted['operation_id']}"
+            )).json()
+            assert guided["message"] == result["terminal_result"]["message"]
             assert {item["node_id"] for item in result["results"]} == set(nodes)
             assert all(
                 item["error_code"] == "UNSUPPORTED_CAPABILITY"
@@ -216,6 +222,13 @@ async def test_three_agent_signed_start_idempotency_and_safe_refusal(tmp_path, m
             assert len({item["address"] for item in network["participants"]}) == 3
             assert network["observed_state"] == "failed"
             assert mutations == []
+            # A restarted coordinator must retain the participant refusal from storage.
+            services[0].results.clear()
+            restored = services[0].network_view(accepted["network_id"])
+            assert all(
+                p["error"]["message"] == "Controlled adapter refuses host mutation"
+                for p in restored["participants"]
+            )
             duplicate = await request(0, "POST", "/v2/cluster/networks", json=payload)
             assert duplicate.json()["operation_id"] == accepted["operation_id"]
             altered = await request(

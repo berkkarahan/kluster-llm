@@ -223,7 +223,11 @@ class LocalNetworkExecutor:
         if self.store.metadata(f"stopped_network:{command.network_id}") or (
             existing_network is not None and existing_network.observed_state == "stopped"
         ):
-            raise PlatformRefusal("STALE_REVISION", "Stopped network tombstone cannot be revived")
+            raise PlatformRefusal(
+                "STALE_REVISION",
+                "This computer has already stopped this network. Stop the private network "
+                "on the master, then set up a new network; Retry cannot revive a stopped network.",
+            )
         self.platform.eligible(self.platform.inspect(assignment.adapter_id))
         if self.store.network(network.network_id) is None:
             self.store.put_network(

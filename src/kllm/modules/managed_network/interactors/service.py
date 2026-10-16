@@ -707,10 +707,16 @@ class ManagedNetworkService:
                     raise PlatformRefusal(
                         "TIMEOUT", "Preparation deadline expired; no addresses were applied"
                     )
-                if any(result["status"] != "prepared" for result in prepared.values()):
+                refused = next(
+                    ((node, result) for node, result in prepared.items()
+                     if result["status"] != "prepared"),
+                    None,
+                )
+                if refused is not None:
+                    node, result = refused
                     raise PlatformRefusal(
-                        "INVALID_ADAPTER",
-                        "A participant refused preparation; no addresses were applied",
+                        result.get("error_code") or "INVALID_ADAPTER",
+                        f"{node}: {result.get('message') or 'Adapter preparation failed'}",
                     )
                 (await self.store.arun(self._publish, network, "applying"))
                 operation.phase = "applying"
@@ -805,7 +811,8 @@ class ManagedNetworkService:
                 operation.phase = "failed"
                 operation.terminal_result = {
                     "error_code": code,
-                    "message": "Setup failed; review participant prerequisites and cleanup state",
+                    "message": str(error) if isinstance(error, PlatformRefusal)
+                    else "Setup failed; review participant prerequisites and cleanup state",
                     "rollback": rollback,
                 }
                 (
@@ -1366,7 +1373,9 @@ class ManagedNetworkService:
         participants = []
         for assignment in self.store.assignments(network_id):
             evidence = self.freshness.live.get((str(network_id), assignment.node_id))
-            result = self.results.get((str(network_id), assignment.node_id), {})
+            result = self.results.get((str(network_id), assignment.node_id), {
+                "error_code": assignment.error_code, "message": assignment.message,
+            })
             participants.append(
                 {
                     **assignment.model_dump(mode="json", exclude={"launch_rpc_endpoint"}),
@@ -1556,7 +1565,10 @@ class ManagedNetworkService:
                     assignments = await self.store.arun(self.store.assignments, network.network_id)
                     runtime_stage = False
                     try:
-                        await asyncio.wait_for(self._health(network, operation, assignments), 2)
+                        # Windows probes legitimately need a few seconds when
+                        # PowerShell cmdlets dominate; keep the bound above the
+                        # platform cost so a healthy renewal is never cancelled.
+                        await asyncio.wait_for(self._health(network, operation, assignments), 5)
                         active = [
                             run
                             for run in (await self.store.arun(self.store.runs, network.network_id))

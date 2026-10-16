@@ -503,6 +503,30 @@ def test_preview_refuses_missing_segmented_graph_capacity(tmp_path, monkeypatch)
     assert preview()["inference_supported"] is True
 
 
+def test_plan_digest_ignores_volatile_capacity_and_latency(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": []}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+    first = plan()
+    first["device_allocations"][0].update(
+        budget_bytes=100, latency_ms=1.5, score=0.9, estimated_bytes=4096
+    )
+    second = json.loads(json.dumps(first))
+    # Live capacity, probe latency and their derived score change between
+    # consecutive plans on a real cluster and must not invalidate the digest.
+    second["device_allocations"][0].update(budget_bytes=200, latency_ms=9.9, score=0.1)
+    stable = planner.preview(body, runtime, members(), model, lambda *_: first)["plan_digest"]
+    moved = planner.preview(body, runtime, members(), model, lambda *_: second)["plan_digest"]
+    assert stable == moved
+    second["device_allocations"][0]["layers"] = 4
+    changed = planner.preview(body, runtime, members(), model, lambda *_: second)["plan_digest"]
+    assert changed != stable
+
+
 def test_preview_refuses_a_family_the_runtime_does_not_implement(tmp_path, monkeypatch):
     from kllm.modules.primacpp.interactors import planner
 

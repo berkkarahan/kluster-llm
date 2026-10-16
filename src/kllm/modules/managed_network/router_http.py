@@ -277,8 +277,8 @@ def build_router(
 
             view = await store_call(selected, selected.operation_view, operation_id)
             terminal = view.get("terminal_result") or {}
-            view["message"] = MESSAGES.get(
-                terminal.get("error_code") or "", terminal.get("message", "")
+            view["message"] = terminal.get("message") or MESSAGES.get(
+                terminal.get("error_code") or "", ""
             )
             latest = {r["node_id"]: r for r in view["results"]}
             view["participants"] = [

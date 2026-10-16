@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import math
 import threading
 import time
@@ -12,7 +11,7 @@ from uuid import UUID
 
 from kllm.modules.primacpp.interactors.execution import Asset
 from kllm.modules.primacpp.interactors.staging import ModelStager
-from kllm.modules.runtimes.interactors.registry import file_digest
+from kllm.modules.primacpp.interactors.preparation_metrics import digest_file as file_digest, measure
 
 CHUNK_BYTES = 24 * 1024  # Base64 plus the signed envelope stays below MAX_FRAME.
 TRANSFER_LEASE_SECONDS = 600
@@ -41,16 +40,13 @@ class TransferGrants:
         before = path.stat()
         if path.is_symlink() or not path.is_file() or before.st_size != asset.size:
             raise ValueError("Transfer source does not match declared asset")
-        if progress is None:
-            digest = file_digest(path)
-        else:
-            sha = hashlib.sha256()
-            with path.open("rb") as source:
-                while data := source.read(1024 * 1024):
-                    check()
-                    sha.update(data)
-                    progress(len(data))
-            digest = sha.hexdigest()
+        hashed = 0
+        def on_hash(done, total):
+            nonlocal hashed
+            if progress is not None and done > hashed:
+                progress(done - hashed)
+            hashed = done
+        digest = file_digest(path, check=check, stage="grant_hash", asset=asset.sha256, progress=on_hash)
         after = path.stat()
         if (
             digest != asset.sha256
@@ -83,7 +79,7 @@ class TransferGrants:
                 or not 0 <= offset <= asset.size
             ):
                 raise ValueError("Asset offset is outside the authorized size")
-            with path.open("rb") as source:
+            with measure("remote_source_read", node=node, asset=digest, sample=64) as counts, path.open("rb") as source:
                 import os
 
                 current = os.fstat(source.fileno())
@@ -93,16 +89,20 @@ class TransferGrants:
                     raise ValueError("Authorized transfer asset changed")
                 source.seek(offset)
                 chunk = source.read(min(CHUNK_BYTES, asset.size - offset))
+                counts["read_bytes"] = len(chunk)
             if grant["acknowledged_offset"] is None:
                 grant["acknowledged_offset"] = (
                     offset  # Resume begins at the receiver's verified offset.
                 )
             grant["served_range"] = (offset, offset + len(chunk))
+            with measure("remote_encode", node=node, asset=digest, sample=64) as counts:
+                encoded = base64.b64encode(chunk).decode("ascii")
+                counts["encoded_bytes"] = len(encoded)
             return {
                 "sha256": digest,
                 "offset": offset,
                 "size": asset.size,
-                "data": base64.b64encode(chunk).decode("ascii"),
+                "data": encoded,
             }
 
     def acknowledge(self, node: str, operation: str, digest: str, offset: int):
@@ -257,7 +257,9 @@ class PushReceiver:
             ):
                 raise ValueError("Asset push does not match the prepared identity/offset")
             try:
-                chunk = base64.b64decode(reply["data"], validate=True)
+                with measure("receiver_decode", asset=asset.sha256, sample=64) as counts:
+                    chunk = base64.b64decode(reply["data"], validate=True)
+                    counts["decoded_bytes"] = len(chunk)
             except (KeyError, ValueError, TypeError) as error:
                 raise ValueError("Malformed asset push") from error
             if not chunk or len(chunk) > CHUNK_BYTES or offset + len(chunk) > asset.size:
@@ -271,15 +273,18 @@ class PushReceiver:
             check()
             if partial.exists() and partial.stat().st_size != offset:
                 partial.unlink()
-            with partial.open("ab") as output:
+            with measure("receiver_write", asset=asset.sha256, sample=64) as counts, partial.open("ab") as output:
                 output.write(chunk)
+                counts["written_bytes"] = len(chunk)
             end = offset + len(chunk)
             if end == asset.size:
                 before = self._identity(partial)
-                if file_digest(partial) != asset.sha256 or before != self._identity(partial):
+                if file_digest(partial, check=check, stage="receiver_final_verify", asset=asset.sha256) != asset.sha256 or before != self._identity(partial):
                     partial.unlink()
                     raise ValueError("Asset push digest mismatch")
                 check()
-                replace_file(partial, final)
+                with measure("receiver_publication", asset=asset.sha256) as counts:
+                    replace_file(partial, final)
+                    counts["publications"] = 1
                 self._remember(asset.sha256, self._identity(final))
             return end

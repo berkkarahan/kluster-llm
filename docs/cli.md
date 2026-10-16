@@ -28,6 +28,41 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 
 ## Commands
 
+### Prima local staging buffer
+
+`KLLM_PRIMA_LOCAL_CHUNK_MIB` controls local model staging reads. Unset means **4 MiB**
+(4 × 1024 × 1024 bytes). Accepts integer values **1–64**; empty, malformed,
+fractional, zero, negative and out-of-range values refuse preparation before
+hashing, copying or worker commands. The owning agent resolves it once when a new
+preparation is admitted and records `local_chunk_bytes` on the job. It does not
+affect manifests, plan digests, profile identities, threads or the 24 KiB signed
+network chunk / 64 KiB frame limits.
+
+Set it before starting a **new** owning agent, for example during an agreed idle
+startup window:
+
+```powershell
+$env:KLLM_PRIMA_LOCAL_CHUNK_MIB = '8'
+uv run kllm start --engine primacpp
+# Restore the default for future agent launches:
+Remove-Item Env:KLLM_PRIMA_LOCAL_CHUNK_MIB
+```
+
+```bash
+KLLM_PRIMA_LOCAL_CHUNK_MIB=8 uv run kllm start --engine primacpp
+# Or export it for subsequent CLI launches; unset restores the default:
+export KLLM_PRIMA_LOCAL_CHUNK_MIB=8
+unset KLLM_PRIMA_LOCAL_CHUNK_MIB
+```
+
+The CLI's new-agent subprocess inherits its environment. A CLI attached to an
+already-running agent cannot change that agent's environment, and changing the
+shell variable does not retune an admitted job. `start` has replacement semantics;
+do not use it to apply this setting during active work. Activate changes only at
+the next agreed agent startup. No forwarding through an HTTP request is performed.
+
+### Command reference
+
 | Command | Description |
 |---------|-------------|
 | `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1] [--backend BACKEND] [--engine llamacpp\|primacpp]` | Start as master, advertise via mDNS, print join key |

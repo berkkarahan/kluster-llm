@@ -90,6 +90,7 @@ class DashboardStatusService:
             "vram_percent": config.get("vram_percent"),
             "ram_percent": config.get("ram_percent"),
             "config_gpu_ids": config.get("gpu_ids"),
+            "engine": config.get("engine", "llamacpp"),
             "accel_backend": config.get("accel_backend"),
         }
 
@@ -143,6 +144,7 @@ class DashboardStatusService:
             "vram_percent": config.get("vram_percent"),
             "ram_percent": config.get("ram_percent"),
             "config_gpu_ids": config.get("gpu_ids"),
+            "engine": config.get("engine", "llamacpp"),
             "accel_backend": config.get(
                 "accel_backend", member.get("actual_backend", member.get("backend"))
             ),

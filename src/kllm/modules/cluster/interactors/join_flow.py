@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 from collections.abc import Callable
 from typing import Any
 
@@ -93,6 +94,8 @@ def build_register_payload(
         "wg_listen_port": netsec.WG_LISTEN_PORT,
         "git_head": git_head,
         "llama_release": llama_release,
+        "platform": platform.system() or None,
+        "architecture": platform.machine() or None,
     }
 
 
@@ -167,16 +170,3 @@ def post_register(
     if not isinstance(payload, dict):
         raise HTTPException(502, "master returned an invalid response")
     return payload
-
-
-def cached_llama_pack_warning(backend: str) -> str | None:
-    """Install a cached llama pack. Return a warning, or None when nothing should be recorded."""
-    try:
-        from kllm.shared.llama_pack import PackNotInstallable, install_cached_llama_pack
-
-        install_cached_llama_pack(backend=str(backend), force=False)
-    except PackNotInstallable as exc:
-        return str(exc)
-    except Exception:
-        return None
-    return None

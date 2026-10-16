@@ -3,37 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-import pytest
-
-from kllm.agent.schemas import LlamaSetupBody
 from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
 from kllm.modules.runtimes.interactors.runtime_setup import RuntimeSetupService
 from kllm.modules.inference.interactors.gpu_selection import GpuDeviceInput, GpuSelection
-from kllm.shared.exceptions import NotFoundError
 from kllm.modules.inference.entities import cpu_batch_threads
 from kllm.shared.state import ClusterState
 
 
-def test_runtime_setup_maps_install_errors_to_domain_exceptions():
-    state = ClusterState(node_id="node-1", role="master")
-    service = RuntimeSetupService(
-        lambda: state,
-        install_pack=lambda *_args: (_ for _ in ()).throw(FileNotFoundError("pack missing")),
-        repository_root=lambda: None,
-        gpu_visibility_env=lambda *_args: {},
-        stop_process=lambda *_args, **_kwargs: None,
-        clear_children=lambda: None,
-        start_worker=lambda **_kwargs: {},
-        resolve_gpu_selection=lambda _ids: ResolvedGpuSelection(GpuSelection((), "cpu", None), ()),
-        register_child=lambda *_args: None,
-        rpc_log_path=lambda: Path("rpc.log"),
-    )
-
-    with pytest.raises(NotFoundError, match="pack missing"):
-        service.setup(LlamaSetupBody())
-
-
-def test_installation_defers_start_until_a_master_command():
+def test_start_is_deferred_until_a_master_command():
     state = ClusterState(
         node_id="worker-1",
         role="worker",
@@ -48,12 +25,6 @@ def test_installation_defers_start_until_a_master_command():
     calls: list[object] = []
     service = RuntimeSetupService(
         lambda: state,
-        install_pack=lambda tag, backend, force: {
-            "ok": True,
-            "tag": tag,
-            "backend": backend,
-            "force": force,
-        },
         repository_root=lambda: Path("/repo"),
         gpu_visibility_env=lambda backend, ids: {"VISIBLE": f"{backend}:{ids}"},
         stop_process=lambda pid, *, force: calls.append(("stop", pid, force)),
@@ -67,15 +38,7 @@ def test_installation_defers_start_until_a_master_command():
         rpc_log_path=lambda: Path("/logs/rpc.log"),
     )
 
-    result = service.setup(LlamaSetupBody(tag="v1", backend="cuda", force=True))
-
-    assert result.as_payload() == {
-        "ok": True,
-        "tag": "v1",
-        "backend": "cuda",
-        "force": True,
-        "relaunch": None,
-    }
+    assert not hasattr(service, "setup")
     assert calls == []
     assert state.process_pid == 42
     assert service.start_commanded_worker(state) == {"pid": 99}
@@ -103,27 +66,6 @@ def test_installation_defers_start_until_a_master_command():
     ]
 
 
-def test_runtime_setup_does_not_try_to_spawn_when_install_succeeds():
-    state = ClusterState(node_id="worker-1", role="worker")
-    service = RuntimeSetupService(
-        lambda: state,
-        install_pack=lambda *_args: {"ok": True},
-        repository_root=lambda: None,
-        gpu_visibility_env=lambda *_args: {},
-        stop_process=lambda *_args, **_kwargs: None,
-        clear_children=lambda: None,
-        start_worker=lambda **_kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
-        resolve_gpu_selection=lambda _ids: ResolvedGpuSelection(GpuSelection((), "cpu", None), ()),
-        register_child=lambda *_args: None,
-        rpc_log_path=lambda: Path("rpc.log"),
-    )
-
-    assert service.setup(LlamaSetupBody()).as_payload() == {
-        "ok": True,
-        "relaunch": None,
-    }
-
-
 def _worker_state() -> ClusterState:
     state = ClusterState(
         node_id="worker-1",
@@ -147,7 +89,6 @@ def _service(
 
     return RuntimeSetupService(
         lambda: state,
-        install_pack=lambda *_args: {"ok": True},
         repository_root=lambda: Path("/repo"),
         gpu_visibility_env=lambda *_args: {},
         stop_process=lambda pid, *, force: calls.append(("stop", pid, force)),

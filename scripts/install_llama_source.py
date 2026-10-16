@@ -171,8 +171,13 @@ def discard_stale_cmake_build(
     source_dir: Path,
     build_dir: Path,
     signature: str | None = None,
+    remove: Callable[[Path], None] | None = None,
 ) -> None:
-    """Remove an installer-owned CMake build dir that would misconfigure."""
+    """Remove an installer-owned CMake build dir that would misconfigure.
+
+    ``remove`` lets the caller supply a lock-aware remover so a build dir held
+    open by a running node fails loudly instead of being silently left in place.
+    """
     entries = read_cmake_cache(build_dir)
     if not entries:
         return
@@ -199,7 +204,10 @@ def discard_stale_cmake_build(
         return
 
     print(f"Discarding llama.cpp CMake build ({reason})")
-    shutil.rmtree(build_dir, ignore_errors=True)
+    if remove is not None:
+        remove(build_dir)
+    else:
+        shutil.rmtree(build_dir, ignore_errors=True)
 
 
 def compile_configured_tree(

@@ -140,7 +140,9 @@ class RuntimeControlService:
             if request.expected_revision != (prior or {}).get("revision", 0):
                 raise ValueError("Target changed; refresh before applying your selection")
             version = self.registry.data["versions"][request.runtime_id]["version"]
-            require_qualified(version)
+            entry = self.registry.data["versions"][request.runtime_id]
+            require_qualified(self.registry.capture(request.runtime_id)
+                              if version.get("engine") == "primacpp" and entry.get("build") else version)
             target = RuntimeTarget(
                 version=version,
                 revision=request.expected_revision + 1,
@@ -351,6 +353,9 @@ class RuntimeControlService:
         data["reconcile_error"] = self.reconcile_error or (
             target_error if kind == "binding_stale" else None
         )
+        prima_ctrl = getattr(self, "prima", None)
+        if prima_ctrl is not None and hasattr(prima_ctrl, "latest_preparation"):
+            data["prima_preparation"] = prima_ctrl.latest_preparation()
         return data
 
     @contextmanager

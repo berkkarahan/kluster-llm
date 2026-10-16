@@ -74,7 +74,8 @@ def test_sink_write_failure_keeps_draining_and_reports_error(tmp_path):
     try:
         sink.sync()
         sink.write(b"output")
-        assert json.loads(sink.status_path.read_text())["error"] == "IsADirectoryError"
+        expected = "PermissionError" if os.name == "nt" else "IsADirectoryError"
+        assert json.loads(sink.status_path.read_text())["error"] == expected
         policy.write_text(json.dumps(dict(logging_enabled=False, logging_generation="1")))
         sink.sync()
         sink.write(b"output")

@@ -190,8 +190,20 @@ class WorkerRpcService:
                 value = self.registry.capture(command.body["runtime_id"])
                 # Refuse an incompatible engine before firewall or process mutation.
                 require_qualified(value)
-            with use_runtime(value):
-                return self._execute(command, deadline, authorize, value)
+            from kllm.shared.runtime_resources import node_resources
+            lease = None
+            if command.action == "start" and self.registry is not None and hasattr(self.registry, "lock"):
+                scope = ("llamacpp", str(command.run_id), str(command.master_session_id), (value or {}).get("runtime_id", "bootstrap"))
+                try:
+                    lease = node_resources(self.registry).acquire(scope, "rpc_start")
+                except ValueError as error:
+                    raise PlatformRefusal("RPC_BUSY", str(error)) from None
+            try:
+                with use_runtime(value):
+                    return self._execute(command, deadline, authorize, value)
+            finally:
+                if lease is not None:
+                    lease.release()
 
     def _execute(
         self,

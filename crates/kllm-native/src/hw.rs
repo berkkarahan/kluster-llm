@@ -43,7 +43,7 @@ impl BackendHint {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct GpuDevice {
     #[pyo3(get)]
@@ -65,7 +65,7 @@ impl GpuDevice {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct CapacitySnapshot {
     #[pyo3(get)]

@@ -43,7 +43,8 @@ class RunAdmission:
         return result
 
     def inventory(
-        self, network_id: UUID, *, runtime: bool = False, selected: list[str] | None = None
+        self, network_id: UUID, *, runtime: bool = False, selected: list[str] | None = None,
+        engine: str = "llamacpp"
     ) -> tuple[Any, list, dict]:
         service = self.service
         network = service.store.network(network_id)
@@ -77,6 +78,11 @@ class RunAdmission:
                     "STALE_REVISION", "Selected participant is no longer enrolled"
                 )
             member = deepcopy(original)
+            if engine == "primacpp":
+                member.update(host=assignment.address, rpc_bind=assignment.address,
+                    network_revision=assignment.assignment_revision)
+                members[assignment.node_id] = member
+                continue
             if assignment.node_id != service.identity.node_id:
                 if not runtime:
                     endpoint = assignment.logical_rpc_endpoint
@@ -268,6 +274,8 @@ class RunAdmission:
             service.lock.release()
 
     async def release(self, reservation):
+        if reservation.engine == "primacpp":
+            raise PlatformRefusal("CLEANUP_PENDING", "Stop all owned Prima ranks before releasing their admission")
         service = self.service
         reservation.state = "releasing"
         (await service.store.arun(service.store.reservation, reservation))

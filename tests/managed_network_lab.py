@@ -172,7 +172,7 @@ class SimulatedAdapter(PlatformAdapter):
 
 
 class NativeAgentLab:
-    def __init__(self, home: Path, monkeypatch):
+    def __init__(self, home: Path, monkeypatch, *, names=("master", "worker-a", "worker-b")):
         self.home, self.monkeypatch = home, monkeypatch
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
             route.connect(("192.0.2.1", 9))
@@ -188,14 +188,13 @@ class NativeAgentLab:
         )
         self.bridge_ports, self.diagnostic_ports, self.configurations = {}, {}, []
         self.inference_child = None
-        for _ in range(3):
+        for _ in names:
             listener = socket.socket()
             listener.bind(("127.0.0.1", 0))
             listener.listen()
             listener.setblocking(False)
             self.listeners.append(listener)
         self.master_port = self.listeners[0].getsockname()[1]
-        names = ("master", "worker-a", "worker-b")
         members = {
             name: {
                 "role": "master" if i == 0 else "worker",
@@ -233,6 +232,7 @@ class NativeAgentLab:
                 self, identity, store, network_id, revision, authority, address, port, peers
             ):
                 lab.diagnostic_ports[identity.node_id] = available_port(lab.source)
+                self.logical_address, self.logical_peers = address, peers
                 super().__init__(
                     identity,
                     store,
@@ -246,6 +246,13 @@ class NativeAgentLab:
 
             async def challenge(self, node_id, revision, port):
                 return await super().challenge(node_id, revision, lab.diagnostic_ports[node_id])
+
+            async def measure(self, node_id, revision, port, **kwargs):
+                result = await super().measure(node_id, revision, lab.diagnostic_ports[node_id], **kwargs)
+                # The lab maps approved virtual assignments to one real socket
+                # address. Receipts retain that explicit fixture translation.
+                result.update(source=self.logical_address, peer=self.logical_peers[node_id])
+                return result
 
         self.monkeypatch.setattr(executor, "DedicatedDiagnostics", MappedDiagnostics)
 
@@ -366,10 +373,10 @@ class NativeAgentLab:
         await self.wait(lambda: all(server.started for server in self.servers))
         self.client = httpx.AsyncClient(trust_env=False, timeout=10)
         identities = [
-            (await self.request(i, "GET", "/v2/node/network-identity")).json() for i in range(3)
+            (await self.request(i, "GET", "/v2/node/network-identity")).json() for i in range(len(self.nodes))
         ]
         binding = identities[0]["cluster_binding_id"]
-        for index in () if automatic_pairing else (1, 2):
+        for index in () if automatic_pairing else range(1, len(self.nodes)):
             for local, peer, role in ((0, index, "worker"), (index, 0, "master")):
                 identity = identities[peer]
                 paired = await self.request(
@@ -380,8 +387,8 @@ class NativeAgentLab:
                     | {"cluster_binding_id": binding, "expected_role": role},
                 )
                 assert paired.status_code == 200, paired.text
-        await self.wait(lambda: len(self.nodes[0].service.channels.sessions) == 2)
-        for index in () if automatic_pairing else (1, 2):
+        await self.wait(lambda: len(self.nodes[0].service.channels.sessions) == len(self.nodes) - 1)
+        for index in () if automatic_pairing else range(1, len(self.nodes)):
             snapshot = self.nodes[index].adapter.inspect("ethernet").public()
             selected = await self.request(
                 index,

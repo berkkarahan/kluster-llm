@@ -11,7 +11,7 @@
   import DeploymentPlan from '#lib/modules/run/view/DeploymentPlan.svelte';
   import { formatGib } from '#lib/shared/format-memory';
   import { MIN_CONTEXT } from '#lib/modules/run/entities';
-  import type { DeviceAllocation } from '#lib/modules/run/entities';
+  import type { DeviceAllocation, PlacementStrategyMode } from '#lib/modules/run/entities';
   import { PARAMETER_LABELS } from '#lib/modules/run/configuration';
   import { runtimeRunReason } from '#lib/modules/run/runtime-readiness';
   import type { RunInteractor } from '../interactor.svelte';
@@ -125,12 +125,14 @@
               </select>
             </label>
             <label class="field" for="run-placement-mode">Placement
-              <select id="run-placement-mode" class="field" value={presenter.nodePriority ? 'priority' : 'auto'}
-                onchange={(e) => presenter.setPriorityPlanning(e.currentTarget.value === 'priority')}>
-                <option value="auto">Automatic</option><option value="priority">Priority</option>
+              <select id="run-placement-mode" class="field" value={presenter.nodePriority ? 'priority' : presenter.placementStrategy}
+                onchange={(e) => presenter.setPlacementStrategy(e.currentTarget.value as PlacementStrategyMode)}>
+                <option value="auto">Automatic (HiGHS / Profiled)</option>
+                <option value="capacity_first">Capacity-first</option>
+                <option value="priority">Priority</option>
               </select>
             </label>
-            <p class="small muted">Automatic placement prefers local GPUs, then remote and pooled devices. Checked nodes must host at least one model layer; unchecked nodes remain eligible.</p>
+            <p class="small muted">Automatic placement uses HiGHS Halda MILP scheduling for Prima when device profiles exist, falling back to capacity-first. Checked nodes must host at least one model layer; unchecked nodes remain eligible.</p>
             {#if !presenter.nodePriority}
               <label class="check-row"><input type="checkbox" bind:checked={presenter.justEnoughMaster} onchange={() => presenter.scheduleEstimate()} />Just Enough Master Allocation</label>
               <p class="small muted">Fill worker GPUs first and give the master only the trailing layers they cannot hold, instead of filling the master's whole budget.</p>

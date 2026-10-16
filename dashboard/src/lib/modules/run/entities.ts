@@ -7,12 +7,26 @@ export type LoadProgress = {
   fraction: number;
   rate_bps?: number | null;
   eta_seconds?: number | null;
+  detail?: string | null;
   error?: string;
   operation_id?: string | null;
   started_at?: string | null;
   updated_at?: string | null;
   finished_at?: string | null;
 };
+
+export type PrimaPreparationProgress = {
+  fraction: number;
+  step: number;
+  steps_total: number;
+  label: string;
+  detail?: string | null;
+  bytes_done: number;
+  bytes_total: number;
+  rate_bps?: number | null;
+  eta_seconds?: number | null;
+};
+
 
 /** Per-model run settings as stored by PUT /v2/inference/model-settings/{model}. */
 export type ParameterSet = Record<string, unknown>;
@@ -51,9 +65,128 @@ export type DeviceAllocation = {
   budget_bytes: number;
 };
 
+export type MemoryPressureSet = 'M1' | 'M2' | 'M3' | 'M4';
+export type PlacementStrategyMode = 'auto' | 'capacity_first' | 'priority';
+export type SchedulerMode = 'highs_halda' | 'capacity_first' | 'priority';
+
+export type HighsNodeAllocation = {
+  node_id: string;
+  rank: number;
+  w_m: number;
+  n_m: number;
+  cpu_layers_per_cycle: number;
+  total_layers: number;
+  total_gpu_layers: number;
+  total_cpu_layers: number;
+  memory_pressure_set: MemoryPressureSet;
+  initial_memory_pressure_set?: MemoryPressureSet;
+  forced_m4: boolean;
+  overloaded_memory_bytes: number;
+  vram_used_bytes: number;
+  ram_used_bytes: number;
+  compute_ms: number;
+  disk_reload_ms: number;
+  kv_and_sync_ms: number;
+  network_ms: number;
+  total_step_ms: number;
+  prima_graphs: number;
+};
+
+export type HighsPrunedNode = {
+  node_id: string;
+  reason: 'weak_device_w_le_1_ngl_0' | 'zero_layers_assigned';
+  iteration?: number;
+  last_w_m?: number;
+  last_n_m?: number;
+  detail?: string;
+};
+
+export type HighsCycleCandidate = {
+  cycle_count_k: number;
+  window_size_w: number;
+  feasible: boolean;
+  objective_step_ms: number | null;
+};
+
+export type HighsScheduleReport = {
+  scheduler_mode: SchedulerMode;
+  requested_strategy: PlacementStrategyMode;
+  solver_backend: 'highspy' | 'highs_exact_milp' | 'heuristic_fallback';
+  total_layers: number;
+  cycle_count_k: number;
+  window_size_w: number;
+  segmented_placement_enabled: boolean;
+  mmap_mode: string;
+  just_enough_master: boolean;
+  objective_step_ms: number;
+  compute_step_ms: number;
+  disk_reload_step_ms: number;
+  network_step_ms: number;
+  fallback_reason: string | null;
+  missing_profile_nodes: string[];
+  forced_m4_rollback: boolean;
+  iterations: number;
+  node_allocations: HighsNodeAllocation[];
+  pruned_nodes: HighsPrunedNode[];
+  evaluated_cycles: HighsCycleCandidate[];
+};
+
+export type PrimaLayerRange = {
+  start: number;
+  end: number;
+};
+
+export type PrimaRankAllocation = {
+  node_id: string;
+  role: 'master' | 'worker';
+  rank: number;
+  address: string;
+  next_node_id: string;
+  layers: PrimaLayerRange[];
+  ngl: number;
+  devices: string[];
+  tensor_split: number[];
+  output_gpu: boolean;
+};
+
+export type PrimaTopology = {
+  schema_version: number;
+  runtime_id: string;
+  master_node_id: string;
+  total_layers: number;
+  data_port: number;
+  signal_port: number;
+  ranks: PrimaRankAllocation[];
+};
+
+export type PrimaNetworkEdge = {
+  source: string;
+  target: string;
+  address: string;
+  port: number;
+};
+
+export type PrimaModelSupport = {
+  supported: boolean | null;
+  error: string | null;
+  warning: string | null;
+};
+
 export type PlacementPlan = {
+  engine?: 'llamacpp' | 'primacpp';
+  transport?: string;
+  plan_digest?: string;
+  prima_topology?: PrimaTopology;
+  network_edges?: PrimaNetworkEdge[];
+  inference_supported?: boolean;
+  qualification_errors?: string[];
+  qualification_warnings?: string[];
+  model_support?: PrimaModelSupport;
   required_nodes?: string[];
   node_priority?: string[];
+  placement_strategy?: PlacementStrategyMode;
+  placement_mode?: SchedulerMode;
+  scheduler?: HighsScheduleReport;
   node_ram_budget_bytes?: Record<string, number>;
   node_ram_alloc_bytes?: Record<string, number>;
   node_vram_alloc_bytes?: Record<string, number>;
@@ -66,6 +199,44 @@ export type PlacementPlan = {
   cpu_alloc_bytes?: number;
   [key: string]: unknown;
 };
+
+export function resolveActiveEngine(
+  status: {
+    engine?: 'llamacpp' | 'primacpp';
+    role?: string;
+    active_config?: Record<string, unknown> | null;
+    runtimes?: {
+      target?: { version?: { engine?: string } } | null;
+      running?: { engine?: string } | null;
+    } | null;
+  } | null | undefined,
+  activeRunConfig?: Record<string, unknown> | null,
+  planResult?: PlacementPlan | null,
+  queryOverride?: string | null
+): 'llamacpp' | 'primacpp' {
+  const override = queryOverride?.trim().toLowerCase();
+  if (override === 'prima' || override === 'primacpp') return 'primacpp';
+  if (override === 'llama' || override === 'llamacpp') return 'llamacpp';
+
+  const configured = status?.engine;
+  if (configured === 'primacpp') return 'primacpp';
+  if (configured === 'llamacpp' && status?.role !== 'worker') return 'llamacpp';
+  if (status?.runtimes?.target?.version?.engine === 'primacpp') return 'primacpp';
+
+  const config = (activeRunConfig ?? status?.active_config ?? null) as Record<string, unknown> | null;
+  const values = (config?.values ?? config) as Record<string, unknown> | undefined;
+  if (values?.executor === 'primacpp' || values?.engine === 'primacpp') return 'primacpp';
+  if (status?.runtimes?.running?.engine === 'primacpp') return 'primacpp';
+
+  if (
+    planResult?.engine === 'primacpp' ||
+    Boolean(planResult?.prima_topology) ||
+    Boolean(planResult?.scheduler)
+  ) {
+    return 'primacpp';
+  }
+  return 'llamacpp';
+}
 
 export const MIN_CONTEXT = 512;
 export const CONTEXT_STEP = 512;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -86,6 +87,8 @@ class CapacityService:
             "process_pid": state.process_pid,
             "process_role": state.process_role,
             "process_started_at": self._tracked_process_start(),
+            "platform": platform.system() or None,
+            "architecture": platform.machine() or None,
         }
 
     def ensure_master_member(self, *, persist: bool = False) -> bool:

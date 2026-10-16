@@ -191,6 +191,23 @@ def build_router(
         except (PlatformRefusal, StoreConflict) as error:
             raise error_response(error) from None
 
+    @router.get("/node/network-setup/recovery/{network_id}/prima/{run_id}")
+    async def prima_listener_review(network_id: UUID, run_id: UUID, request: Request) -> dict[str, Any]:
+        selected = authorized(request, local=True)
+        try:
+            return await selected.guided.recover_prima_ports(network_id, run_id)
+        except (PlatformRefusal, OSError, RuntimeError) as error:
+            raise error_response(error) from None
+
+    @router.post("/node/network-setup/recovery/{network_id}/prima/{run_id}")
+    async def prima_listener_resolve(network_id: UUID, run_id: UUID, request: Request) -> dict[str, Any]:
+        selected = authorized(request, local=True)
+        value = await body(request, RecoveryRequest)
+        try:
+            return await selected.guided.recover_prima_ports(network_id, run_id, value)
+        except (PlatformRefusal, OSError, RuntimeError) as error:
+            raise error_response(error) from None
+
     @router.post("/node/network-setup/administrator")
     async def enable_administrator(request: Request) -> dict[str, Any]:
         selected = authorized(request, local=True)

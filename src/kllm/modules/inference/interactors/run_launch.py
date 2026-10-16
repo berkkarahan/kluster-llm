@@ -117,6 +117,8 @@ def build_master_launch(
         "mmproj_auto": body.vision and not body.mmproj,
     }
     launch.update(defaults.to_launch_dict())
+    if settings.checkpoint_min_step != 8192:
+        launch["extra_args"] += ["--checkpoint-min-step", str(settings.checkpoint_min_step)]
     if settings.swa_full:
         launch["extra_args"] += ["--swa-full"]
     if settings.speculative != "auto":

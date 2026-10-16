@@ -14,6 +14,7 @@ native skill interface.
 | Operations | `kllm-connect` | Agent endpoints, authentication and readiness |
 | Operations | `kllm-diagnose` | Evidence-led runtime/network troubleshooting |
 | Development | `kllm-develop` | Architecture-aware implementation and bug fixes |
+| Development | `kllm-prima` | Prima fork features, improvements and bugs through managed Kluster builds and qualification |
 | Development | `kllm-dashboard` | Live Svelte dashboard changes |
 | Development | `kllm-test` | Regression checks and validation boundaries |
 

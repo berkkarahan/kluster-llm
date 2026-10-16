@@ -3,22 +3,45 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import combinations
 from pathlib import Path
 from uuid import uuid4
 
 from kllm.modules.primacpp.interactors.execution import (
     ExecutionManifest,
+    ProfileEdge,
     Segment,
     asset_files,
     inventory_identity,
+    vulkan_kv_cache_error,
 )
-from kllm.modules.primacpp.interactors.placement import topology_from_plan, network_edges
+from kllm.modules.primacpp.interactors.placement import (
+    topology_from_plan, network_edges, require_layer_execution,
+)
+from kllm.modules.primacpp.interactors.model_support import architecture_support, model_architecture
+from kllm.modules.primacpp.interactors.platforms import normalize_platform
 from kllm.modules.primacpp.interactors.recipe import qualification_errors
 from kllm.modules.runtimes.entities import body_digest
 
 
+def participant_platforms(topology, members: dict) -> dict:
+    """Reported OS, architecture and backend per planned rank; unreported values stay None."""
+    result = {}
+    for rank in topology.ranks:
+        member = members[rank.node_id]
+        result[rank.node_id] = {
+            "rank": rank.rank,
+            "platform": normalize_platform(member.get("platform")),
+            "architecture": member.get("architecture"),
+            "backend": member.get("actual_backend") or member.get("backend"),
+        }
+    return result
+
+
 def candidates(body, members, execute_plan, *, limit=32):
     # Explicit priority is a user constraint, never an optimizer suggestion.
+    if type(limit) is not int or limit < 1:
+        raise ValueError("Prima candidate limit must be positive")
     options = [deepcopy(members)]
     if not body.node_priority:
         optional = [
@@ -26,23 +49,37 @@ def candidates(body, members, execute_plan, *, limit=32):
             for n, m in sorted(members.items())
             if m.get("role") == "worker" and n not in body.required_nodes
         ]
-        for node in optional[: limit - 1]:
-            options.append({n: m for n, m in members.items() if n != node})
+        workers = sum(m.get("role") == "worker" for m in members.values())
+        for removed_count in range(1, len(optional) + 1):
+            if body.network_id and workers - removed_count < 1:
+                break  # A network-bound candidate still needs a native worker.
+            for removed in combinations(optional, removed_count):
+                if len(options) >= limit:
+                    break
+                omitted = set(removed)
+                options.append({n: m for n, m in members.items() if n not in omitted})
+            if len(options) >= limit:
+                break
     results, seen = [], set()
-    for inventory in options:
-        plan = execute_plan(body, inventory)
+    for index, inventory in enumerate(options):
+        try:
+            plan = execute_plan(body, inventory)
+        except ValueError:
+            if index == 0:
+                raise
+            continue  # An optional subset may be invalid without invalidating the full plan.
         if plan.get("fit_status") == "overflow":
             continue
         key = body_digest(
             {
-                k: plan.get(k)
-                for k in (
+                "participants": sorted(inventory),
+                "placement": {k: plan.get(k) for k in (
                     "device_allocations",
                     "cpu_layers",
                     "ngl",
                     "tensor_split_csv",
                     "tensor_overrides",
-                )
+                )},
             }
         )
         if key not in seen:
@@ -53,9 +90,38 @@ def candidates(body, members, execute_plan, *, limit=32):
     return results
 
 
-def preview(body, runtime: dict, members: dict, model: Path, execute_plan) -> dict:
+def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, score=None) -> dict:
+    from kllm.modules.primacpp.entities import HighsScheduleReport
+    from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
+
     feasible = candidates(body, members, execute_plan)
-    plan, _ = feasible[0]
+    plan, selected_members = feasible[0]
+    profiling = {"status": "unmeasured", "predicted_decode_ms": None}
+    if score is not None:
+        (plan, selected_members), profiling = score(feasible)
+    if isinstance(profiling, dict) and isinstance(profiling.get("scheduler"), dict):
+        scheduler_report = HighsScheduleReport.model_validate(profiling["scheduler"])
+    else:
+        scheduler_report = solve_highs_halda_schedule(
+            body=body,
+            runtime=runtime,
+            members=selected_members,
+            base_plan=plan,
+        )
+        measured_reason = profiling.get("reason") if isinstance(profiling, dict) else None
+        if (scheduler_report.fallback_reason == "missing_device_profiles"
+                and scheduler_report.requested_strategy == "auto"
+                and isinstance(measured_reason, str) and measured_reason):
+            # The measured scorer declined for a concrete reason; never claim
+            # profiles are missing when they merely do not cover this candidate.
+            scheduler_report = scheduler_report.model_copy(update={
+                "fallback_reason": measured_reason,
+                "missing_profile_nodes": [],
+            })
+        profiling = {
+            **(profiling if isinstance(profiling, dict) else {}),
+            "scheduler": scheduler_report.model_dump(),
+        }
     stat = model.stat()
     # This is an observation, not a claim that a large model has been digest-verified.
     identity = {
@@ -78,8 +144,35 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan) -> di
     topology = None
     try:
         topology = topology_from_plan(plan, members, runtime["runtime_id"])
+        topology = topology.model_copy(update={"scheduler_report": scheduler_report})
     except ValueError as error:
         errors = [*errors, str(error)]
+    if topology is not None and (plan.get("split_mode") or "layer") == "layer":
+        resolved = plan.get("resolved_launch_settings") or {}
+        if not isinstance(resolved, dict):
+            resolved = {}
+        try:
+            require_layer_execution(topology, set((runtime.get("capabilities") or {}).get("features", [])), {
+                "prima_graphs": resolved.get("prima_graphs"),
+                "prima_graph_counts": plan.get("prima_graph_counts"),
+            })
+        except ValueError as error:
+            errors = [*errors, str(error)]
+    if topology is not None:
+        resolved = plan.get("resolved_launch_settings") or {}
+        capabilities = runtime.get("capabilities") or {}
+        kv_error = vulkan_kv_cache_error(
+            topology.ranks,
+            {node: info["backend"] for node, info in participant_platforms(topology, members).items()},
+            resolved if isinstance(resolved, dict) else {},
+            capabilities.get("features", []),
+            capabilities=capabilities)
+        if kv_error:
+            errors = [*errors, kv_error]
+    support = architecture_support(model_architecture(model), runtime.get("capabilities") or {})
+    if support["error"]:
+        errors = [*errors, support["error"]]
+    warnings = [support["warning"]] if support["warning"] else []
     return {
         **plan,
         "engine": "primacpp",
@@ -90,17 +183,46 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan) -> di
         "prima_topology": topology.model_dump() if topology else None,
         "network_edges": network_edges(topology) if topology else [],
         "runtime_required_nodes": [r.node_id for r in topology.ranks] if topology else [],
+        "participant_platforms": participant_platforms(topology, members) if topology else {},
         "candidate_count": len(feasible),
-        "profiling": {"status": "unmeasured", "predicted_decode_ms": None},
+        "profiling": profiling,
+        "scheduler": scheduler_report.model_dump(),
+        "placement_mode": scheduler_report.scheduler_mode,
         "inference_supported": not errors,
         "qualification_errors": errors,
+        "qualification_warnings": warnings,
+        "model_support": support,
     }
 
 
+def candidate_profile_edges(manifest, feasible, *, segmented=False):
+    """Approve additional candidate links only among this preparation's ranks."""
+    prepared = {rank.node_id: rank.address for rank in manifest.ranks}
+    execution = {(edge["source"], edge["target"]) for edge in manifest.transfer_edges}
+    pairs = set()
+    for plan, members in feasible:
+        try:
+            topology = topology_from_plan(plan, members, manifest.runtime_id)
+            resolved = plan.get("resolved_launch_settings") or {}
+            if not isinstance(resolved, dict):
+                resolved = {}
+            require_layer_execution(topology, {"segmented_placement"} if segmented else set(), {
+                "prima_graphs": resolved.get("prima_graphs"),
+                "prima_graph_counts": plan.get("prima_graph_counts"),
+            })
+        except ValueError:
+            continue  # Unrepresentable candidates cannot supply measurement edges.
+        if (topology.total_layers != manifest.total_layers
+                or any(prepared.get(rank.node_id) != rank.address for rank in topology.ranks)):
+            continue  # No asset or measurement authorization for an unprepared node.
+        pairs.update((edge["source"], edge["target"]) for edge in network_edges(topology))
+    return [ProfileEdge(source=source, target=target) for source, target in sorted(pairs - execution)]
+
+
 def materialize(
-    body, runtime, members, model, execute_plan, *, expected_digest: str, companions=None
+    body, runtime, members, model, execute_plan, *, expected_digest: str, companions=None, adapters=None, score=None
 ):
-    value = preview(body, runtime, members, model, execute_plan)
+    value = preview(body, runtime, members, model, execute_plan, score=score)
     if value["plan_digest"] != expected_digest:
         raise ValueError("Prima plan changed; refresh the plan before preparation")
     if value["prima_topology"] is None:
@@ -108,16 +230,16 @@ def materialize(
     from kllm.modules.primacpp.entities import PrimaTopology
 
     topology = PrimaTopology.model_validate(value["prima_topology"])
-    files = asset_files(model, companions)
+    files = asset_files(model, companions, adapters=adapters)
     backends = {}
     for rank in topology.ranks:
         member = members[rank.node_id]
         backend = member.get("actual_backend") or member.get("backend")
-        if rank.ngl and backend not in ("vulkan", "metal", "cuda", "rocm"):
+        if (rank.ngl or rank.output_gpu) and backend not in ("vulkan", "metal", "cuda", "rocm"):
             raise ValueError(
                 f"{rank.node_id}: select an explicit GPU backend before preparing Prima"
             )
-        backends[rank.node_id] = backend if rank.ngl else "cpu"
+        backends[rank.node_id] = backend if rank.ngl or rank.output_gpu else "cpu"
     manifest = ExecutionManifest(
         runtime_id=runtime["runtime_id"],
         run_id=str(uuid4()),
@@ -183,13 +305,15 @@ def choose_measured_candidate(
                     and (
                         not value.device_identity
                         or not value.driver_identity
-                        or value.gpu_layer_ms is None
                     )
                 )
             ):
                 return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None}
             layers = sum(r.end - r.start for r in rank.layers)
-            score += (layers - rank.ngl) * value.cpu_layer_ms + rank.ngl * (value.gpu_layer_ms or 0)
+            if (len(topology.ranks) != 1 or value.total_layers != layers or value.gpu_layers != rank.ngl
+                    or value.output_gpu != rank.output_gpu):
+                return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None}
+            score += value.decode_ms
         for edge in network_edges(topology):
             link = links.get((edge["source"], edge["target"]))
             if (

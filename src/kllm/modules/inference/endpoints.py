@@ -90,6 +90,12 @@ async def anthropic_messages(
         ),
     )
 
+
+async def chat_completion_control(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await gateway.proxy_completion_control(
+        state_ref.current().infer_port, request, active_config=_host()._active_config()
+    )
+
 async def responses(request: Request, _: None = Depends(require_api_token)) -> Any:
     return await _host()._observed_inference(
         "/v1/responses",
@@ -99,11 +105,82 @@ async def responses(request: Request, _: None = Depends(require_api_token)) -> A
 async def response_tokens(request: Request, _: None = Depends(require_api_token)) -> Any:
     return await _host()._observed_inference(
         "/v1/responses/input_tokens",
-        gateway.proxy_responses(state_ref.current().infer_port, request, count_tokens=True),
+        gateway.proxy_responses(
+            state_ref.current().infer_port, request,
+            count_tokens=True, active_config=_host()._active_config(),
+        ),
     )
 
 async def inference_models(request: Request, _: None = Depends(require_api_token)) -> Any:
     return await gateway.served_models(state_ref.current().infer_port, request.app.state.inference_client)
+
+
+async def embeddings(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/v1/embeddings",
+        gateway.proxy_embeddings(state_ref.current().infer_port, request, active_config=_host()._active_config()),
+    )
+
+async def raw_embeddings(request: Request, _: None = Depends(require_api_token)) -> Any:
+    path = request.url.path
+    return await _host()._observed_inference(
+        path,
+        gateway.proxy_embeddings(state_ref.current().infer_port, request,
+                                 active_config=_host()._active_config(), path=path),
+    )
+
+async def rerank(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/v1/rerank",
+        gateway.proxy_rerank(state_ref.current().infer_port, request, active_config=_host()._active_config()),
+    )
+
+
+async def tokenize(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/tokenize",
+        gateway.proxy_model_utility(state_ref.current().infer_port, request, "/tokenize",
+                                    active_config=_host()._active_config()),
+    )
+
+
+async def detokenize(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/detokenize",
+        gateway.proxy_model_utility(state_ref.current().infer_port, request, "/detokenize",
+                                    active_config=_host()._active_config()),
+    )
+
+
+async def apply_template(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/apply-template",
+        gateway.proxy_model_utility(state_ref.current().infer_port, request, "/apply-template",
+                                    active_config=_host()._active_config()),
+    )
+
+
+async def text_completions(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/v1/completions",
+        gateway.proxy_text_completions(state_ref.current().infer_port, request,
+                                       active_config=_host()._active_config()),
+    )
+
+async def infill(request: Request, _: None = Depends(require_api_token)) -> Any:
+    return await _host()._observed_inference(
+        "/infill",
+        gateway.proxy_infill(state_ref.current().infer_port, request,
+                             active_config=_host()._active_config()),
+    )
+
+async def raw_completions(request: Request, _: None = Depends(require_api_token)) -> Any:
+    path = request.url.path
+    return await _host()._observed_inference(
+        path,
+        gateway.proxy_raw_completion(state_ref.current().infer_port, request, path,
+                                     active_config=_host()._active_config()),
+    )
 
 async def connection_snapshot(
     request: Request,
@@ -232,6 +309,10 @@ def legacy_put_model_settings(model: str, body: LegacyModelSettingsBody) -> dict
 def stop_inference() -> dict[str, Any]:
     """Stop llama-server and drop the loaded model. The cluster stays up."""
     service = getattr(_host().app.state, "managed_network", None)
+    prima = getattr(getattr(service, "runtimes", None), "_prima", None)
+    if prima is not None:
+        prima.runs.cancelled.set()
+        prima.runs.stop()
     result = (
         service.rpc_runs.stop(lambda: _host()._inference_handlers().stop())
         if service is not None and service.rpc_runs is not None

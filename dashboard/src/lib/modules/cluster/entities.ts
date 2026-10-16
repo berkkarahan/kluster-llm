@@ -98,6 +98,8 @@ export type Status = {
   vram_percent?: number;
   ram_percent?: number;
   config_gpu_ids?: number[] | null;
+  /** Node engine mode from config (kllm start/join --engine); drives the Prima settings swap. */
+  engine?: 'llamacpp' | 'primacpp';
   accel_backend?: AccelBackend | null;
   split_mode?: SplitMode;
   gpu_ids?: number[] | null;

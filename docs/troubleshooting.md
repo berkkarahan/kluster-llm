@@ -1,5 +1,16 @@
 # Troubleshooting Guide
 
+### Prima profiler exits before readiness
+
+Inspect the preparation/profile job logs, including `inspection.log` and each
+CPU/Vulkan `profile.log`. Errors include the phase, child exit code and native
+diagnostic. `Absolute ownership differs from the model layer count` means the
+execution manifest and native loader disagree; increasing a timeout cannot fix it.
+Prepare the current managed Prima runtime with `model_structure_v1`, refresh the
+placement, and retry Prepare & profile. The profiler obtains executable layers
+from that exact runtime and checks approved preparation ownership. Do not edit
+model metadata or remove auxiliary tensors to work around this error.
+
 Use the Python installer and `kllm` CLI for every supported platform. Avoid manual binary copies or alternate launch scripts until the recovery steps in [agent-install.md](agent-install.md) are exhausted.
 
 ## Installation
@@ -15,6 +26,19 @@ python scripts/install.py
 ```
 
 The installer stages `llama-server`, `rpc-server`, and their shared libraries under `vendor/bin`.
+
+### Native rebuild while a node is running (`Access is denied`)
+
+A running `kllm` / `kllm-agent` / dashboard maps `src/kllm/_native.*.pyd`
+(`.so` on Unix) for its whole lifetime, and on Windows that makes the built
+extension unwritable. The installer now handles it: it retries a briefly held
+file, then renames the loaded copy aside as `_native.<abi>.pyd.locked` and puts
+the fresh build at the canonical path. The live process keeps its old module
+until it restarts, so restart Kluster to pick up the new extension; the parked
+copy is a throwaway duplicate the next installer run deletes once nothing maps
+it. If the file cannot even be renamed aside, the stage stops with
+`error: cannot replace the native extension (...)`: stop the node and any
+active inference, then re-run `uv run python scripts/install.py`.
 
 ### Verify an installation
 
@@ -459,9 +483,28 @@ drop-in API or platform compatibility. Qualification errors in the runtime libra
 expected during development. Continue serving with llama.cpp; do not remove launch
 options or edit manifests to bypass the gate. See [remaining implementation](../specs/017-prima-integration/tasks.md).
 
+**Prima scope per platform:** qualification is evaluated against the scope for the node's own
+operating system, `<windows|linux|darwin>-vulkan-<local|distributed>` (macOS uses Vulkan through
+MoltenVK). Only Windows has recorded evidence in this repository; the Linux and macOS scopes are
+defined but unqualified (`qualification_evidence_missing`) until physical hardware receipts are
+recorded. A platform never borrows another platform's evidence. In a mixed-OS run every
+participant platform must have its own qualified scope; errors for a non-local platform are
+prefixed with that scope (for example `linux-vulkan-distributed: qualification_evidence_missing`).
+`platform_unrecognized` means the node did not report a known OS; it is never assumed to be Windows.
+
+**Prima ring mixes GPU backends:** a Prima ring needs one shared accelerator backend. Planning
+fails with `Prima rings require one shared compatible GPU backend` and names each node, its
+platform and its backend (for example a Metal macOS node with a Vulkan Linux node). Select
+Vulkan on the differing node, or exclude it. A coordinator-only CPU master is exempt on any OS.
+
+**Prima participant identity differs:** preparation names the node and the differing identity
+(`runtime`, `source commit` or `recipe`). Nodes on different operating systems and architectures
+are accepted when source commit and recipe match; their binaries (`build_id`, artifacts) may differ.
+Rebuild the named node from the same managed source version.
+
 **Prima recipe changed:** resolve the supported Prima source again and build a new
-isolated version. The recipe digest covers the patch series and build implementation;
-an old artifact is never silently attributed to a changed recipe.
+isolated version. The recipe digest covers the pinned source, dependency hashes and build
+implementation; an old artifact is never silently attributed to a changed recipe.
 
 **Prima profiling failed:** inspect the profile job log. The model must be local and the
 node must have no active inference. Structured Q4K estimates may be unavailable for other

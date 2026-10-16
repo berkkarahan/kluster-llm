@@ -14,6 +14,7 @@ const MIN_DEDICATED_LINK_SPEED_MBPS: u64 = 1_000;
 #[cfg(any(target_os = "windows", test))]
 const MIN_DEDICATED_LINK_SPEED_BPS: u64 = MIN_DEDICATED_LINK_SPEED_MBPS * 1_000_000;
 
+#[cfg(any(unix, test))]
 fn has_minimum_link_speed(speed_mbps: u64) -> bool {
     speed_mbps >= MIN_DEDICATED_LINK_SPEED_MBPS
 }
@@ -102,7 +103,7 @@ fn service(scope: &Scope) -> Result<String> {
     Err(refuse("Ethernet adapter has no macOS network service"))
 }
 #[cfg(windows)]
-fn powershell(scope: &Scope, script: &str) -> Result<String> {
+pub(super) fn powershell(scope: &Scope, script: &str) -> Result<String> {
     // Interface IDs are decimal and addresses are validated literals. All script
     // text is fixed here, including the operation and property names.
     if !scope.adapter.chars().all(|c| c.is_ascii_digit()) {

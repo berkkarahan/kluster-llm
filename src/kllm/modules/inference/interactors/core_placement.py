@@ -364,10 +364,16 @@ def plan_devices(
 
     cpu_budget = ram(master)
     inputs = memory.input_bytes + memory.auxiliary_weights_bytes
-    cpu_base = inputs + memory.overhead + memory.checkpoint_bytes + memory.auxiliary_runtime_bytes
+    host_cache = settings.prompt_cache_bytes
+    if host_cache < 0:
+        raise ValidationError("prompt cache host reservation must be nonnegative")
+    cpu_base = inputs + memory.overhead + memory.checkpoint_bytes + memory.auxiliary_runtime_bytes + host_cache + settings.prima_adapter_bytes
+    worker_host_cache = host_cache + (memory.checkpoint_bytes if settings.prima_checkpoints else 0) + settings.prima_adapter_bytes
     devices: list[Device] = []
     if device == "gpu":
         for n in nodes:
+            if not n.is_master and worker_host_cache > ram(n):
+                continue
             inventory = n.devices
             if not inventory and n.backend not in ("cpu", "unknown"):
                 raise ValidationError(
@@ -396,7 +402,7 @@ def plan_devices(
                     free + inventory_device.reclaimable_bytes,
                 )
                 if n.unified_memory:
-                    budget = min(budget, max(0, ram(n) - (cpu_base if n.is_master else 0)))
+                    budget = min(budget, max(0, ram(n) - (cpu_base if n.is_master else worker_host_cache)))
                 local = n.is_master
                 name = inventory_device.device
                 if not name:
@@ -443,7 +449,7 @@ def plan_devices(
                         device=f"RPC[{n.rpc_endpoint}]/{rpc_device.index}",
                         backend="cpu",
                         local=False,
-                        budget_bytes=ram(n),
+                        budget_bytes=max(0, ram(n) - worker_host_cache),
                         latency_ms=n.latency_ms,
                         rpc_endpoint=n.rpc_endpoint,
                         rpc_index=rpc_device.index,
@@ -467,7 +473,7 @@ def plan_devices(
     gpu_budgets = {
         n.node_id: (
             min(
-                max(0, ram(n) - (cpu_base if n.is_master else 0)),
+                max(0, ram(n) - (cpu_base if n.is_master else worker_host_cache)),
                 sum(d.budget_bytes for d in devices if d.node_id == n.node_id),
             )
             if n.unified_memory
@@ -483,12 +489,13 @@ def plan_devices(
         cpu_devices.sort(key=lambda d: priority_order.get(d.node_id, len(priority_order)))
     gpu_devices = list(devices)
     shared_budgets = {
-        n.node_id: max(0, ram(n) - (cpu_base if n.is_master else 0))
+        n.node_id: max(0, ram(n) - (cpu_base if n.is_master else worker_host_cache))
         for n in nodes
         if n.unified_memory
     }
     model_bytes = sum(costs)
-    overhead = memory.overhead
+    # Full adapter storage bounds are reserved on every selected allocation pool.
+    overhead = memory.overhead + settings.prima_adapter_bytes
     split_mode = settings.split_mode
     failure_reason: str | None = None
     routing_mode: Literal["manual", "local", "single_remote", "pool"] = "pool"
@@ -692,6 +699,17 @@ def plan_devices(
         cpu_count = solution.cpu_layers
         cpu_bytes = solution.cpu_bytes
         allocations = list(solution.allocations)
+    graph_host_extra: dict[str, int] = {}
+    graph_extra_units = 0
+    graph_counts: dict[str, int] = {}
+    if fits and settings.prima_graphs and split_mode == "layer" and not expert_offloaded:
+        from kllm.modules.inference.interactors.prima_graph_reserve import reserve_graph_visits
+
+        reserve = reserve_graph_visits(allocations, cpu_count, count - 1, master.node_id, memory.overhead)
+        allocations = list(reserve.allocations)
+        graph_host_extra = reserve.host_extra
+        graph_extra_units = reserve.extra_units
+        graph_counts = reserve.graph_counts
     ngl = count - cpu_count
     # Slightly bias interior boundaries downward to avoid float rounding assigning
     # a boundary layer to the previous device in upstream upper_bound(float).
@@ -719,9 +737,12 @@ def plan_devices(
     else:
         device_order = [a.device for a in allocations]
     node_ids = [n.node_id for n in nodes]
+    cache_nodes = ({a.node_id for a in allocations} if worker_host_cache else set()) | set(graph_host_extra)
     node_alloc = [
         sum(a.estimated_bytes for a in allocations if a.node_id == nid)
         + (cpu_bytes if nid == master.node_id else 0)
+        + (worker_host_cache if nid != master.node_id and nid in cache_nodes else 0)
+        + graph_host_extra.get(nid, 0)
         for nid in node_ids
     ]
     node_workload = {
@@ -730,11 +751,13 @@ def plan_devices(
         for nid in node_ids
     }
     ram_budgets = {
-        n.node_id: ram(n) if n.is_master or any(d.node_id == n.node_id for d in cpu_devices) else 0
+        n.node_id: ram(n) if n.is_master or n.node_id in cache_nodes or any(d.node_id == n.node_id for d in cpu_devices) else 0
         for n in nodes
     }
     node_ram = {
         n.node_id: (cpu_bytes if n.is_master else 0)
+        + (worker_host_cache if not n.is_master and n.node_id in cache_nodes else 0)
+        + graph_host_extra.get(n.node_id, 0)
         + sum(
             a.estimated_bytes
             for a in allocations
@@ -765,6 +788,22 @@ def plan_devices(
         else ram_budgets[n.node_id] + gpu_budgets[n.node_id]
         for n in nodes
     }
+    if fits and graph_host_extra:
+        # Shared host/device pools and individual device limits are both binding.
+        device_usage: dict[tuple[str, str], int] = {}
+        device_limits: dict[tuple[str, str], int] = {}
+        for allocation in allocations:
+            key = (allocation.node_id, allocation.device)
+            device_usage[key] = device_usage.get(key, 0) + allocation.estimated_bytes
+            device_limits[key] = allocation.budget_bytes
+        exceeds = any(device_usage[key] > device_limits[key] for key in device_usage)
+        exceeds |= any(node_ram[n.node_id] > ram_budgets[n.node_id]
+                       or node_vram[n.node_id] > gpu_budgets[n.node_id]
+                       or (n.unified_memory and node_ram[n.node_id] + node_vram[n.node_id] > node_budgets[n.node_id])
+                       for n in nodes)
+        if exceeds:
+            fits = False
+            failure_reason = "Prima retained graph visits exceed host or device capacity"
     budget = sum(node_budgets.values())
     tight = fits and (
         cpu_bytes > cpu_budget * 0.9
@@ -780,6 +819,7 @@ def plan_devices(
     )
     device_effective = "gpu" if any(a.memory_kind == "gpu" for a in allocations) else "cpu"
     return DevicePlacementPlan(
+        prima_graph_counts=tuple(NodeByteValue(node, value) for node, value in sorted(graph_counts.items())),
         required_nodes=tuple(sorted(required)),
         node_priority=tuple(node_priority),
         node_ram_budget_bytes=tuple(
@@ -819,9 +859,9 @@ def plan_devices(
         checkpoint_estimate_bytes=memory.checkpoint_bytes,
         weights_estimate_bytes=memory.weights_bytes,
         auxiliary_weights_bytes=memory.auxiliary_weights_bytes,
-        compute_estimate_bytes=memory.compute_bytes * (len(allocations) + 1),
+        compute_estimate_bytes=memory.compute_bytes * (len(allocations) + 1 + graph_extra_units),
         auxiliary_runtime_bytes=memory.auxiliary_runtime_bytes,
-        execution_overhead_bytes=256 * MIB * (len(allocations) + 1),
+        execution_overhead_bytes=256 * MIB * (len(allocations) + 1 + graph_extra_units),
         estimate_complete=memory.complete,
         estimate_warnings=memory.warnings,
         estimated_bytes=sum(node_alloc),

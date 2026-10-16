@@ -3,6 +3,7 @@ mod address_events;
 #[path = "../network/arp_conflict.rs"]
 mod arp_conflict;
 mod relay {
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn private(ip: std::net::Ipv4Addr) -> bool {
         ip.is_private() && !ip.is_unspecified() && !ip.is_loopback()
     }

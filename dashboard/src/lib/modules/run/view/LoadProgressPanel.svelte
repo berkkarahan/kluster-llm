@@ -15,9 +15,10 @@
   let readyKey = $state('');
 
   const p = $derived(presenter.loadProgress);
+  const runBusy = $derived(presenter.busy === 'run' || presenter.busy === '/v2/inference/runs');
   const oom = $derived(presenter.planResult?.fit_status === 'overflow');
   const tight = $derived(presenter.planResult?.fit_status === 'tight');
-  const active = $derived(p?.phase === 'starting' || p?.phase === 'loading');
+  const active = $derived(p?.phase === 'starting' || p?.phase === 'loading' || (runBusy && !p));
   const ready = $derived(p?.phase === 'ready' && !dismissedReady);
   const failed = $derived(p?.phase === 'error');
   const failedVisible = $derived(failed && (!$errors.started || $errors.entries.load?.visible));
@@ -46,6 +47,7 @@
 
   const label = $derived.by(() => {
     if (showOom) return 'OOM Warning';
+    if (!p && runBusy) return 'Starting engine…';
     if (!p) return '';
     switch (p.phase) {
       case 'starting':
@@ -65,12 +67,16 @@
     }
   });
 
-  const pct = $derived(p ? Math.min(100, Math.max(0, p.fraction * 100)) : 0);
-  const detail = $derived(
-    p
+  const pct = $derived(p ? Math.min(100, Math.max(0, p.fraction * 100)) : runBusy ? 5 : 0);
+  const detail = $derived.by(() => {
+    if (!p) return runBusy ? 'Submitting deployment to cluster coordinator…' : '';
+    const transfer = p.bytes_total > 0
       ? composeProgressLabel(p.bytes_loaded, p.bytes_total, p.rate_bps, p.eta_seconds)
-      : ''
-  );
+      : '';
+    if (p.detail && transfer) return `${p.detail} · ${transfer}`;
+    if (p.detail) return p.detail;
+    return transfer;
+  });
 </script>
 
 {#if active || ready || failedVisible || unknown || cancelled || showOom}
@@ -112,7 +118,7 @@
       </div>
       <div class="mono text-[11px]" style="color: var(--muted)">
         {detail}
-        {#if p?.phase === 'starting'}
+        {#if (p?.phase === 'starting' || (!p && runBusy)) && !p?.detail}
           <span> — engine warming up, bar fills as weights page in</span>
         {/if}
       </div>

@@ -137,6 +137,9 @@ class PlatformAdapter(ABC):
     def authorize(self, command: Any) -> None:
         """Optional privileged boundary; manual adapters execute in the agent."""
 
+    def reconcile(self, command: Any) -> None:
+        """Optional native scope update for an unchanged manual assignment."""
+
     def before_add(self, snapshot: AdapterSnapshot, prepared: Prepared) -> AdapterSnapshot:
         return snapshot
 

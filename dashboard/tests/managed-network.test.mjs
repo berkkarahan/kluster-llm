@@ -3,7 +3,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer as createHttpServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'vite';
@@ -33,10 +33,24 @@ test('private network app setup, selected run, blocked stop and cleanup',
     let operationPending = false;
     let operationRevision = 1;
     let administratorEnabled = false;
+    const listenerRun = '00000000-0000-4000-8000-000000000014';
+    let listenerResources = [];
+    let listenerDigest = 'd'.repeat(64);
+    let listenerRules = [
+      {port:9000, peers:['192.168.234.2'], ownership:'exact', original:{InstanceID:'owned'}, current:{InstanceID:'owned'}},
+      {port:9001, peers:['192.168.234.2'], ownership:'changed', original:{InstanceID:'old'}, current:{InstanceID:'changed', Remote:['192.168.234.2']}}
+    ];
+    let wrongListenerReview = false;
+    let listenerReviewDelay = 0;
+    let listenerRefusal = false;
+    let invalidListenerAck = false;
+    let helperTimedOut = false;
     const status = () => ({role:'master',node_id:'master',members:{master:{host:'192.168.68.1'},worker:{host:'192.168.68.2'}},managed_networks:network ? [network] : []});
     const model = {name:'fixture.gguf',path:'fixture.gguf',size_bytes:100};
     try {
       const entry = compile(`<script>
+        import '/src/app.css';
+        import '/src/prototype.css';
         import ManagedNetwork from '/src/lib/modules/network/view/ManagedNetwork.svelte';
         import Run from '/src/routes/run/+page.svelte';
         import {createApp} from '/src/lib/app.svelte.ts';
@@ -51,7 +65,16 @@ test('private network app setup, selected run, blocked stop and cleanup',
         const path = req.url.split('?')[0];
         const json = (payload, code=200) => res.writeHead(code,{'Content-Type':'application/json'}).end(JSON.stringify(payload));
         if(path==='/__network-test') {
-          res.writeHead(200,{'Content-Type':'text/html'}).end(`<html><body><div id="app"></div><script type="module" src="/__network-mount.js"></script></body></html>`);
+          res.writeHead(200,{'Content-Type':'text/html'}).end(`<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /></head><body><div id="app"></div><script type="module" src="/__network-mount.js"></script></body></html>`);
+          return;
+        }
+        if(path==='/@vite/client') {
+          // Vite 8 connects its CSS client even with HMR/ws disabled. Keep the
+          // installed client's real style helpers, without fixture-only sockets.
+          const transformed=await vite.transformRequest(path);
+          const connection='transport.connect(createHMRHandler(handleMessage));';
+          assert.ok(transformed?.code.includes(connection),'Review the Vite client when upgrading the fixture');
+          res.writeHead(200,{'Content-Type':'application/javascript'}).end(transformed.code.replace(connection,''));
           return;
         }
         if(!path.startsWith('/v2/')) {vite.middlewares(req,res,()=>res.writeHead(404).end());return;}
@@ -63,7 +86,24 @@ test('private network app setup, selected run, blocked stop and cleanup',
           assert.equal(body.acknowledged,true,'Administrator notice must be acknowledged first');
           administratorEnabled=true; return json({ready:true});
         }
-        if(path==='/v2/node/network-setup') return json({administrator_enabled:administratorEnabled,cleanup_pending:[],administrator_notice:'Administrator access is required on each computer. Original settings will be restored.'});
+        if(path==='/v2/node/network-setup') return json({administrator_enabled:helperTimedOut?false:administratorEnabled,
+          error_code:helperTimedOut?'TIMEOUT':null,message:helperTimedOut?'Local network helper did not respond in time.':'',
+          cleanup_pending:[],prima_listener_recovery:listenerResources,administrator_notice:'Administrator access is required on each computer. Original settings will be restored.'});
+        if(path===`/v2/node/network-setup/recovery/${networkId}/prima/${listenerRun}`) {
+          if(req.method==='GET') {
+            if(listenerRefusal) return json({detail:{code:'LOCAL_ONLY',message:'This change requires the local node app'}},403);
+            if(listenerReviewDelay) await new Promise(resolve=>setTimeout(resolve,listenerReviewDelay));
+            return json({network_id:networkId,run_id:wrongListenerReview ? operationId : listenerRun,
+              manifest_digest:'e'.repeat(64),snapshot_digest:listenerDigest,rules:listenerRules});
+          }
+          assert.deepEqual(Object.keys(body).sort(),['decision','snapshot_digest']);
+          if(body.snapshot_digest!==listenerDigest) return json({detail:{code:'OWNERSHIP_CONFLICT',message:'Prima rules changed; review them again'}},409);
+          assert.equal(req.method,'POST');
+          if(body.decision==='restore_owned') assert.ok(listenerRules.every(rule=>['exact','absent'].includes(rule.ownership)));
+          if(invalidListenerAck) return json({phase:'admitted',decision:body.decision});
+          listenerResources=[];
+          return json({phase:'released',decision:body.decision});
+        }
         if(path==='/v2/cluster/network-setup' && req.method==='GET') return json({administrator_notice:'Administrator access is required on each computer. Original settings will be restored.',assessment_revision:'a'.repeat(64),master_node_id:'master',networks:network?[network]:[],computers:['master','worker','worker-b'].map(node_id=>({node_id,name:node_id,host:'192.168.68.1',master:node_id==='master',administrator_enabled:administratorEnabled,adapters:[{...adapter,reason:''}],selected_adapter:'eth-test',ready:administratorEnabled,error_code:administratorEnabled?null:'ADMIN_REQUIRED',message:administratorEnabled?'Ready':'Enable administrator access'}))});
         if(path==='/v2/cluster/network-setup' && req.method==='POST') {
           assert.equal(body.assessment_revision,'a'.repeat(64));
@@ -170,6 +210,13 @@ test('private network app setup, selected run, blocked stop and cleanup',
       assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Enable administrator access on this computer').disabled"),true);
       await evaluate("document.querySelector('.admin-notice input[type=checkbox]').click()");
       await click('Enable administrator access on this computer');
+      helperTimedOut=true;
+      await click('Refresh computers');
+      await wait("document.body.textContent.includes('Network helper needs attention on this computer')");
+      assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Enable administrator access on this computer') ?? null"),null);
+      assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Set up private network').disabled"),true);
+      helperTimedOut=false;
+      await click('Refresh computers');
       await click('Set up private network');
       await wait("document.querySelector('.managed-network summary').textContent.includes('Private network ready')");
       assert.ok(!requests.some(r=>r.path==='/v2/node/network-selection'||r.path.startsWith('/v2/node/network-identity/peers/')), 'Guided setup needs no manual pairing or selection');
@@ -209,9 +256,103 @@ test('private network app setup, selected run, blocked stop and cleanup',
       await wait("!Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Stop private network').disabled");
       await click('Stop private network');
       await wait("document.body.textContent.includes('· stopped ·')");
+
+      // Native rules are controlled. Chrome, Svelte, HTTP and token forwarding are real.
+      listenerResources=[{network_id:networkId,run_id:listenerRun,manifest_digest:'e'.repeat(64)}];
+      await click('Refresh computers');
+      await click('Review Prima rules');
+      await wait("document.querySelector('[aria-label=\"Prima rule recovery decision\"]')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-restore]').disabled"),true);
+      assert.equal(await evaluate("document.querySelector('[data-prima-keep]').disabled"),true);
+      assert.match(await evaluate("document.querySelector('.prima-rule-table').innerText"), /Changed outside Kluster/);
+      for (const width of [1280,390]) {
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1100,deviceScaleFactor:1,mobile:width<600});
+        assert.equal(await evaluate('innerWidth'),width,'Viewport must use the requested CSS width');
+        await evaluate("document.querySelector('.prima-snapshots').open=true;document.querySelector('.prima-pending').scrollIntoView()");
+        await wait("document.querySelector('.prima-snapshots').open");
+        assert.equal(await evaluate(`Array.from(document.querySelectorAll('.prima-recovery,.prima-rule-scroll,.prima-snapshots pre')).every(el=>{const r=el.getBoundingClientRect();return r.left>=-1&&r.right<=innerWidth+1})`),true,`Recovery panels must fit ${width}px`);
+        // Evidence screenshots are written only for a run that passed its fitted-panel
+        // checks, and the artifacts directory must be created for fresh checkouts.
+        const shot=await call('Page.captureScreenshot',{format:'png'});
+        const target=fileURLToPath(new URL(`../../artifacts/prima-listener-recovery-${width}.png`,import.meta.url));
+        mkdirSync(new URL('../../artifacts',import.meta.url),{recursive:true});
+        const handle=openSync(target,'w');
+        writeFileSync(handle,Buffer.from(shot.data,'base64'));
+        closeSync(handle);
+      }
+      await call('Emulation.clearDeviceMetricsOverride');
+      await evaluate("document.querySelector('.prima-snapshots').open=false");
+      // A changed backend snapshot must invalidate the old decision, not trigger a retry.
+      listenerDigest='f'.repeat(64);
+      await evaluate("document.querySelector('[data-prima-ack]').click()");
+      await click('Keep all current Prima rules');
+      await wait("document.body.textContent.includes('Prima rules changed; review them again')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-keep]')"),null);
+      await click('Review Prima rules');
+      await wait("document.querySelector('[data-prima-ack]')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-ack]').checked"),false);
+      await evaluate("document.querySelector('[data-prima-ack]').click()");
+      await click('Keep all current Prima rules');
+      await wait("document.body.textContent.includes('Current Prima rules were kept')");
+      await wait("!document.querySelector('[aria-label=\"Prima rule recovery decision\"]')");
+      assert.equal(requests.filter(r=>r.path.endsWith(`/prima/${listenerRun}`)&&r.method==='POST').length,2);
+
+      listenerResources=[{network_id:networkId,run_id:listenerRun,manifest_digest:'e'.repeat(64)}];
+      listenerRules=[{port:9000,peers:['192.168.234.2'],ownership:'unknown',original:null,current:{InstanceID:'lost'}},
+        {port:9001,peers:['192.168.234.2'],ownership:'absent',original:{InstanceID:'gone'},current:null}];
+      await click('Refresh computers');
+      await click('Review Prima rules');
+      await wait("document.querySelector('.prima-rule-table')?.textContent.includes('Creation receipt missing')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-restore]').disabled"),true);
+
+      // Closing during a delayed read must never republish a stale review on reopen.
+      listenerReviewDelay=300;
+      await click('Review Prima rules');
+      await evaluate("document.querySelector('.managed-network').open=false");
+      await new Promise(resolve=>setTimeout(resolve,350));
+      await evaluate("document.querySelector('.managed-network').open=true");
+      await wait("Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Review Prima rules'&&!b.disabled)");
+      assert.equal(await evaluate("document.querySelector('[data-prima-keep]')"),null);
+      listenerReviewDelay=0;
+      wrongListenerReview=true;
+      await click('Review Prima rules');
+      await wait("document.body.textContent.includes('Prima rule review differs from the selected run')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-keep]')"),null);
+      wrongListenerReview=false;
+      listenerRules=[{port:9000,peers:['192.168.234.2'],ownership:'exact',original:{InstanceID:'owned'},current:{InstanceID:'owned'}},
+        {port:9001,peers:['192.168.234.2'],ownership:'absent',original:{InstanceID:'gone'},current:null}];
+      await click('Review Prima rules');
+      await click('Remove unchanged Prima rules');
+      await wait("document.body.textContent.includes('Owned Prima rules were removed')");
+      const recovered=requests.filter(r=>r.path.endsWith(`/prima/${listenerRun}`)&&r.method==='POST');
+      assert.deepEqual(recovered.map(r=>r.body.decision),['keep_current','keep_current','restore_owned']);
+      assert.equal(recovered.at(-1).body.snapshot_digest,listenerDigest);
+
+      // Worker-local recovery remains accessible without requesting master inventories.
+      listenerResources=[{network_id:networkId,run_id:listenerRun,manifest_digest:'e'.repeat(64)}];
+      await evaluate("window.networkStore.cluster.status={...window.networkStore.cluster.status,role:'worker'}");
+      const clusterReads=requests.filter(r=>r.path==='/v2/cluster/network-setup'&&r.method==='GET').length;
+      await click('Refresh computers');
+      await wait("document.body.textContent.includes('The cluster’s master handles private-network setup')");
+      assert.equal(requests.filter(r=>r.path==='/v2/cluster/network-setup'&&r.method==='GET').length,clusterReads);
+      listenerRefusal=true;
+      await click('Review Prima rules');
+      await wait("document.body.textContent.includes('Open Kluster at localhost on this computer')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-keep]')"),null);
+      listenerRefusal=false;
+      await click('Review Prima rules');
+      invalidListenerAck=true;
+      await click('Remove unchanged Prima rules');
+      await wait("document.body.textContent.includes('Prima rule recovery was not acknowledged')");
+      assert.equal(await evaluate("document.querySelector('[data-prima-keep]')"),null);
+      invalidListenerAck=false;
+      await click('Review Prima rules');
+      await click('Remove unchanged Prima rules');
+      await wait("document.body.textContent.includes('Owned Prima rules were removed')");
       assert.ok(requests.some(r=>r.path.endsWith('/peers/worker')));
       assert.ok(requests.some(r=>r.path==='/v2/node/network-selection'));
       assert.ok(requests.filter(r=>(r.method==='POST'||r.method==='PUT') && (r.path.includes('network') || r.path.includes('/inference/runs'))).every(r=>r.authorization==='Bearer fixture-token'), JSON.stringify(requests.filter(r=>(r.method==='POST'||r.method==='PUT') && (r.path.includes('network') || r.path.includes('/inference/runs')))));
+      assert.deepEqual(browserErrors,[], 'Recovery interactions must not produce unhandled browser exceptions');
     } finally {
       try { ws?.close(); } catch { /* ignore */ }
       if (browser) {

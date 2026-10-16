@@ -22,6 +22,11 @@ from kllm.modules.primacpp.interactors.compatibility import BASELINE_COMMIT, lau
 from kllm.modules.primacpp.interactors.execution import ExecutionManifest, Segment, asset_files
 from kllm.modules.primacpp.interactors.recipe import recipe, recipe_digest
 from kllm.modules.runtimes.interactors.registry import file_digest
+from kllm.modules.primacpp.interactors.devices import (
+    discover_vulkan_devices, select_vulkan_devices, vulkan_environment, remapped_vulkan_names,
+)
+from kllm.modules.primacpp.interactors.evidence import execution_reports, verify_vulkan_execution
+from kllm.modules.primacpp.interactors.assessment import response_errors
 
 
 def capture_runtime(directory: Path) -> dict:
@@ -39,6 +44,25 @@ def capture_runtime(directory: Path) -> dict:
         if not path.is_relative_to(artifacts) or file_digest(path) != digest:
             raise ValueError("Assessment artifact failed digest verification")
     return value
+
+
+def capture_development_runtime(runtime: dict, binary: Path) -> dict:
+    """Bind a diagnostic override to its actual binary and capability report."""
+    binary = binary.resolve()
+    digest = file_digest(binary)
+    environment = {key: value for key, value in {**os.environ, **runtime.get("runtime_env", {})}.items()
+                   if value is not None}
+    probe = subprocess.run([str(binary), "--list-devices"], env=environment, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=60, check=True)
+    reports = [json.loads(line.split("=", 1)[1]) for line in probe.stdout.splitlines()
+               if line.startswith("KLLM_PRIMA_CAPABILITIES=")]
+    if (len(reports) != 1 or not isinstance(reports[0], dict)
+            or not isinstance(reports[0].get("features"), list)
+            or any(not isinstance(feature, str) for feature in reports[0]["features"])
+            or file_digest(binary) != digest):
+        raise ValueError("Development binary capability report or digest is invalid")
+    return {**runtime, "llama_server": str(binary), "capabilities": reports[0],
+            "artifacts": {**runtime.get("artifacts", {}), binary.name: digest}}
 
 
 def capture_baseline(binary: Path) -> dict:
@@ -63,10 +87,28 @@ def capture_baseline(binary: Path) -> dict:
     }
 
 
+def baseline_placement(ngl: int, output_gpu: bool, *, device="Vulkan0") -> list[str]:
+    """Match transformer/output ownership against the pinned 7fe450e baseline."""
+    if ngl < 0 or (output_gpu and not ngl):
+        raise ValueError("Baseline placement requires explicit transformer/output offload")
+    # This baseline includes output in every positive --gpu-layers count.
+    args = ["--gpu-layers", str(ngl + 1 if ngl else 0), "--device", device if ngl else "none"]
+    if not output_gpu:
+        # Tied models project with token_embd.weight instead of output.weight.
+        args += ["--override-tensor", r"^(output[._].*|token_embd\.weight)$=CPU"]
+    return [*args, "--no-op-offload"]
+
+
 def observation_status(data: dict) -> str:
     # Equal failures and empty streams cannot count as parity successes.
+    expected = {"chat", "structured", "tools", "stream"}
+    if any({case.get("case") for case in result["cases"]} != expected
+           or len(result["cases"]) != len(expected)
+           for result in (data["prima"], data["baseline"])):
+        return "failed"
     if not data["equal_http_statuses"] or any(
-        case["status"] >= 400 for result in (data["prima"], data["baseline"]) for case in result["cases"]
+        case["status"] >= 400 or case.get("semantic_errors", ["Missing semantic check"])
+        for result in (data["prima"], data["baseline"]) for case in result["cases"]
     ):
         return "failed"
     return "observed"
@@ -82,19 +124,25 @@ def request_cases(port: int) -> list[dict]:
     results = []
     body = {
         "model": "assessment",
-        "messages": [{"role": "user", "content": "Reply with one word: hello."}],
+        "messages": [{"role": "user", "content": "Output exactly the lowercase ASCII word hello, without translation, explanation, punctuation or other text."}],
         "temperature": 0,
         "seed": 0,
-        "max_tokens": 16,
+        "max_tokens": 128,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60) as client:
         for name, payload in [
             ("chat", body),
-            ("structured", {**body, "response_format": {"type": "json_object"}}),
+            ("structured", {**body, "messages": [{"role": "user", "content": 'Return JSON: {"reply":"hello"}.'}],
+                            "response_format": {"type": "json_schema", "json_schema": {"name": "reply", "strict": True,
+                                "schema": {"type": "object", "properties": {"reply": {"type": "string", "const": "hello"}},
+                                           "required": ["reply"], "additionalProperties": False}}}}),
             (
                 "tools",
                 {
                     **body,
+                    "messages": [{"role": "user", "content": "Call echo with text hello."}],
+                    "tool_choice": {"type": "function", "function": {"name": "echo"}},
                     "tools": [
                         {
                             "type": "function",
@@ -104,6 +152,8 @@ def request_cases(port: int) -> list[dict]:
                                 "parameters": {
                                     "type": "object",
                                     "properties": {"text": {"type": "string"}},
+                                    "required": ["text"],
+                                    "additionalProperties": False,
                                 },
                             },
                         }
@@ -123,21 +173,30 @@ def request_cases(port: int) -> list[dict]:
                     "status": response.status_code,
                     "elapsed_ms": (time.monotonic() - start) * 1000,
                     "body": data,
+                    "semantic_errors": response_errors(name, response.status_code, data),
                 }
             )
         start = time.monotonic()
         first = None
         chunks = 0
+        done = False
+        finish_reason = None
+        content_parts = []
         with client.stream(
             "POST", "/v1/chat/completions", json={**body, "stream": True}
         ) as response:
             for line in response.iter_lines():
+                if line.strip() == "data: [DONE]":
+                    done = True
                 if line.startswith("data:") and line.strip() != "data: [DONE]":
                     event = json.loads(line[5:])
-                    content = event.get("choices", [{}])[0].get("delta", {}).get("content")
+                    choice = (event.get("choices") or [{}])[0]
+                    finish_reason = choice.get("finish_reason") or finish_reason
+                    content = choice.get("delta", {}).get("content")
                     if content:
                         first = first or time.monotonic()
                         chunks += 1
+                        content_parts.append(content)
             results.append(
                 {
                     "case": "stream",
@@ -145,6 +204,10 @@ def request_cases(port: int) -> list[dict]:
                     "ttft_ms": (first - start) * 1000 if first else None,
                     "elapsed_ms": (time.monotonic() - start) * 1000,
                     "content_events": chunks,
+                    "content": "".join(content_parts),
+                    "done": done,
+                    "finish_reason": finish_reason,
+                    "semantic_errors": [] if done and finish_reason == "stop" and "".join(content_parts).strip().lower() == "hello" else ["Incomplete stream, terminal event or answer"],
                 }
             )
     return results
@@ -189,7 +252,10 @@ def serve_cases(
                 time.sleep(0.1)
             else:
                 raise ValueError("Model readiness timed out")
-            return {"cases": request_cases(port), "log": log.read_text()[-8192:]}
+            cases = request_cases(port)
+            output.flush()
+            logged = log.read_text(encoding="utf-8", errors="replace")
+            return {"cases": cases, "log": logged[-8192:], "execution_reports": execution_reports(logged)}
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -200,7 +266,7 @@ def serve_cases(
                     process.wait(timeout=10)
 
 
-def model_assessment(runtime, baseline, model, backend, ngl):
+def model_assessment(runtime, baseline, model, backend, ngl, *, device=None):
     files = asset_files(model)
     rank = RankAllocation(
         node_id="assessment",
@@ -226,14 +292,15 @@ def model_assessment(runtime, baseline, model, backend, ngl):
     if not isinstance(layers, int) or layers <= 0:
         raise ValueError("GGUF transformer layer count is unavailable")
     devices = runtime["capabilities"]["devices"]
-    selected = next((d for d in devices if d["backend"].lower() == backend), None)
+    selected_devices = select_vulkan_devices(discover_vulkan_devices(runtime), [device] if device else None) if backend == "vulkan" else []
+    selected = selected_devices[0] if selected_devices else next((d for d in devices if d["backend"].lower() == backend), None)
     if backend != "cpu" and not selected:
         raise ValueError("Requested assessment backend has no device; no substitution allowed")
     rank = rank.model_copy(
         update={
             "layers": [LayerRange(start=0, end=layers)],
             "ngl": min(ngl, layers) if backend != "cpu" else 0,
-            "devices": [selected["name"]] if selected and ngl else [],
+            "devices": remapped_vulkan_names(selected_devices) if backend == "vulkan" and ngl else ([selected["name"]] if selected and ngl else []),
             "tensor_split": [1.0] if selected and ngl else [],
         }
     )
@@ -258,15 +325,22 @@ def model_assessment(runtime, baseline, model, backend, ngl):
         env = runtime.get("runtime_env", {}).copy()
         env["KLLM_PRIMA_BIND"] = "127.0.0.1"
         if backend == "vulkan":
-            env["GGML_VK_VISIBLE_DEVICES"] = "0"
+            env.update(vulkan_environment(selected_devices))
+            env["KLLM_PRIMA_EXECUTION_EVIDENCE"] = "1"
         prima = serve_cases(
             Path(runtime["llama_server"]), model, env, ["--execution-manifest", str(contract)], root
         )
-        baseline_result = serve_cases(baseline, model, env, ["-ngl", str(rank.ngl)], root)
+        baseline_result = serve_cases(baseline, model, env,
+            baseline_placement(rank.ngl, rank.output_gpu, device="Vulkan0" if backend == "vulkan" else (selected or {}).get("name", "none")), root)
         equal_status = all(
             p["status"] == b["status"] for p, b in zip(prima["cases"], baseline_result["cases"])
         )
         gpu_evidence = "unverified" if rank.ngl else "not_requested"
+        if backend == "vulkan" and rank.ngl:
+            try:
+                gpu_evidence = verify_vulkan_execution(prima["execution_reports"], manifest, rank, selected_devices)
+            except ValueError as error:
+                gpu_evidence = {"status": "unavailable" if not prima["execution_reports"] else "failed", "reason": str(error)}
         return {
             "model_sha256": files[0][0].sha256,
             "assets": [a.model_dump() for a, _ in files],
@@ -275,6 +349,7 @@ def model_assessment(runtime, baseline, model, backend, ngl):
             "model_metadata": metadata,
             "backend": backend,
             "ngl": rank.ngl,
+            "selected_devices": selected_devices,
             "prima": prima,
             "baseline": baseline_result,
             "equal_http_statuses": equal_status,
@@ -296,6 +371,7 @@ def main():
         "--backend", choices=["cpu", "vulkan", "metal", "cuda", "rocm"], default="vulkan"
     )
     parser.add_argument("--ngl", type=int, default=1)
+    parser.add_argument("--device", help="Exact Vulkan UUID, device name or description")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.ngl < 0:
@@ -351,17 +427,17 @@ def main():
                 else:
                     try:
                         data = model_assessment(
-                            runtime, args.baseline_server, model, args.backend, args.ngl
+                            runtime, args.baseline_server, model, args.backend, args.ngl, device=args.device
                         )
                         evidence["results"].append(
                             {"case": kind, "status": observation_status(data), **data}
                         )
                         if args.backend != "cpu" and args.ngl > 0:
+                            proof = data["gpu_execution_evidence"]
                             evidence["results"].append(
                                 {
                                     "case": kind + "_gpu_execution",
-                                    "status": "unavailable",
-                                    "reason": "Selected-device and assigned-layer execution proof is not implemented",
+                                    **(proof if isinstance(proof, dict) else {"status": "unavailable", "reason": "Selected-device and assigned-layer execution proof is unavailable"}),
                                 }
                             )
                     except Exception as error:

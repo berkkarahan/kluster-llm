@@ -131,6 +131,24 @@ def synthetic_moe_gguf(path: Path, arch="qwen2moe", experts=4, layers=2):
     return read_model_layout(path)
 
 
+def test_qwen35_layout_excludes_mtp_from_execution_without_rewriting_metadata(tmp_path):
+    layout = synthetic_gguf(tmp_path / "saluki.gguf", "qwen35", nextn_predict_layers=1)
+    baseline = synthetic_gguf(tmp_path / "trunk-only.gguf", "qwen35")
+    assert layout["metadata"]["qwen35.block_count"] == 4
+    assert len(layout["layers"]) == len(layout["expert_layers"]) == 3
+    assert [t["name"] for t in layout["skipped_predictor_tensors"]] == ["blk.3.attn_q.weight"]
+    assert not any(t["name"].startswith("blk.3.") for t in layout["tensors"])
+    assert layout["input_bytes"] == baseline["input_bytes"]
+    assert layout["output_bytes"] == baseline["output_bytes"]
+    assert layout["confidence"] == "metadata"
+    assert len(ModelLayout.from_mapping(layout).layers) == 3
+
+
+@pytest.mark.parametrize("count", [2, 4])
+def test_qwen35_layout_refuses_invalid_mtp_counts(tmp_path, count):
+    assert synthetic_gguf(tmp_path / "invalid.gguf", "qwen35", nextn_predict_layers=count) is None
+
+
 @pytest.fixture(params=["llama", "deepseek2", "qwen35moe"])
 def model_layout(request, tmp_path):
     return synthetic_gguf(tmp_path / "model.gguf", request.param)
@@ -138,6 +156,21 @@ def model_layout(request, tmp_path):
 
 def settings(**kwargs):
     return resolve_launch_settings(RunBody(model="fixture.gguf", **kwargs)).to_mapping()
+
+
+def test_independent_draft_contexts_reserve_each_slots_kv_and_compute(tmp_path):
+    from dataclasses import replace
+
+    raw = synthetic_gguf(tmp_path / "draft.gguf")
+    layout = ModelLayout.from_mapping(raw)
+    single = PlacementSettings(context=4096, parallel_slots=1, draft_contexts=1,
+                               draft_size_bytes=12 * MIB, draft_layout=layout, speculative="none")
+    one = memory_costs(layout, 12 * MIB, 4096, single)
+    many = memory_costs(layout, 12 * MIB, 4096, replace(single, parallel_slots=3, draft_contexts=3, kv_unified=True))
+    assert many.auxiliary_runtime_bytes == 3 * one.auxiliary_runtime_bytes
+    assert many.auxiliary_runtime_bytes > 3 * 4096 * 4 * 2 * 128 * 2
+    restored = PlacementSettings.from_mapping(replace(single, draft_contexts=3).to_mapping())
+    assert restored.draft_contexts == 3
 
 
 def costs(layout, **kwargs):

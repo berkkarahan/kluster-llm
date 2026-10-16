@@ -43,6 +43,12 @@ target/
 *.a
 .mypy_cache/
 
+# install.py staging/parking leftovers for the editable native module
+*.pyd.new
+*.pyd.locked
+*.so.new
+*.so.locked
+
 # Vendored third-party (cloned by scripts/install.py)
 vendor/
 

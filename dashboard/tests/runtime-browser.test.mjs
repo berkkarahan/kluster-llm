@@ -97,6 +97,11 @@ test('llama.cpp settings resolves immutable forks, synchronizes targets, and fit
       }
       await click('+ Add version');
       await wait("document.querySelector('dialog').open");
+      const addDialogCenter = await evaluate(`(() => {
+        const r = document.querySelector('dialog[open]').getBoundingClientRect();
+        return { dx: Math.abs((r.left + r.width / 2) - innerWidth / 2), dy: Math.abs((r.top + r.height / 2) - innerHeight / 2) };
+      })()`);
+      assert.ok(addDialogCenter.dx <= 2 && addDialogCenter.dy <= 2, `Add version modal not centered: ${JSON.stringify(addDialogCenter)}`);
       await evaluate("[...document.querySelectorAll('dialog input')].forEach((el,i)=>{el.value=['Saved fork','https://github.com/example/other.git','v1'][i];el.dispatchEvent(new Event('input',{bubbles:true}));})");
       await click('Resolve revision');
       await wait("document.querySelector('.resolved-box')");
@@ -104,6 +109,15 @@ test('llama.cpp settings resolves immutable forks, synchronizes targets, and fit
       await click('Save version');
       await wait("!document.querySelector('dialog').open && document.querySelectorAll('.version-row').length===3");
       assert.equal(commands.find(c=>c.path==='/v2/node/runtimes').value.commit,'c'.repeat(40));
+      await evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Logs' && !b.disabled && b.getClientRects().length).click()");
+      await wait("document.querySelector('dialog').open && document.querySelector('.log-console')?.value.includes('Fixture: compiler failed')");
+      const logDialogCenter = await evaluate(`(() => {
+        const r = document.querySelector('dialog[open]').getBoundingClientRect();
+        return { dx: Math.abs((r.left + r.width / 2) - innerWidth / 2), dy: Math.abs((r.top + r.height / 2) - innerHeight / 2) };
+      })()`);
+      assert.ok(logDialogCenter.dx <= 2 && logDialogCenter.dy <= 2, `Build log modal not centered: ${JSON.stringify(logDialogCenter)}`);
+      await click('Close');
+      await wait("!document.querySelector('dialog').open");
       await click('Set target & sync');
       await wait("document.querySelector('.pending-note').textContent.includes('Saved fork')");
       assert.equal(commands.find(c=>c.path==='/v2/cluster/runtime-target').value.expected_revision,5);

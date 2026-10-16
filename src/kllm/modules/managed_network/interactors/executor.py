@@ -768,6 +768,9 @@ class LocalNetworkExecutor:
                     "CLEANUP_PENDING",
                     "Reconcile requires an unchanged continuously observed assignment",
                 )
+            reconcile = getattr(self.platform, "reconcile", None)
+            if reconcile is not None:
+                await asyncio.to_thread(reconcile, command)
             (await self.store.arun(self.store.put_operation, proposal.operation))
             self.preparation[str(command.network_id)] = proposal
             diagnostic = self.diagnostics.get(str(command.network_id))

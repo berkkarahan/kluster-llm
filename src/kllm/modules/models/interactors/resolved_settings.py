@@ -36,10 +36,22 @@ class ResolvedLaunchSettings:
     requested_micro_batch: int
     extra_args: tuple[str, ...]
     draft_size_bytes: int = 0
+    draft_contexts: int = 1
+    prompt_cache_bytes: int = 0
+    prima_checkpoints: bool = False
+    prima_graphs: bool = False
+    prima_kv_sequences: int = 0
+    prima_adapter_bytes: int = 0
+    prima_adapter_scratch_per_token: int = 0
+    checkpoint_min_step: int = 8192
     draft_layout: ModelLayout | None = None
     vision_runtime: bool = False
     auxiliary_weights_bytes: int = 0
     estimate_warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.prima_kv_sequences) is not int or not 0 <= self.prima_kv_sequences <= 2**31 - 1:
+            raise ValidationError("Prima KV sequence count must be a bounded non-negative integer")
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> ResolvedLaunchSettings:
@@ -83,6 +95,14 @@ class ResolvedLaunchSettings:
                 ),
                 extra_args=tuple(str(arg) for arg in extra_args),
                 draft_size_bytes=int(values.get("draft_size_bytes", 0)),
+                draft_contexts=int(values.get("draft_contexts", 1)),
+                prompt_cache_bytes=int(values.get("prompt_cache_bytes", 0)),
+                prima_checkpoints=bool(values.get("prima_checkpoints", False)),
+            prima_graphs=bool(values.get("prima_graphs", False)),
+                prima_kv_sequences=values.get("prima_kv_sequences", 0),
+                prima_adapter_bytes=int(values.get("prima_adapter_bytes", 0)),
+                prima_adapter_scratch_per_token=int(values.get("prima_adapter_scratch_per_token", 0)),
+                checkpoint_min_step=int(values.get("checkpoint_min_step", 8192)),
                 draft_layout=ModelLayout.from_mapping(raw_layout),
                 vision_runtime=bool(values.get("vision_runtime", False)),
                 auxiliary_weights_bytes=int(values.get("auxiliary_weights_bytes", 0)),
@@ -93,7 +113,7 @@ class ResolvedLaunchSettings:
 
     def to_mapping(self) -> dict[str, Any]:
         """Serialize settings for native, HTTP, and persisted-state boundaries."""
-        return {
+        values = {
             "parallel_slots": self.parallel_slots,
             "batch_size": self.batch_size,
             "micro_batch": self.micro_batch,
@@ -116,6 +136,13 @@ class ResolvedLaunchSettings:
             "requested_micro_batch": self.requested_micro_batch,
             "extra_args": list(self.extra_args),
             "draft_size_bytes": self.draft_size_bytes,
+            "draft_contexts": self.draft_contexts,
+            "prompt_cache_bytes": self.prompt_cache_bytes,
+            "prima_checkpoints": self.prima_checkpoints,
+            "prima_graphs": self.prima_graphs,
+            "prima_adapter_bytes": self.prima_adapter_bytes,
+            "prima_adapter_scratch_per_token": self.prima_adapter_scratch_per_token,
+            "checkpoint_min_step": self.checkpoint_min_step,
             "_draft_layout": (
                 self.draft_layout.to_mapping() if self.draft_layout is not None else None
             ),
@@ -123,3 +150,6 @@ class ResolvedLaunchSettings:
             "auxiliary_weights_bytes": self.auxiliary_weights_bytes,
             "estimate_warnings": list(self.estimate_warnings),
         }
+        if self.prima_kv_sequences:
+            values["prima_kv_sequences"] = self.prima_kv_sequences
+        return values

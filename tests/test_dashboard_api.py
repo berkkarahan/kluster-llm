@@ -113,6 +113,20 @@ def test_status_exposes_feature_flags(client):
     assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True}
 
 
+def test_status_exposes_the_configured_engine(client):
+    c, agent, _ = client
+    from kllm.shared import config as kllm_config
+
+    body = c.get("/v1/status").json()
+    assert body["engine"] == "llamacpp"
+    assert agent_runtime._live_status()["engine"] == "llamacpp"
+
+    kllm_config.save_config({"engine": "primacpp"})
+    body = c.get("/v1/status").json()
+    assert body["engine"] == "primacpp"
+    assert agent_runtime._live_status()["engine"] == "primacpp"
+
+
 def test_status_exposes_the_shared_node_directory(client, monkeypatch):
     c, agent, _ = client
     rows = [
@@ -187,6 +201,99 @@ def test_served_models_and_responses_are_authenticated_native_passthrough(client
                 "input_tokens": 17
             }
             assert json.loads(calls[-1].content) == payload
+        finally:
+            agent.app.state.inference_client = previous
+
+
+def test_response_token_count_requires_prima_qualification(client, monkeypatch):
+    from kllm.modules.primacpp.interactors import qualification
+
+    c, _, token = client
+    active = {"engine": "primacpp", "runtime": {}, "qualification_context": {}}
+    monkeypatch.setattr(
+        agent_runtime,
+        "_active_config",
+        lambda: active,
+    )
+
+    response = c.post(
+        "/v1/responses/input_tokens",
+        json={"input": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+    assert "qualified execution context" in response.json()["detail"]
+
+    active = {
+        **active,
+        "qualification_context": {"scope": "local"},
+        "generation_defaults": {"reasoning_effort": "high"},
+    }
+    monkeypatch.setattr(
+        qualification,
+        "qualification_status",
+        lambda runtime, *, context: {"inference_supported": True, "qualified_features": ["responses"]},
+    )
+    response = c.post(
+        "/v1/responses/input_tokens",
+        json={"input": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+    assert "reasoning_controls" in response.json()["detail"]
+
+    active = {**active, "generation_defaults": {}}
+    response = c.post(
+        "/v1/responses/input_tokens",
+        json={"input": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+    assert "input-token counting" in response.json()["detail"]
+
+
+def test_prima_responses_bind_the_active_served_model(client, monkeypatch):
+    import httpx
+    from kllm.modules.primacpp.interactors import qualification
+
+    c, agent, token = client
+    served = "served.gguf"
+    active = {
+        "engine": "primacpp",
+        "model": "different.gguf",
+        "runtime": {"capabilities": {"features": ["response_input_tokens_v1"]}},
+        "qualification_context": {"scope": "local"},
+    }
+    monkeypatch.setattr(agent_runtime, "_active_config", lambda: active)
+    monkeypatch.setattr(
+        qualification,
+        "qualification_status",
+        lambda runtime, *, context: {"inference_supported": True, "qualified_features": ["responses"]},
+    )
+    forwarded = []
+
+    def upstream(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": served}]})
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(200, json={"input_tokens": 3})
+
+    with mock_async_client(upstream) as target:
+        previous = agent.app.state.inference_client
+        agent.app.state.inference_client = target
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            path = "/v1/responses/input_tokens"
+            assert c.post(path, json={"input": "hello"}, headers=headers).status_code == 503
+            active = {**active, "model": served}
+            assert c.post(path, json={"model": "other.gguf", "input": "hello"}, headers=headers).status_code == 404
+            response = c.post(path, json={"input": "hello"}, headers=headers)
+            assert response.status_code == 200
+            assert response.json()["input_tokens"] == 3
+            assert forwarded == [{"input": "hello", "model": served}]
         finally:
             agent.app.state.inference_client = previous
 

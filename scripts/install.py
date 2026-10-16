@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
@@ -47,15 +48,17 @@ import re
 import shlex
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -68,10 +71,12 @@ ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = ROOT / ".venv"
 DASHBOARD = ROOT / "dashboard"
 VENDOR_LLAMA = ROOT / "vendor" / "llama.cpp"
+VENDOR_PRIMA = ROOT / "vendor" / "prima.cpp"
 BIN_DIR = ROOT / "vendor" / "bin"
 PRIMA_BIN_DIR = ROOT / "vendor" / "prima"
 PIN_FILE = ROOT / "llama-release"
 STAMP_FILE = BIN_DIR / "llama-release.txt"
+PRIMA_STAMP_FILE = PRIMA_BIN_DIR / "prima-release.txt"
 LLAMA_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 GITHUB_HEADERS = {"User-Agent": "kllm-install", "Accept": "application/vnd.github+json"}
 # Binary/asset downloads must not use the GitHub API Accept — some CDNs/proxies
@@ -211,6 +216,126 @@ def _which(cmd: str) -> str | None:
 
 def _warn(msg: str) -> None:
     print(f"WARNING: {msg}", file=sys.stderr, flush=True)
+
+
+# ── vendor rewrite primitives ────────────────────────────────────────────────
+#
+# ``vendor/bin``, ``vendor/prima``, ``vendor/llama.cpp`` and ``vendor/prima.cpp``
+# are installer-owned: install.py must be able to clear and re-materialize
+# anything it staged there. A running node maps ``llama-server`` / ``rpc-server``
+# and their shared libraries, and Windows then refuses both delete and overwrite
+# (error 32). Parking a live binary aside would hide a running node, so the
+# installer fails loudly with a remedy instead.
+
+
+def _clear_readonly(path: Path) -> None:
+    """Drop a read-only bit so a previously protected artifact can be replaced."""
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """True when an ``OSError`` means another process holds the file open."""
+    if getattr(exc, "winerror", None) == 32:
+        return True
+    return getattr(exc, "errno", None) in {errno.EBUSY, errno.ETXTBSY}
+
+
+def _vendor_in_use_error(path: Path, what: str) -> SystemExit:
+    return SystemExit(
+        f"error: cannot rewrite {what} ({path}) - the file is in use by a running "
+        "process (Windows error 32 / EBUSY). Stop the Kluster node and any active "
+        "inference, then re-run the installer."
+    )
+
+
+def _remove_vendor_file(path: Path, what: str) -> None:
+    """Delete one installer-owned vendor file, failing loudly when it is locked."""
+    if not path.exists() and not path.is_symlink():
+        return
+    _clear_readonly(path)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if _is_lock_error(exc):
+            raise _vendor_in_use_error(path, what) from exc
+        raise
+
+
+def _remove_vendor_tree(path: Path, what: str) -> None:
+    """Remove an installer-owned vendor tree, failing loudly when it is locked."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or not path.is_dir():
+        _remove_vendor_file(path, what)
+        return
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            _remove_vendor_file(Path(root) / name, what)
+        for name in dirs:
+            child = Path(root) / name
+            if child.is_symlink():
+                _remove_vendor_file(child, what)
+                continue
+            _clear_readonly(child)
+            try:
+                child.rmdir()
+            except OSError as exc:
+                if _is_lock_error(exc):
+                    raise _vendor_in_use_error(child, what) from exc
+                raise
+    _clear_readonly(path)
+    try:
+        path.rmdir()
+    except OSError as exc:
+        if _is_lock_error(exc):
+            raise _vendor_in_use_error(path, what) from exc
+        raise
+
+
+_LLAMA_STAGED_STEMS = frozenset({"llama-server", "rpc-server", "ggml-rpc-server"})
+_PRIMA_STAGED_STEMS = frozenset({"llama-server", "llama-cli", "profile-tool"})
+# Tokens that only ever appear in a shared library install.py staged from a
+# llama.cpp build/pack. ``component.dll`` must not match, so ``omp`` is spelled
+# as ``libomp``. ``kllm-network-helper`` carries none of these.
+_SHARED_LIB_TOKENS = ("llama", "ggml", "mtmd", "libomp")
+
+
+def _stem(name: str) -> str:
+    lowered = name.lower()
+    return lowered[:-4] if lowered.endswith(".exe") else lowered
+
+
+def _owned_llama_artifact(name: str) -> bool:
+    """True for files install.py stages into vendor/bin (never the network helper)."""
+    lowered = name.lower()
+    if lowered in {"llama-release.txt", "rpc-transport.json"}:
+        return True
+    if _stem(name) in _LLAMA_STAGED_STEMS:
+        return True
+    if lowered.endswith((".dll", ".dylib", ".so")) or ".so." in lowered:
+        return any(token in lowered for token in _SHARED_LIB_TOKENS)
+    return False
+
+
+def _owned_prima_artifact(name: str) -> bool:
+    """True for files install.py stages into vendor/prima."""
+    if name.lower() in {"manifest.json", "prima-release.txt"}:
+        return True
+    return _stem(name) in _PRIMA_STAGED_STEMS
+
+
+def _reset_staged_binaries(directory: Path, predicate: Callable[[str], bool], *, what: str) -> None:
+    """Clear installer-owned artifacts so a backend/pin change leaves nothing stale."""
+    if not directory.is_dir():
+        return
+    for entry in directory.iterdir():
+        if entry.is_file() and predicate(entry.name):
+            _remove_vendor_file(entry, what)
 
 
 def _ssl_contexts() -> list[ssl.SSLContext]:
@@ -447,6 +572,99 @@ def llama_install_status(tag: str | None = None, *, expected: str | None = None)
             and rpc
             and stamp.get("tag") == pin
             and backends_satisfied(wanted, actual_backends)
+        ),
+    }
+
+
+def read_prima_recipe_pin() -> tuple[str, str, str]:
+    """Return (source_repository, source_commit, recipe_digest) for pinned prima.cpp."""
+    src_dir = str(ROOT / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    from kllm.modules.primacpp.interactors.recipe import recipe, recipe_digest
+
+    definition = recipe()
+    return (
+        str(definition["source_repository"]),
+        str(definition["source_commit"]),
+        recipe_digest(),
+    )
+
+
+def write_prima_install_stamp(
+    *,
+    commit: str,
+    recipe_digest: str,
+    backend: str,
+    highs: str = "on",
+) -> None:
+    PRIMA_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"commit={commit}",
+        f"recipe_digest={recipe_digest}",
+        f"backend={backend}",
+        f"highs={highs}",
+    ]
+    PRIMA_STAMP_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_prima_install_stamp() -> dict[str, str]:
+    if not PRIMA_STAMP_FILE.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for line in PRIMA_STAMP_FILE.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
+def prima_stamp_matches(
+    commit: str, recipe_digest: str, backend: str | None = None
+) -> bool:
+    stamp = read_prima_install_stamp()
+    if stamp.get("commit") != commit or stamp.get("recipe_digest") != recipe_digest:
+        return False
+    if stamp.get("highs") != "on":
+        return False
+    if backend is None:
+        return True
+    return frozenset(parse_stamp_backends(stamp.get("backend"))) == frozenset(
+        parse_stamp_backends(backend)
+    )
+
+
+def prima_install_status(*, expected: str | None = None) -> dict[str, Any]:
+    """Pin/stamp state plus probed capabilities for a bootstrap Prima install."""
+    _repo, commit, digest = read_prima_recipe_pin()
+    llama_server = _resolve_prima_binary("llama-server")
+    llama_cli = _resolve_prima_binary("llama-cli")
+    profile_tool = _resolve_prima_binary("profile-tool")
+    stamp = read_prima_install_stamp()
+    requested = stamp.get("backend")
+    wanted = expected or requested
+    actual_backends, features = _probe_prima_capabilities(llama_server)
+    highs_ok = stamp.get("highs") == "on" and "highs" in features
+    return {
+        "pin": commit,
+        "recipe_digest": digest,
+        "stamp": stamp.get("commit"),
+        "stamp_recipe_digest": stamp.get("recipe_digest"),
+        "llama_server": str(llama_server) if llama_server else None,
+        "llama_cli": str(llama_cli) if llama_cli else None,
+        "profile_tool": str(profile_tool) if profile_tool else None,
+        "requested_backend": requested,
+        "expected_backend": wanted,
+        "actual_backends": actual_backends,
+        "features": features,
+        "highs": "on" if highs_ok else "off",
+        "ok": bool(
+            llama_server
+            and llama_cli
+            and profile_tool
+            and prima_stamp_matches(commit, digest, wanted)
+            and backends_satisfied(wanted, actual_backends)
+            and highs_ok
         ),
     }
 
@@ -783,7 +1001,9 @@ def ensure_vulkan_macos() -> dict[str, str]:
             )
         if brew:
             print("Installing Vulkan build deps via Homebrew...")
-            _run([brew, "install", *_BREW_VULKAN_PACKAGES])
+            brew_env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"}
+            brew_env.pop("HOMEBREW_ASK", None)
+            _run([brew, "install", *_BREW_VULKAN_PACKAGES], env=brew_env)
         missing = _macos_vulkan_missing()
         if missing:
             raise SystemExit(
@@ -811,6 +1031,153 @@ def ensure_vulkan_macos() -> dict[str, str]:
         merged = os.pathsep.join([*paths, existing] if existing else paths)
         env["CMAKE_PREFIX_PATH"] = merged
     return env
+
+
+# Prima.cpp README prerequisites on macOS:
+#   brew install gcc make cmake fio git wget highs zeromq curl
+_BREW_PRIMA_PACKAGES = (
+    "gcc",
+    "make",
+    "cmake",
+    "fio",
+    "git",
+    "wget",
+    "highs",
+    "zeromq",
+    "curl",
+)
+
+
+def _macos_prima_missing(prefix: Path | None = None) -> list[str]:
+    """Return Homebrew formula names from _BREW_PRIMA_PACKAGES that are not yet satisfied."""
+    prefix = prefix or _brew_prefix()
+    missing: list[str] = []
+    for tool in ("gcc", "make", "cmake", "fio", "git", "wget", "curl"):
+        if not _which(tool):
+            missing.append(tool)
+    has_highs = bool(_which("highs")) or (
+        prefix is not None
+        and (
+            (prefix / "include" / "highs" / "Highs.h").is_file()
+            or (prefix / "include" / "Highs.h").is_file()
+            or (prefix / "lib" / "libhighs.dylib").is_file()
+            or (prefix / "lib" / "libhighs.a").is_file()
+        )
+    )
+    if not has_highs:
+        missing.append("highs")
+    has_zmq = prefix is not None and (
+        (prefix / "include" / "zmq.h").is_file()
+        or (prefix / "lib" / "libzmq.dylib").is_file()
+        or (prefix / "lib" / "libzmq.a").is_file()
+    )
+    if not has_zmq:
+        missing.append("zeromq")
+    return missing
+
+
+def ensure_prima_deps(backend: str = "auto") -> None:
+    """Ensure Prima.cpp README prerequisite packages and backend SDKs are installed."""
+    resolved = detect_backend(backend)
+    ensure_git()
+    ensure_cmake()
+    if _is_macos():
+        prefix = _brew_prefix()
+        missing = _macos_prima_missing(prefix)
+        if missing:
+            brew = _which("brew")
+            if not brew:
+                raise SystemExit(
+                    "error: macOS Prima builds need Homebrew to install missing prerequisites ("
+                    + ", ".join(missing)
+                    + "). Install Homebrew (https://brew.sh) and re-run."
+                )
+            print(f"Installing Prima prerequisites via Homebrew ({', '.join(missing)})...")
+            brew_env = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"}
+            brew_env.pop("HOMEBREW_ASK", None)
+            _run([brew, "install", *missing], env=brew_env)
+        if resolved != "cpu":
+            ensure_vulkan_macos()
+        return
+
+    if _is_windows():
+        if resolved == "vulkan":
+            ensure_windows_vulkan()
+        return
+
+    if _is_linux():
+        need_tools = [
+            tool
+            for tool in ("gcc", "g++", "make", "cmake", "fio", "git", "wget", "curl")
+            if not _which(tool)
+        ]
+        has_zmq_header = any(
+            Path(p).is_file()
+            for p in (
+                "/usr/include/zmq.h",
+                "/usr/local/include/zmq.h",
+            )
+        )
+        need_vulkan = resolved == "vulkan" and (
+            not _which("glslc")
+            or not (
+                Path("/usr/include/vulkan/vulkan.h").is_file()
+                or Path("/usr/local/include/vulkan/vulkan.h").is_file()
+            )
+        )
+        if not need_tools and has_zmq_header and not need_vulkan:
+            return
+        print("Installing Prima prerequisite packages on Linux...")
+        if _which("apt-get"):
+            pkgs = [
+                "build-essential",
+                "gcc",
+                "g++",
+                "make",
+                "cmake",
+                "fio",
+                "git",
+                "wget",
+                "libzmq3-dev",
+                "curl",
+                "pkg-config",
+            ]
+            if need_vulkan:
+                pkgs += ["libvulkan-dev", "glslc", "spirv-headers"]
+            _run(["sudo", "apt-get", "update", "-y"], check=False)
+            _run(["sudo", "apt-get", "install", "-y", *pkgs], check=False)
+        elif _which("dnf"):
+            pkgs = [
+                "gcc",
+                "gcc-c++",
+                "make",
+                "cmake",
+                "fio",
+                "git",
+                "wget",
+                "zeromq-devel",
+                "curl",
+                "pkgconf-pkg-config",
+            ]
+            if need_vulkan:
+                pkgs += ["vulkan-loader-devel", "glslc", "spirv-headers-devel"]
+            _run(["sudo", "dnf", "install", "-y", *pkgs], check=False)
+        elif _which("pacman"):
+            pkgs = [
+                "base-devel",
+                "gcc",
+                "make",
+                "cmake",
+                "fio",
+                "git",
+                "wget",
+                "zeromq",
+                "curl",
+                "pkgconf",
+            ]
+            if need_vulkan:
+                pkgs += ["vulkan-icd-loader", "vulkan-headers", "shaderc", "spirv-headers"]
+            _run(["sudo", "pacman", "-Sy", "--noconfirm", *pkgs], check=False)
 
 
 # Windows from-source Vulkan builds need the LunarG SDK: glslc and the Vulkan
@@ -851,13 +1218,20 @@ def _windows_vulkan_missing(root: Path | None) -> list[str]:
 
 def _windows_vulkan_env(root: Path | None) -> dict[str, str]:
     """Cmake env extras so this process builds before any shell/env refresh."""
+    existing_cl = os.environ.get("CL", "").strip()
+    cl_flags = (
+        existing_cl
+        if "/DNOMINMAX" in existing_cl or "-DNOMINMAX" in existing_cl
+        else (f"{existing_cl} /DNOMINMAX".strip() if existing_cl else "/DNOMINMAX")
+    )
     if root is None:
-        return {}
+        return {"CL": cl_flags}
     existing = os.environ.get("CMAKE_PREFIX_PATH", "")
     return {
         "VULKAN_SDK": str(root),
         "PATH": os.pathsep.join([str(root / "Bin"), os.environ.get("PATH", "")]),
         "CMAKE_PREFIX_PATH": os.pathsep.join([str(root), existing] if existing else [str(root)]),
+        "CL": cl_flags,
     }
 
 
@@ -1047,6 +1421,105 @@ def _wheel_for_reinstall(python: Path, wheel: Path) -> Path:
     return _wheel_omitting_console_scripts(wheel, busy)
 
 
+# A running node maps ``src/kllm/_native.*.pyd`` for the lifetime of the
+# process, and Windows refuses to overwrite a mapped image ("Access is denied").
+# It does allow renaming that image aside, so the freshly built module can take
+# the canonical path while the live process keeps its mapping until a restart.
+_EXTENSION_REPLACE_ATTEMPTS = 4
+_EXTENSION_REPLACE_DELAY = 0.25
+
+
+def _is_file_in_use_error(exc: BaseException) -> bool:
+    """True when Windows refused a replace because the target is open or mapped.
+
+    Wider than ``_is_lock_error`` because a mapped image is the usual cause
+    here: overwriting a loaded module reports ``WinError 5`` (*Access is
+    denied*), not the sharing violation of a plain open handle, and some
+    Windows error paths surface only ``errno.EACCES``.
+    """
+    if _is_lock_error(exc):
+        return True
+    if getattr(exc, "winerror", None) in {5, 33}:
+        return True
+    return isinstance(exc, PermissionError)
+
+
+def _replace_extension_file(temporary: Path, destination: Path) -> None:
+    """Move ``temporary`` onto ``destination``, retrying transient holds.
+
+    Antivirus scanners briefly open a freshly written binary without any
+    sharing, so early attempts can fail even when nothing is running. The final
+    attempt re-raises so the caller sees the real error.
+    """
+    delay = _EXTENSION_REPLACE_DELAY
+    for attempt in range(_EXTENSION_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, destination)
+            return
+        except OSError as exc:
+            if not _is_file_in_use_error(exc) or attempt + 1 == _EXTENSION_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def _extension_in_use_error(path: Path) -> SystemExit:
+    return SystemExit(
+        f"error: cannot replace the native extension ({path}) - another process keeps "
+        "the file open in a way that blocks replacement. Stop the Kluster node "
+        "(kllm / kllm-agent) and any active inference, then re-run the installer."
+    )
+
+
+def _write_native_extension(destination: Path, payload: bytes) -> Path | None:
+    """Put the just-built native module at ``destination``.
+
+    A running node maps the extension for its whole lifetime, and Windows then
+    refuses to overwrite it: ``os.replace`` fails with *Access is denied* even
+    though nothing else is wrong. A mapped image may still be renamed, so the
+    previous copy is parked beside the new one - the live process keeps its
+    mapping and the next process imports the fresh build. Returns the parked
+    path when that fallback was needed, else ``None``.
+    """
+    _clear_readonly(destination)
+    temporary = destination.with_name(destination.name + ".new")
+    temporary.write_bytes(payload)
+    try:
+        try:
+            _replace_extension_file(temporary, destination)
+            return None
+        except OSError as exc:
+            if not _is_file_in_use_error(exc):
+                raise
+        parked = _park_destination(destination)
+        try:
+            destination.rename(parked)
+        except OSError as exc:
+            raise _extension_in_use_error(destination) from exc
+        try:
+            _replace_extension_file(temporary, destination)
+        except OSError as exc:
+            # Never leave the source layout without an importable module: put
+            # the previous copy back before reporting the failure.
+            if not destination.is_file():
+                try:
+                    parked.rename(destination)
+                except OSError:
+                    pass
+            raise _extension_in_use_error(destination) from exc
+        try:
+            parked.unlink()
+        except OSError:
+            pass
+        return parked
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _stage_editable_extension(wheel: Path) -> None:
     """Keep uv's source-layout editable import on the just-built native module."""
     with zipfile.ZipFile(wheel) as archive:
@@ -1058,9 +1531,13 @@ def _stage_editable_extension(wheel: Path) -> None:
                 and path.suffix in (".so", ".pyd")
             ):
                 destination = ROOT / "src" / "kllm" / path.name
-                temporary = destination.with_name(destination.name + ".new")
-                temporary.write_bytes(archive.read(name))
-                os.replace(temporary, destination)
+                parked = _write_native_extension(destination, archive.read(name))
+                if parked is not None:
+                    print(
+                        f"note: {destination.name} was still loaded by a running process; "
+                        f"the previous copy is parked as {parked.name}. Restart Kluster to "
+                        "load the new native extension."
+                    )
 
 
 def build_rust(python: Path, *, release: bool) -> None:
@@ -1392,7 +1869,53 @@ def _cmake_backend_flags(backend: str) -> list[str]:
     return install_llama_source.cmake_backend_flags(backend, macos=_is_macos(), linux=_is_linux())
 
 
+def _cmake_prima_flags(backend: str) -> list[str]:
+    """CMake flags Kluster passes to compile prima.cpp (explicitly enabling HiGHS)."""
+    flags = [
+        *_cmake_backend_flags(backend),
+        "-DUSE_HIGHS=ON",
+        "-DBUILD_SHARED_LIBS=OFF",
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DGGML_BLAS=OFF",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    ]
+    if _is_windows():
+        flags.append("-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /W3 /GR /EHsc /DNOMINMAX")
+    return flags
+
+
+def _git_output(path: Path, *args: str) -> str | None:
+    """Captured stdout of a git query, or None when it fails."""
+    result = subprocess.run(
+        ["git", "-C", str(path), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _llama_tree_matches_tag(tag: str) -> bool:
+    """True when the checked-out llama.cpp commit peels to the pinned tag."""
+    head = _git_output(VENDOR_LLAMA, "rev-parse", "HEAD")
+    if not head:
+        return False
+    for ref in (f"refs/tags/{tag}^{{commit}}", f"{tag}^{{commit}}"):
+        target = _git_output(VENDOR_LLAMA, "rev-parse", ref)
+        if target:
+            return target == head
+    return False
+
+
 def clone_or_update_llama(tag: str | None = None) -> None:
+    """Materialize the pinned llama.cpp source, repairing anything unusable.
+
+    ``vendor/llama.cpp`` is installer-owned. A tree without git metadata, or one
+    whose checkout does not peel to the pin, is wiped and re-cloned rather than
+    trusted, so a partial extraction can never masquerade as a valid checkout.
+    """
     ensure_git()
     tag = tag or read_pinned_release()
     VENDOR_LLAMA.parent.mkdir(parents=True, exist_ok=True)
@@ -1418,25 +1941,33 @@ def clone_or_update_llama(tag: str | None = None) -> None:
                 check=False,
             )
             _run(["git", "-C", str(VENDOR_LLAMA), "checkout", "--force", "FETCH_HEAD"])
+        if not _llama_tree_matches_tag(tag):
+            print(f"Repairing {VENDOR_LLAMA}: checkout is not at pin {tag}")
+            _remove_vendor_tree(VENDOR_LLAMA, "vendor/llama.cpp")
+        else:
+            # Drop untracked leftovers that could poison the next configure while
+            # keeping ignored paths (the reused CMake cache lives under build/).
+            _run(["git", "-C", str(VENDOR_LLAMA), "clean", "-fd"], check=False)
+            return
     elif VENDOR_LLAMA.is_dir() and any(VENDOR_LLAMA.iterdir()):
-        print(f"Using existing llama.cpp tree at {VENDOR_LLAMA} (expected tag {tag})")
-    else:
-        print(f"Cloning llama.cpp {tag} → {VENDOR_LLAMA}")
-        result = _run(
-            [
-                "git",
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                tag,
-                "https://github.com/ggml-org/llama.cpp.git",
-                str(VENDOR_LLAMA),
-            ],
-            check=False,
-        )
-        if result.returncode != 0:
-            raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
+        print(f"Replacing unusable llama.cpp tree at {VENDOR_LLAMA} (expected tag {tag})")
+        _remove_vendor_tree(VENDOR_LLAMA, "vendor/llama.cpp")
+    print(f"Cloning llama.cpp {tag} → {VENDOR_LLAMA}")
+    result = _run(
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            tag,
+            "https://github.com/ggml-org/llama.cpp.git",
+            str(VENDOR_LLAMA),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
 
 
 def _read_cmake_cache(build_dir: Path) -> dict[str, str]:
@@ -1474,7 +2005,12 @@ def _discard_stale_cmake_build(
     signature: str | None = None,
 ) -> None:
     """Remove an installer-owned CMake build dir that would misconfigure."""
-    install_llama_source.discard_stale_cmake_build(source_dir, build_dir, signature)
+    install_llama_source.discard_stale_cmake_build(
+        source_dir,
+        build_dir,
+        signature,
+        remove=lambda path: _remove_vendor_tree(path, "vendor/llama.cpp/build"),
+    )
 
 
 def build_llama_from_source(
@@ -1588,6 +2124,45 @@ def _resolve_runtime_binary(name: str) -> Path | None:
     if staged.is_file():
         return staged
     return _find_build_tree_binary(name)
+
+
+def _resolve_prima_binary(name: str) -> Path | None:
+    """Resolve a staged Prima binary in ``vendor/prima``."""
+    exe = f"{name}.exe" if _is_windows() else name
+    staged = PRIMA_BIN_DIR / exe
+    return staged if staged.is_file() else None
+
+
+def _probe_prima_capabilities(binary: Path | None) -> tuple[list[str], list[str]]:
+    """Return (actual_backends, features) reported by Prima llama-server --list-devices."""
+    if binary is None:
+        return [], []
+    try:
+        probe = subprocess.run(
+            [str(binary), "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [], []
+    text = probe.stdout + probe.stderr
+    found = parse_list_devices_backends(text)
+    if probe.returncode == 0 and not found:
+        found = ["cpu"]
+    features: list[str] = []
+    for line in probe.stdout.splitlines():
+        if line.startswith("KLLM_PRIMA_CAPABILITIES="):
+            try:
+                import json
+
+                payload = json.loads(line.removeprefix("KLLM_PRIMA_CAPABILITIES="))
+                raw_features = payload.get("features")
+                if isinstance(raw_features, list):
+                    features = [str(f) for f in raw_features]
+            except Exception:
+                pass
+    return found, features
 
 
 def pick_release_asset(assets: list[dict[str, Any]], backend: str) -> dict[str, Any] | None:
@@ -1940,9 +2515,11 @@ def install_llama(
         current = read_install_stamp().get("tag") or "unknown"
         print(f"Installed llama.cpp is {current}; upgrading to pin {tag}")
 
-    # Invalidate old proof before staging another runtime. This never asserts
-    # that an upstream release archive was compiled with TCP-only transport.
-    (BIN_DIR / "rpc-transport.json").unlink(missing_ok=True)
+    # Invalidate old proof and clear installer-owned artifacts before staging
+    # another runtime, so a backend or pin change cannot leave stale binaries
+    # behind. This never asserts that an upstream release archive was compiled
+    # with TCP-only transport.
+    _reset_staged_binaries(BIN_DIR, _owned_llama_artifact, what="vendor/bin")
     if rpc_tcp_only:
         prefer_prebuilt = False
 
@@ -2051,8 +2628,6 @@ def _write_rpc_transport_evidence(tag: str) -> None:
             and path.suffix in (".dll", ".so", ".dylib")
         ):
             artifacts[path.name] = sha(path)
-    import time
-
     evidence = {
         "installed_at": time.time(),
         "schema": 1,
@@ -2157,12 +2732,95 @@ def verify_llama_installed(tag: str, *, expected: str | None = None) -> None:
     )
 
 
+def print_prima_check(*, expected: str | None = None) -> int:
+    status = prima_install_status(expected=expected)
+    print(f"pin:          {status['pin']}")
+    print(f"recipe:       {status['recipe_digest']}")
+    print(f"installed:    {status['stamp'] or '(no stamp)'}")
+    print(f"llama-server: {status['llama_server'] or 'MISSING'}")
+    print(f"llama-cli:    {status['llama_cli'] or 'MISSING'}")
+    print(f"profile-tool: {status['profile_tool'] or 'MISSING'}")
+    print(
+        "backends:     "
+        f"requested={status['requested_backend'] or '(none)'} "
+        f"probed={','.join(status['actual_backends']) or '(none)'}"
+    )
+    print(f"highs:        {status['highs']}")
+    if expected and expected != status["requested_backend"]:
+        print(f"expected:     {expected}")
+    if status["ok"]:
+        print("status:       ok")
+        return 0
+    print("status:       mismatch")
+    print("hint:         run python scripts/install.py --engine primacpp --llama-only --force")
+    return 1
+
+
+def verify_prima_installed(*, expected: str | None = None) -> None:
+    status = prima_install_status(expected=expected)
+    if status["ok"]:
+        return
+    raise SystemExit(
+        f"error: prima.cpp {status['pin'][:12]} is not installed or mismatched "
+        f"(stamp={status['stamp']!r}, highs={status['highs']!r}, "
+        f"expected={status['expected_backend']!r}, probed={status['actual_backends']!r}). "
+        "Retry with --engine primacpp --force."
+    )
+
+
+def install_prima(
+    backend: str,
+    *,
+    force: bool = False,
+    expected: str | None = None,
+) -> None:
+    backend = detect_backend(backend)
+    stamp_be = expected or stamp_backend_for_install(backend)
+    _repo, commit, digest = read_prima_recipe_pin()
+    print(f"prima.cpp backend: {backend}" + (f" (stamp {stamp_be})" if stamp_be != backend else ""))
+    print(f"prima.cpp pin:     {commit} (recipe {digest[:12]})")
+    print("prima.cpp highs:   enabled (-DUSE_HIGHS=ON)")
+
+    if (
+        not force
+        and prima_stamp_matches(commit, digest, stamp_be)
+        and prima_install_status(expected=stamp_be)["ok"]
+    ):
+        print(f"llama-server: {_resolve_prima_binary('llama-server')}")
+        print(f"llama-cli:    {_resolve_prima_binary('llama-cli')}")
+        print(f"profile-tool: {_resolve_prima_binary('profile-tool')}")
+        print(f"Already at pinned {commit[:12]}")
+        return
+
+    ensure_prima_deps(backend)
+
+    src_dir = str(ROOT / "src")
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+    from kllm.modules.primacpp.interactors.build import bootstrap_prima_build
+
+    bootstrap_prima_build(sys.modules[__name__], VENDOR_PRIMA, PRIMA_BIN_DIR, backend)
+    write_prima_install_stamp(
+        commit=commit,
+        recipe_digest=digest,
+        backend=stamp_be,
+        highs="on",
+    )
+    print(f"llama-server: {_resolve_prima_binary('llama-server')}")
+    print(f"llama-cli:    {_resolve_prima_binary('llama-cli')}")
+    print(f"profile-tool: {_resolve_prima_binary('profile-tool')}")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Install Kluster LLM and all runtime dependencies.")
     p.add_argument("--source-repo", help="Public HTTPS Git source for an isolated managed runtime")
     p.add_argument("--revision", help="Full immutable Git commit for --source-repo")
-    p.add_argument("--engine", choices=("llamacpp", "primacpp"), default="llamacpp",
-                   help="Managed inference engine; bootstrap continues to use llama.cpp")
+    p.add_argument(
+        "--engine",
+        choices=("llamacpp", "primacpp"),
+        default="llamacpp",
+        help="Inference engine to install (llamacpp or primacpp; default: llamacpp)",
+    )
     p.add_argument("--recipe-digest", help="Resolved Prima compatibility/build recipe SHA-256")
     p.add_argument(
         "--runtime-dir", type=Path, help="Isolated destination; never replaces vendor/bin"
@@ -2281,6 +2939,19 @@ def _run_install_llama_stage(
     )
 
 
+def _run_install_prima_stage(
+    backend: str,
+    *,
+    force: bool,
+    expected: str | None,
+) -> None:
+    install_prima(
+        backend,
+        force=force,
+        expected=expected,
+    )
+
+
 def _record_stage_error(name: str, exc: BaseException) -> str:
     detail = str(exc) or type(exc).__name__
     _warn(f"{name} failed ({detail})")
@@ -2313,11 +2984,11 @@ def _run_stages(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.engine == "primacpp" and not all((args.source_repo, args.revision, args.runtime_dir)):
-        raise SystemExit("Prima requires isolated managed source arguments; see docs/agent-install.md")
     if args.engine == "llamacpp" and args.recipe_digest:
         raise SystemExit("--recipe-digest is only valid for Prima managed builds")
     if any((args.source_repo, args.revision, args.runtime_dir)):
+        if args.engine == "primacpp" and not all((args.source_repo, args.revision, args.runtime_dir)):
+            raise SystemExit("Prima requires isolated managed source arguments; see docs/agent-install.md")
         if (
             not all((args.source_repo, args.revision, args.runtime_dir))
             or not args.llama_only
@@ -2380,7 +3051,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {error}", file=sys.stderr)
             return 1
         return 0
-    tag = read_pinned_release(args.tag)
+    if args.engine == "primacpp":
+        if args.recipe_digest:
+            raise SystemExit("--recipe-digest is only valid for Prima managed builds")
+        if args.prebuilt or args.prefer_prebuilt:
+            raise SystemExit(
+                "error: prebuilt packs are not available for primacpp; Prima builds from source with HiGHS"
+            )
+        if args.rpc_tcp_only:
+            raise SystemExit("error: --rpc-tcp-only is only valid for llamacpp")
+        if args.tag:
+            raise SystemExit("error: --tag is only valid for llamacpp")
+    tag = read_pinned_release(args.tag) if args.engine == "llamacpp" else ""
 
     if args.llama_only:
         args.skip_rust = True
@@ -2389,6 +3071,8 @@ def main(argv: list[str] | None = None) -> int:
         args.skip_toolchains = True
 
     if args.check:
+        if args.engine == "primacpp":
+            return print_prima_check(expected=expected_stamp_for_default(args.backend))
         return print_llama_check(tag, expected=expected_stamp_for_default(args.backend))
 
     print(f"Repo root: {ROOT}")
@@ -2413,6 +3097,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_wireguard:
         print("\n=== WireGuard ===")
         install_wireguard()
+    if args.engine == "primacpp" and not args.skip_llama and not args.skip_toolchains:
+        ensure_prima_deps(args.backend)
 
     jobs: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
     if not args.skip_rust:
@@ -2427,32 +3113,47 @@ def main(argv: list[str] | None = None) -> int:
             ("Dashboard (Svelte)", build_ui, (), {"skip_install": args.skip_npm_install}),
         )
 
+    expected_stamp: str | None = None
     if not args.skip_llama:
-        print("\n=== llama.cpp (llama-server + rpc-server) ===")
-        if args.llama_only:
-            print(f"Pin file:  {PIN_FILE} ({tag})")
-        # macOS GPU installs must source-build Metal+Vulkan; there is no prebuilt
-        # path for them (see the rejection above). Elsewhere prefer prebuilt
-        # unless --from-source was asked for.
-        # (--prefer-prebuilt still applies to `--backend cpu` on macOS.)
         resolved_backend = detect_backend(args.backend)
-        prefer_prebuilt = _prefer_llama_prebuilt(args, resolved_backend)
         expected_stamp = stamp_backend_for_install(resolved_backend)
+        if args.engine == "primacpp":
+            print("\n=== prima.cpp (llama-server + llama-cli + profile-tool, HiGHS=ON) ===")
+            jobs.append(
+                (
+                    "prima.cpp (llama-server + llama-cli + profile-tool)",
+                    _run_install_prima_stage,
+                    (args.backend,),
+                    {
+                        "force": args.force,
+                        "expected": expected_stamp,
+                    },
+                ),
+            )
+        else:
+            print("\n=== llama.cpp (llama-server + rpc-server) ===")
+            if args.llama_only:
+                print(f"Pin file:  {PIN_FILE} ({tag})")
+            # macOS GPU installs must source-build Metal+Vulkan; there is no prebuilt
+            # path for them (see the rejection above). Elsewhere prefer prebuilt
+            # unless --from-source was asked for.
+            # (--prefer-prebuilt still applies to `--backend cpu` on macOS.)
+            prefer_prebuilt = _prefer_llama_prebuilt(args, resolved_backend)
 
-        jobs.append(
-            (
-                "llama.cpp (llama-server + rpc-server)",
-                _run_install_llama_stage,
-                (args.backend,),
-                {
-                    "prefer_prebuilt": prefer_prebuilt,
-                    "force": args.force,
-                    "tag": tag,
-                    "expected": expected_stamp,
-                    "rpc_tcp_only": args.rpc_tcp_only,
-                },
-            ),
-        )
+            jobs.append(
+                (
+                    "llama.cpp (llama-server + rpc-server)",
+                    _run_install_llama_stage,
+                    (args.backend,),
+                    {
+                        "prefer_prebuilt": prefer_prebuilt,
+                        "force": args.force,
+                        "tag": tag,
+                        "expected": expected_stamp,
+                        "rpc_tcp_only": args.rpc_tcp_only,
+                    },
+                ),
+            )
 
     errors = _run_stages(jobs, sync=args.sync)
 
@@ -2463,9 +3164,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if not args.skip_llama:
-        verify_llama_installed(tag, expected=expected_stamp)
-        if args.llama_only:
-            print(f"llama.cpp {tag} ready.")
+        if args.engine == "primacpp":
+            verify_prima_installed(expected=expected_stamp)
+            if args.llama_only:
+                _repo, commit, _digest = read_prima_recipe_pin()
+                print(f"prima.cpp {commit[:12]} ready.")
+        else:
+            verify_llama_installed(tag, expected=expected_stamp)
+            if args.llama_only:
+                print(f"llama.cpp {tag} ready.")
 
     path_updated = False
     if not args.skip_rust and not args.skip_path_shim:

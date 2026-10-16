@@ -480,6 +480,7 @@ class ProfileJobs:
         except Exception as error:
             with self.lock:
                 if identity not in self.cancelled:
+                    self._record_refusal(identity, error)
                     self.jobs[identity].update(
                         phase="failed", error=str(error)[:1000], finished_at=time.time()
                     )
@@ -599,6 +600,17 @@ class ProfileJobs:
         with path.open("rb") as source:
             source.seek(max(0, path.stat().st_size - 65536))
             return source.read(65536).decode("utf-8", errors="replace")
+
+    def _record_refusal(self, identity: str, error: Exception) -> None:
+        """Leave a refused job's owned log diagnosable instead of missing/empty."""
+        path = self.root / identity / "profile.log"
+        try:
+            if path.exists() and path.stat().st_size:
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"Profile refused before profiling: {str(error)[:1000]}\n")
+        except OSError:
+            pass
 
     def close(self):
         for identity in list(self.jobs):

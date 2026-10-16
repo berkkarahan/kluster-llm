@@ -814,10 +814,12 @@ def test_real_profile_process_and_owned_logs(tmp_path, backend):
             assert result["phase"] == "failed", result
             assert "physical Vulkan profiler device evidence" in result["error"]
             assert not jobs.cache.root.exists()
+            # A refused job still owns a diagnosable log with the refusal reason.
+            assert "physical Vulkan profiler device evidence" in jobs.logs(job["job_id"])
         else:
             assert result["phase"] == "prepared", result
             assert result["profile"]["cpu_layer_ms"] == 1.0
-        assert "KLLM_PRIMA_PROFILE=" in jobs.logs(job["job_id"])
+            assert "KLLM_PRIMA_PROFILE=" in jobs.logs(job["job_id"])
         assert jobs.start(request)["job_id"] == job["job_id"]
         state.process_pid = 123
         with pytest.raises(ValueError, match="active run"):

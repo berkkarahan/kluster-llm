@@ -20,6 +20,20 @@ from kllm.modules.managed_network.interactors.verification import (
 from kllm.shared.platform.base import PlatformRefusal
 
 
+def _foreign_address_bindable() -> bool:
+    """The foreign-source case needs a second loopback address (Linux has it by default)."""
+    import socket
+
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.2", 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
 @pytest_asyncio.fixture
 async def link(tmp_path):
     stores = [NetworkStore(tmp_path / name) for name in ("master", "worker")]
@@ -106,7 +120,7 @@ async def close_writer(writer):
 async def refused(reader):
     try:
         assert await asyncio.wait_for(reader.read(), 2) == b""
-    except ConnectionResetError:
+    except ConnectionError:
         pass
 
 
@@ -145,6 +159,8 @@ async def test_signed_stream_measures_complete_payload_and_preserves_echo(link):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["signature", "source", "revision", "network"])
 async def test_stream_refuses_foreign_context_before_bulk(link, failure):
+    if failure == "source" and not _foreign_address_bindable():
+        pytest.skip("A second loopback source address is unavailable on this host")
     diagnostics, identities, _ = link
     source, target = diagnostics
     frame = request(source, target)
@@ -198,8 +214,12 @@ async def test_stream_does_not_acknowledge_corrupt_or_revoked_sample(link, failu
             )
             stores[1].accept_authority(target.authority)
         block = stream_block(frame.nonce, 0) if failure != "payload" else bytes(65536)
-        writer.write(block * 16)
-        await writer.drain()
+        try:
+            writer.write(block * 16)
+            await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # The target refused the bulk before this host's socket observed it.
+            pass
         await refused(reader)
         await settle(target)
     finally:

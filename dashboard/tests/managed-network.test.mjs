@@ -3,7 +3,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer as createHttpServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'vite';
@@ -271,8 +271,14 @@ test('private network app setup, selected run, blocked stop and cleanup',
         await evaluate("document.querySelector('.prima-snapshots').open=true;document.querySelector('.prima-pending').scrollIntoView()");
         await wait("document.querySelector('.prima-snapshots').open");
         assert.equal(await evaluate(`Array.from(document.querySelectorAll('.prima-recovery,.prima-rule-scroll,.prima-snapshots pre')).every(el=>{const r=el.getBoundingClientRect();return r.left>=-1&&r.right<=innerWidth+1})`),true,`Recovery panels must fit ${width}px`);
+        // Evidence screenshots are written only for a run that passed its fitted-panel
+        // checks, and the artifacts directory must be created for fresh checkouts.
         const shot=await call('Page.captureScreenshot',{format:'png'});
-        writeFileSync(fileURLToPath(new URL(`../../artifacts/prima-listener-recovery-${width}.png`,import.meta.url)),Buffer.from(shot.data,'base64'));
+        const target=fileURLToPath(new URL(`../../artifacts/prima-listener-recovery-${width}.png`,import.meta.url));
+        mkdirSync(new URL('../../artifacts',import.meta.url),{recursive:true});
+        const handle=openSync(target,'w');
+        writeFileSync(handle,Buffer.from(shot.data,'base64'));
+        closeSync(handle);
       }
       await call('Emulation.clearDeviceMetricsOverride');
       await evaluate("document.querySelector('.prima-snapshots').open=false");

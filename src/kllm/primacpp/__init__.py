@@ -34,4 +34,5 @@ def _load_primacpp_lib() -> None:
 _load_primacpp_lib()
 
 # Expose low‑level API from the _native module.
-from ._native import *  # noqa: F401,F403
+# The import runs after the shared-library probe above, so E402 is intentional here.
+from ._native import *  # noqa: E402,F401,F403

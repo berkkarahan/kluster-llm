@@ -27,6 +27,19 @@ python scripts/install.py
 
 The installer stages `llama-server`, `rpc-server`, and their shared libraries under `vendor/bin`.
 
+### Native rebuild while a node is running (`Access is denied`)
+
+A running `kllm` / `kllm-agent` / dashboard maps `src/kllm/_native.*.pyd`
+(`.so` on Unix) for its whole lifetime, and on Windows that makes the built
+extension unwritable. The installer now handles it: it retries a briefly held
+file, then renames the loaded copy aside as `_native.<abi>.pyd.locked` and puts
+the fresh build at the canonical path. The live process keeps its old module
+until it restarts, so restart Kluster to pick up the new extension; the parked
+copy is a throwaway duplicate the next installer run deletes once nothing maps
+it. If the file cannot even be renamed aside, the stage stops with
+`error: cannot replace the native extension (...)`: stop the node and any
+active inference, then re-run `uv run python scripts/install.py`.
+
 ### Verify an installation
 
 ```bash

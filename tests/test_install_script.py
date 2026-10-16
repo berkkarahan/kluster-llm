@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import importlib.util
 import os
 import shutil
@@ -972,6 +974,74 @@ def test_busy_windows_launcher_is_omitted_from_reinstall(install, tmp_path):
         os.close(fd)
 
 
+def _native_wheel(tmp_path: Path, payload: bytes) -> Path:
+    wheel = tmp_path / "kllm-0.1.0-cp312-cp312-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("kllm/_native.cp312-win_amd64.pyd", payload)
+    return wheel
+
+
+def test_native_extension_replace_survives_a_transient_denial(install, tmp_path, monkeypatch):
+    """A momentary Windows denial must not fail the Rust stage."""
+    staged = tmp_path / "src" / "kllm"
+    staged.mkdir(parents=True)
+    destination = staged / "_native.cp312-win_amd64.pyd"
+    destination.write_bytes(b"old-native")
+    real_replace = install.os.replace
+    attempts: list[str] = []
+
+    def flaky_replace(source, target):
+        attempts.append(str(source))
+        if len(attempts) == 1:
+            # Shape of the observed failure: no winerror, both names attached.
+            raise PermissionError(errno.EACCES, "Access is denied", str(source), None, str(target))
+        return real_replace(source, target)
+
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install.os, "replace", flaky_replace)
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    install._stage_editable_extension(_native_wheel(tmp_path, b"new-native"))
+    assert destination.read_bytes() == b"new-native"
+    assert not destination.with_name(destination.name + ".new").exists()
+    assert len(attempts) == 2
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows refuses to overwrite a mapped image")
+def test_loaded_native_extension_is_parked_and_replaced(install, tmp_path, monkeypatch, capsys):
+    """A loaded extension is renamed aside so the freshly built module lands."""
+    staged = tmp_path / "src" / "kllm"
+    staged.mkdir(parents=True)
+    destination = staged / "_native.cp312-win_amd64.pyd"
+    shutil.copy2(Path(os.environ["SystemRoot"]) / "System32" / "version.dll", destination)
+    ctypes.WinDLL(str(destination))
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    install._stage_editable_extension(_native_wheel(tmp_path, b"new-native"))
+    assert destination.read_bytes() == b"new-native"
+    parked = destination.with_name(destination.name + ".locked")
+    assert parked.is_file()
+    assert "Restart Kluster" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing violation is error 32")
+def test_held_native_extension_reports_an_actionable_error(install, tmp_path, monkeypatch):
+    """An extension that cannot even be renamed aside fails with the remedy."""
+    staged = tmp_path / "src" / "kllm"
+    staged.mkdir(parents=True)
+    destination = staged / "_native.cp312-win_amd64.pyd"
+    destination.write_bytes(b"old-native")
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    handle = os.open(destination, os.O_RDONLY)
+    try:
+        with pytest.raises(SystemExit, match="Stop the Kluster node"):
+            install._stage_editable_extension(_native_wheel(tmp_path, b"new-native"))
+    finally:
+        os.close(handle)
+    assert destination.read_bytes() == b"old-native"
+    assert not destination.with_name(destination.name + ".new").exists()
+
+
 def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(install, "BIN_DIR", tmp_path)
     monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
@@ -1448,3 +1518,179 @@ def test_cmake_prima_flags_and_windows_env_preserve_cross_platform_compilation(
     assert "-DUSE_HIGHS=ON" in linux_flags
     assert not any(flag.startswith("-DCMAKE_CXX_FLAGS=") for flag in linux_flags)
 
+
+def _winerror32() -> OSError:
+    exc = OSError(13, "The process cannot access the file")
+    exc.winerror = 32  # type: ignore[attr-defined]
+    return exc
+
+
+def test_reset_staged_binaries_clears_owned_and_keeps_unknown(install, tmp_path):
+    # A backend/pin change must not leave the previous backend's libraries behind,
+    # but files install.py never staged (e.g. the network helper) must survive.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    owned = [
+        "llama-server.exe",
+        "rpc-server.exe",
+        "ggml-rpc-server.exe",
+        "ggml-vulkan.dll",
+        "llama-common.dll",
+        "libomp.dll",
+        "llama-release.txt",
+        "rpc-transport.json",
+    ]
+    unknown = ["kllm-network-helper.exe", "component.dll", "notes.txt"]
+    for name in (*owned, *unknown):
+        (bin_dir / name).write_bytes(b"x")
+
+    install._reset_staged_binaries(bin_dir, install._owned_llama_artifact, what="vendor/bin")
+
+    for name in owned:
+        assert not (bin_dir / name).exists(), name
+    for name in unknown:
+        assert (bin_dir / name).exists(), name
+
+
+def test_reset_staged_prima_clears_owned_and_keeps_unknown(install, tmp_path):
+    prima_bin = tmp_path / "prima"
+    prima_bin.mkdir()
+    owned = ["llama-server.exe", "llama-cli.exe", "profile-tool.exe", "manifest.json"]
+    for name in (*owned, "prima-release.txt", "notes.txt"):
+        (prima_bin / name).write_bytes(b"x")
+
+    install._reset_staged_binaries(prima_bin, install._owned_prima_artifact, what="vendor/prima")
+
+    for name in (*owned, "prima-release.txt"):
+        assert not (prima_bin / name).exists(), name
+    assert (prima_bin / "notes.txt").exists()
+
+
+def test_clear_readonly_allows_remove(install, tmp_path):
+    target = tmp_path / "ggml-cpu.dll"
+    target.write_bytes(b"x")
+    target.chmod(0o444)
+    install._remove_vendor_file(target, "vendor/bin")
+    assert not target.exists()
+
+
+def test_remove_vendor_file_fails_loudly_when_locked(install, tmp_path, monkeypatch):
+    target = tmp_path / "llama-server.exe"
+    target.write_bytes(b"x")
+
+    def locked(_path):
+        raise _winerror32()
+
+    monkeypatch.setattr(install.os, "unlink", locked)
+    with pytest.raises(SystemExit, match="in use by a running process"):
+        install._remove_vendor_file(target, "vendor/bin")
+
+
+def test_remove_vendor_tree_fails_loudly_when_locked(install, tmp_path, monkeypatch):
+    tree = tmp_path / "llama.cpp"
+    tree.mkdir()
+    (tree / "llama-server.exe").write_bytes(b"x")
+
+    def locked(_path):
+        raise _winerror32()
+
+    monkeypatch.setattr(install.os, "unlink", locked)
+    with pytest.raises(SystemExit, match="in use by a running process"):
+        install._remove_vendor_tree(tree, "vendor/llama.cpp")
+
+
+def test_clone_or_update_replaces_non_git_tree(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    vendor.mkdir()
+    (vendor / "leftover.dll").write_bytes(b"x")
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    install.clone_or_update_llama("v0.5.0")
+
+    assert not (vendor / "leftover.dll").exists()
+    assert any("clone" in command for command in commands)
+
+
+def test_clone_or_update_repairs_stale_git_checkout(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    (vendor / ".git").mkdir(parents=True)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+
+    def fake_git_output(_path, *args):
+        # HEAD trails the pin, so the tree must be wiped and re-cloned.
+        return "deadbeef" if args == ("rev-parse", "HEAD") else "cafebabe"
+
+    monkeypatch.setattr(install, "_git_output", fake_git_output)
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    install.clone_or_update_llama("v0.5.0")
+
+    assert not (vendor / ".git").exists()
+    assert any("clone" in command for command in commands)
+
+
+def test_clone_or_update_keeps_matching_checkout(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    (vendor / ".git").mkdir(parents=True)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+    monkeypatch.setattr(install, "_git_output", lambda _path, *args: "same")
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    install.clone_or_update_llama("v0.5.0")
+
+    assert any("clean" in command for command in commands)
+    assert not any("clone" in command for command in commands)
+
+
+def test_discard_stale_build_uses_lock_aware_remover(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    build = vendor / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(vendor.resolve()) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+
+    seen: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        install, "_remove_vendor_tree", lambda path, what: seen.append((path, what))
+    )
+
+    # A signature mismatch is a stale-cache reason, so the injected remover runs.
+    install._discard_stale_cmake_build(vendor, build, "signature")
+    assert seen == [(build, "vendor/llama.cpp/build")]

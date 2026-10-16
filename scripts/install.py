@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
@@ -47,15 +48,17 @@ import re
 import shlex
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -213,6 +216,126 @@ def _which(cmd: str) -> str | None:
 
 def _warn(msg: str) -> None:
     print(f"WARNING: {msg}", file=sys.stderr, flush=True)
+
+
+# ── vendor rewrite primitives ────────────────────────────────────────────────
+#
+# ``vendor/bin``, ``vendor/prima``, ``vendor/llama.cpp`` and ``vendor/prima.cpp``
+# are installer-owned: install.py must be able to clear and re-materialize
+# anything it staged there. A running node maps ``llama-server`` / ``rpc-server``
+# and their shared libraries, and Windows then refuses both delete and overwrite
+# (error 32). Parking a live binary aside would hide a running node, so the
+# installer fails loudly with a remedy instead.
+
+
+def _clear_readonly(path: Path) -> None:
+    """Drop a read-only bit so a previously protected artifact can be replaced."""
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """True when an ``OSError`` means another process holds the file open."""
+    if getattr(exc, "winerror", None) == 32:
+        return True
+    return getattr(exc, "errno", None) in {errno.EBUSY, errno.ETXTBSY}
+
+
+def _vendor_in_use_error(path: Path, what: str) -> SystemExit:
+    return SystemExit(
+        f"error: cannot rewrite {what} ({path}) - the file is in use by a running "
+        "process (Windows error 32 / EBUSY). Stop the Kluster node and any active "
+        "inference, then re-run the installer."
+    )
+
+
+def _remove_vendor_file(path: Path, what: str) -> None:
+    """Delete one installer-owned vendor file, failing loudly when it is locked."""
+    if not path.exists() and not path.is_symlink():
+        return
+    _clear_readonly(path)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if _is_lock_error(exc):
+            raise _vendor_in_use_error(path, what) from exc
+        raise
+
+
+def _remove_vendor_tree(path: Path, what: str) -> None:
+    """Remove an installer-owned vendor tree, failing loudly when it is locked."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or not path.is_dir():
+        _remove_vendor_file(path, what)
+        return
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            _remove_vendor_file(Path(root) / name, what)
+        for name in dirs:
+            child = Path(root) / name
+            if child.is_symlink():
+                _remove_vendor_file(child, what)
+                continue
+            _clear_readonly(child)
+            try:
+                child.rmdir()
+            except OSError as exc:
+                if _is_lock_error(exc):
+                    raise _vendor_in_use_error(child, what) from exc
+                raise
+    _clear_readonly(path)
+    try:
+        path.rmdir()
+    except OSError as exc:
+        if _is_lock_error(exc):
+            raise _vendor_in_use_error(path, what) from exc
+        raise
+
+
+_LLAMA_STAGED_STEMS = frozenset({"llama-server", "rpc-server", "ggml-rpc-server"})
+_PRIMA_STAGED_STEMS = frozenset({"llama-server", "llama-cli", "profile-tool"})
+# Tokens that only ever appear in a shared library install.py staged from a
+# llama.cpp build/pack. ``component.dll`` must not match, so ``omp`` is spelled
+# as ``libomp``. ``kllm-network-helper`` carries none of these.
+_SHARED_LIB_TOKENS = ("llama", "ggml", "mtmd", "libomp")
+
+
+def _stem(name: str) -> str:
+    lowered = name.lower()
+    return lowered[:-4] if lowered.endswith(".exe") else lowered
+
+
+def _owned_llama_artifact(name: str) -> bool:
+    """True for files install.py stages into vendor/bin (never the network helper)."""
+    lowered = name.lower()
+    if lowered in {"llama-release.txt", "rpc-transport.json"}:
+        return True
+    if _stem(name) in _LLAMA_STAGED_STEMS:
+        return True
+    if lowered.endswith((".dll", ".dylib", ".so")) or ".so." in lowered:
+        return any(token in lowered for token in _SHARED_LIB_TOKENS)
+    return False
+
+
+def _owned_prima_artifact(name: str) -> bool:
+    """True for files install.py stages into vendor/prima."""
+    if name.lower() in {"manifest.json", "prima-release.txt"}:
+        return True
+    return _stem(name) in _PRIMA_STAGED_STEMS
+
+
+def _reset_staged_binaries(directory: Path, predicate: Callable[[str], bool], *, what: str) -> None:
+    """Clear installer-owned artifacts so a backend/pin change leaves nothing stale."""
+    if not directory.is_dir():
+        return
+    for entry in directory.iterdir():
+        if entry.is_file() and predicate(entry.name):
+            _remove_vendor_file(entry, what)
 
 
 def _ssl_contexts() -> list[ssl.SSLContext]:
@@ -1298,6 +1421,105 @@ def _wheel_for_reinstall(python: Path, wheel: Path) -> Path:
     return _wheel_omitting_console_scripts(wheel, busy)
 
 
+# A running node maps ``src/kllm/_native.*.pyd`` for the lifetime of the
+# process, and Windows refuses to overwrite a mapped image ("Access is denied").
+# It does allow renaming that image aside, so the freshly built module can take
+# the canonical path while the live process keeps its mapping until a restart.
+_EXTENSION_REPLACE_ATTEMPTS = 4
+_EXTENSION_REPLACE_DELAY = 0.25
+
+
+def _is_file_in_use_error(exc: BaseException) -> bool:
+    """True when Windows refused a replace because the target is open or mapped.
+
+    Wider than ``_is_lock_error`` because a mapped image is the usual cause
+    here: overwriting a loaded module reports ``WinError 5`` (*Access is
+    denied*), not the sharing violation of a plain open handle, and some
+    Windows error paths surface only ``errno.EACCES``.
+    """
+    if _is_lock_error(exc):
+        return True
+    if getattr(exc, "winerror", None) in {5, 33}:
+        return True
+    return isinstance(exc, PermissionError)
+
+
+def _replace_extension_file(temporary: Path, destination: Path) -> None:
+    """Move ``temporary`` onto ``destination``, retrying transient holds.
+
+    Antivirus scanners briefly open a freshly written binary without any
+    sharing, so early attempts can fail even when nothing is running. The final
+    attempt re-raises so the caller sees the real error.
+    """
+    delay = _EXTENSION_REPLACE_DELAY
+    for attempt in range(_EXTENSION_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, destination)
+            return
+        except OSError as exc:
+            if not _is_file_in_use_error(exc) or attempt + 1 == _EXTENSION_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def _extension_in_use_error(path: Path) -> SystemExit:
+    return SystemExit(
+        f"error: cannot replace the native extension ({path}) - another process keeps "
+        "the file open in a way that blocks replacement. Stop the Kluster node "
+        "(kllm / kllm-agent) and any active inference, then re-run the installer."
+    )
+
+
+def _write_native_extension(destination: Path, payload: bytes) -> Path | None:
+    """Put the just-built native module at ``destination``.
+
+    A running node maps the extension for its whole lifetime, and Windows then
+    refuses to overwrite it: ``os.replace`` fails with *Access is denied* even
+    though nothing else is wrong. A mapped image may still be renamed, so the
+    previous copy is parked beside the new one - the live process keeps its
+    mapping and the next process imports the fresh build. Returns the parked
+    path when that fallback was needed, else ``None``.
+    """
+    _clear_readonly(destination)
+    temporary = destination.with_name(destination.name + ".new")
+    temporary.write_bytes(payload)
+    try:
+        try:
+            _replace_extension_file(temporary, destination)
+            return None
+        except OSError as exc:
+            if not _is_file_in_use_error(exc):
+                raise
+        parked = _park_destination(destination)
+        try:
+            destination.rename(parked)
+        except OSError as exc:
+            raise _extension_in_use_error(destination) from exc
+        try:
+            _replace_extension_file(temporary, destination)
+        except OSError as exc:
+            # Never leave the source layout without an importable module: put
+            # the previous copy back before reporting the failure.
+            if not destination.is_file():
+                try:
+                    parked.rename(destination)
+                except OSError:
+                    pass
+            raise _extension_in_use_error(destination) from exc
+        try:
+            parked.unlink()
+        except OSError:
+            pass
+        return parked
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _stage_editable_extension(wheel: Path) -> None:
     """Keep uv's source-layout editable import on the just-built native module."""
     with zipfile.ZipFile(wheel) as archive:
@@ -1309,9 +1531,13 @@ def _stage_editable_extension(wheel: Path) -> None:
                 and path.suffix in (".so", ".pyd")
             ):
                 destination = ROOT / "src" / "kllm" / path.name
-                temporary = destination.with_name(destination.name + ".new")
-                temporary.write_bytes(archive.read(name))
-                os.replace(temporary, destination)
+                parked = _write_native_extension(destination, archive.read(name))
+                if parked is not None:
+                    print(
+                        f"note: {destination.name} was still loaded by a running process; "
+                        f"the previous copy is parked as {parked.name}. Restart Kluster to "
+                        "load the new native extension."
+                    )
 
 
 def build_rust(python: Path, *, release: bool) -> None:
@@ -1658,7 +1884,38 @@ def _cmake_prima_flags(backend: str) -> list[str]:
     return flags
 
 
+def _git_output(path: Path, *args: str) -> str | None:
+    """Captured stdout of a git query, or None when it fails."""
+    result = subprocess.run(
+        ["git", "-C", str(path), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _llama_tree_matches_tag(tag: str) -> bool:
+    """True when the checked-out llama.cpp commit peels to the pinned tag."""
+    head = _git_output(VENDOR_LLAMA, "rev-parse", "HEAD")
+    if not head:
+        return False
+    for ref in (f"refs/tags/{tag}^{{commit}}", f"{tag}^{{commit}}"):
+        target = _git_output(VENDOR_LLAMA, "rev-parse", ref)
+        if target:
+            return target == head
+    return False
+
+
 def clone_or_update_llama(tag: str | None = None) -> None:
+    """Materialize the pinned llama.cpp source, repairing anything unusable.
+
+    ``vendor/llama.cpp`` is installer-owned. A tree without git metadata, or one
+    whose checkout does not peel to the pin, is wiped and re-cloned rather than
+    trusted, so a partial extraction can never masquerade as a valid checkout.
+    """
     ensure_git()
     tag = tag or read_pinned_release()
     VENDOR_LLAMA.parent.mkdir(parents=True, exist_ok=True)
@@ -1684,25 +1941,33 @@ def clone_or_update_llama(tag: str | None = None) -> None:
                 check=False,
             )
             _run(["git", "-C", str(VENDOR_LLAMA), "checkout", "--force", "FETCH_HEAD"])
+        if not _llama_tree_matches_tag(tag):
+            print(f"Repairing {VENDOR_LLAMA}: checkout is not at pin {tag}")
+            _remove_vendor_tree(VENDOR_LLAMA, "vendor/llama.cpp")
+        else:
+            # Drop untracked leftovers that could poison the next configure while
+            # keeping ignored paths (the reused CMake cache lives under build/).
+            _run(["git", "-C", str(VENDOR_LLAMA), "clean", "-fd"], check=False)
+            return
     elif VENDOR_LLAMA.is_dir() and any(VENDOR_LLAMA.iterdir()):
-        print(f"Using existing llama.cpp tree at {VENDOR_LLAMA} (expected tag {tag})")
-    else:
-        print(f"Cloning llama.cpp {tag} → {VENDOR_LLAMA}")
-        result = _run(
-            [
-                "git",
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                tag,
-                "https://github.com/ggml-org/llama.cpp.git",
-                str(VENDOR_LLAMA),
-            ],
-            check=False,
-        )
-        if result.returncode != 0:
-            raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
+        print(f"Replacing unusable llama.cpp tree at {VENDOR_LLAMA} (expected tag {tag})")
+        _remove_vendor_tree(VENDOR_LLAMA, "vendor/llama.cpp")
+    print(f"Cloning llama.cpp {tag} → {VENDOR_LLAMA}")
+    result = _run(
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            tag,
+            "https://github.com/ggml-org/llama.cpp.git",
+            str(VENDOR_LLAMA),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"error: git clone of llama.cpp tag {tag} failed")
 
 
 def _read_cmake_cache(build_dir: Path) -> dict[str, str]:
@@ -1740,7 +2005,12 @@ def _discard_stale_cmake_build(
     signature: str | None = None,
 ) -> None:
     """Remove an installer-owned CMake build dir that would misconfigure."""
-    install_llama_source.discard_stale_cmake_build(source_dir, build_dir, signature)
+    install_llama_source.discard_stale_cmake_build(
+        source_dir,
+        build_dir,
+        signature,
+        remove=lambda path: _remove_vendor_tree(path, "vendor/llama.cpp/build"),
+    )
 
 
 def build_llama_from_source(
@@ -2245,9 +2515,11 @@ def install_llama(
         current = read_install_stamp().get("tag") or "unknown"
         print(f"Installed llama.cpp is {current}; upgrading to pin {tag}")
 
-    # Invalidate old proof before staging another runtime. This never asserts
-    # that an upstream release archive was compiled with TCP-only transport.
-    (BIN_DIR / "rpc-transport.json").unlink(missing_ok=True)
+    # Invalidate old proof and clear installer-owned artifacts before staging
+    # another runtime, so a backend or pin change cannot leave stale binaries
+    # behind. This never asserts that an upstream release archive was compiled
+    # with TCP-only transport.
+    _reset_staged_binaries(BIN_DIR, _owned_llama_artifact, what="vendor/bin")
     if rpc_tcp_only:
         prefer_prebuilt = False
 
@@ -2356,8 +2628,6 @@ def _write_rpc_transport_evidence(tag: str) -> None:
             and path.suffix in (".dll", ".so", ".dylib")
         ):
             artifacts[path.name] = sha(path)
-    import time
-
     evidence = {
         "installed_at": time.time(),
         "schema": 1,

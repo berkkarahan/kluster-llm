@@ -252,7 +252,7 @@ pub fn validate(scope: &Scope) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        let data: Value = serde_json::from_str(&powershell(scope, "$a=Get-NetAdapter -InterfaceIndex $i; [pscustomobject]@{Hardware=$a.HardwareInterface; Description=$a.InterfaceDescription; Speed=[long]$a.LinkSpeed; Up=($a.Status -eq 'Up'); Default=@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count; Addresses=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 | Select-Object -ExpandProperty IPAddress)} | ConvertTo-Json -Compress")?)?;
+        let data: Value = serde_json::from_str(&powershell(scope, "$a=Get-NetAdapter -InterfaceIndex $i; [pscustomobject]@{Hardware=$a.HardwareInterface; Description=$a.InterfaceDescription; Speed=[long]$a.Speed; Up=($a.Status -eq 'Up'); Default=@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count; Addresses=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 | Select-Object -ExpandProperty IPAddress)} | ConvertTo-Json -Compress")?)?;
         if data["Hardware"] != true
             || data["Up"] != true
             || !windows_speed_is_eligible(data["Speed"].as_u64().unwrap_or(0))

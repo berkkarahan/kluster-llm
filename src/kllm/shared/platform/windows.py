@@ -7,7 +7,7 @@ import json
 from kllm.modules.managed_network.entities import NodeAssignment
 from kllm.modules.managed_network.gateways.store import digest
 from kllm.shared.platform.base import AdapterSnapshot, PlatformAdapter, PlatformRefusal, run_fixed
-from kllm.shared.platform.inspection import _inspect_windows
+from kllm.shared.platform.inspection import NetworkError, _inspect_windows, _windows_state
 
 
 def powershell(script: str, values: dict[str, str]) -> str:
@@ -17,8 +17,38 @@ def powershell(script: str, values: dict[str, str]) -> str:
     )
 
 
+_INVENTORY_SCRIPT = r"""
+$ErrorActionPreference='Stop'
+$routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object {$_.DestinationPrefix -ne '0.0.0.0/0'} | Select-Object -ExpandProperty DestinationPrefix)
+$defaults=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty InterfaceIndex)
+$ipifs=@(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+$out=@(Get-NetAdapter | ForEach-Object {
+$i=[int]$_.ifIndex
+$ipif=$ipifs | Where-Object {$_.InterfaceIndex -eq $i} | Select-Object -First 1
+$all=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object IPAddress,PrefixLength)
+$active=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Select-Object IPAddress,PrefixLength,AddressState,SkipAsSource,InstanceID)
+[pscustomobject]@{Index=$i;Guid=$(if($_.InterfaceGuid){$_.InterfaceGuid.ToString()}else{''});MAC=$_.MacAddress;Name=$_.Name;Status=$_.Status.ToString();LinkSpeed=$(if($_.LinkSpeed){$_.LinkSpeed.ToString()}else{''});Hardware=[bool]$_.HardwareInterface;Description=$_.InterfaceDescription;Default=($defaults -contains $i);HasIpif=[bool]$ipif;Dhcp=$(if($ipif){$ipif.Dhcp -eq 'Enabled'}else{$false});Addresses=$all;AddressStates=$active;Routes=$routes}})
+ConvertTo-Json -InputObject $out -Compress -Depth 5
+"""
+
+
 class WindowsAdapter(PlatformAdapter):
     def inventory(self) -> list[AdapterSnapshot]:
+        # One batched query: per-adapter enumeration costs a PowerShell process
+        # per call, which overruns the managed-network inventory budget.
+        try:
+            payload = json.loads(powershell(_INVENTORY_SCRIPT, {}))
+        except (OSError, ValueError, PlatformRefusal):
+            payload = None
+        if payload is not None:
+            entries = payload if isinstance(payload, list) else [payload]
+            result = []
+            for entry in entries:
+                try:
+                    result.append(self._batched_snapshot(entry))
+                except (OSError, KeyError, TypeError, ValueError, NetworkError):
+                    continue
+            return result
         indexes = json.loads(
             powershell(
                 "$ErrorActionPreference='Stop'; @(Get-NetAdapter | Select-Object -ExpandProperty ifIndex) | ConvertTo-Json -Compress",
@@ -34,6 +64,31 @@ class WindowsAdapter(PlatformAdapter):
             except (OSError, ValueError, PlatformRefusal):
                 continue
         return result
+
+    def _batched_snapshot(self, entry: dict) -> AdapterSnapshot:
+        """Build one snapshot from the batched payload, matching `inspect` exactly."""
+        index = int(entry["Index"])
+        guid = entry.get("Guid") or ""
+        mac = entry.get("MAC") or ""
+        if not entry.get("HasIpif") or not guid or not mac:
+            raise ValueError("adapter lacks a complete Windows inspection")
+        state = _windows_state(str(index), entry)
+        return self._snapshot(index, guid, mac, state, entry.get("AddressStates") or [])
+
+    def _snapshot(
+        self, index: int, guid: str, mac_value: str, state, address_states: list[dict]
+    ) -> AdapterSnapshot:
+        mac = str(mac_value).replace("-", ":").lower()
+        fingerprint = digest({"guid": guid.lower(), "mac": mac, "index": index})
+        return AdapterSnapshot(
+            str(index),
+            str(index),
+            int(index),
+            fingerprint,
+            mac,
+            state,
+            {"guid": guid, "address_states": address_states},
+        )
 
     def inspect(self, adapter_id: str) -> AdapterSnapshot:
         if not adapter_id.isdigit():
@@ -53,17 +108,7 @@ $addresses=@(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -PolicyStor
                 {"interface": adapter_id},
             )
         )
-        mac = data["MAC"].replace("-", ":").lower()
-        fingerprint = digest({"guid": data["Guid"].lower(), "mac": mac, "index": data["Index"]})
-        return AdapterSnapshot(
-            adapter_id,
-            adapter_id,
-            int(adapter_id),
-            fingerprint,
-            mac,
-            state,
-            {"guid": data["Guid"], "address_states": data["Addresses"]},
-        )
+        return self._snapshot(int(adapter_id), data["Guid"], data["MAC"], state, data["Addresses"])
 
     def conflict_preflight(self, snapshot: AdapterSnapshot, address: str) -> None:
         result = powershell(

@@ -27,13 +27,7 @@ class MacOSAdapter(PlatformAdapter):
             raise PlatformRefusal("INVALID_ADAPTER", "Invalid macOS adapter identifier")
         service, hardware = _mac_service(adapter_id, run_fixed)
         index = socket.if_nametoindex(adapter_id)
-        output = run_fixed(["ifconfig", adapter_id])
-        match = re.search(r"\bether\s+([0-9a-f:]{17})", output, re.I)
-        if not match:
-            raise PlatformRefusal(
-                "INVALID_ADAPTER", "Adapter does not have a verifiable Ethernet MAC"
-            )
-        mac = match.group(1).lower()
+        mac = self._mac(adapter_id)
         state = _inspect_macos(adapter_id, run_fixed)
         info = run_fixed(["networksetup", "-getinfo", service])
         gateway = re.search(r"^Router:\s*(.*)$", info, re.M)
@@ -53,6 +47,29 @@ class MacOSAdapter(PlatformAdapter):
             }
         )
         return AdapterSnapshot(adapter_id, adapter_id, index, fingerprint, mac, state, facts)
+
+    @staticmethod
+    def _mac(adapter_id: str) -> str:
+        """Read the adapter's real Ethernet address.
+
+        Some macOS versions redact `ifconfig` MAC values for unprivileged
+        callers (02:00:00:00:00:00); networksetup reports the real address and
+        remains the first choice, with ifconfig kept as a fallback.
+        """
+        try:
+            output = run_fixed(["networksetup", "-getmacaddress", adapter_id])
+        except (OSError, PlatformRefusal):
+            output = ""
+        match = re.search(r"Ethernet Address:\s*([0-9a-f:]{17})", output, re.I)
+        if match and match.group(1).lower() != "02:00:00:00:00:00":
+            return match.group(1).lower()
+        output = run_fixed(["ifconfig", adapter_id])
+        fallback = re.search(r"\bether\s+([0-9a-f:]{17})", output, re.I)
+        if not fallback:
+            raise PlatformRefusal(
+                "INVALID_ADAPTER", "Adapter does not have a verifiable Ethernet MAC"
+            )
+        return fallback.group(1).lower()
 
     def add_exact(self, snapshot: AdapterSnapshot, assignment: NodeAssignment) -> None:
         network = ipaddress.IPv4Network(

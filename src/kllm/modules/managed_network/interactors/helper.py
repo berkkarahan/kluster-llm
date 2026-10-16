@@ -159,34 +159,63 @@ class HelperClient:
             wintypes.HANDLE,
             ctypes.POINTER(wintypes.ULONG),
         ]
-        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.QueryFullProcessImageNameW.argtypes = [
+        kernel.GetNamedPipeServerProcessId.restype = wintypes.BOOL
+        kernel.GetNamedPipeServerSessionId.argtypes = [
             wintypes.HANDLE,
-            wintypes.DWORD,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.ULONG),
         ]
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.GetNamedPipeServerSessionId.restype = wintypes.BOOL
+        kernel.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel.LocalFree.restype = ctypes.c_void_p
+        handle = getattr(msvcrt, "get_osfhandle")(pipe.fileno())
         pid = wintypes.ULONG()
-        if not kernel.GetNamedPipeServerProcessId(
-            getattr(msvcrt, "get_osfhandle")(pipe.fileno()), ctypes.byref(pid)
+        session = wintypes.ULONG()
+        # The protected helper runs as SYSTEM in the services session, and a
+        # non-elevated client cannot open a SYSTEM process to read its image.
+        # The pipe's owning SID is the verifiable identity boundary instead:
+        # only SYSTEM-privileged code can create a SYSTEM-owned pipe (the
+        # Windows analogue of the root peer-credential check used on Unix).
+        if (
+            not kernel.GetNamedPipeServerProcessId(handle, ctypes.byref(pid))
+            or not kernel.GetNamedPipeServerSessionId(handle, ctypes.byref(session))
+            or session.value != 0
         ):
             raise OSError("Helper identity is unavailable")
-        process = kernel.OpenProcess(0x1000, False, pid.value)
-        if not process:
-            raise OSError("Helper identity is unavailable")
+        advapi = getattr(ctypes, "WinDLL")("advapi32", use_last_error=True)
+        advapi.GetSecurityInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi.GetSecurityInfo.restype = wintypes.DWORD
+        advapi.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.LPWSTR),
+        ]
+        advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+        owner = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
+        status = advapi.GetSecurityInfo(
+            handle, 6, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)
+        )
         try:
-            path = ctypes.create_unicode_buffer(32768)
-            length = wintypes.DWORD(len(path))
+            if status or not owner.value:
+                raise OSError("Helper identity is unavailable")
+            text = wintypes.LPWSTR()
             if (
-                not kernel.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(length))
-                or path.value.casefold()
-                != r"C:\Program Files\KlusterLLM\NetworkHelper\kllm-network-helper.exe".casefold()
+                not advapi.ConvertSidToStringSidW(owner, ctypes.byref(text))
+                or text.value != "S-1-5-18"
             ):
-                raise OSError("Helper process is not the protected installation")
+                raise OSError("Helper identity is unavailable")
+            kernel.LocalFree(text)
         finally:
-            kernel.CloseHandle(process)
+            if descriptor.value:
+                kernel.LocalFree(descriptor)
 
     def status(self, expected: dict[str, Any] | None = None) -> dict[str, Any]:
         try:

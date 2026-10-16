@@ -23,6 +23,20 @@ A stale dispatch had sent Llama into MiniCPM3's low-rank attention loader, causi
 structure contract test now also loads a complete small Llama tensor fixture;
 metadata inspection alone is not model-loading acceptance.
 
+Recipe 138 (Prima 0.0.5) corrects the hybrid cache selection in
+`llama_set_inputs`: the recurrent mask/copy bookkeeping derived the owning store
+from the const `kv_self` alias and then bound `llama_kv_cell &` to a const cell.
+MSVC accepted the dropped const qualifier as a nonstandard extension, while
+clang and GCC rejected it and failed the macOS/Linux compilation jobs, so 0.0.4
+could not build on non-MSVC hosts. Selecting the store through `lctx.kv_self`
+changes const qualification only: the same cache objects are selected and the
+same cells are mutated, so Llama, the hybrid Qwen3.5 family and every other
+architecture keep their existing behavior. Verified with a macOS Release
+Metal+Vulkan build of llama-server, llama-cli and profile-tool, Qwen3.5
+primitive contracts on CPU and Vulkan0, and the qwen35/Llama structure plus
+Llama tensor-loader fixtures. Model-backed Qwen3.5 state/trace checks still
+need the supplied Saluki GGUF.
+
 Local hardware verification on 2026-10-16 used the freshly managed 0.0.4 build
 (`0832998f8ff6eb1194d2ffa49165cbaef8836cd8`), Windows, and an AMD Radeon RX
 9070 XT. Saluki Qwen3.5 (65 stored blocks / 64 executable layers), TinyLlama
@@ -50,8 +64,8 @@ requests recheck it, including policy revocation. All production scopes remain e
 The runtime library can resolve and save the supported Prima source through its
 existing endpoints using `engine: "primacpp"`, repository
 `https://github.com/berkkarahan/prima.cpp.git`, and either the pinned commit ref
-(ref_type `"commit"`) or the pinned release — recipe 137 pins
-`berkkarahan/prima.cpp` release `0.0.4` (`source_release` /
+(ref_type `"commit"`) or the pinned release — recipe 138 pins
+`berkkarahan/prima.cpp` release `0.0.5` (`source_release` /
 `source_release_commit`) whose tag resolves to exactly the pinned commit; both
 routes produce the same immutable identity. A moved or deleted release tag refuses
 until the recipe is advanced. The response includes `recipe_digest`. The recipe

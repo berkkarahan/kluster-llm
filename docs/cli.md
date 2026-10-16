@@ -11,7 +11,7 @@ Cross-platform entrypoint for starting/stopping a cluster, joining workers, down
 uv run python scripts/install.py
 ```
 
-This creates `.venv` with **uv** (Python version from `.python-version`), installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, installs/builds `llama-server` + `rpc-server` (RPC-enabled), and installs WireGuard for `--overlay wireguard`.
+This creates `.venv` with **uv** (Python version from `.python-version`), installs Rust/Node if missing, builds the `kllm` package (maturin), builds the dashboard, and installs/builds `llama-server` + `rpc-server` (RPC-enabled).
 
 The committed [`llama-release`](../llama-release) is the stable bootstrap default. Settings → **llama.cpp** also stores upstream releases and public forks, resolved to exact repository/commit snapshots. The master can persist a target and synchronize source builds to children, including future joins/reconnections. Builds prepare beside active inference; new runs require the master and selected workers to match. Backend builds may differ by node. Bootstrap binaries can still be synchronized with:
 
@@ -30,8 +30,8 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 
 | Command | Description |
 |---------|-------------|
-| `kllm start [--key KEY] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
-| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--overlay none\|wireguard] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
+| `kllm start [--key KEY] [--rpc-bind HOST] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
+| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm config [--split-mode layer\|row\|tensor]` | Show local system settings or set the persistent split-mode default |
 | `kllm flags [<name>] [--enable\|--disable]` | Show or change local dashboard feature flags. `private-network-setup` gates the Home → Private 10GbE network panel (disabled by default); omit `<name>` to list all flags |
@@ -39,7 +39,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm update [--port PORT]` | Local maintenance: stop this node, `git pull --ff-only` (requires a clean checkout), then full rebuild (`scripts/install.py --sync`). Node stays stopped; start or join again when it finishes. |
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
-| `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
+| `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. A Hugging Face file URL keeps its revision and full path. Repository and tree page URLs are not downloads. |
 | `kllm model delete <name>` | Delete a GGUF from the master model store |
@@ -51,26 +51,19 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 
 Control plane default port: **18765**. Worker RPC default: **50052** (LAN-only; do not expose on the public internet). Inference HTTP: **8080** (also proxied on the control port as OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`).
 
-`kllm status` prints the same member map the dashboard Home topology uses on that node (`node_id`, `host`, `role`, capacity). When a shrink replan cannot apply (overflow) or applied with a tight fit, `apply_error` / `apply_warning` are printed; a non-zero exit is not required because the cluster is still up. RPC port **50052** stays on the private bind / overlay and is never published as a public service.
+`kllm status` prints the same member map the dashboard Home topology uses on that node (`node_id`, `host`, `role`, capacity). When a shrink replan cannot apply (overflow) or applied with a tight fit, `apply_error` / `apply_warning` are printed; a non-zero exit is not required because the cluster is still up. RPC port **50052** stays on a trusted private LAN bind and is never published as a public service.
 
 `kllm logs` dumps recent cluster log lines; `kllm logs -f` follows them. Workers relay agent, llama-server, and rpc-server output to the master (`~/.kllm/logs/cluster.jsonl`) so debugging is a single stream. On a worker the CLI proxies to the master and falls back to local files if the master is unreachable. Filter with `--node` and `--source agent|llama|rpc`.
 
-### RPC bind and optional WireGuard
+### Private LAN RPC bind
 
 Joining establishes membership and networking and leaves the worker idle. The master starts `rpc-server` only when a model run allocates work to that node, using the saved GPU selection, private bind address, and RPC port. Startup best-effort prepares the host firewall for that endpoint. Wildcard binds are rejected by runtime control; choose one private interface address.
 
-Stopping or replacing the model releases that run's RPC processes while the workers stay joined. Planning and previews start no RPC processes. The same lifecycle applies to LAN, WireGuard, and managed private networks: private-network setup verifies addresses, routes, and signed connectivity; runtime compatibility checks and RPC relay admission occur when inference starts.
+Stopping or replacing the model releases that run's RPC processes while the workers stay joined. Planning and previews start no RPC processes. The same lifecycle applies to LAN and managed private networks: private-network setup verifies addresses, routes, and signed connectivity; runtime compatibility checks and RPC relay admission occur when inference starts.
 
 Workers accept signed commands from their paired current master. Runtime ownership expires after 60 seconds without renewal (the master renews every 5 seconds). Worker heartbeat, software installation, and agent restart do not start RPC. If the local llama-server dies, or a worker renewal or private-network check fails on two consecutive samples, the master stops the affected run and reloads its saved settings with the same selected workers, trying at 1-, 2-, and 4-second intervals. One missed renewal does not reload the model. Stop cancels recovery. Three failed attempts leave inference stopped with an error; 60 seconds of healthy serving resets the retry budget. Interrupted inference requests are not replayed.
 
-Optional overlay (must match on master and workers):
-
-```bash
-kllm start --overlay wireguard
-kllm join --key <key> --overlay wireguard
-```
-
-Requires system WireGuard (`wg` on PATH, plus `wg-quick` on Linux/macOS or WireGuard for Windows). PSK is derived from the join key; RPC moves to `10.66.87.0/24` while control-plane HTTP stays on the LAN. Dashboard Cluster panel exposes the same **RPC bind** and **Overlay** controls.
+Before upgrading a cluster that used the old WireGuard overlay, stop/leave it on each node. A legacy tunnel is removed on stop/leave, but its config and keys are retained. If teardown fails, state is retained and LAN start/join is blocked until it is stopped. The old CLI `--overlay` flag and API `overlay` field are no longer accepted. Cluster Settings retain the **RPC bind** control and the dedicated fast Ethernet setup.
 
 Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN (falling back to a helper Python when the agent interpreter cannot see mDNS). Pass `--master` only when discovery is unavailable.
 
@@ -331,9 +324,9 @@ uv run python scripts/install.py --llama-only --rpc-tcp-only
 
 Return to the master, refresh the computer list, and click **Set up private network**. Initial node pairing, a sole safe adapter, private subnet and addresses are handled automatically. If multiple suitable adapters exist, choose one in the computer row. A slow or unknown link, missing authorization, unsupported runtime or unsafe configuration gets a readable status.
 
-All participants prepare before address changes. Kluster saves dedicated DHCP settings, disables IPv4 DHCP where needed, and restores owned changes on stop or cancellation. Existing LAN/WireGuard management paths, DNS profiles and the original RPC child are preserved. Readiness requires signed dedicated path verification and a released valid RPC protocol probe. `RPC_BUSY` leaves the address configured with verification pending.
+All participants prepare before address changes. Kluster saves dedicated DHCP settings, disables IPv4 DHCP where needed, and restores owned changes on stop or cancellation. Existing LAN management paths, DNS profiles and the original RPC child are preserved. Readiness requires signed dedicated path verification and a released valid RPC protocol probe. `RPC_BUSY` leaves the address configured with verification pending.
 
-On Plan & Run, choose the dedicated network explicitly for that request. The default remains LAN/WireGuard. The selector is excluded from remembered model settings. Run diagnostics expose logical dedicated endpoints and the actual master loopback bridge endpoints. Stop inference before stopping or changing a dependent network. Retry/add/cancel and local cleanup review are available in the network panel. Temporary addresses survive only as long as the host OS retains them; they are not persistent adapter profiles. Keep upstream RPC port 50052 off public networks.
+On Plan & Run, choose the dedicated network explicitly for that request. The default remains the local LAN. The selector is excluded from remembered model settings. Run diagnostics expose logical dedicated endpoints and the actual master loopback bridge endpoints. Stop inference before stopping or changing a dependent network. Retry/add/cancel and local cleanup review are available in the network panel. Temporary addresses survive only as long as the host OS retains them; they are not persistent adapter profiles. Keep upstream RPC port 50052 off public networks.
 
 Administrator access can be revoked under **Advanced details** once the private network and cleanup are settled. That section retains manual identity pairing, adapter selection, subnet override and diagnostics. If ownership is lost after a restart or external changes, use **Review network recovery** locally and choose whether to keep the current settings or restore the reviewed Kluster changes. Recovery never silently deletes an ambiguous address.
 

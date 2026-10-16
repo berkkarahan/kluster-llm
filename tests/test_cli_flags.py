@@ -23,3 +23,9 @@ def test_flags_unknown_name_is_usage_error(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("KLLM_HOME", str(tmp_path / "kllm-home"))
     assert main(["flags", "nope", "--enable"]) == 2
     assert "unknown feature flag" in capsys.readouterr().err
+
+
+def test_cluster_cli_rejects_removed_overlay_option(capsys):
+    for command in ("start", "join"):
+        assert main([command, "--overlay", "wireguard"]) == 2
+        assert "No such option: --overlay" in capsys.readouterr().err

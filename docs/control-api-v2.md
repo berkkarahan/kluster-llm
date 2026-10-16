@@ -29,7 +29,7 @@ Runtime status carries the shared node identity: each node row includes `name` (
 
 Inference clients keep using the OpenAI-compatible `POST /v1/chat/completions` and Anthropic-compatible `POST /v1/messages` routes. The old control paths remain temporarily available while external callers move to v2.
 
-On first startup with an older cluster-state file, the agent stops tracked model/runtime child processes, clears transient membership, join keys, active plans, and process state, then starts idle. It retains the node identity, run settings, models, credentials, and usage history. Rejoin each node after the coordinated upgrade. RPC port 50052 remains restricted to a private LAN or WireGuard overlay.
+On first startup with an older cluster-state file, the agent stops tracked model/runtime child processes, clears transient membership, join keys, active plans, and process state, then starts idle. It retains the node identity, run settings, models, credentials, and usage history. Rejoin each node after the coordinated upgrade. RPC port 50052 remains restricted to a trusted private LAN or dedicated fast Ethernet network. Start/join reject obsolete `overlay` input rather than ignoring it; stop/leave a saved legacy WireGuard cluster on each node before using LAN-only clustering.
 
 SQLite-backed telemetry and managed-network operations return the existing sanitized `503` unavailable response when bounded admission or checkout expires, or when the owner is closing. A usage-ingest `503` may follow a confirmed reading commit if a later retention unit failed; retries use the existing reading identity and do not create duplicate observations. A storage commit with an unknown outcome is never retried automatically.
 

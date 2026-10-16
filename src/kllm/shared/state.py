@@ -174,9 +174,9 @@ class ClusterState:
     model_name: str | None = None
     # Selected local GPU indices (None = not yet chosen / use all at next start)
     gpu_ids: list[int] | None = None
-    # RPC netsec — LAN bind by default; optional WireGuard overlay
+    # Legacy tunnel fields are retained solely to detect and clean up saved clusters.
     rpc_bind: str | None = None
-    overlay: str = "none"  # none | wireguard
+    overlay: str = "none"  # legacy saved value may be wireguard
     wg_address: str | None = None
     wg_public_key: str | None = None
     overlay_status: str | None = None

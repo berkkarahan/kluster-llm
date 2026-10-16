@@ -8,7 +8,7 @@ The model file stays on the master. Workers add memory and compute through `rpc-
 
 ## Private network
 
-Run every node on a network you control: a dedicated Ethernet or Thunderbolt link, a lab LAN, or the optional WireGuard overlay.
+Run every node on a private network you control: a dedicated Ethernet or Thunderbolt link, or a trusted lab LAN.
 
 - **50052** is llama.cpp RPC. Upstream RPC has no authentication. Reachability is enough to join inference. The HTTP API token does not protect this port.
 - **18765** is the control plane and the dashboard. Keep it on that same private network.
@@ -42,7 +42,7 @@ uv run kllm start
 uv run kllm join --key '<join-key-from-master>'
 ```
 
-If mDNS discovery is unavailable, add `--master <master-lan-ip>`. On a shared network, pass `--overlay wireguard` on every node.
+If mDNS discovery is unavailable, add `--master <master-lan-ip>`. Do not expose unauthenticated RPC port 50052 to shared or public networks.
 
 Download and run a model on the master:
 

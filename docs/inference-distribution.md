@@ -3,7 +3,7 @@
 Every node must use llama.cpp **v0.5.0** (stable pin in `llama-release`). Use each node's installed accelerator:
 Metal on Apple Silicon, CUDA on supported NVIDIA installations, ROCm on supported
 Linux AMD installations, and Vulkan where native support is unavailable. RPC layer
-splitting supports mixed backends. Keep RPC port 50052 private to LAN/WireGuard.
+splitting supports mixed backends. Keep RPC port 50052 on a trusted private LAN or the dedicated fast Ethernet network.
 
 `KLLM_ACCEL_BACKEND` and the saved backend selection express a preference. Status
 reports that request separately from the backend and device names returned by the

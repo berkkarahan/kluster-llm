@@ -142,7 +142,9 @@ def test_parse_args_defaults(install):
     args = install.parse_args([])
     assert args.backend == "auto"
     assert args.skip_llama is False
-    assert args.skip_wireguard is False
+    assert not hasattr(args, "skip_wireguard")
+    with pytest.raises(SystemExit):
+        install.parse_args(["--skip-wireguard"])
 
 
 def test_read_pinned_release_from_repo(install):
@@ -839,7 +841,7 @@ def test_main_runs_install_stages_concurrently_and_reports_failure(
         lambda *args, **kwargs: pytest.fail("llama verification must not mask a stage failure"),
     )
 
-    assert install.main(["--skip-toolchains", "--skip-wireguard", "--backend", "cpu"]) == 1
+    assert install.main(["--skip-toolchains", "--backend", "cpu"]) == 1
     output = capsys.readouterr()
     assert "kllm (Rust + Python): rust build broke" in output.err
     assert "Install complete." not in output.out
@@ -878,7 +880,7 @@ def test_main_sync_runs_stages_in_order_without_process_pool(
     )
 
     assert (
-        install.main(["--sync", "--skip-toolchains", "--skip-wireguard", "--backend", "cpu"]) == 1
+        install.main(["--sync", "--skip-toolchains", "--backend", "cpu"]) == 1
     )
     assert order == ["rust", "ui", "llama"]
     output = capsys.readouterr()

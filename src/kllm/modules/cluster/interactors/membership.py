@@ -163,7 +163,7 @@ def on_membership_shrink(
 ) -> None:
     """Replan (and maybe apply) after Leave / unregister / liveness drop.
 
-    Does not change RPC bind, overlay, join key, or cluster role.
+    Does not change RPC bind, join key, or cluster role.
     Does not auto-shrink RUN SETTINGS.
     """
     state.save()

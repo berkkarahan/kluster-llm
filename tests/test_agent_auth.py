@@ -203,7 +203,7 @@ def test_join_discovers_master_by_key(client, monkeypatch):
         patch.object(agent.native, "start_worker", return_value={"pid": 99}),
         patch("httpx.Client", FakeClient),
     ):
-        r = c.post("/v1/join", json={"key": "secret", "overlay": "none"})
+        r = c.post("/v1/join", json={"key": "secret"})
     assert r.status_code == 200
     assert r.json()["master"] == "192.168.10.1"
     assert agent.STATE.master_host == "192.168.10.1"
@@ -217,7 +217,7 @@ def test_join_no_matching_master_returns_404(client, monkeypatch):
         "browse_masters",
         lambda timeout=2.0, key=None, port=None: [],
     )
-    r = c.post("/v1/join", json={"key": "missing", "overlay": "none"})
+    r = c.post("/v1/join", json={"key": "missing"})
     assert r.status_code == 404
     assert (
         "no matching master" in r.text.lower() or "no matching master" in r.json()["detail"].lower()
@@ -237,6 +237,6 @@ def test_join_multiple_matching_masters_returns_409(client, monkeypatch):
         ]
 
     monkeypatch.setattr(agent.discovery, "browse_masters", fake_browse)
-    r = c.post("/v1/join", json={"key": "dup-key", "overlay": "none"})
+    r = c.post("/v1/join", json={"key": "dup-key"})
     assert r.status_code == 409
     assert "multiple masters" in r.json()["detail"].lower()

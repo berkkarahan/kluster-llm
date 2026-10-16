@@ -76,7 +76,6 @@
   const nodeCount = $derived(Object.keys(displayNodes).length);
   const recording = $derived(usage.liveUsage?.recording ?? null);
   const netsecWarnings = $derived(cluster.status?.netsec_warnings ?? []);
-  const overlayStatus = $derived(cluster.status?.overlay_status ?? '');
 
   let inspectorDialog = $state<HTMLDialogElement | undefined>(undefined);
   let inspectorMode = $state<'details' | 'history' | null>(null);
@@ -277,7 +276,7 @@
     {#if cluster.status?.join_key}
       <p class="mono small">key <span class="green">{cluster.status.join_key}</span></p>
     {/if}
-    <p class="mono small muted">node {cluster.status?.node_id ?? '—'} · rpc {cluster.status?.rpc_bind ?? '—'} · overlay {cluster.status?.overlay ?? 'none'}{cluster.status?.wg_address ? ` ${cluster.status.wg_address}` : ''}</p>
+    <p class="mono small muted">node {cluster.status?.node_id ?? '—'} · rpc {cluster.status?.rpc_bind ?? '—'}</p>
     {#if cluster.status?.gpu_ids?.length}
       <p class="mono small muted">active GPUs {cluster.status.gpu_ids.map((id) => {
         const gpu = settings.gpus.find((item) => item.index === id);
@@ -292,7 +291,6 @@
       <ErrorMessage source={`update-worker:${worker.node_id ?? worker.host}`} message={worker.error} label={`Update ${worker.host ?? worker.node_id ?? '?'}`} />
     {/each}
     {#each netsecWarnings as warning}<p class="small warning" role="note">{warning}</p>{/each}
-    {#if overlayStatus}<p class="usage-overlay-status small muted">{overlayStatus}</p>{/if}
   </section>
 
   <section class="stat-strip" aria-label="Cluster summary">

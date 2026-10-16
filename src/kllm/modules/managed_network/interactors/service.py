@@ -525,7 +525,7 @@ class ManagedNetworkService:
     def _management_hosts(self) -> list[str]:
         addresses: list[str] = []
         for member in self.state().members.values():
-            for key in ("host", "lan_host", "wg_address"):
+            for key in ("host", "lan_host"):
                 host = member.get(key)
                 if host:
                     addresses.extend(

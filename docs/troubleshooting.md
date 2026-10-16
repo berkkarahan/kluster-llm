@@ -172,7 +172,7 @@ the default-route LAN IP. A running cluster keeps its persisted bind across
 agent restarts: stop and start the cluster, or pass
 `kllm start --rpc-bind <internal-ip>`, to move RPC onto the dedicated link.
 
-RPC port 50052 must be reachable over a private LAN or WireGuard overlay. Test it from the master:
+RPC port 50052 must be reachable over a trusted private LAN or the dedicated fast Ethernet network. Test it from the master:
 
 ```bash
 # Unix
@@ -219,15 +219,9 @@ uv run python scripts/install.py --check
 
 Restart the cluster only after every node reports the same tag.
 
-### WireGuard overlay fails
+### Migrating an old WireGuard cluster
 
-Confirm WireGuard is installed on every node:
-
-```bash
-wg --version
-```
-
-On Windows, also check `C:\Program Files\WireGuard\wg.exe`. Start and join with `--overlay wireguard` consistently; do not mix overlay and plain-LAN nodes in the same session.
+Stop the master and leave on each worker before starting or joining a LAN-only cluster. A saved legacy tunnel is removed during stop/leave; old keys and config are retained. If removal fails, correct the local OS tunnel/tooling problem and retry. Start/join will reject legacy WireGuard state instead of silently switching RPC transport.
 
 ## Planning and inference
 
@@ -419,7 +413,7 @@ Runtime logs live under `~/.kllm/logs`. Include:
 - Operating system, CPU, GPU, RAM, and VRAM for each node
 - The committed `llama-release` value and `install.py --check` output
 - `kllm status` and the relevant log excerpt
-- Network type, addresses, latency, and whether WireGuard is enabled
+- Network type, LAN/dedicated addresses, and latency
 - Model filename, quantization, context, and the `kllm plan` result
 
 See [cli.md](cli.md), [engine-decision.md](engine-decision.md), and [memory-constraints.md](memory-constraints.md) for supported behavior.
@@ -432,7 +426,7 @@ Show the panel first with `kllm flags private-network-setup --enable` (it is hid
 
 A connected worker showing **Joined · idle** has no running RPC process by design. Start the model on the master to allocate workers. An upgrade-required error means a selected worker cannot accept signed runtime commands; update its agent and rejoin. **Recovering** means the master is restarting the selected RPC workers and reloading the model. Stop cancels that retry loop. **Cleanup pending** retains ownership information after an unacknowledged stop: reconnect the worker and retry Stop before starting another run. A disconnected worker expires its RPC ownership after 60 seconds and stops the owned process without restarting it.
 
-`RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN/WireGuard.
+`RPC_BUSY` means the existing serial RPC server is occupied or its prior connection has not drained. Preserve that run, stop it through existing inference controls if appropriate, and retry verification. `STALE_REVISION` requires refreshed inventory/status. A degraded dedicated network refuses new selected runs; an existing managed stream keeps its frozen endpoints. Link failure never silently switches a running stream to LAN.
 
 `INFERENCE_ACTIVE` blocks network stop/add/retry while a reservation, active run or unresolved admission owns its assignments. Stop inference first, then let the app obtain drain acknowledgements. Missing acknowledgements stay uncertain; they are not reported as successful cleanup. Cleanup pending on an unreachable worker is retained and retried after control connectivity returns.
 

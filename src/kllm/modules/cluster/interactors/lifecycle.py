@@ -11,7 +11,6 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from kllm.shared import netsec
 from kllm.shared.schemas import StartBody
 from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
 from kllm.shared.state import ClusterState
@@ -22,12 +21,10 @@ class MasterStartDependencies:
     """External effects required to configure and advertise a master node."""
 
     state: Callable[[], ClusterState]
-    normalize_overlay: Callable[[str], str]
     generate_join_key: Callable[[], str]
     pick_rpc_bind_host: Callable[[str | None], str]
     select_gpus: Callable[[StartBody], ResolvedGpuSelection]
     build_master_member: Callable[[str], dict[str, Any]]
-    setup_overlay: Callable[[str, str], None]
     advertise: Callable[[str, int, str, str], None]
 
 
@@ -41,10 +38,8 @@ class MasterStartHandler:
         state = self._deps.state()
         if state.role == "worker":
             raise HTTPException(409, "node is a worker; leave first")
-        try:
-            overlay = self._deps.normalize_overlay(body.overlay)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        if state.overlay == "wireguard":
+            raise HTTPException(409, "Stop the legacy WireGuard cluster before starting a LAN cluster")
 
         state.role = "master"
         join_key = body.key or state.join_key or self._deps.generate_join_key()
@@ -52,7 +47,7 @@ class MasterStartHandler:
         state.control_port = body.control_port
         state.rpc_port = body.rpc_port
         state.master_host = None
-        state.overlay = overlay
+        state.overlay = "none"
         state.netsec_warnings = []
         state.wg_address = None
         state.wg_public_key = None
@@ -66,10 +61,6 @@ class MasterStartHandler:
         state.gpu_ids = list(gpu.gpu_ids)
         state.members[state.node_id] = self._deps.build_master_member(lan_host)
 
-        if overlay == netsec.OVERLAY_WIREGUARD:
-            self._deps.setup_overlay(join_key, lan_host)
-        else:
-            state.overlay_status = "disabled"
         state.save()
         self._deps.advertise(
             f"kllm-{state.node_id}",
@@ -82,9 +73,6 @@ class MasterStartHandler:
             "join_key": state.join_key,
             "node_id": state.node_id,
             "rpc_bind": state.rpc_bind,
-            "overlay": state.overlay,
-            "wg_address": state.wg_address,
-            "overlay_status": state.overlay_status,
             "netsec_warnings": state.netsec_warnings,
             "gpu_ids": state.gpu_ids,
         }

@@ -49,7 +49,10 @@ def start_master(body: StartBody) -> dict[str, Any]:
 
 def stop() -> dict[str, str]:
     was_master = state_ref.current().role == "master"
-    result = _host()._cluster_lifecycle_handlers().stop()
+    try:
+        result = _host()._cluster_lifecycle_handlers().stop()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if was_master:
         publish_lifecycle(LifecycleEvent.CLUSTER_STOPPED, state_ref.current().node_id or None)
     return cast(dict[str, str], result)
@@ -66,7 +69,10 @@ def join_cluster(body: JoinBody) -> dict[str, Any]:
 
 def leave() -> dict[str, str]:
     was_worker = state_ref.current().role == "worker"
-    result = _host()._cluster_lifecycle_handlers().leave()
+    try:
+        result = _host()._cluster_lifecycle_handlers().leave()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if was_worker:
         publish_lifecycle(LifecycleEvent.WORKER_LEFT, state_ref.current().node_id or None)
     return cast(dict[str, str], result)

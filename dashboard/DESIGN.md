@@ -334,7 +334,7 @@ qualification is incomplete; this panel provides preparation and assessment grou
 Section order is **Hardware, Network, Tokens, Software, llama.cpp, Paths**.
 The llama section is directly addressable with `/settings?section=llama`.
 Hardware uses node-local CPU/GPU/backend/device selection and RAM/VRAM budget controls; backend locks while live.
-Network exposes RPC bind, LAN/WireGuard, join/master inputs, overlay status and warnings; live controls are locked.
+Network exposes private-LAN RPC bind, join/master inputs and network-security warnings; live controls are locked. Dedicated fast Ethernet setup remains on Cluster.
 Tokens masks/reveals/copies the API token and manages the Hugging Face token.
 Software reports git HEAD, llama-release and ports, plus master-only worker updates.
 Paths reports home/models/logs from /v2/node/home; its home fallback is ~/.kllm.
@@ -425,6 +425,8 @@ computed-style measurement, contrast audit, hardware run or full test suite was 
 Existing test definitions describe coverage, not a new passing result.
 Documentation checks verified all 43 local links and 15 palette values against the checkout;
 `git diff --check` passed after applying the regenerated file.
+
+2026-10-16 LAN-only change: Cluster and Settings no longer expose legacy WireGuard controls/status. Dedicated fast Ethernet setup remains; dashboard tests, type check and production build passed in the main worktree.
 
 | Evidence | What it exercises |
 | --- | --- |

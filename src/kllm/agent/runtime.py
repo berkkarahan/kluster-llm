@@ -90,7 +90,6 @@ from kllm.modules.live.router_http import (
     parse_subscription as _subscription,
     safe_control as _safe_control,
 )
-from kllm.shared.exceptions import ExternalServiceError, ResourceUnavailableError
 from kllm.agent.schemas import (
     JoinBody,
     StartBody,
@@ -117,7 +116,8 @@ from kllm.modules.cluster.interactors.background_tasks import CapacityRefreshSch
 from kllm.modules.cluster.presenters.heartbeat_payload import HeartbeatPayloadBuilder
 from kllm.modules.runtimes.interactors.runtime_setup import RuntimeSetupService
 from kllm.modules.inference.interactors.template_validation import TemplateValidationService
-from kllm.modules.managed_network.interactors.network_setup import MasterOverlaySetupService, NetworkStateService, WorkerOverlaySetupService
+from kllm.modules.managed_network.interactors.network_setup import NetworkStateService
+from kllm.shared.legacy_tunnel import teardown_legacy_tunnel
 from kllm.agent.application_lifecycle import AgentLifecycleDependencies, AgentLifespan
 from kllm.agent.lifecycle_bus import LifecycleEvent, publish_lifecycle
 from kllm.modules.inference.interactors.run_planning import (
@@ -463,9 +463,7 @@ def _network_state_service() -> NetworkStateService:
         refresh_firewall_warnings=netsec.refresh_rpc_firewall_warnings,
         wifi_path_warning=netsec.wifi_path_warning,
         stop_proxy=cp_proxy.stop_current,
-        teardown_wireguard=netsec.tear_down_wireguard,
-        overlay_wireguard=netsec.OVERLAY_WIREGUARD,
-        overlay_none=netsec.OVERLAY_NONE,
+        teardown_legacy_tunnel=teardown_legacy_tunnel,
         default_rpc_port=DEFAULT_RPC_PORT,
     )
 
@@ -1118,29 +1116,6 @@ def _master_lan_host() -> str:
     return mem.get("lan_host") or mem.get("host") or discovery._local_ip()
 
 
-def _setup_master_overlay(join_key: str, lan_host: str) -> None:
-    """Translate master overlay service errors into the HTTP contract."""
-    try:
-        _master_overlay_setup_service().setup(join_key, lan_host)
-    except ResourceUnavailableError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except ExternalServiceError as exc:
-        raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
-
-
-def _master_overlay_setup_service() -> MasterOverlaySetupService:
-    return MasterOverlaySetupService(
-        state=lambda: state_ref.current(),
-        tooling_available=netsec.wg_tooling_available,
-        load_keypair=netsec.load_or_create_keypair,
-        next_address=netsec.next_wg_address,
-        derive_psk=netsec.derive_wg_psk,
-        build_config=netsec.build_wg_conf,
-        bring_up=netsec.bring_up_wireguard,
-        listen_port=netsec.WG_LISTEN_PORT,
-    )
-
-
 def _master_gpu_selection(body: StartBody) -> ResolvedGpuSelection:
     listed = native.list_gpus()
     gpu_ids = _membership_gpu_ids(
@@ -1168,12 +1143,10 @@ def _master_start_handler() -> MasterStartHandler:
     return MasterStartHandler(
         MasterStartDependencies(
             state=lambda: state_ref.current(),
-            normalize_overlay=netsec.normalize_overlay,
             generate_join_key=generate_join_key,
             pick_rpc_bind_host=netsec.pick_rpc_bind_host,
             select_gpus=_master_gpu_selection,
             build_master_member=_build_master_member_record,
-            setup_overlay=_setup_master_overlay,
             advertise=_advertise_master,
         )
     )
@@ -1246,13 +1219,11 @@ def _cluster_join_service() -> ClusterJoinService:
             probe_capacity=_probe_capacity_for_cluster,
             pick_rpc_bind_host=netsec.pick_rpc_bind_host,
             ensure_master_control_route=_ensure_master_control_route,
-            load_or_create_keypair=netsec.load_or_create_keypair,
             software_identity=cluster_update.software_identity,
             build_register_payload=build_register_payload,
             post_register=post_register,
             drop_cp_proxy=_drop_cp_proxy,
             apply_cluster_snapshot=_apply_cluster_snapshot,
-            worker_bring_up_wireguard=_worker_bring_up_wg,
             post_worker_heartbeat=_worker_post_heartbeat,
             stop_process=native.stop_process,
             clear_children=runtime.clear_children,
@@ -1272,21 +1243,6 @@ def _join_cluster(body: JoinBody) -> dict[str, Any]:
         return _cluster_join_service().join(body)
 
 
-def _worker_bring_up_wg(join_key: str, reg: dict[str, Any]) -> str:
-    return _worker_overlay_setup_service().setup(join_key, reg)
-
-
-def _worker_overlay_setup_service() -> WorkerOverlaySetupService:
-    return WorkerOverlaySetupService(
-        state=lambda: state_ref.current(),
-        load_keypair=netsec.load_or_create_keypair,
-        derive_psk=netsec.derive_wg_psk,
-        build_config=netsec.build_wg_conf,
-        bring_up=netsec.bring_up_wireguard,
-        listen_port=netsec.WG_LISTEN_PORT,
-    )
-
-
 def _membership_handlers() -> MembershipHandlers:
     return MembershipHandlers(
         state=lambda: state_ref.current(),
@@ -1294,7 +1250,6 @@ def _membership_handlers() -> MembershipHandlers:
         resources=_usage_runtime().resources,
         resource_probe_available=native.resource_probe_available,
         store=_usage_store,
-        master_lan_host=_master_lan_host,
         inference_activity=_inference_activity,
         shrink_cluster=_relaunch_after_membership_change,
         directory_sync=_network_directory_sync,
@@ -1302,10 +1257,6 @@ def _membership_handlers() -> MembershipHandlers:
         directory_remove=_network_directory_remove,
         lifecycle_publisher=publish_lifecycle,
     )
-
-
-def _rewrite_master_wg_peers() -> None:
-    _membership_handlers().rewrite_master_wg_peers()
 
 
 def _usage_ingest_handlers() -> UsageIngestHandlers:

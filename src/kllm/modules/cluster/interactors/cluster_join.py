@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from kllm.shared import netsec
-from kllm.modules.cluster.interactors.join_flow import require_join_overlay, resolve_master_endpoint
+from kllm.modules.cluster.interactors.join_flow import resolve_master_endpoint
 from kllm.shared.schemas import JoinBody
 from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
 from kllm.modules.inference.interactors.rpc_devices import worker_rpc_devices
@@ -25,13 +25,11 @@ class ClusterJoinDependencies:
     probe_capacity: Callable[[], dict[str, Any]]
     pick_rpc_bind_host: Callable[..., str]
     ensure_master_control_route: Callable[[str, int], list[str]]
-    load_or_create_keypair: Callable[[], tuple[str, str]]
     software_identity: Callable[[], dict[str, Any]]
     build_register_payload: Callable[..., dict[str, Any]]
     post_register: Callable[..., dict[str, Any]]
     drop_cp_proxy: Callable[[], None]
     apply_cluster_snapshot: Callable[[dict[str, Any]], None]
-    worker_bring_up_wireguard: Callable[[str, dict[str, Any]], str]
     post_worker_heartbeat: Callable[[], None]
     stop_process: Callable[..., Any] = lambda *_args, **_kwargs: None
     clear_children: Callable[[], None] = lambda: None
@@ -47,7 +45,8 @@ class ClusterJoinService:
         state = self._deps.state()
         if state.role == "master":
             raise HTTPException(409, "node is master; stop first")
-        overlay = require_join_overlay(body.overlay)
+        if state.overlay == "wireguard":
+            raise HTTPException(409, "Leave the legacy WireGuard cluster before joining a LAN cluster")
         master_host, master_port = resolve_master_endpoint(
             body.master_host, body.master_port, body.key
         )
@@ -68,7 +67,7 @@ class ClusterJoinService:
         )
         lan_host = self._deps.pick_rpc_bind_host(body.rpc_bind, toward=master_host)
         state.rpc_bind = lan_host
-        state.overlay = overlay
+        state.overlay = "none"
         state.netsec_warnings = []
         state.llama_warnings = []
         state.wg_address = None
@@ -78,14 +77,6 @@ class ClusterJoinService:
         state.netsec_warnings.extend(
             self._deps.ensure_master_control_route(master_host, master_port)
         )
-
-        wg_public_key: str | None = None
-        if overlay == netsec.OVERLAY_WIREGUARD:
-            try:
-                _, wg_public_key = self._deps.load_or_create_keypair()
-                state.wg_public_key = wg_public_key
-            except Exception as exc:
-                raise HTTPException(500, f"WireGuard keygen failed: {exc}") from exc
 
         identity = self._deps.software_identity()
         payload = self._deps.build_register_payload(
@@ -98,7 +89,6 @@ class ClusterJoinService:
             backend=backend,
             gpus=gpu.device_payloads(),
             gpu_ids=state.gpu_ids,
-            wg_public_key=wg_public_key,
             git_head=identity.get("git_head"),
             llama_release=identity.get("llama_release"),
         )
@@ -123,12 +113,7 @@ class ClusterJoinService:
         )
         self._deps.apply_cluster_snapshot(registration)
 
-        rpc_bind_host = self._correct_rpc_bind(overlay, body, registration, lan_host, state)
-        if overlay == netsec.OVERLAY_WIREGUARD:
-            try:
-                rpc_bind_host = self._deps.worker_bring_up_wireguard(body.key, registration)
-            except Exception as exc:
-                raise HTTPException(500, f"WireGuard overlay failed: {exc}") from exc
+        rpc_bind_host = self._correct_rpc_bind(body, registration, lan_host, state)
 
         # Rejoining releases only the process already tracked by this agent.
         # Joining never starts a process or searches for unrelated RPC servers.
@@ -162,9 +147,6 @@ class ClusterJoinService:
             "launch": {"pid": None, "deferred": True},
             "rpc_status": "idle",
             "rpc_bind": state.rpc_bind,
-            "overlay": state.overlay,
-            "wg_address": state.wg_address,
-            "overlay_status": state.overlay_status,
             "netsec_warnings": state.netsec_warnings,
             "llama_warnings": list(state.llama_warnings or []),
             "gpu_ids": state.gpu_ids,
@@ -173,7 +155,6 @@ class ClusterJoinService:
 
     def _correct_rpc_bind(
         self,
-        overlay: str,
         body: JoinBody,
         registration: dict[str, Any],
         lan_host: str,
@@ -181,8 +162,7 @@ class ClusterJoinService:
     ) -> str:
         hint = registration.get("rpc_bind_hint")
         if (
-            overlay != netsec.OVERLAY_NONE
-            or body.rpc_bind
+            body.rpc_bind
             or not isinstance(hint, str)
             or not netsec.should_apply_rpc_bind_hint(hint, lan_host)
         ):

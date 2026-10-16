@@ -25,7 +25,6 @@ STATUS_KEYS = (
     "members",
     "join_key",
     "rpc_bind",
-    "overlay",
     "last_plan",
     "inference_up",
     "apply_error",
@@ -109,7 +108,7 @@ def _start_master(c, agent, *, node_id="testnode"):
     ):
         adv.return_value.start = lambda: None
         adv.return_value.stop = lambda: None
-        r = c.post("/v1/start", json={"overlay": "none", "key": "secret-key"})
+        r = c.post("/v1/start", json={"key": "secret-key"})
     assert r.status_code == 200
     return r.json()
 
@@ -162,7 +161,7 @@ def test_status_contract_keys(client):
     for key in STATUS_KEYS:
         assert key in data
     assert data["role"] in ("idle", "master", "worker")
-    assert data["overlay"] in ("none", "wireguard") or data["overlay"] is None
+    assert "overlay" not in data
     assert data["apply_error"] is None
     assert data["apply_warning"] is None
 
@@ -376,7 +375,7 @@ def test_join_applies_cluster_members(client, monkeypatch):
         patch.object(agent.native, "start_worker", return_value={"pid": 99}),
         patch("httpx.Client", FakeClient),
     ):
-        r = c.post("/v1/join", json={"key": "secret", "overlay": "none"})
+        r = c.post("/v1/join", json={"key": "secret"})
     assert r.status_code == 200
     status = c.get("/v1/status").json()
     assert status["role"] == "worker"
@@ -467,7 +466,6 @@ def test_shrink_fits_restarts_serving(tmp_path, monkeypatch):
         process_pid=111,
         process_role="master",
         rpc_bind="10.0.0.1",
-        overlay="none",
         members={
             "master1": {
                 "node_id": "master1",
@@ -511,7 +509,6 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
         process_pid=111,
         process_role="master",
         rpc_bind="10.0.0.1",
-        overlay="none",
         members={"master1": {"node_id": "master1", "host": "10.0.0.1", "role": "master"}},
         last_settings={"model": "toy.gguf", "context": 4096, "threads": 8},
     )
@@ -542,7 +539,6 @@ def test_shrink_tight_and_overflow(tmp_path, monkeypatch):
         process_pid=111,
         process_role="master",
         rpc_bind="10.0.0.1",
-        overlay="none",
         members={"master1": {"node_id": "master1", "host": "10.0.0.1", "role": "master"}},
         last_settings={"model": "toy.gguf", "context": 4096, "threads": 8},
     )
@@ -1035,7 +1031,7 @@ def test_worker_accepted_false_local_leave(client):
         patch.object(agent_runtime, "_ensure_master_control_route", return_value=[]),
         patch.object(agent.http_clients, "control_client", return_value=FakeControl()),
         patch.object(agent.native, "stop_process"),
-        patch.object(agent.netsec, "tear_down_wireguard"),
+        patch.object(agent_runtime, "teardown_legacy_tunnel"),
     ):
         agent_runtime._worker_post_heartbeat()
     assert agent.STATE.role == "idle"
@@ -1048,7 +1044,7 @@ def test_register_keeps_advertised_host_when_rpc_bind_hint_sent():
     from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import RegisterBody
 
-    state = ClusterState(role="master", node_id="master", overlay="none")
+    state = ClusterState(role="master", node_id="master")
     state.save = lambda: None  # noqa: SLF001
     handlers = MembershipHandlers(
         lambda: state,
@@ -1056,7 +1052,6 @@ def test_register_keeps_advertised_host_when_rpc_bind_hint_sent():
         resources=SimpleNamespace(prune=lambda _: None),
         resource_probe_available=lambda: False,
         store=lambda: SimpleNamespace(end_node=lambda _: None),
-        master_lan_host=lambda: "192.168.68.1",
         inference_activity=lambda: {},
     )
     body = RegisterBody(
@@ -1075,7 +1070,7 @@ def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
     from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import RegisterBody
 
-    state = ClusterState(role="master", node_id="master", overlay="none")
+    state = ClusterState(role="master", node_id="master")
     state.save = lambda: None  # noqa: SLF001
     state.members["w1"] = {
         **REGISTER_BODY,
@@ -1090,7 +1085,6 @@ def test_heartbeat_keeps_worker_rpc_bind_when_tcp_peer_differs():
         resources=SimpleNamespace(prune=lambda _: None),
         resource_probe_available=lambda: False,
         store=lambda: SimpleNamespace(end_node=lambda _: None),
-        master_lan_host=lambda: "192.168.68.1",
         inference_activity=lambda: {},
     )
     body = RegisterBody(
@@ -1114,7 +1108,7 @@ def test_heartbeat_response_carries_the_shared_node_directory():
     from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import RegisterBody
 
-    state = ClusterState(role="master", node_id="master", overlay="none")
+    state = ClusterState(role="master", node_id="master")
     state.save = lambda: None  # noqa: SLF001
     state.members["w1"] = {**REGISTER_BODY, "role": "worker", "last_seen": 0.0}
     synced: list[bool] = []
@@ -1125,7 +1119,6 @@ def test_heartbeat_response_carries_the_shared_node_directory():
         resources=SimpleNamespace(prune=lambda _: None),
         resource_probe_available=lambda: False,
         store=lambda: SimpleNamespace(end_node=lambda _: None),
-        master_lan_host=lambda: "192.168.68.1",
         inference_activity=lambda: {},
         directory_sync=lambda: synced.append(True),
         directory_snapshot=lambda: [row],
@@ -1145,7 +1138,7 @@ def test_unregister_removes_the_directory_row():
     from kllm.modules.cluster.router_http import MembershipHandlers
     from kllm.agent.schemas import UnregisterBody
 
-    state = ClusterState(role="master", node_id="master", overlay="none")
+    state = ClusterState(role="master", node_id="master")
     state.save = lambda: None  # noqa: SLF001
     state.members["w1"] = {**REGISTER_BODY, "role": "worker", "last_seen": 0.0}
     removed: list[str] = []
@@ -1155,7 +1148,6 @@ def test_unregister_removes_the_directory_row():
         resources=SimpleNamespace(prune=lambda _: None),
         resource_probe_available=lambda: False,
         store=lambda: SimpleNamespace(end_node=lambda _: None),
-        master_lan_host=lambda: "192.168.68.1",
         inference_activity=lambda: {},
         shrink_cluster=lambda _: None,
         directory_remove=removed.append,

@@ -44,7 +44,7 @@ class RankAllocation(Record):
             or address.is_multicast
             or not (address.is_private or address.is_loopback)
         ):
-            raise ValueError("Prima requires a private LAN, overlay, or loopback address")
+            raise ValueError("Prima requires a private LAN or loopback address")
         return str(address)
 
     @model_validator(mode="after")

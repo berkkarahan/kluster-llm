@@ -295,7 +295,6 @@ class FastSubnetService:
                 master_port=int(body.master_port or state.master_port or DEFAULT_CONTROL_PORT),
                 rpc_port=int(state.rpc_port or DEFAULT_RPC_PORT),
                 rpc_bind=None,
-                overlay=state.overlay or "none",
                 gpu_ids=list(state.gpu_ids) if state.gpu_ids is not None else None,
             )
         )

@@ -9,24 +9,9 @@ import httpx
 from fastapi import HTTPException
 
 from kllm.modules.cluster.interactors import discovery
-from kllm.shared import netsec
 from kllm.shared.config import CONTROL_PROTOCOL_VERSION
 from kllm.shared.state import DEFAULT_CONTROL_PORT
 from kllm.modules.cluster.presenters.heartbeat_payload import local_hostname
-
-
-def require_join_overlay(overlay_raw: str) -> str:
-    """Normalize a join overlay and reject WireGuard when the tools are missing."""
-    try:
-        overlay = netsec.normalize_overlay(overlay_raw)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    if overlay == netsec.OVERLAY_WIREGUARD and not netsec.wg_tooling_available():
-        raise HTTPException(
-            400,
-            "WireGuard tooling not found (wg). Install WireGuard or use overlay=none",
-        )
-    return overlay
 
 
 def resolve_master_endpoint(master_host: str | None, master_port: int, key: str) -> tuple[str, int]:
@@ -67,7 +52,6 @@ def build_register_payload(
     backend: str,
     gpus: list[dict[str, Any]],
     gpu_ids: list[int] | None,
-    wg_public_key: str | None,
     git_head: Any,
     llama_release: Any,
 ) -> dict[str, Any]:
@@ -89,8 +73,6 @@ def build_register_payload(
         "unified_memory": cap.get("unified_memory", False),
         "binary_version": cap.get("binary_version"),
         "gpu_ids": gpu_ids,
-        "wg_public_key": wg_public_key,
-        "wg_listen_port": netsec.WG_LISTEN_PORT,
         "git_head": git_head,
         "llama_release": llama_release,
     }

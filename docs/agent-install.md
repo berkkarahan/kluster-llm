@@ -116,6 +116,7 @@ python3 scripts/install.py --backend cuda --from-source
 4. The llama.cpp stage installs binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
    The macOS Homebrew dependencies are `molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`. The Vulkan gate checks `glslc` (provided by `shaderc`) and the `SPIRV-Headers` CMake config alongside Vulkan headers and the MoltenVK ICD manifest.
    The reusable `vendor/llama.cpp/build` tree is installer-owned: it is discarded when the pin, backend flags or a recorded OpenSSL package path changes, so a toolchain upgrade (`brew upgrade openssl@3`) cannot leave a cache that half-resolves a package. A dangling `-L` in an exported `LDFLAGS` is ignored rather than treated as stale, so it cannot force a rebuild every run.
+   The four vendor runtime dirs — `vendor/bin`, `vendor/prima`, `vendor/llama.cpp`, `vendor/prima.cpp` — are installer-owned and fully rewritable. Before staging, the installer clears the artifacts it owns (binaries, shared libraries, stamps, transport/manifest records) so a backend or pin change leaves nothing stale, while a file it did not stage (e.g. `vendor/bin/kllm-network-helper.exe`) is preserved. A source tree without git metadata, or whose checkout does not peel to the pin, is wiped and re-cloned rather than trusted. If a binary is held open by a running node, the rewrite **fails loudly** with the in-use file named and a stop-and-retry remedy instead of leaving a half-written tree.
    On macOS the default install **aborts** when the Metal+Vulkan build fails; it never downgrades to a Metal-only pack, and `--prefer-prebuilt` is rejected outright. Verification probes the binary the runtime actually launches (`vendor/bin/llama-server`, which `kllm-native` resolves first), not the CMake build output, and `--check` exits non-zero on a backend mismatch.
    llama-server's embedded HTTPS server is the expendable part: if `cmake` configure fails, the installer clears the cached OpenSSL entries and dangling linker flags and retries **with HTTPS enabled** (the real fix); only if that fails does it fall back to `-DLLAMA_OPENSSL=OFF`, recorded as `https=off` in the stamp. The fallback is never latched, so the next run restores HTTPS.
    Runtime setup can reuse a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot. Joining only enrolls the node and never extracts a runtime pack or starts RPC.
@@ -435,6 +436,8 @@ kllm run --model file.gguf
 | `vendor/bin/` | Staged `llama-server` / `rpc-server` |
 | `vendor/bin/llama-release.txt` | Local stamp of the installed tag (gitignored under `vendor/`) |
 | `vendor/llama.cpp/` | Source + cmake build tree |
+| `vendor/prima/` | Staged Prima `llama-server` / `llama-cli` / `profile-tool` + manifest |
+| `vendor/prima.cpp/` | Prima source + cmake build tree |
 | `~/.kllm/` | Runtime state (`cluster.json`, models, WG keys, API token, `hf_token`) |
 
 ---

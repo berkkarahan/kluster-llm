@@ -21,6 +21,15 @@ from kllm.modules.runtimes.interactors.registry import atomic_json, file_digest
 from kllm.modules.runtimes.interactors.source import accept_prima_source, git_environment
 
 
+def _remove_tree(install, path: Path, what: str) -> None:
+    """Remove an installer-owned tree via the installer's lock-aware remover."""
+    remover = getattr(install, "_remove_vendor_tree", None)
+    if remover is not None:
+        remover(path, what)
+    else:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def prima_cmake_flags(install, resolved: str) -> list[str]:
     if hasattr(install, "_cmake_prima_flags"):
         flags = list(install._cmake_prima_flags(resolved))
@@ -222,6 +231,12 @@ def _compile_and_verify_prima(
     )
     print("KLLM_RUNTIME_PHASE=verifying", flush=True)
     output.mkdir(parents=True, exist_ok=True)
+    reset = getattr(install, "_reset_staged_binaries", None)
+    predicate = getattr(install, "_owned_prima_artifact", None)
+    if reset is not None and predicate is not None:
+        # Clear installer-owned Prima artifacts so a backend or recipe change
+        # cannot leave a stale llama-server / llama-cli / profile-tool behind.
+        reset(output, predicate, what="vendor/prima")
     binaries = {}
     extension = ".exe" if platform.system() == "Windows" else ""
     for name, key in (
@@ -371,7 +386,7 @@ def bootstrap_prima_build(install, vendor: Path, output: Path, backend: str) -> 
             env=env,
         )
         if head.returncode != 0 or head.stdout.strip() != commit:
-            shutil.rmtree(vendor, ignore_errors=True)
+            _remove_tree(install, vendor, "vendor/prima.cpp")
             _materialize_source(vendor, repository, commit)
         else:
             install._run(["git", "-C", str(vendor), "reset", "--hard", commit], env=env)
@@ -381,7 +396,7 @@ def bootstrap_prima_build(install, vendor: Path, output: Path, backend: str) -> 
             )
     else:
         if vendor.exists():
-            shutil.rmtree(vendor, ignore_errors=True)
+            _remove_tree(install, vendor, "vendor/prima.cpp")
         _materialize_source(vendor, repository, commit)
     return _compile_and_verify_prima(
         install,

@@ -33,10 +33,10 @@ condensed Quick rules and keeps the full normative text verbatim beneath them.
    complete, compilation is not acceptance, reproduction evidence is retained,
    and all worktree evidence is labelled developmental. Windows builds/ISA →
    03-windows-native.md; Vulkan devices → 04-gpu-vulkan.md.
-3. **Publish only when authorized** — 12-placement-qualification.md: fork diff
-   → fast-forward push to `codex/kluster-integration` → recipe bump to the
-   exact SHA → fresh isolated rebuild. Without authorization, leave a
-   reviewable diff and report the required step.
+3. **Publish to `main` by default** — 12-placement-qualification.md: fork diff
+   → fast-forward push directly to `main` on `https://github.com/berkkarahan/prima.cpp`
+   (unless explicitly told otherwise) → recipe bump to the exact SHA → fresh
+   isolated rebuild.
 4. **Qualification stays off without evidence** — performance and physical
    distributed acceptance remain deferred to the user's live three-computer
    cluster; controlled/local/physical results stay labelled and separate
@@ -50,7 +50,7 @@ condensed Quick rules and keeps the full normative text verbatim beneath them.
 | 01-sources-setup.md | Both sources: docs to read, recipe pins/digests, checkout hygiene, failure-ownership boundaries | recipe.py, digest, pin, checkout, owner |
 | 02-build-lifecycle.md | Validation schedule, defect reproduction/evidence, managed install builds, worktree labeling, deferred-test phase | validation, reproduce, evidence, install.py, from-source |
 | 03-windows-native.md | Windows Release builds, ISA/CPUID/AVX-512 detection, MSVC /EHsc C boundaries, CPU graph scheduling & cancellation | MSVC, EHsc, CPUID, AVX-512, relocation, cancellation |
-| 04-gpu-vulkan.md | Vulkan logical→physical mapping, explicit devices/visibility, driver-unavailable startup, output-only GPU coordinators | Vulkan, ordinal, UUID, visibility mask, explicit_devices_v1, output_only_gpu_v1 |
+| 04-gpu-vulkan.md | Vulkan logical→physical mapping, explicit devices/visibility, driver-unavailable startup, output-only GPU coordinators, GPU-resident KV quantization/Flash Attention (`--strict-device-kv`) | Vulkan, ordinal, UUID, visibility mask, explicit_devices_v1, output_only_gpu_v1, vulkan_kv, vulkan_flash_attn_v1, strict_device_kv_v1 |
 | 05-lora.md | All LoRA: managed loading, assets, native selection/sync, admission, embedding adapters, per-request, activated invocation | LoRA, adapter, managed_lora_v1, request_lora_v1, activated_lora_v1, scales |
 | 06-reasoning-tools.md | Reasoning controls/budgets, manual control, reasoning wire, tool history/streams, automatic & forced tools, GBNF grammars | reasoning, thinking, tool, GBNF, grammar, streaming_tools, reasoning_wire_v1 |
 | 07-server-apis.md | HTTP surface: templates & keyword defaults, tokenizer/apply-template, completions, infill, embeddings, rerank, split GGUF assets | apply-template, /v1/completions, /infill, /embeddings, rerank, split GGUF, template_kwargs_defaults_v1 |

@@ -53,14 +53,19 @@
     const saved = presenter.savedModelConfig;
     let changed = false;
     if (force || presenter.flashAttention === 'auto') {
-      presenter.flashAttention = 'off';
+      if (!force && (saved?.cache_type_k || saved?.cache_type_v)) {
+        const vType = String(saved?.cache_type_v ?? presenter.cacheTypeV);
+        presenter.flashAttention = ['f32', 'f16', 'bf16'].includes(vType) ? 'off' : 'on';
+      } else {
+        presenter.flashAttention = 'off';
+        if (force || !saved?.cache_type_k) {
+          presenter.cacheTypeK = 'f16';
+        }
+        if (force || !saved?.cache_type_v) {
+          presenter.cacheTypeV = 'f16';
+        }
+      }
       changed = true;
-      if (force || !saved?.cache_type_k) {
-        presenter.cacheTypeK = 'f16';
-      }
-      if (force || !saved?.cache_type_v) {
-        presenter.cacheTypeV = 'f16';
-      }
     }
     if (changed) {
       presenter.markSettingsClean();
@@ -849,7 +854,7 @@
                 </div>
               </div>
               <p class="small muted">
-                Prima note: Flash Attention defaults to <code>off</code> unless V cache is quantized or explicitly enabled. Setting <strong>Model loading</strong> to <code>none</code> (<code>--no-mmap</code>) forces Halda memory pressure set <code>M4</code> with zero disk-reload latency.
+                Prima note: Vulkan supports GPU-resident KV caches across all 9 precisions (<code>f32</code>, <code>f16</code>, <code>bf16</code>, <code>q8_0</code>, <code>q4_0</code>, <code>q4_1</code>, <code>q5_0</code>, <code>q5_1</code>, <code>iq4_nl</code>) with Flash Attention; quantized V caches require Flash Attention <code>on</code>. Setting <strong>Model loading</strong> to <code>none</code> (<code>--no-mmap</code>) forces Halda memory pressure set <code>M4</code> with zero disk-reload latency.
               </p>
             </div>
           </details>

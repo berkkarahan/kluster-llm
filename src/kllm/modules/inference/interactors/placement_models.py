@@ -390,6 +390,10 @@ class PlacementNodeInput:
     rpc_devices: tuple[RpcDeviceInput, ...] = ()
     ram_fraction: float = 1.0
     vram_fraction: float = 1.0
+    aliases: tuple[str, ...] = ()
+    hostname: str | None = None
+    host: str | None = None
+    lan_host: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PlacementNodeInput:
@@ -407,9 +411,21 @@ class PlacementNodeInput:
         rpc_devices = RpcDeviceInput.parse_inventory(
             value.get("rpc_capabilities") or value.get("rpc_devices") or ()
         )
+        aliases_raw = value.get("aliases")
+        aliases: list[str] = (
+            list(aliases_raw) if isinstance(aliases_raw, (list, tuple, set)) else []
+        )
+        if value.get("hostname"):
+            aliases.append(str(value["hostname"]))
+        if value.get("host"):
+            aliases.append(str(value["host"]))
+        if value.get("lan_host"):
+            aliases.append(str(value["lan_host"]))
+        if value.get("role") == "master" or value.get("is_master"):
+            aliases.append("master")
         return cls(
             node_id=node_id,
-            is_master=bool(value.get("is_master")),
+            is_master=bool(value.get("is_master") or value.get("role") == "master"),
             backend=str(value.get("backend") or "unknown"),
             total_ram_bytes=int(value.get("total_ram_bytes") or 0),
             available_ram_bytes=int(value.get("available_ram_bytes") or 0),
@@ -423,6 +439,10 @@ class PlacementNodeInput:
             rpc_devices=rpc_devices,
             ram_fraction=max(0.1, min(1.0, float(value.get("ram_fraction", 1.0)))),
             vram_fraction=max(0.1, min(1.0, float(value.get("vram_fraction", 1.0)))),
+            aliases=tuple(dict.fromkeys(aliases)),
+            hostname=str(value["hostname"]) if value.get("hostname") is not None else None,
+            host=str(value["host"]) if value.get("host") is not None else None,
+            lan_host=str(value["lan_host"]) if value.get("lan_host") is not None else None,
         )
 
 

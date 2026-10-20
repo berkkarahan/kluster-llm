@@ -18,6 +18,8 @@ import threading
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+from dataclasses import replace
+
 import pytest
 from starlette.exceptions import HTTPException
 
@@ -34,6 +36,7 @@ from kllm.modules.inference.interactors.memory_estimation import memory_costs
 from kllm.modules.managed_network.entities import MasterAuthority, NodeAssignment, NodeIdentity
 from kllm.modules.managed_network.interactors.verification import StreamScope
 from kllm.modules.primacpp.entities import LayerRange, RankAllocation
+from kllm.modules.primacpp.interactors.placement import topology_from_plan
 from kllm.modules.primacpp.interactors.planner import candidates
 from kllm.modules.primacpp.interactors.execution import (
     Asset,
@@ -76,7 +79,15 @@ def _build_placement_node(
         if gpu_bytes
         else ()
     )
-    node = PlacementNodeInput(
+    aliases = set()
+    if hostname:
+        aliases.add(hostname)
+    if host:
+        aliases.add(host)
+    if is_master:
+        aliases.add("master")
+        aliases.add("master-1")
+    return PlacementNodeInput(
         node_id=nid,
         is_master=is_master,
         backend=backend if gpu_bytes else "cpu",
@@ -87,20 +98,11 @@ def _build_placement_node(
         rpc_endpoint=None if is_master else f"{host or nid}:50052",
         latency_ms=0.5,
         devices=devices,
+        aliases=tuple(aliases),
+        hostname=hostname,
+        host=host,
+        lan_host=host,
     )
-    aliases = set()
-    if hostname:
-        aliases.add(hostname)
-    if host:
-        aliases.add(host)
-    if is_master:
-        aliases.add("master")
-        aliases.add("master1")
-        aliases.add("master-1")
-    object.__setattr__(node, "aliases", tuple(aliases))
-    object.__setattr__(node, "hostname", hostname)
-    object.__setattr__(node, "host", host)
-    return node
 
 
 def _build_model_layout(layers_count: int = 80, layer_bytes: int = 700 * MIB, arch: str = "gpt-oss") -> ModelLayout:
@@ -762,3 +764,355 @@ async def test_execute_link_managed_network_delegates_to_diagnostic():
     val_recv = {"preparation_job_id": op_id, "scope": scope_recv.model_dump(mode="json"), "mode": "receive"}
     res_recv = await execute_link(control, val_recv, op_id, owner, lambda: True)
     assert res_recv == {"phase": "ready", "grant_id": "grant_123"}
+
+
+class TestLiveThreeNodeClusterTopology:
+    """Verifies live cluster topology behavior where worker's node_id is literally 'master1'."""
+
+    @pytest.fixture
+    def live_cluster(self):
+        # 1. Master: 049f6c77 (Windows, Radeon RX 9070 XT, 16GB)
+        # 2. Worker 1: master1 (macOS Darwin, M1 Pro, 32GB)
+        # 3. Worker 2: a83ac5b6 (macOS Darwin, M5 Pro, 40GB)
+        master = _build_placement_node(
+            "049f6c77",
+            is_master=True,
+            gpu_bytes=16 * GIB,
+            ram_bytes=32 * GIB,
+            hostname="win-master-host",
+            host="10.10.10.3",
+            backend="vulkan",
+        )
+        worker_m1 = _build_placement_node(
+            "master1",
+            is_master=False,
+            gpu_bytes=32 * GIB,
+            ram_bytes=32 * GIB,
+            hostname="Karahan-M1-Pro.local",
+            host="10.10.10.2",
+            backend="vulkan",
+        )
+        worker_m5 = _build_placement_node(
+            "a83ac5b6",
+            is_master=False,
+            gpu_bytes=40 * GIB,
+            ram_bytes=48 * GIB,
+            hostname="LMUK-CJ7G5VHVFC",
+            host="10.10.10.1",
+            backend="vulkan",
+        )
+        nodes = [master, worker_m1, worker_m5]
+        members = {
+            "049f6c77": {
+                "node_id": "049f6c77",
+                "role": "master",
+                "hostname": "win-master-host",
+                "host": "10.10.10.3",
+                "lan_host": "10.10.10.3",
+                "backend": "vulkan",
+                "actual_backend": "vulkan",
+                "platform": "Windows",
+                "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 16 * GIB}],
+            },
+            "master1": {
+                "node_id": "master1",
+                "role": "worker",
+                "hostname": "Karahan-M1-Pro.local",
+                "host": "10.10.10.2",
+                "lan_host": "10.10.10.2",
+                "backend": "vulkan",
+                "actual_backend": "vulkan",
+                "platform": "Darwin",
+                "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 32 * GIB}],
+                "rpc_devices": [{"device": "GPU0", "index": 0, "memory_kind": "gpu"}],
+            },
+            "a83ac5b6": {
+                "node_id": "a83ac5b6",
+                "role": "worker",
+                "hostname": "LMUK-CJ7G5VHVFC",
+                "host": "10.10.10.1",
+                "lan_host": "10.10.10.1",
+                "backend": "vulkan",
+                "actual_backend": "vulkan",
+                "platform": "Darwin",
+                "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 40 * GIB}],
+                "rpc_devices": [{"device": "GPU0", "index": 0, "memory_kind": "gpu"}],
+            },
+        }
+        return nodes, members
+
+    def test_dataclasses_replace_preserves_node_identifiers(self, live_cluster):
+        nodes, _ = live_cluster
+        worker_m1 = nodes[1]
+        assert worker_m1.node_id == "master1"
+        assert worker_m1.hostname == "Karahan-M1-Pro.local"
+        assert "Karahan-M1-Pro.local" in worker_m1.aliases
+        assert worker_m1.host == "10.10.10.2"
+
+        # Calling dataclasses.replace must preserve first-class dataclass fields
+        modified = replace(worker_m1, ram_fraction=0.75, vram_fraction=0.85)
+        assert modified.node_id == "master1"
+        assert modified.hostname == "Karahan-M1-Pro.local"
+        assert modified.aliases == worker_m1.aliases
+        assert modified.host == "10.10.10.2"
+        assert modified.lan_host == "10.10.10.2"
+        assert modified.ram_fraction == 0.75
+        assert modified.vram_fraction == 0.85
+
+    def test_canonical_resolution_worker_master1_vs_master_role(self, live_cluster):
+        nodes, _ = live_cluster
+
+        # 'master1' must resolve to the worker node_id 'master1', NOT the master 049f6c77
+        assert resolve_canonical_node_id("master1", nodes) == "master1"
+
+        # 'master' role identifier must resolve to the actual master node
+        assert resolve_canonical_node_id("master", nodes) == "049f6c77"
+        assert resolve_canonical_node_id("MASTER", nodes) == "049f6c77"
+
+        # Hostname resolution
+        assert resolve_canonical_node_id("Karahan-M1-Pro.local", nodes) == "master1"
+        assert resolve_canonical_node_id("karahan-m1-pro.local", nodes) == "master1"
+        assert resolve_canonical_node_id("LMUK-CJ7G5VHVFC", nodes) == "a83ac5b6"
+        assert resolve_canonical_node_id("lmuk-cj7g5vhvfc", nodes) == "a83ac5b6"
+
+        # IP address resolution
+        assert resolve_canonical_node_id("10.10.10.2", nodes) == "master1"
+        assert resolve_canonical_node_id("10.10.10.1", nodes) == "a83ac5b6"
+        assert resolve_canonical_node_id("10.10.10.3", nodes) == "049f6c77"
+
+        # Prefix matching (>= 6 chars)
+        assert resolve_canonical_node_id("049f6c", nodes) == "049f6c77"
+        assert resolve_canonical_node_id("049F6C", nodes) == "049f6c77"
+        assert resolve_canonical_node_id("a83ac5", nodes) == "a83ac5b6"
+        assert resolve_canonical_node_id("A83AC5", nodes) == "a83ac5b6"
+
+    def test_threenode_deployment_planning_and_terminal_output_pinning(self, live_cluster):
+        nodes, members = live_cluster
+        layout = _build_model_layout(layers_count=24, layer_bytes=800 * MIB)
+        settings = PlacementSettings(prima_graphs=True, split_mode="layer", flash_attention="auto")
+
+        plan = plan_devices(
+            nodes,
+            size=20 * GIB,
+            layout=layout,
+            settings=settings,
+            context=4096,
+            headroom=0.8,
+            device="gpu",
+            vram_weight=0.6,
+            latency_weight=0.4,
+            required_nodes=["master1", "a83ac5b6"],
+        )
+        assert plan.fit_status in ("fits", "tight")
+        allocated_nodes = {a.node_id for a in plan.device_allocations}
+        # All required nodes plus master must be allocated
+        assert "049f6c77" in allocated_nodes
+        assert "master1" in allocated_nodes
+        assert "a83ac5b6" in allocated_nodes
+
+        # Terminal output stage must be pinned to master
+        terminal = next(a for a in plan.device_allocations if a.layer_end == 25)
+        assert terminal.node_id == "049f6c77"
+        assert terminal.layer_start == 24
+        assert terminal.layer_end == 25
+        assert terminal.layers == 1
+        assert terminal.output_layer is True
+
+        # topology_from_plan must succeed without ValueError
+        plan_dict = {
+            "estimated_layers": plan.estimated_layers,
+            "split_mode": plan.split_mode,
+            "fit_status": plan.fit_status,
+            "cpu_layers": plan.cpu_layers,
+            "device_allocations": [
+                {
+                    "node_id": a.node_id,
+                    "layer_start": a.layer_start,
+                    "layer_end": a.layer_end,
+                    "layers": a.layers,
+                    "device": a.device,
+                    "rpc_index": a.rpc_index,
+                    "local": a.local,
+                    "memory_kind": a.memory_kind,
+                }
+                for a in plan.device_allocations
+            ],
+        }
+        topology = topology_from_plan(plan_dict, members, "a" * 64)
+        assert len(topology.ranks) == 3
+        assert topology.ranks[0].node_id == "049f6c77"
+        assert topology.ranks[0].role == "master"
+        assert topology.ranks[0].output_gpu is True
+
+    def test_candidates_generation_with_worker_master1_and_prefixes(self, live_cluster):
+        _, members = live_cluster
+        body = SimpleNamespace(
+            required_nodes=["master1", "a83ac5b6"],
+            node_priority=[],
+            network_id="",
+            model="test.gguf",
+        )
+
+        def mock_execute_plan(b, inv):
+            # Verify required nodes are not pruned from inventory
+            assert "master1" in inv
+            assert "a83ac5b6" in inv
+            return {
+                "fit_status": "fits",
+                "device_allocations": [{"node_id": nid} for nid in inv],
+                "cpu_layers": 0,
+                "ngl": 24,
+                "tensor_split_csv": "",
+                "tensor_overrides": [],
+            }
+
+        cand_results = candidates(body, members, mock_execute_plan)
+        assert len(cand_results) >= 1
+        # In the first candidate (all members), all three nodes are present
+        assert "master1" in cand_results[0][1]
+        assert "a83ac5b6" in cand_results[0][1]
+        assert "049f6c77" in cand_results[0][1]
+
+    @pytest.mark.asyncio
+    async def test_link_profiling_unmanaged_lan_does_not_grab_foreign_diagnostics(self):
+        op_id = str(uuid4())
+        src_id = "049f6c77"
+        tgt_id = "master1"
+        binding_id = uuid4()
+        raw = bytes(32)
+        key_b64 = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        key_id = hashlib.sha256(raw).hexdigest()
+        auth = MasterAuthority(
+            cluster_binding_id=binding_id,
+            master_node_id=src_id,
+            master_key_id=key_id,
+            master_term=1,
+            master_session_id=uuid4(),
+        )
+        src_node = NodeIdentity(
+            node_id=src_id,
+            key_id=key_id,
+            public_key=key_b64,
+            cluster_binding_id=binding_id,
+        )
+        tgt_node = NodeIdentity(
+            node_id=tgt_id,
+            key_id=key_id,
+            public_key=key_b64,
+            cluster_binding_id=binding_id,
+        )
+        ranks = [
+            RankAllocation(
+                node_id=src_id,
+                rank=0,
+                address="10.10.10.3",
+                role="master",
+                next_node_id=tgt_id,
+                ngl=0,
+                layers=[LayerRange(start=0, end=10)],
+                devices=[],
+            ),
+            RankAllocation(
+                node_id=tgt_id,
+                rank=1,
+                address="10.10.10.2",
+                role="worker",
+                next_node_id=src_id,
+                ngl=0,
+                layers=[LayerRange(start=10, end=20)],
+                devices=[],
+            ),
+        ]
+        unmanaged_net_id = uuid4()
+        foreign_net_id = uuid4()
+        op_uuid = UUID(op_id)
+        manifest = ExecutionManifest(
+            runtime_id="a" * 64,
+            run_id=str(uuid4()),
+            plan_digest="b" * 64,
+            total_layers=20,
+            ranks=ranks,
+            settings={},
+            network_id="",
+            inventory_digest="c" * 64,
+            assets=[Asset(name="m.gguf", kind="model", sha256="d" * 64, size=1)],
+            segments=[
+                Segment(start=w.start, end=w.end, node_id=r.node_id)
+                for r in ranks
+                for w in r.layers
+            ],
+            backends={src_id: "cpu", tgt_id: "cpu"},
+            transfer_edges=[
+                {"source": src_id, "target": tgt_id},
+                {"source": tgt_id, "target": src_id},
+            ],
+        )
+        scope = StreamScope(
+            probe_id=uuid4(),
+            operation_id=op_uuid,
+            contract_digest=manifest.digest,
+            network_id=unmanaged_net_id,
+            authority=auth,
+            source=src_node,
+            target=tgt_node,
+            source_revision=1,
+            target_revision=1,
+        )
+
+        foreign_diag_called = False
+
+        async def foreign_grant_stream(*args, **kwargs):
+            nonlocal foreign_diag_called
+            foreign_diag_called = True
+            return "foreign_grant"
+
+        foreign_diag = SimpleNamespace(grant_stream=foreign_grant_stream)
+
+        service = SimpleNamespace(
+            identity=src_node,
+            state=lambda: SimpleNamespace(
+                node_id=src_id,
+                members={
+                    src_id: {"node_id": src_id, "role": "master", "host": "10.10.10.3", "latency_ms": 0.5},
+                    tgt_id: {"node_id": tgt_id, "role": "worker", "host": "10.10.10.2", "latency_ms": 1.5},
+                },
+            ),
+            executor=SimpleNamespace(
+                diagnostics={str(foreign_net_id): foreign_diag},
+                preparation={},
+            ),
+            store=SimpleNamespace(
+                check_authority=lambda a: None,
+            ),
+            prima_admission=SimpleNamespace(validate_worker=lambda m: None),
+        )
+        control = SimpleNamespace(
+            lock=threading.Lock(),
+            _check=lambda jid: None,
+            service=service,
+            jobs={
+                op_id: {
+                    "job_id": op_id,
+                    "manifest_digest": manifest.digest,
+                    "phase": "prepared",
+                    "manifest": manifest.model_dump(),
+                }
+            },
+            resources=SimpleNamespace(acquire=lambda scope, kind: SimpleNamespace(release=lambda: None)),
+        )
+        owner = {**authority_owner(auth), "sender": src_id}
+
+        val_send = {
+            "preparation_job_id": op_id,
+            "scope": scope.model_dump(mode="json"),
+            "mode": "send",
+        }
+        res_send = await execute_link(control, val_send, op_id, owner, lambda: True)
+
+        # Foreign diagnostic from unrelated network must NEVER have been called
+        assert foreign_diag_called is False
+        assert res_send["phase"] == "measured"
+        assert res_send["measurement"]["source"] == "10.10.10.3"
+        assert res_send["measurement"]["peer"] == "10.10.10.2"
+        assert res_send["measurement"]["source_node_id"] == src_id
+        assert res_send["measurement"]["target_node_id"] == tgt_id

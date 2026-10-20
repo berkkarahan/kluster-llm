@@ -1015,3 +1015,123 @@ def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path, 
             assert registry.target()["version"]["runtime_id"] == version.runtime_id
     finally:
         registry.close()
+
+
+def test_multinode_live_cluster_prima_topology_with_terminal_output_pinning():
+    # Tests live cluster topology where master is 049f6c77, worker 1 is master1, and worker 2 is a83ac5b6
+    members_data = {
+        "049f6c77": {
+            "node_id": "049f6c77",
+            "role": "master",
+            "hostname": "win-master-host",
+            "host": "10.10.10.3",
+            "lan_host": "10.10.10.3",
+            "backend": "vulkan",
+            "actual_backend": "vulkan",
+            "platform": "Windows",
+            "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 16 * 1024**3}],
+        },
+        "master1": {
+            "node_id": "master1",
+            "role": "worker",
+            "hostname": "Karahan-M1-Pro.local",
+            "host": "10.10.10.2",
+            "lan_host": "10.10.10.2",
+            "backend": "vulkan",
+            "actual_backend": "vulkan",
+            "platform": "Darwin",
+            "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 32 * 1024**3}],
+            "rpc_devices": [{"device": "GPU0", "index": 0, "memory_kind": "gpu"}],
+        },
+        "a83ac5b6": {
+            "node_id": "a83ac5b6",
+            "role": "worker",
+            "hostname": "LMUK-CJ7G5VHVFC",
+            "host": "10.10.10.1",
+            "lan_host": "10.10.10.1",
+            "backend": "vulkan",
+            "actual_backend": "vulkan",
+            "platform": "Darwin",
+            "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 40 * 1024**3}],
+            "rpc_devices": [{"device": "GPU0", "index": 0, "memory_kind": "gpu"}],
+        },
+    }
+    # Plan where master holds 0..10, worker1 holds 10..20, worker2 holds 20..32,
+    # and the terminal output stage (32..33) is pinned to master 049f6c77.
+    plan_data = {
+        "estimated_layers": 32,
+        "split_mode": "layer",
+        "fit_status": "fits",
+        "cpu_layers": 0,
+        "device_allocations": [
+            {
+                "node_id": "049f6c77",
+                "layer_start": 0,
+                "layer_end": 10,
+                "layers": 10,
+                "device": "GPU0",
+                "local": True,
+                "memory_kind": "gpu",
+            },
+            {
+                "node_id": "master1",
+                "layer_start": 10,
+                "layer_end": 20,
+                "layers": 10,
+                "device": "RPC[10.10.10.2:50052]/0",
+                "rpc_index": 0,
+                "local": False,
+                "memory_kind": "gpu",
+            },
+            {
+                "node_id": "a83ac5b6",
+                "layer_start": 20,
+                "layer_end": 32,
+                "layers": 12,
+                "device": "RPC[10.10.10.1:50052]/0",
+                "rpc_index": 0,
+                "local": False,
+                "memory_kind": "gpu",
+            },
+            {
+                "node_id": "049f6c77",
+                "layer_start": 32,
+                "layer_end": 33,
+                "layers": 1,
+                "device": "GPU0",
+                "local": True,
+                "memory_kind": "gpu",
+            },
+        ],
+    }
+    topology = topology_from_plan(plan_data, members_data, "a" * 64)
+    assert len(topology.ranks) == 3
+    # Master node must be at rank 0
+    assert topology.ranks[0].node_id == "049f6c77"
+    assert topology.ranks[0].role == "master"
+    assert topology.ranks[0].output_gpu is True
+    assert topology.ranks[0].ngl == 10
+    # Worker nodes follow in layer execution order
+    assert topology.ranks[1].node_id == "master1"
+    assert topology.ranks[1].role == "worker"
+    assert topology.ranks[1].ngl == 10
+    assert topology.ranks[2].node_id == "a83ac5b6"
+    assert topology.ranks[2].role == "worker"
+    assert topology.ranks[2].ngl == 12
+
+    # Verify that if a worker had been given the terminal output stage (e.g. layer_end=33 on a83ac5b6),
+    # topology_from_plan rejects it with ValueError
+    bad_plan = {
+        **plan_data,
+        "device_allocations": [
+            plan_data["device_allocations"][0],
+            plan_data["device_allocations"][1],
+            {
+                **plan_data["device_allocations"][2],
+                "layer_end": 33,
+                "layers": 13,
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="Prima output stage must remain on the rank-zero master"):
+        topology_from_plan(bad_plan, members_data, "a" * 64)

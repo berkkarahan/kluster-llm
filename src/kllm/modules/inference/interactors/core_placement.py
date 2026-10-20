@@ -333,7 +333,10 @@ def resolve_canonical_node_id(identifier: str, nodes: Sequence[PlacementNodeInpu
         if master_node is not None:
             return master_node.node_id
     for n in nodes:
-        if len(identifier) >= 6 and (n.node_id.startswith(identifier) or identifier.startswith(n.node_id)):
+        if len(identifier) >= 6 and (
+            n.node_id.lower().startswith(identifier.lower())
+            or identifier.lower().startswith(n.node_id.lower())
+        ):
             return n.node_id
     for n in nodes:
         if n.node_id.lower() == identifier.lower():
@@ -737,6 +740,83 @@ def plan_devices(
     graph_extra_units = 0
     graph_counts: dict[str, int] = {}
     if fits and settings.prima_graphs and split_mode == "layer" and not expert_offloaded:
+        terminal_alloc = next((a for a in allocations if a.layer_end == count), None)
+        if terminal_alloc is not None and (
+            terminal_alloc.node_id != master.node_id or terminal_alloc.layer_start < count - 1
+        ):
+            idx = allocations.index(terminal_alloc)
+            new_end = count - 1
+            new_layers = new_end - terminal_alloc.layer_start
+            if new_layers > 0:
+                allocations[idx] = replace(
+                    terminal_alloc,
+                    layer_end=new_end,
+                    layers=new_layers,
+                    output_layer=False,
+                    estimated_bytes=max(0, terminal_alloc.estimated_bytes - costs[count - 1]),
+                )
+            else:
+                allocations.pop(idx)
+
+            master_alloc = next(
+                (a for a in allocations if a.node_id == master.node_id and a.memory_kind == "gpu"),
+                None,
+            )
+            if master_alloc is None:
+                master_alloc = next((a for a in allocations if a.node_id == master.node_id), None)
+            if master_alloc is not None:
+                output_alloc = replace(
+                    master_alloc,
+                    layer_start=count - 1,
+                    layer_end=count,
+                    layers=1,
+                    output_layer=True,
+                    estimated_bytes=costs[count - 1] + memory.overhead,
+                )
+            else:
+                master_cand = next(
+                    (d for d in devices if d.node_id == master.node_id and d.local), None
+                )
+                if master_cand is None:
+                    master_cand = next((d for d in devices if d.node_id == master.node_id), None)
+                if master_cand is not None:
+                    output_alloc = master_cand.allocate(
+                        layer_start=count - 1,
+                        layer_end=count,
+                        estimated_bytes=costs[count - 1] + memory.overhead,
+                        total_layers=count,
+                    )
+                else:
+                    master_cpu = next((d for d in cpu_devices if d.node_id == master.node_id), None)
+                    if master_cpu is not None:
+                        output_alloc = master_cpu.allocate(
+                            layer_start=count - 1,
+                            layer_end=count,
+                            estimated_bytes=costs[count - 1] + memory.overhead,
+                            total_layers=count,
+                        )
+                    else:
+                        output_alloc = DeviceAllocation(
+                            node_id=master.node_id,
+                            device=master.devices[0].device if master.devices else "CPU",
+                            backend=master.backend,
+                            local=True,
+                            budget_bytes=cpu_budget,
+                            latency_ms=0.0,
+                            rpc_endpoint=None,
+                            rpc_index=0,
+                            rpc_device_count=0,
+                            unified_memory=master.unified_memory,
+                            score=1.0,
+                            layer_start=count - 1,
+                            layer_end=count,
+                            layers=1,
+                            output_layer=True,
+                            estimated_bytes=costs[count - 1] + memory.overhead,
+                            memory_kind="gpu" if master.devices else "ram",
+                        )
+            allocations.append(output_alloc)
+
         from kllm.modules.inference.interactors.prima_graph_reserve import reserve_graph_visits
 
         reserve = reserve_graph_visits(allocations, cpu_count, count - 1, master.node_id, memory.overhead)

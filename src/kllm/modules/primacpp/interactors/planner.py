@@ -40,39 +40,62 @@ def participant_platforms(topology, members: dict) -> dict:
     return result
 
 
+def _member_matches_required(member: dict, member_key: str, req_set_lower: set[str]) -> bool:
+    nid = str(member.get("node_id") or member_key or "").strip().lower()
+    hname = str(member.get("hostname") or "").strip().lower()
+    host = str(member.get("host") or "").strip().lower()
+    lan = str(member.get("lan_host") or "").strip().lower()
+    is_m = member.get("role") == "master" or member.get("is_master")
+    k_lower = str(member_key or "").strip().lower()
+
+    if (
+        (nid and nid in req_set_lower)
+        or (k_lower and k_lower in req_set_lower)
+        or (hname and hname in req_set_lower)
+        or (host and host in req_set_lower)
+        or (lan and lan in req_set_lower)
+        or (is_m and "master" in req_set_lower)
+    ):
+        return True
+    for r in req_set_lower:
+        if r != "master" and len(r) >= 6:
+            if nid and (nid.startswith(r) or r.startswith(nid)):
+                return True
+            if k_lower and (k_lower.startswith(r) or r.startswith(k_lower)):
+                return True
+    return False
+
+
 def candidates(body, members, execute_plan, *, limit=32):
     # Explicit priority is a user constraint, never an optimizer suggestion.
     if type(limit) is not int or limit < 1:
         raise ValueError("Prima candidate limit must be positive")
     options = [deepcopy(members)]
     if not body.node_priority:
-        req_set = set(body.required_nodes)
-        for m in members.values():
-            nid = m.get("node_id")
-            if (
-                nid in req_set
-                or m.get("hostname") in req_set
-                or m.get("host") in req_set
-                or m.get("lan_host") in req_set
-                or (m.get("role") == "master" and "master" in req_set)
-            ):
+        req_set = {str(n).strip() for n in body.required_nodes if str(n).strip()}
+        req_set_lower = {n.lower() for n in req_set}
+        for k, m in members.items():
+            if _member_matches_required(m, k, req_set_lower):
+                nid = m.get("node_id")
                 if nid:
-                    req_set.add(nid)
+                    req_set.add(str(nid))
+                    req_set_lower.add(str(nid).lower())
                 if m.get("hostname"):
-                    req_set.add(m["hostname"])
+                    req_set.add(str(m["hostname"]))
+                    req_set_lower.add(str(m["hostname"]).lower())
                 if m.get("host"):
-                    req_set.add(m["host"])
+                    req_set.add(str(m["host"]))
+                    req_set_lower.add(str(m["host"]).lower())
                 if m.get("lan_host"):
-                    req_set.add(m["lan_host"])
+                    req_set.add(str(m["lan_host"]))
+                    req_set_lower.add(str(m["lan_host"]).lower())
+                if k:
+                    req_set.add(str(k))
+                    req_set_lower.add(str(k).lower())
         optional = [
             n
             for n, m in sorted(members.items())
-            if m.get("role") == "worker"
-            and n not in req_set
-            and m.get("node_id") not in req_set
-            and m.get("hostname") not in req_set
-            and m.get("host") not in req_set
-            and m.get("lan_host") not in req_set
+            if m.get("role") == "worker" and not _member_matches_required(m, n, req_set_lower)
         ]
         workers = sum(m.get("role") == "worker" for m in members.values())
         for removed_count in range(1, len(optional) + 1):
@@ -90,20 +113,32 @@ def candidates(body, members, execute_plan, *, limit=32):
     for index, inventory in enumerate(options):
         candidate_body = body
         if index > 0:
-            inv_nodes = set(inventory.keys())
-            for m in inventory.values():
-                if m.get("node_id"):
-                    inv_nodes.add(m["node_id"])
-                if m.get("hostname"):
-                    inv_nodes.add(m["hostname"])
-                if m.get("host"):
-                    inv_nodes.add(m["host"])
-                if m.get("lan_host"):
-                    inv_nodes.add(m["lan_host"])
-                if m.get("role") == "master":
-                    inv_nodes.add("master")
-            pruned_req = [n for n in body.required_nodes if n in inv_nodes]
-            pruned_pri = [n for n in body.node_priority if n in inv_nodes]
+            def _node_in_inventory(node_ref: str, inv: dict) -> bool:
+                ref = str(node_ref).strip()
+                ref_lower = ref.lower()
+                for k, m in inv.items():
+                    if ref == k or ref_lower == str(k).lower():
+                        return True
+                    nid = str(m.get("node_id") or "")
+                    if ref == nid or ref_lower == nid.lower():
+                        return True
+                    hname = str(m.get("hostname") or "")
+                    if ref == hname or ref_lower == hname.lower():
+                        return True
+                    host = str(m.get("host") or "")
+                    if ref == host or ref_lower == host.lower():
+                        return True
+                    lan = str(m.get("lan_host") or "")
+                    if ref == lan or ref_lower == lan.lower():
+                        return True
+                    if (m.get("role") == "master" or m.get("is_master")) and ref_lower == "master":
+                        return True
+                    if ref_lower != "master" and len(ref_lower) >= 6 and (nid.lower().startswith(ref_lower) or ref_lower.startswith(nid.lower())):
+                        return True
+                return False
+
+            pruned_req = [n for n in body.required_nodes if _node_in_inventory(n, inventory)]
+            pruned_pri = [n for n in body.node_priority if _node_in_inventory(n, inventory)]
             if hasattr(body, "model_copy"):
                 candidate_body = body.model_copy(
                     update={"required_nodes": pruned_req, "node_priority": pruned_pri}

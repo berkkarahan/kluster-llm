@@ -9,29 +9,32 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
-from kllm.modules.primacpp.interactors.execution import Asset, require_execution_capabilities, validate_asset_batch
+from kllm.modules.primacpp.interactors.execution import Asset, validate_asset_batch
 from kllm.modules.primacpp.interactors.lifecycle import RankSupervisor
 from kllm.modules.primacpp.interactors.preparation import get_profile_jobs
+from kllm.modules.primacpp.gateways.store import ProfilingStore
+from kllm.modules.primacpp.interactors.coordinator import ProfilingCoordinator
 from kllm.modules.primacpp.entities import DeviceProfile, ProfileRequest, RankAllocation
-from kllm.modules.primacpp.interactors.planner import materialize, preview, candidates, candidate_profile_edges
+from kllm.modules.primacpp.interactors.planner import preview
 from kllm.modules.primacpp.interactors.transfers import AssetReceiver, PushReceiver, TransferGrants
 from kllm.modules.runtimes.entities import body_digest
 from kllm.modules.runtimes.interactors.registry import atomic_json, file_digest
 from kllm.shared import native
 from kllm.shared.prima_diagnostics import ProgressLog, operation, scope as log_scope
 from kllm.modules.primacpp.interactors.devices import discover_vulkan_devices, select_vulkan_devices, vulkan_environment
-from kllm.modules.primacpp.interactors.launch import rank_arguments, execution_settings, materialize_template, device_arguments
+from kllm.modules.primacpp.interactors.launch import rank_arguments, materialize_template, device_arguments
 from kllm.modules.primacpp.interactors.execution import authority_owner, ExecutionManifest
 from kllm.modules.primacpp.interactors.distributed_runs import PrimaRuns
 from kllm.modules.primacpp.interactors.participants import (
-    observe_participant, ParticipantEvidence, require_participant, require_shared_identity)
+    observe_participant, ParticipantEvidence, require_participant)
 from kllm.shared.runtime_resources import node_resources, prima_scope
 from kllm.modules.primacpp.interactors.draft import draft_file, draft_mode
 from kllm.modules.primacpp.interactors.extras import materialize_template_kwargs
 from kllm.modules.primacpp.interactors.preparation_metrics import (
-    ProgressWindow, diagnostics_scope, digest_file, local_chunk_bytes, measure, check_owned, wire_status, channel_timing,
+    ProgressWindow, diagnostics_scope, digest_file, measure, check_owned, wire_status, channel_timing,
 )
 
 TERMINAL = {"prepared", "failed", "cancelled", "interrupted"}
@@ -172,6 +175,11 @@ class PrimaControl:
         self.cancelled: set[str] = set()
         self._job_samples: dict[str, ProgressWindow] = {}
         self.jobs = {}
+        store_home = getattr(registry, "root", Path("."))
+        self.store = ProfilingStore(store_home.parent if store_home.name == "runtimes" else store_home)
+        self.coordinator = ProfilingCoordinator(self, self.store)
+        if hasattr(service, "state") and callable(service.state) and service.state().role == "master":
+            self.coordinator.reconcile_on_startup()
         path = self.root / "jobs.json"
         if path.exists():
             self.jobs = json.loads(path.read_text())
@@ -418,10 +426,11 @@ class PrimaControl:
             atomic_json(self.root / "jobs.json", self.jobs)
             counts["publications"] = 1
 
-    def members(self, body):
-        if body.network_id:
+    def members(self, body=None):
+        network_id = getattr(body, "network_id", None) if not isinstance(body, dict) else body.get("network_id")
+        if network_id:
             try:
-                admitted = self.service.prima_admission.members(body.network_id)
+                admitted = self.service.prima_admission.members(network_id)
                 if admitted:
                     return admitted
             except Exception:
@@ -473,71 +482,9 @@ class PrimaControl:
     def start_preparation(
         self, runtime_id, body, expected_digest, request_id, *, include_profile=False
     ):
-        if self.service.state().role != "master":
-            raise ValueError("Prima preparation requires the Kluster master")
-        from uuid import UUID
-
-        UUID(request_id)
-        payload = {
-            "runtime_id": runtime_id,
-            "settings": body.model_dump(),
-            "plan_digest": expected_digest,
-            "include_profile": include_profile,
-        }
-        with self.lock:
-            if self.closed:
-                raise ValueError("Prima preparation is closing")
-            previous = next((j for j in self.jobs.values() if j["request_id"] == request_id), None)
-            if previous:
-                if previous["request_digest"] != body_digest(payload):
-                    raise ValueError("Preparation request ID reused with different inputs")
-                return deepcopy(previous)
-            chunk_bytes = local_chunk_bytes()
-            if self.service.state().process_pid or self.rank.owner or self.runs.busy or any(
-                j["phase"] not in TERMINAL for j in self.jobs.values()
-            ):
-                raise ValueError("Stop inference or the active preparation before preparing Prima")
-            identity = str(uuid4())
-            lease = self.resources.acquire(prima_scope(identity, authority_owner(self.service.channels.master_authority()), expected_digest), "prepare")
-            self.preparation_reservations[identity] = lease
-            now = time.time()
-            self.jobs[identity] = {
-                "job_id": identity,
-                "request_id": request_id,
-                "request_digest": body_digest(payload),
-                "phase": "queued",
-                "runtime_id": runtime_id,
-                "plan_digest": expected_digest,
-                "nodes": {},
-                "error": None,
-                "created_at": now,
-                "request_settings_digest": body_digest(body.model_dump()),
-                "local_chunk_bytes": chunk_bytes,
-                "progress": {
-                    "phase": "queued",
-                    "label": "Queued for Prima preparation…",
-                    "step_index": 1,
-                    "step_total": 2 if include_profile else 1,
-                    "fraction": 0.0,
-                    "pct": 0.0,
-                    "bytes_done": 0,
-                    "bytes_total": 0,
-                    "rate_bps": None,
-                    "eta_seconds": None,
-                    "updated_at": now,
-                },
-            }
-            try:
-                self._save()
-                future = self.pool.submit(self._prepare, identity, runtime_id, body, expected_digest, include_profile)
-                self.preparation_futures[identity] = future
-                future.add_done_callback(lambda _: self._settle_preparation(identity))
-            except BaseException:
-                self.jobs.pop(identity, None)
-                self.preparation_reservations.pop(identity, None)
-                lease.release()
-                raise
-            return deepcopy(self.jobs[identity])
+        return self.coordinator.start_run(
+            runtime_id, body, expected_digest, request_id, include_profile=include_profile
+        )
 
     def _settle_preparation(self, identity):
         with self.lock:
@@ -677,481 +624,17 @@ class PrimaControl:
             raise ValueError(result.get("message") or "Prima command failed")
         return result
 
-    def _prepare(self, identity, runtime_id, body, digest, include_profile):
-        with log_scope(identity), diagnostics_scope(self.jobs[identity], self.lock, lambda: self._check(identity),
+    def _prepare(self, identity, runtime_id, body, digest, include_profile, start_from_stage=None):
+        with log_scope(identity), diagnostics_scope(self.jobs.get(identity, {}), self.lock, lambda: self._check(identity),
                                self.service.state().node_id):
+            if start_from_stage is not None:
+                return self._prepare_owned(identity, runtime_id, body, digest, include_profile, start_from_stage)
             return self._prepare_owned(identity, runtime_id, body, digest, include_profile)
 
-    def _prepare_owned(self, identity, runtime_id, body, digest, include_profile):
-        operation = identity
-        from kllm.modules.primacpp.interactors.transfers import PreparationLeases
-
-        def renew(node, job_id, progress):
-            self._check(identity)
-            return self._call(node, operation, "prima_prepare_renew", {"job_id": job_id, "progress": progress})
-        leases = PreparationLeases(renew)
-        def check():
-            self._check(identity)
-            leases.check()
-        try:
-            self._check(identity)
-            self._update_job_progress(
-                identity,
-                phase="planning",
-                label="Materializing placement manifest & verifying assets…",
-                step_index=1,
-                step_total=2 if include_profile else 1,
-                fraction=0.04,
-            )
-            runtime = self.registry.capture(runtime_id)
-            companions = {
-                kind: self.resolve_model(value)
-                for kind, value in [("draft", body.draft_model if body.draft_enabled() else None), ("projector", body.mmproj)]
-                if value
-            }
-            from kllm.modules.primacpp.interactors.adapters import adapter_paths
-            adapters = adapter_paths(body.model_dump())
-            members = self.members(body)
-            model = self.resolve_model(body.model)
-            planned = self.plan(runtime_id, body, members=members, model=model)
-            manifest, files = materialize(
-                body,
-                runtime,
-                members,
-                model,
-                lambda b, m: planned,
-                expected_digest=digest,
-                companions=companions,
-                adapters=adapters,
-                score=lambda feasible: (feasible[0], planned["profiling"]),
-            )
-            manifest = manifest.model_copy(update={"settings": execution_settings(body, planned, model,
-                getattr(self.service.state(), "infer_port", 18080))})
-            step_total = 1 + (1 if include_profile else 0) + (1 if include_profile and len(manifest.ranks) > 1 else 0)
-            stage_span = 0.45 if include_profile else 0.96
-            if manifest.settings.get("prima_lora"):
-                for rank in manifest.ranks:
-                    if (rank.node_id != self.service.state().node_id
-                            and (type(members[rank.node_id].get("prima_lora_assets_version")) is not int
-                                 or members[rank.node_id]["prima_lora_assets_version"] != 1)):
-                        raise ValueError(f"{rank.node_id}: upgrade the worker for verified Prima LoRA assets")
-            if include_profile and len(manifest.ranks) > 1:
-                feasible = candidates(body, members, lambda b, m: self._capacity_plan(runtime, b, m))
-                manifest = ExecutionManifest.model_validate(manifest.model_copy(update={
-                    "profile_edges": candidate_profile_edges(manifest, feasible, segmented=
-                        "segmented_placement" in runtime.get("capabilities", {}).get("features", []))}).model_dump())
-            if len(manifest.ranks) > 1:
-                for rank in manifest.ranks:
-                    if (rank.node_id != self.service.state().node_id
-                            and (type(members[rank.node_id].get("prima_resources_version")) is not int
-                                 or members[rank.node_id]["prima_resources_version"] != 1)):
-                        raise ValueError(f"{rank.node_id}: upgrade the worker for Prima resource reservations")
-            if include_profile:
-                for rank in manifest.ranks:
-                    if (rank.node_id != self.service.state().node_id
-                            and members[rank.node_id].get("prima_profile_version") != 2):
-                        raise ValueError(f"{rank.node_id}: upgrade the worker for preparation-bound Prima profiling")
-                    if (len(manifest.ranks) > 1 and rank.node_id != self.service.state().node_id
-                            and (type(members[rank.node_id].get("prima_link_profile_version")) is not int
-                                 or members[rank.node_id]["prima_link_profile_version"] not in
-                                 ((2,) if manifest.profile_edges else (1, 2)))):
-                        raise ValueError(f"{rank.node_id}: upgrade the worker for signed candidate private-link profiling")
-                    if (len(manifest.ranks) > 1 and rank.node_id != self.service.state().node_id
-                            and members[rank.node_id].get("prima_profile_context_version") != 1):
-                        raise ValueError(f"{rank.node_id}: upgrade the worker for fresh Prima profile context")
-            if len(manifest.ranks) > 1:
-                self.jobs[identity]["command_owner"] = authority_owner(self.service.channels.master_authority())
-                evidence = {}
-                for rank in manifest.ranks:
-                    self._check(identity)
-                    if rank.node_id == self.service.state().node_id:
-                        value = self.observe_participant(runtime_id, rank, manifest.backends[rank.node_id])
-                    else:
-                        if members[rank.node_id].get("prima_inventory_version") != 1:
-                            raise ValueError(f"{rank.node_id}: upgrade the worker agent for signed Prima hardware inventory")
-                        raw = self._call(rank.node_id, operation, "prima_inventory", {
-                            "runtime_id": runtime_id, "rank": rank.model_dump(), "backend": manifest.backends[rank.node_id]})
-                        value = ParticipantEvidence.model_validate(raw)
-                    require_shared_identity(value, rank.node_id, runtime_id, runtime)
-                    evidence[rank.node_id] = value
-                manifest = ExecutionManifest.model_validate(manifest.model_copy(update={
-                    "participant_evidence": evidence}).model_dump())
-            require_execution_capabilities(manifest, runtime.get("capabilities", {}))
-            self.preparation_reservations[identity].bind(prima_scope(identity,
-                authority_owner(self.service.channels.master_authority()), manifest.digest))
-            manifest_file = self.root / identity / "execution.json"
-            manifest_file.parent.mkdir(parents=True, exist_ok=True)
-            manifest_file.write_text(
-                json.dumps(manifest.model_dump(), sort_keys=True, separators=(",", ":"))
-            )
-            files.append(
-                (
-                    Asset(
-                        name="execution.json",
-                        kind="manifest",
-                        sha256=manifest.digest,
-                        size=manifest_file.stat().st_size,
-                    ),
-                    manifest_file,
-                )
-            )
-            validate_asset_batch([asset for asset, _ in files], include_manifest=True)
-            node_asset_bytes = sum(asset.size for asset, _ in files)
-            total_stage_bytes = node_asset_bytes * max(1, len(manifest.ranks))
-            with self.lock:
-                self._check(identity)
-                self.jobs[identity].update(
-                    phase="preparing", manifest=manifest.model_dump(), manifest_digest=manifest.digest
-                )
-            self._update_job_progress(
-                identity,
-                phase="staging",
-                label=f"Staging model assets across {len(manifest.ranks)} node{'s' if len(manifest.ranks) != 1 else ''}…",
-                step_index=1,
-                step_total=step_total,
-                fraction=0.05,
-                bytes_done=0,
-                bytes_total=total_stage_bytes,
-            )
-            self._save()
-            completed_nodes_bytes = 0
-            for rank_idx, rank in enumerate(manifest.ranks, start=1):
-                self._check(identity)
-                if rank.node_id == self.service.state().node_id:
-                    self.jobs[identity]["nodes"][rank.node_id] = {
-                        "phase": "preparing",
-                        "transferred_bytes": 0,
-                        "asset_size": node_asset_bytes,
-                    }
-                    prior_asset_bytes = 0
-                    for asset, path in files:
-                        logical_done = 0
-                        copy_start = 0
-                        def _on_local_stage(stage, done: int, size: int, _node=rank.node_id, _prior=prior_asset_bytes, _name=asset.name):
-                            nonlocal logical_done, copy_start
-                            if stage == "resume":
-                                copy_start = done
-                            if stage in ("resume", "local_copy", "cache_hit", "publication"):
-                                logical_done = done
-                            node_done = _prior + logical_done
-                            agg_done = completed_nodes_bytes + node_done
-                            frac = 0.05 + (agg_done / max(1, total_stage_bytes)) * stage_span
-                            with self.lock:
-                                self._check(identity)
-                                self.jobs[identity]["nodes"][_node].update(
-                                    phase="preparing", transferred_bytes=node_done, asset_size=node_asset_bytes,
-                                )
-                            self._update_job_progress(
-                                identity,
-                                phase="staging",
-                                label=lambda: f"{stage.replace('_', ' ').capitalize()}: {_name} on {_node} ({rank_idx}/{len(manifest.ranks)})…",
-                                step_index=1,
-                                step_total=step_total,
-                                fraction=frac,
-                                bytes_done=agg_done,
-                                bytes_total=total_stage_bytes,
-                                stage=stage, scope=(_node, _name),
-                                rate_done=done - copy_start if stage == "local_copy" else done,
-                                rate_total=size - copy_start if stage == "local_copy" else size,
-                                rate_kind="local_copy" if stage == "local_copy" else
-                                    "hash" if stage in ("cache_verify", "final_verify") else None,
-                                force=stage in ("publication", "cache_hit"),
-                            )
-                        self.receiver.stager.prepare(
-                            asset.sha256,
-                            asset.size,
-                            lambda offset, path=path: self._file_chunks(path, offset, self.jobs[identity]["local_chunk_bytes"], check),
-                            check=lambda: self._check(identity),
-                            stage_progress=_on_local_stage,
-                        )
-                        prior_asset_bytes += asset.size
-                    result = {"phase": "prepared", "transferred_bytes": node_asset_bytes, "asset_size": node_asset_bytes}
-                else:
-                    if (members[rank.node_id].get("prima_control_version") != 1
-                            or type(members[rank.node_id].get("prima_asset_lease_version")) is not int
-                            or members[rank.node_id]["prima_asset_lease_version"] != 1):
-                        raise ValueError(
-                            f"{rank.node_id}: upgrade the worker agent for Prima preparation"
-                        )
-                    result = self._call(
-                        rank.node_id,
-                        operation,
-                        "prima_prepare",
-                        {
-                            "runtime_id": runtime_id,
-                            "assets": [a.model_dump() for a, _ in files],
-                            "operation_id": operation,
-                        },
-                    )
-                    remote_job = result["job_id"]
-                    leases.enroll(rank.node_id, remote_job)
-                    self.jobs[identity]["nodes"][rank.node_id] = result
-                    self._save()
-                    offsets = dict(result["offsets"])
-                    prior_asset_bytes = 0
-                    for asset, path in files:
-                        offset = offsets.get(asset.sha256, 0)
-                        if type(offset) is not int or not 0 <= offset <= asset.size:
-                            raise ValueError("Worker prepared offset is outside the declared asset")
-                        transfer_start = offset
-                        with measure("remote_resume", node=rank.node_id, asset=asset.sha256) as counts:
-                            counts["resume_bytes" if offset < asset.size else "cache_hit_bytes"] = offset
-                        if offset < asset.size:
-                            self._update_job_progress(identity, phase="staging", stage="grant_hash",
-                                scope=(rank.node_id, asset.sha256), label=f"Verifying transfer source: {asset.name}…",
-                                bytes_done=completed_nodes_bytes + prior_asset_bytes + offset, bytes_total=total_stage_bytes,
-                                step_total=step_total,
-                                fraction=0.05 + (completed_nodes_bytes + prior_asset_bytes + offset) / max(1, total_stage_bytes) * stage_span)
-                            # Future assets do not spend their lease while another file transfers.
-                            self.grants.grant(rank.node_id, operation, asset, path,
-                                progress=leases.advance, check=check)
-                        self._update_job_progress(identity, phase="staging",
-                            stage="remote_payload" if offset < asset.size else "remote_cache_hit",
-                            scope=(rank.node_id, asset.sha256),
-                            label=f"Transferring {asset.name} to {rank.node_id}…" if offset < asset.size else
-                                f"Reusing verified {asset.name} on {rank.node_id}",
-                            bytes_done=completed_nodes_bytes + prior_asset_bytes + offset, bytes_total=total_stage_bytes,
-                            fraction=0.05 + (completed_nodes_bytes + prior_asset_bytes + offset) / max(1, total_stage_bytes) * stage_span,
-                            step_total=step_total, rate_done=0, rate_total=asset.size - transfer_start,
-                            rate_kind="acknowledged_payload" if offset < asset.size else None)
-                        while offset < asset.size:
-                            check()
-                            chunk = self.grants.chunk(rank.node_id, operation, asset.sha256, offset)
-                            reply = self._call(
-                                rank.node_id,
-                                operation,
-                                "prima_asset_chunk",
-                                {"job_id": remote_job, "chunk": chunk},
-                            )
-                            acknowledged = reply.get("offset")
-                            with measure("remote_acknowledged", node=rank.node_id, asset=asset.sha256, sample=64) as counts:
-                                self.grants.acknowledge(rank.node_id, operation, asset.sha256, acknowledged)
-                                counts["acknowledged_bytes"] = acknowledged - offset
-                            leases.advance(acknowledged - offset)
-                            offset = acknowledged
-                            offsets[asset.sha256] = offset
-                            node_done = prior_asset_bytes + offset
-                            agg_done = completed_nodes_bytes + node_done
-                            frac = 0.05 + (agg_done / max(1, total_stage_bytes)) * stage_span
-                            check()
-                            with self.lock:
-                                self._check(identity)
-                                self.jobs[identity]["nodes"][rank.node_id].update(
-                                    phase="preparing", transferred_bytes=offset, asset_size=asset.size
-                                )
-                            self._update_job_progress(
-                                identity,
-                                phase="staging",
-                                label=lambda: f"Transferring {asset.name} to {rank.node_id} ({rank_idx}/{len(manifest.ranks)})…",
-                                step_index=1,
-                                step_total=step_total,
-                                fraction=frac,
-                                bytes_done=agg_done,
-                                bytes_total=total_stage_bytes,
-                                stage="remote_payload", scope=(rank.node_id, asset.sha256),
-                                rate_done=offset - transfer_start, rate_total=asset.size - transfer_start,
-                                rate_kind="acknowledged_payload",
-                                force=offset == asset.size,
-                            )
-                            if offset % (24 * 1024 * 256) == 0 or offset == asset.size:
-                                self._save()
-                        prior_asset_bytes += asset.size
-                    result = self._call(
-                        rank.node_id, operation, "prima_status", {"job_id": remote_job}
-                    )
-                    if result["phase"] != "prepared":
-                        raise ValueError(result.get("error") or "Worker preparation failed")
-                completed_nodes_bytes += node_asset_bytes
-                self.jobs[identity]["nodes"][rank.node_id] = result
-                leases.advance()
-                self._save()
-            self._check(identity)
-            if self.plan(runtime_id, body)["plan_digest"] != digest:
-                raise ValueError("Inventory or settings changed during preparation; re-plan")
-            if include_profile:
-                profile_span = 0.35 if len(manifest.ranks) > 1 else 0.49
-                rank_count = max(1, len(manifest.ranks))
-                for rank_idx, rank in enumerate(manifest.ranks, start=1):
-                    self._check(identity)
-                    rank_base = 0.50 + ((rank_idx - 1) / rank_count) * profile_span
-                    rank_width = profile_span / rank_count
-                    self._update_job_progress(
-                        identity,
-                        phase="profiling",
-                        label=f"Profiling hardware on {rank.node_id} ({rank_idx}/{rank_count})…",
-                        step_index=2,
-                        step_total=step_total,
-                        fraction=rank_base,
-                        scope=(rank.node_id,),
-                    )
-                    request = ProfileRequest(
-                        runtime_id=runtime_id,
-                        model=next(a.sha256 for a in manifest.assets if a.kind == "model"),
-                        context=manifest.settings["context"],
-                        threads=manifest.settings["threads"],
-                        backend=manifest.backends[rank.node_id],
-                        devices=rank.devices if manifest.backends[rank.node_id] == "vulkan" and (rank.ngl or rank.output_gpu) else None,
-                        mode="generation" if len(manifest.ranks) == 1 and rank.ngl
-                            and manifest.backends[rank.node_id] == "vulkan"
-                            and "gpu_execution_evidence_v1" in runtime.get("capabilities", {}).get("features", []) else "kernel",
-                        gpu_layers=rank.ngl if len(manifest.ranks) == 1 and rank.ngl
-                            and manifest.backends[rank.node_id] == "vulkan"
-                            and "gpu_execution_evidence_v1" in runtime.get("capabilities", {}).get("features", []) else None,
-                        request_id=str(uuid4()),
-                        output_gpu=rank.output_gpu,
-                    )
-                    if request.mode == "generation":
-                        request = ProfileRequest.model_validate({**request.model_dump(), **{
-                            key: manifest.settings.get(key, default) for key, default in
-                            (("cache_type_k", "f16"), ("cache_type_v", "f16"), ("flash_attention", "off"))}})
-                    if rank.node_id == self.service.state().node_id:
-                        scope = {**authority_owner(self.service.channels.master_authority()), "sender": rank.node_id,
-                            "operation_id": operation, "preparation_job_id": identity, "manifest_digest": manifest.digest,
-                            "runtime_id": runtime_id, "model_sha256": request.model, "node_id": rank.node_id,
-                            "backend": request.backend, "context": request.context, "threads": request.threads,
-                            **({"total_layers": manifest.total_layers} if request.mode == "generation" else {})}
-                        profile = self.profiles.start(request, control_owner=scope, check=lambda: self._check(identity))
-                        self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
-                        while profile["phase"] not in TERMINAL:
-                            if profile["phase"] == "cleanup_pending":
-                                raise ValueError("Owned Prima profile cleanup is pending")
-                            check()
-                            if profile.get("pid") and profile.get("process_created_at"):
-                                leases.advance()
-                            prof_prog = profile.get("progress") or {}
-                            sub_frac = float(prof_prog.get("fraction") or 0.1)
-                            sub_label = prof_prog.get("label") or f"Profiling {rank.node_id}…"
-                            self._update_job_progress(
-                                identity,
-                                phase="profiling",
-                                label=f"{rank.node_id}: {sub_label}",
-                                step_index=2,
-                                step_total=step_total,
-                                fraction=rank_base + sub_frac * rank_width,
-                                bytes_done=int(prof_prog.get("bytes_done") or 0),
-                                bytes_total=int(prof_prog.get("bytes_total") or 0),
-                                stage=prof_prog.get("stage", "profiling"), scope=(rank.node_id,),
-                            )
-                            time.sleep(0.2)
-                            profile = self.profiles.job(profile["job_id"])
-                            self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
-                    else:
-                        remote_preparation = self.jobs[identity]["nodes"][rank.node_id]["job_id"]
-                        scope = {**self.jobs[identity]["command_owner"], "sender": manifest.ranks[0].node_id,
-                            "operation_id": operation, "preparation_job_id": remote_preparation,
-                            "manifest_digest": manifest.digest, "runtime_id": runtime_id,
-                            "model_sha256": request.model, "node_id": rank.node_id, "backend": request.backend,
-                            "context": request.context, "threads": request.threads}
-                        profile = self._call(
-                            rank.node_id, operation, "prima_profile", {"preparation_job_id": remote_preparation,
-                                "manifest_digest": manifest.digest, "profile": request.model_dump(exclude_none=True)}
-                        )
-                        self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
-                        while profile["phase"] not in TERMINAL:
-                            if profile["phase"] == "cleanup_pending":
-                                raise ValueError("Owned Prima profile cleanup is pending")
-                            check()
-                            if profile.get("pid") and profile.get("process_created_at"):
-                                leases.advance()
-                            prof_prog = profile.get("progress") or {}
-                            sub_frac = float(prof_prog.get("fraction") or 0.1)
-                            sub_label = prof_prog.get("label") or f"Profiling {rank.node_id}…"
-                            self._update_job_progress(
-                                identity,
-                                phase="profiling",
-                                label=f"{rank.node_id}: {sub_label}",
-                                step_index=2,
-                                step_total=step_total,
-                                fraction=rank_base + sub_frac * rank_width,
-                                bytes_done=int(prof_prog.get("bytes_done") or 0),
-                                bytes_total=int(prof_prog.get("bytes_total") or 0),
-                                stage=prof_prog.get("stage", "profiling"), scope=(rank.node_id,),
-                            )
-                            time.sleep(0.2)
-                            profile = self._call(
-                                rank.node_id,
-                                operation,
-                                "prima_status",
-                                {"profile_job_id": profile["job_id"]},
-                            )
-                            self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
-                    self.jobs[identity]["nodes"][rank.node_id]["profile"] = profile
-                    if profile["phase"] != "prepared":
-                        raise ValueError(profile.get("error") or "Rank profiling failed")
-                    if len(manifest.ranks) > 1:
-                        self._retain_profile(profile, manifest, rank, request, operation, scope)
-                    self._save()
-            if include_profile and len(manifest.ranks) > 1:
-                from kllm.modules.primacpp.interactors.link_profile import collect_links
-
-                self._update_job_progress(
-                    identity,
-                    phase="links",
-                    label="Measuring Ring-TCP private links…",
-                    step_index=3,
-                    step_total=step_total,
-                    fraction=0.85,
-                )
-                with measure("private_link_profile"):
-                    self.jobs[identity]["links"] = collect_links(self, manifest, identity, check, leases.advance)
-                self._save()
-            leases.advance()
-            leases.check(force=True)  # Align every complete worker approval with final preparation.
-            self._update_job_progress(
-                identity,
-                phase="prepared",
-                label="Prima assets prepared and profiled" if include_profile else "Prima assets prepared",
-                step_index=step_total,
-                step_total=step_total,
-                fraction=1.0,
-                bytes_done=total_stage_bytes,
-                bytes_total=total_stage_bytes,
-            )
-            with self.lock:
-                self._check(identity)
-                self.jobs[identity].update(phase="prepared", finished_at=time.time(), expires_at=time.time() + 600)
-        except Exception as error:
-            final_phase = "cancelled" if identity in self.cancelled else "failed"
-            prev_prog = self.jobs.get(identity, {}).get("progress") or {}
-            exact_bytes = self.jobs.get(identity, {}).get("progress_bytes") or {}
-            self._update_job_progress(
-                identity,
-                phase=final_phase,
-                label=str(error)[:240],
-                step_index=int(prev_prog.get("step_index") or 1),
-                step_total=int(prev_prog.get("step_total") or 1),
-                fraction=float(prev_prog.get("fraction") or 0.0),
-                bytes_done=int(exact_bytes.get("done", prev_prog.get("bytes_done")) or 0),
-                bytes_total=int(exact_bytes.get("total", prev_prog.get("bytes_total")) or 0),
-            )
-            with self.lock:
-                if self.jobs[identity]["phase"] != "cancelled":
-                    self.jobs[identity].update(
-                        phase=final_phase, error=str(error)[:1000], finished_at=time.time(),
-                    )
-        finally:
-            if self.jobs[identity]["phase"] in ("failed", "cancelled"):
-                for node, result in self.jobs[identity]["nodes"].items():
-                    profile_job = (result.get("profile") or {}).get("job_id")
-                    if profile_job:
-                        try:
-                            if node == self.service.state().node_id:
-                                self.profiles.cancel(profile_job)
-                            else:
-                                self._call(
-                                    node, operation, "prima_cancel", {"profile_job_id": profile_job}
-                                )
-                        except Exception:
-                            pass
-                    if node != self.service.state().node_id and result.get("job_id"):
-                        try:
-                            self._call(
-                                node, operation, "prima_cancel", {"job_id": result["job_id"]}
-                            )
-                        except Exception:
-                            pass  # Worker preparation expires independently; partial assets remain resumable.
-            self.grants.revoke(operation)
-            self._save()
+    def _prepare_owned(self, identity, runtime_id, body, digest, include_profile, start_from_stage=None):
+        return self.coordinator._execute_run(
+            identity, runtime_id, body, digest, include_profile, start_from_stage=start_from_stage
+        )
 
     @staticmethod
     def _file_chunks(path, offset, chunk_bytes=4 * 1024 * 1024, check=lambda: None):
@@ -1181,12 +664,16 @@ class PrimaControl:
 
     def job(self, identity):
         with self.lock:
+            if hasattr(self, "coordinator"):
+                result = self.coordinator.get_run(identity)
+                if result is not None:
+                    return result
             return self._public_job(identity)
 
     def cancel(self, identity, *, reason=None):
         with self.lock:
-            job = self.jobs[identity]
-            if job["phase"] not in {"failed", "interrupted"} or identity in self.preparation_reservations:
+            job = self.jobs.get(identity)
+            if job and (job["phase"] not in {"failed", "interrupted"} or identity in self.preparation_reservations):
                 self.cancelled.add(identity)
                 job.update(phase="cancelled", finished_at=time.time())
                 if reason is not None:
@@ -1205,7 +692,44 @@ class PrimaControl:
                 )
                 self._save()
                 self._settle_preparation(identity)
+            if hasattr(self, "store"):
+                run_rec = self.store.get_run(identity)
+                if run_rec:
+                    current_st = run_rec.get("current_stage")
+                    if current_st:
+                        self.store.transition_stage(
+                            identity, current_st, "cancelled", error=reason or "Preparation cancelled"
+                        )
+                    self.store.update_run(
+                        identity,
+                        status="cancelled",
+                        error_message=reason or "Preparation cancelled",
+                        finished_at=time.time(),
+                    )
+            if hasattr(self, "coordinator"):
+                res = self.coordinator.get_run(identity)
+                if res is not None:
+                    return res
             return self._public_job(identity)
+
+    def retry_preparation(
+        self, identity: str, *, stage_name: str | None = None, node_id: str | None = None
+    ) -> dict[str, Any]:
+        return self.coordinator.retry_run(identity, stage_name=stage_name, node_id=node_id)
+
+    def preparation_coverage(self, identity: str) -> dict[str, Any]:
+        return self.coordinator.get_coverage(identity)
+
+    def preparation_logs(
+        self,
+        identity: str,
+        *,
+        stage: str | None = None,
+        node: str | None = None,
+        level: str | None = None,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        return self.coordinator.get_logs(identity, stage=stage, node=node, level=level, limit=limit)
 
     async def execute(self, command, deadline, authorize):
         def check():
@@ -1549,6 +1073,10 @@ class PrimaControl:
     def close(self):
         self.closed = True
         self.runs.stop()
+        if hasattr(self, "coordinator"):
+            self.coordinator.close()
+        if hasattr(self, "store"):
+            self.store.close()
         self.pool.shutdown(wait=True, cancel_futures=True)
         self.profiles.close()
         if self.rank.owner:

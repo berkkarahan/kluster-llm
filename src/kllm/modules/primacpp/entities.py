@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+from enum import Enum
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -341,3 +342,77 @@ class PreparationRequest(Record):
     @classmethod
     def request_uuid(cls, value: str) -> str:
         return str(UUID(value))
+
+
+class ProfilingStageName(str, Enum):
+    MATERIALIZE = "materialize"
+    ASSET_SYNC = "asset_sync"
+    NODE_PROFILE = "node_profile"
+    LINK_PROFILE = "link_profile"
+    PLAN_QUALIFICATION = "plan_qualification"
+
+
+class StageStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
+
+
+class ProfilingRunStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+
+
+STAGE_SEQUENCE: tuple[ProfilingStageName, ...] = (
+    ProfilingStageName.MATERIALIZE,
+    ProfilingStageName.ASSET_SYNC,
+    ProfilingStageName.NODE_PROFILE,
+    ProfilingStageName.LINK_PROFILE,
+    ProfilingStageName.PLAN_QUALIFICATION,
+)
+
+STAGE_ORDERS: dict[ProfilingStageName, int] = {
+    ProfilingStageName.MATERIALIZE: 1,
+    ProfilingStageName.ASSET_SYNC: 2,
+    ProfilingStageName.NODE_PROFILE: 3,
+    ProfilingStageName.LINK_PROFILE: 4,
+    ProfilingStageName.PLAN_QUALIFICATION: 5,
+}
+
+
+class ProfilingStageInfo(Record):
+    stage_name: str
+    stage_order: int
+    status: str
+    attempt: int = 1
+    max_attempts: int = 3
+    progress_fraction: float = 0.0
+    progress_label: str = ""
+    bytes_done: int = 0
+    bytes_total: int = 0
+    started_at: float | None = None
+    finished_at: float | None = None
+    error_message: str | None = None
+
+
+class ProfilingRetryRequest(Record):
+    stage_name: str | None = None
+    node_id: str | None = None
+
+
+class LinkMeasurementRecord(Record):
+    source: str
+    target: str
+    latency_ms: float
+    bandwidth_bytes_s: float
+
+
+TERMINAL: set[str] = {"prepared", "failed", "cancelled", "interrupted"}
+

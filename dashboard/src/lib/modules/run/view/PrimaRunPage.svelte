@@ -352,7 +352,7 @@
       <span class="chip chip-info">Prima engine</span>
       <span class="chip mono">prima-ring-tcp</span>
       {#if targetPrimaVersion}
-        <span class="chip mono">{targetPrimaVersion.name || targetPrimaVersion.commit.slice(0, 10)}</span>
+        <span class="chip mono">{targetPrimaVersion.name || targetPrimaVersion.commit?.slice(0, 10) || targetPrimaVersion.runtime_id}</span>
       {/if}
       <a class="text-button" href={routes.settingsLlama}>Prima runtime settings →</a>
     </div>
@@ -414,7 +414,7 @@
           <label class="field" for="prima-deploy-runtime">Preview runtime (does not change the cluster target)
             <select id="prima-deploy-runtime" class="field" value={deployment.runtimeId} onchange={e => deployment.setRuntime(e.currentTarget.value)}>
               <option value="">Choose an installed Prima runtime</option>
-              {#each primaVersions as entry}<option value={entry.version.runtime_id}>{entry.version.name || entry.version.commit.slice(0,12)}</option>{/each}
+              {#each primaVersions as entry}<option value={entry.version.runtime_id}>{entry.version.name || entry.version.commit?.slice(0,12) || entry.version.runtime_id}</option>{/each}
             </select>
           </label>
           <p class="small muted mono">{deployment.runtimeId}</p>

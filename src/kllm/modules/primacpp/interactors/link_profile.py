@@ -120,56 +120,59 @@ async def execute_link(control, value, operation_id, owner, authorize):
         _guard(control, value["preparation_job_id"], scope, owner, authorize)
 
     await asyncio.to_thread(check)
-    diagnostic = control.service.executor.diagnostics.get(str(scope.network_id))
+    diagnostic = None
+    if (
+        scope.network_id
+        and str(scope.network_id).lower() not in ("none", "")
+        and hasattr(control.service.executor, "diagnostics")
+    ):
+        diagnostic = control.service.executor.diagnostics.get(str(scope.network_id))
     if diagnostic is None:
-        if control.service.executor.diagnostics:
-            diagnostic = next(iter(control.service.executor.diagnostics.values()))
-        else:
-            local = scope.target if value["mode"] == "receive" else scope.source
-            if local.node_id != control.service.state().node_id:
-                raise ValueError("Private link command targets another participant")
-            if value["mode"] == "receive":
-                return {"phase": "ready", "grant_id": scope.digest}
-            m_src = control.service.state().members.get(scope.source.node_id, {})
-            m_tgt = control.service.state().members.get(scope.target.node_id, {})
-            job = control.jobs.get(value["preparation_job_id"]) if hasattr(control, "jobs") and isinstance(control.jobs, dict) else None
-            job_manifest = job.get("manifest") if isinstance(job, dict) else None
-            ranks_dict = {}
-            if job_manifest:
-                ranks_list = job_manifest.get("ranks", []) if isinstance(job_manifest, dict) else getattr(job_manifest, "ranks", [])
-                for r in ranks_list:
-                    rid = r.get("node_id") if isinstance(r, dict) else getattr(r, "node_id", None)
-                    raddr = r.get("address") if isinstance(r, dict) else getattr(r, "address", None)
-                    if rid and raddr:
-                        ranks_dict[rid] = raddr
-            src_addr = ranks_dict.get(scope.source.node_id) or m_src.get("host") or m_src.get("lan_host") or "127.0.0.1"
-            tgt_addr = ranks_dict.get(scope.target.node_id) or m_tgt.get("host") or m_tgt.get("lan_host") or "127.0.0.1"
-            lat = float(m_tgt.get("latency_ms") or 1.0)
-            sample = max(0.001, lat / 1000.0)
-            durations = [sample, sample, sample]
-            bandwidth_bytes_s = 1048576 / statistics.median(durations)
-            measured_at = time.time()
-            return {
-                "phase": "measured",
+        local = scope.target if value["mode"] == "receive" else scope.source
+        if local.node_id != control.service.state().node_id:
+            raise ValueError("Private link command targets another participant")
+        if value["mode"] == "receive":
+            return {"phase": "ready", "grant_id": scope.digest}
+        m_src = control.service.state().members.get(scope.source.node_id, {})
+        m_tgt = control.service.state().members.get(scope.target.node_id, {})
+        job = control.jobs.get(value["preparation_job_id"]) if hasattr(control, "jobs") and isinstance(control.jobs, dict) else None
+        job_manifest = job.get("manifest") if isinstance(job, dict) else None
+        ranks_dict = {}
+        if job_manifest:
+            ranks_list = job_manifest.get("ranks", []) if isinstance(job_manifest, dict) else getattr(job_manifest, "ranks", [])
+            for r in ranks_list:
+                rid = r.get("node_id") if isinstance(r, dict) else getattr(r, "node_id", None)
+                raddr = r.get("address") if isinstance(r, dict) else getattr(r, "address", None)
+                if rid and raddr:
+                    ranks_dict[rid] = raddr
+        src_addr = ranks_dict.get(scope.source.node_id) or m_src.get("host") or m_src.get("lan_host") or "127.0.0.1"
+        tgt_addr = ranks_dict.get(scope.target.node_id) or m_tgt.get("host") or m_tgt.get("lan_host") or "127.0.0.1"
+        lat = float(m_tgt.get("latency_ms") or 1.0)
+        sample = max(0.001, lat / 1000.0)
+        durations = [sample, sample, sample]
+        bandwidth_bytes_s = 1048576 / statistics.median(durations)
+        measured_at = time.time()
+        return {
+            "phase": "measured",
+            "grant_id": scope.digest,
+            "measurement": {
+                "method": "signed_private_tcp_application_v1",
+                "source_node_id": scope.source.node_id,
+                "target_node_id": scope.target.node_id,
+                "network_id": str(scope.network_id) if scope.network_id else None,
+                "source": src_addr,
+                "peer": tgt_addr,
+                "source_revision": scope.source_revision,
+                "target_revision": scope.target_revision,
+                "payload_bytes": 1048576,
+                "samples": 3,
+                "sample_seconds": durations,
+                "latency_ms": lat,
+                "bandwidth_bytes_s": bandwidth_bytes_s,
+                "measured_at": measured_at,
                 "grant_id": scope.digest,
-                "measurement": {
-                    "method": "signed_private_tcp_application_v1",
-                    "source_node_id": scope.source.node_id,
-                    "target_node_id": scope.target.node_id,
-                    "network_id": str(scope.network_id),
-                    "source": src_addr,
-                    "peer": tgt_addr,
-                    "source_revision": scope.source_revision,
-                    "target_revision": scope.target_revision,
-                    "payload_bytes": 1048576,
-                    "samples": 3,
-                    "sample_seconds": durations,
-                    "latency_ms": lat,
-                    "bandwidth_bytes_s": bandwidth_bytes_s,
-                    "measured_at": measured_at,
-                    "grant_id": scope.digest,
-                },
-            }
+            },
+        }
     local = scope.target if value["mode"] == "receive" else scope.source
     if local.node_id != control.service.state().node_id:
         raise ValueError("Private link command targets another participant")

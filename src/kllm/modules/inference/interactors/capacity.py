@@ -67,6 +67,7 @@ class CapacityService:
         )
         return {
             "node_id": state.node_id,
+            "hostname": platform.node() or "localhost",
             "host": lan_host,
             "lan_host": lan_host,
             "control_port": state.control_port,

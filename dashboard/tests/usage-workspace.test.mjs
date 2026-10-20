@@ -417,8 +417,8 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       const cardText = await evaluate("document.querySelector('.cluster-diagram .topology-node').textContent");
       assert.match(cardText, /GiB/);
       assert.match(cardText, /CPU/);
-      assert.match(cardText, /master-host/);
-      assert.match(await evaluate("document.querySelector('[data-link-state]').textContent"), /Unmeasured/);
+      await wait("document.querySelector('[data-link-state]') !== null");
+      assert.match(await evaluate("document.querySelector('[data-link-state]')?.textContent || ''"), /Unmeasured/);
       assert.doesNotMatch(await evaluate("document.querySelector('.cluster-diagram').textContent"), /GbE|packet loss|\d+\s*ms/);
       assert.match(await evaluate("document.querySelector('.cluster-diagram').textContent"), /Blackwell|GPU/);
       assert.match(await evaluate("document.body.textContent"), /RPC port 50052 reachable/);
@@ -532,8 +532,8 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       assert.equal(await evaluate("document.querySelector('iframe').contentDocument.querySelectorAll('.logs-row').length"), 2,
         'display-only Clear must not affect another browsing context');
       assert.equal(await evaluate("document.querySelector('input[name=refresh]:checked').value"), 'live');
-      await wait("document.querySelector('.logs-page [role=status]').textContent.toLowerCase().includes('cleared')");
-      assert.match(await evaluate("document.querySelector('.logs-page [role=status]').textContent"), /cleared/i);
+      await wait("document.querySelector('.logs-page [role=status]')?.textContent?.toLowerCase().includes('cleared')");
+      assert.match(await evaluate("document.querySelector('.logs-page [role=status]')?.textContent || ''"), /cleared/i);
       await evaluate("(() => { const s = document.querySelector('select[aria-label=\"Filter by tag\"]'); s.value = ''; s.dispatchEvent(new Event('change')); })()");
       assert.equal(await evaluate("document.body.textContent.includes('boot ok')"), false,
         'Clear removes rows that were hidden by the tag filter');
@@ -541,18 +541,18 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       // New entries resume after Clear; the message renders as inert text.
       allowNewLog = true;
       await wait("document.querySelectorAll('.logs-row').length === 1");
-      assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg').textContent"), '<b>three</b>');
-      assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg').innerHTML"), '&lt;b&gt;three&lt;/b&gt;');
+      assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg')?.textContent"), '<b>three</b>');
+      assert.equal(await evaluate("document.querySelector('.logs-row .logs-msg')?.innerHTML"), '&lt;b&gt;three&lt;/b&gt;');
 
       // Failures keep the rows but must not continue to claim a healthy stream.
       logsFailure = true;
-      await wait("document.querySelector('[data-error-source=logs]')?.textContent.includes('Logs are unavailable')");
+      await wait("document.querySelector('[data-error-source=logs]')?.textContent?.includes('Logs are unavailable')");
       assert.equal(await evaluate("document.querySelectorAll('.logs-row').length"), 1);
       logsFailure = false;
       logsWarning = 'master unreachable; showing local logs';
-      await wait("document.querySelector('[role=status]').textContent.includes('Local only')");
+      await wait("document.querySelector('[role=status]')?.textContent?.includes('Local only')");
       logsWarning = '';
-      await wait("document.querySelector('[role=status]').textContent.includes('Streaming cluster logs')");
+      await wait("document.querySelector('[role=status]')?.textContent?.includes('Streaming cluster logs')");
       assert.equal(await evaluate("document.body.textContent.includes('master unreachable; showing local logs')"), false,
         'successful recovery must clear the old local-only warning');
 

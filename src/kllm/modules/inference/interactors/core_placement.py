@@ -313,6 +313,34 @@ def _expert_offload_manual(
     }
 
 
+def resolve_canonical_node_id(identifier: str, nodes: Sequence[PlacementNodeInput]) -> str:
+    """Resolve user/UI node identifier (e.g. hostname, role, host, or hex node_id) to canonical node_id."""
+    for n in nodes:
+        if n.node_id == identifier:
+            return n.node_id
+    for n in nodes:
+        aliases = getattr(n, "aliases", ())
+        if identifier in aliases or any(a.lower() == identifier.lower() for a in aliases):
+            return n.node_id
+        if getattr(n, "hostname", None) and str(n.hostname).lower() == identifier.lower():
+            return n.node_id
+        if getattr(n, "host", None) and str(n.host).lower() == identifier.lower():
+            return n.node_id
+        if getattr(n, "lan_host", None) and str(n.lan_host).lower() == identifier.lower():
+            return n.node_id
+    if identifier.lower() == "master":
+        master_node = next((n for n in nodes if n.is_master), None)
+        if master_node is not None:
+            return master_node.node_id
+    for n in nodes:
+        if len(identifier) >= 6 and (n.node_id.startswith(identifier) or identifier.startswith(n.node_id)):
+            return n.node_id
+    for n in nodes:
+        if n.node_id.lower() == identifier.lower():
+            return n.node_id
+    return identifier
+
+
 def plan_devices(
     nodes: Sequence[PlacementNodeInput],
     size: int,
@@ -329,21 +357,26 @@ def plan_devices(
     node_priority: Sequence[str] = (),
     just_enough_master: bool = False,
 ) -> DevicePlacementPlan:
-    required = frozenset(required_nodes)
+    resolved_required = tuple(resolve_canonical_node_id(nid, nodes) for nid in required_nodes)
+    resolved_priority = tuple(resolve_canonical_node_id(nid, nodes) for nid in node_priority)
+    if node_shares is not None:
+        node_shares = {resolve_canonical_node_id(k, nodes): v for k, v in node_shares.items()}
+    required = frozenset(resolved_required)
     unknown = required - {n.node_id for n in nodes}
     if unknown:
         raise ValidationError(f"required nodes are unavailable: {', '.join(sorted(unknown))}")
     if required and (node_shares is not None or settings.split_mode != "layer"):
         raise ValidationError("required_nodes require automatic layer placement")
-    if len(set(node_priority)) != len(node_priority) or any(
-        not nid.strip() or nid != nid.strip() for nid in node_priority
+    if len(set(resolved_priority)) != len(resolved_priority) or any(
+        not nid.strip() or nid != nid.strip() for nid in resolved_priority
     ):
         raise ValidationError("node_priority must contain unique nonempty node IDs")
-    unavailable = set(node_priority) - {n.node_id for n in nodes}
+    unavailable = set(resolved_priority) - {n.node_id for n in nodes}
     if unavailable:
         raise ValidationError(f"priority nodes are unavailable: {', '.join(sorted(unavailable))}")
-    if node_priority and (node_shares is not None or settings.split_mode != "layer"):
+    if resolved_priority and (node_shares is not None or settings.split_mode != "layer"):
         raise ValidationError("node_priority requires automatic layer placement")
+    node_priority = resolved_priority
     settings = effective_launch_settings(settings, context)
     context = settings.context
     device_count = sum(len(n.devices) for n in nodes) if device == "gpu" else 0
@@ -564,6 +597,7 @@ def plan_devices(
                 shared_budgets=shared_budgets,
                 allow_cpu_spill=spill,
                 node_priority=node_priority,
+                reserve_terminal_overhead=bool(settings.prima_graphs and len(nodes) > 1),
             )
 
         # GPU-first: a local CPU-spill shortcut must not hide a feasible GPU pool.
@@ -788,7 +822,7 @@ def plan_devices(
         else ram_budgets[n.node_id] + gpu_budgets[n.node_id]
         for n in nodes
     }
-    if fits and graph_host_extra:
+    if fits and (any(graph_host_extra.values()) or graph_extra_units):
         # Shared host/device pools and individual device limits are both binding.
         device_usage: dict[tuple[str, str], int] = {}
         device_limits: dict[tuple[str, str], int] = {}

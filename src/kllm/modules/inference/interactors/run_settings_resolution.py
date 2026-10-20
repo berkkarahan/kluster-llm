@@ -190,8 +190,6 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
             result["cache_type_k"] = "f16"
         if not prima_vulkan_fa and body.draft_enabled() and result["draft_cache_type_v"] not in ("f32", "f16", "bf16"):
             result["draft_cache_type_v"] = "f16"
-        if result["cache_type_v"] in ("f32", "f16", "bf16"):
-            result["flash_attention"] = "off"
     quantized_v = result["cache_type_v"] not in ("f32", "f16", "bf16")
     if body.draft_enabled():
         quantized_v |= result["draft_cache_type_v"] not in ("f32", "f16", "bf16")

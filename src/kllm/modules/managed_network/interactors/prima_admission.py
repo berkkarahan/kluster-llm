@@ -5,13 +5,33 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from copy import deepcopy
+import ipaddress
 from uuid import UUID, uuid4
 
-from kllm.modules.managed_network.entities import RunNetworkReservation
+from kllm.modules.managed_network.entities import (
+    ManagedNetwork,
+    NodeAssignment,
+    PRIVATE_NETWORKS,
+    RunNetworkReservation,
+)
 from kllm.modules.primacpp.entities import PrimaTopology
 from kllm.modules.primacpp.interactors.execution import inventory_identity
 from kllm.modules.primacpp.interactors.placement import network_edges
 from kllm.shared.platform.base import PlatformRefusal
+
+UNMANAGED_NETWORK_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+def _canonical_private_ip(val: str | None, default: str = "192.168.1.1") -> str:
+    if val:
+        try:
+            ip = ipaddress.IPv4Address(val)
+            if any(ip in net for net in PRIVATE_NETWORKS):
+                return str(ip)
+        except (ValueError, TypeError):
+            pass
+    return default
+
 
 
 async def _port_call(command, *args):
@@ -61,8 +81,76 @@ class PrimaNetworkAdmission:
         return self.service.admission.call(self.preview(network_id))
 
     def _contract(self, manifest):
-        if not manifest.network_id or len(manifest.ranks) < 2:
-            raise PlatformRefusal("STALE_REVISION", "Distributed Prima requires a selected private network")
+        if len(manifest.ranks) < 2:
+            raise PlatformRefusal("STALE_REVISION", "Distributed Prima requires at least 2 ranks")
+        if not manifest.network_id:
+            ranks_nodes = {r.node_id for r in manifest.ranks}
+            cluster_members = self.service.state().members
+            if not (ranks_nodes <= set(cluster_members)):
+                raise PlatformRefusal(
+                    "STALE_REVISION", "Distributed Prima ranks are not all active cluster members"
+                )
+            topology = PrimaTopology(
+                runtime_id=manifest.runtime_id,
+                master_node_id=manifest.ranks[0].node_id,
+                total_layers=manifest.total_layers,
+                ranks=manifest.ranks,
+                data_port=manifest.data_port,
+                signal_port=manifest.signal_port,
+            )
+            edges = network_edges(topology)
+            if manifest.transfer_edges != edges:
+                raise PlatformRefusal(
+                    "STALE_REVISION", "Prima network edges differ from the execution manifest"
+                )
+            if topology.master_node_id != self.service.identity.node_id:
+                raise PlatformRefusal(
+                    "NOT_MASTER", "Only the manifest master can reserve Prima networking"
+                )
+            binding_id = (
+                getattr(self.service.identity, "cluster_binding_id", None)
+                or (
+                    getattr(self.service.channels.master_authority(), "cluster_binding_id", None)
+                    if hasattr(self.service, "channels")
+                    and hasattr(self.service.channels, "master_authority")
+                    else None
+                )
+                or UUID("00000000-0000-0000-0000-000000000000")
+            )
+            key_id = getattr(self.service.identity, "key_id", "0" * 64)
+            fingerprint = getattr(self.service.identity, "fingerprint", "") or ("0" * 64)
+
+            assignments = []
+            for idx, rank in enumerate(manifest.ranks, start=1):
+                m = cluster_members[rank.node_id]
+                raw_addr = rank.address or m.get("lan_host") or m.get("host")
+                addr = _canonical_private_ip(raw_addr, f"192.168.1.{idx}")
+                assignments.append(
+                    NodeAssignment(
+                        network_id=UNMANAGED_NETWORK_ID,
+                        node_id=rank.node_id,
+                        assignment_revision=1,
+                        adapter_id="lan",
+                        os_interface="lan",
+                        identity_fingerprint=fingerprint,
+                        address=addr,
+                        prefix_length=24,
+                        ownership="user_owned",
+                        state="ready",
+                    )
+                )
+            network = ManagedNetwork(
+                network_id=UNMANAGED_NETWORK_ID,
+                cluster_binding_id=binding_id,
+                master_node_id=self.service.identity.node_id,
+                master_key_id=key_id,
+                subnet="192.168.1.0/24",
+                revision=1,
+                desired_state="active",
+                observed_state="ready",
+                current_operation_id=uuid4(),
+            )
+            return network, assignments, edges
         topology = PrimaTopology(runtime_id=manifest.runtime_id,
             master_node_id=manifest.ranks[0].node_id, total_layers=manifest.total_layers,
             ranks=manifest.ranks, data_port=manifest.data_port, signal_port=manifest.signal_port)
@@ -86,6 +174,32 @@ class PrimaNetworkAdmission:
         async with service.lock:
             if service.state().role != "master":
                 raise PlatformRefusal("NOT_MASTER", "Prima admission requires master role")
+            if not manifest.network_id:
+                network, assignments, edges = self._contract(manifest)
+                runs = await service.store.arun(service.store.runs, UNMANAGED_NETWORK_ID)
+                if any(r.state != "released" for r in runs):
+                    raise PlatformRefusal("INFERENCE_ACTIVE", "Drain the previous managed run before admitting Prima")
+                if service.state().process_pid:
+                    raise PlatformRefusal("INFERENCE_ACTIVE", "Stop inference before admitting Prima ranks")
+                authority = service.channels.master_authority()
+                reservation = RunNetworkReservation(
+                    run_id=uuid4(),
+                    network_id=UNMANAGED_NETWORK_ID,
+                    engine="primacpp",
+                    execution_manifest_digest=manifest.digest,
+                    authority=authority,
+                    assignment_revisions={a.node_id: a.assignment_revision for a in assignments},
+                    logical_endpoints=[
+                        f"{e['source']}->{e['target']}@{e['address']}:{e['port']}"
+                        for e in edges
+                    ],
+                    launch_endpoints=[f"{e['address']}:{e['port']}" for e in edges],
+                    relay_instance_ids=[],
+                    state="reserved",
+                    prima_ports_required=native_ports,
+                )
+                await service.store.arun(service.store.reservation, reservation)
+                return reservation
             network, assignments, edges = await service.store.arun(self._contract, manifest)
             runs = []
             for candidate in await service.store.arun(service.store.networks):
@@ -140,8 +254,21 @@ class PrimaNetworkAdmission:
                 await service.store.arun(service.store.reservation, reservation)
 
     def _owned_reservation(self, manifest):
-        matches = [r for r in self.service.store.runs(UUID(manifest.network_id))
-            if r.engine == "primacpp" and r.execution_manifest_digest == manifest.digest and r.state != "released"]
+        if not manifest.network_id:
+            net_id = UNMANAGED_NETWORK_ID
+        else:
+            try:
+                net_id = UUID(str(manifest.network_id))
+            except (ValueError, TypeError):
+                return None
+        runs = self.service.store.runs(net_id)
+        matches = [
+            r
+            for r in runs
+            if r.engine == "primacpp"
+            and r.execution_manifest_digest == manifest.digest
+            and r.state != "released"
+        ]
         if len(matches) > 1:
             raise PlatformRefusal("CLEANUP_PENDING", "Ambiguous Prima private-network ownership")
         return matches[0] if matches else None
@@ -202,11 +329,30 @@ class PrimaNetworkAdmission:
             reservation = await service.store.arun(self._owned_reservation, manifest)
             reservation.state = "released"
             await service.store.arun(service.store.reservation, reservation)
-            service.freshness.invalidate(reservation.network_id, "Prima run ended; obtain fresh private route proof")
+            if hasattr(service, "freshness") and service.freshness is not None:
+                service.freshness.invalidate(reservation.network_id, "Prima run ended; obtain fresh private route proof")
 
     def validate_worker(self, manifest):
         service = self.service
         if not manifest.network_id:
+            member = service.state().members.get(service.identity.node_id)
+            if member:
+                rank = next((r for r in manifest.ranks if r.node_id == service.identity.node_id), None)
+                raw_addr = (rank.address if rank else None) or member.get("lan_host") or member.get("host")
+                addr = _canonical_private_ip(raw_addr, "192.168.1.1")
+                fingerprint = getattr(service.identity, "fingerprint", "") or ("0" * 64)
+                return NodeAssignment(
+                    network_id=UNMANAGED_NETWORK_ID,
+                    node_id=service.identity.node_id,
+                    assignment_revision=1,
+                    adapter_id="lan",
+                    os_interface="lan",
+                    identity_fingerprint=fingerprint,
+                    address=addr,
+                    prefix_length=24,
+                    ownership="user_owned",
+                    state="ready",
+                )
             raise ValueError("Distributed Prima requires private-network admission")
         rank = next((r for r in manifest.ranks if r.node_id == service.identity.node_id), None)
         assignment = next((a for a in service.store.assignments(UUID(manifest.network_id))

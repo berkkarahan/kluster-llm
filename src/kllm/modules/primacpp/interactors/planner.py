@@ -7,6 +7,8 @@ from itertools import combinations
 from pathlib import Path
 from uuid import uuid4
 
+from starlette.exceptions import HTTPException
+
 from kllm.modules.primacpp.interactors.execution import (
     ExecutionManifest,
     ProfileEdge,
@@ -44,10 +46,33 @@ def candidates(body, members, execute_plan, *, limit=32):
         raise ValueError("Prima candidate limit must be positive")
     options = [deepcopy(members)]
     if not body.node_priority:
+        req_set = set(body.required_nodes)
+        for m in members.values():
+            nid = m.get("node_id")
+            if (
+                nid in req_set
+                or m.get("hostname") in req_set
+                or m.get("host") in req_set
+                or m.get("lan_host") in req_set
+                or (m.get("role") == "master" and "master" in req_set)
+            ):
+                if nid:
+                    req_set.add(nid)
+                if m.get("hostname"):
+                    req_set.add(m["hostname"])
+                if m.get("host"):
+                    req_set.add(m["host"])
+                if m.get("lan_host"):
+                    req_set.add(m["lan_host"])
         optional = [
             n
             for n, m in sorted(members.items())
-            if m.get("role") == "worker" and n not in body.required_nodes
+            if m.get("role") == "worker"
+            and n not in req_set
+            and m.get("node_id") not in req_set
+            and m.get("hostname") not in req_set
+            and m.get("host") not in req_set
+            and m.get("lan_host") not in req_set
         ]
         workers = sum(m.get("role") == "worker" for m in members.values())
         for removed_count in range(1, len(optional) + 1):
@@ -63,9 +88,35 @@ def candidates(body, members, execute_plan, *, limit=32):
     results, seen = [], set()
     capacity_error = None
     for index, inventory in enumerate(options):
+        candidate_body = body
+        if index > 0:
+            inv_nodes = set(inventory.keys())
+            for m in inventory.values():
+                if m.get("node_id"):
+                    inv_nodes.add(m["node_id"])
+                if m.get("hostname"):
+                    inv_nodes.add(m["hostname"])
+                if m.get("host"):
+                    inv_nodes.add(m["host"])
+                if m.get("lan_host"):
+                    inv_nodes.add(m["lan_host"])
+                if m.get("role") == "master":
+                    inv_nodes.add("master")
+            pruned_req = [n for n in body.required_nodes if n in inv_nodes]
+            pruned_pri = [n for n in body.node_priority if n in inv_nodes]
+            if hasattr(body, "model_copy"):
+                candidate_body = body.model_copy(
+                    update={"required_nodes": pruned_req, "node_priority": pruned_pri}
+                )
+            elif hasattr(body, "__dataclass_fields__"):
+                from dataclasses import replace
+
+                candidate_body = replace(
+                    body, required_nodes=pruned_req, node_priority=pruned_pri
+                )
         try:
-            plan = execute_plan(body, inventory)
-        except ValueError:
+            plan = execute_plan(candidate_body, inventory)
+        except (ValueError, HTTPException):
             if index == 0:
                 raise
             continue  # An optional subset may be invalid without invalidating the full plan.

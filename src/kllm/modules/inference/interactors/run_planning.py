@@ -16,6 +16,7 @@ from kllm.shared.accel import detect_unified_memory, llama_device_for_backend, u
 from kllm.modules.models.interactors.gguf_meta import read_model_layout
 from kllm.modules.inference.entities import RunBody, RunSettingsFields
 from kllm.modules.inference.interactors.placement_models import PlacementNodeInput
+from kllm.modules.inference.interactors.core_placement import resolve_canonical_node_id
 from kllm.shared.state import DEFAULT_CONTROL_PORT, DEFAULT_RPC_PORT
 from kllm.modules.inference.interactors.run_settings_resolution import (
     _file_size_bytes as _file_size_bytes,
@@ -207,28 +208,40 @@ def cluster_nodes(members: dict[str, Any]) -> list[PlacementNodeInput]:
         devices = [
             {**device, "index": device.get("index", index)} for index, device in enumerate(devices)
         ]
-        nodes.append(
-            PlacementNodeInput.from_mapping(
-                {
-                    "node_id": m["node_id"],
-                    "total_ram_bytes": m.get("total_ram_bytes", 0),
-                    "available_ram_bytes": m.get("available_ram_bytes", 0),
-                    "vram_bytes": m.get("vram_bytes"),
-                    "backend": m.get("backend", "unknown"),
-                    "unified_memory": _member_unified_memory(m),
-                    "devices": devices,
-                    "rpc_devices": m.get("rpc_devices", []),
-                    "rpc_capabilities": m.get("rpc_capabilities", []),
-                    "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
-                    "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
-                    "latency_ms": float(lat) if lat is not None else None,
-                    "role": m.get("role", "worker"),
-                    "is_master": m.get("role") == "master",
-                    "ram_fraction": float(m.get("ram_percent", 100)) / 100,
-                    "vram_fraction": float(m.get("vram_percent", 100)) / 100,
-                }
-            )
+        node = PlacementNodeInput.from_mapping(
+            {
+                "node_id": m["node_id"],
+                "total_ram_bytes": m.get("total_ram_bytes", 0),
+                "available_ram_bytes": m.get("available_ram_bytes", 0),
+                "vram_bytes": m.get("vram_bytes"),
+                "backend": m.get("backend", "unknown"),
+                "unified_memory": _member_unified_memory(m),
+                "devices": devices,
+                "rpc_devices": m.get("rpc_devices", []),
+                "rpc_capabilities": m.get("rpc_capabilities", []),
+                "reclaimable_ram_bytes": m.get("reclaimable_ram_bytes", 0),
+                "rpc_endpoint": f"{member_rpc_host(m)}:{m.get('rpc_port', DEFAULT_RPC_PORT)}",
+                "latency_ms": float(lat) if lat is not None else None,
+                "role": m.get("role", "worker"),
+                "is_master": m.get("role") == "master",
+                "ram_fraction": float(m.get("ram_percent", 100)) / 100,
+                "vram_fraction": float(m.get("vram_percent", 100)) / 100,
+            }
         )
+        aliases: set[str] = set()
+        if m.get("hostname"):
+            aliases.add(str(m["hostname"]))
+        if m.get("host"):
+            aliases.add(str(m["host"]))
+        if m.get("lan_host"):
+            aliases.add(str(m["lan_host"]))
+        if m.get("role") == "master" or m.get("is_master"):
+            aliases.add("master")
+        object.__setattr__(node, "aliases", tuple(aliases))
+        object.__setattr__(node, "hostname", m.get("hostname"))
+        object.__setattr__(node, "host", m.get("host"))
+        object.__setattr__(node, "lan_host", m.get("lan_host"))
+        nodes.append(node)
     return nodes
 
 
@@ -293,6 +306,38 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
                 if len(selected_devices) != len(set(body.gpu_ids)):
                     raise HTTPException(400, "gpu_ids includes unavailable devices")
                 nodes[index] = replace(node, devices=selected_devices)
+    id_map: dict[str, str] = {}
+    for m in members.values():
+        nid = m.get("node_id")
+        if not nid:
+            continue
+        id_map[nid] = nid
+        if m.get("hostname"):
+            id_map[m["hostname"]] = nid
+        if m.get("host"):
+            id_map[m["host"]] = nid
+        if m.get("lan_host"):
+            id_map[m["lan_host"]] = nid
+        if m.get("role") == "master" or m.get("is_master"):
+            id_map["master"] = nid
+    for n in nodes:
+        id_map[n.node_id] = n.node_id
+        if n.is_master:
+            id_map["master"] = n.node_id
+        for alias in getattr(n, "aliases", ()):
+            id_map[alias] = n.node_id
+        if getattr(n, "hostname", None):
+            id_map[n.hostname] = n.node_id
+        if getattr(n, "host", None):
+            id_map[n.host] = n.node_id
+
+    def _resolve(ident: str) -> str:
+        mapped = id_map.get(ident, ident)
+        return resolve_canonical_node_id(mapped, nodes)
+
+    resolved_required = [_resolve(nid) for nid in body.required_nodes]
+    resolved_priority = [_resolve(nid) for nid in body.node_priority]
+    resolved_shares = {_resolve(k): v for k, v in body.node_shares.items()} if body.node_shares else None
     try:
         result = native.plan_split(
             nodes=nodes,
@@ -313,9 +358,9 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             if body.draft_enabled()
             else 0,
             vision=bool(body.vision),
-            node_shares=body.node_shares,
-            required_nodes=body.required_nodes,
-            node_priority=body.node_priority,
+            node_shares=resolved_shares,
+            required_nodes=resolved_required,
+            node_priority=resolved_priority,
             just_enough_master=body.just_enough_master,
         )
     except Exception as exc:

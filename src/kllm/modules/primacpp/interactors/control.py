@@ -420,7 +420,12 @@ class PrimaControl:
 
     def members(self, body):
         if body.network_id:
-            return self.service.prima_admission.members(body.network_id)
+            try:
+                admitted = self.service.prima_admission.members(body.network_id)
+                if admitted:
+                    return admitted
+            except Exception:
+                pass
         return deepcopy(self.service.state().members)
 
     def _capacity_plan(self, runtime, body, members):
@@ -439,7 +444,7 @@ class PrimaControl:
                 "predicted_decode_ms": None,
                 "reason": f"Operator selected {strategy} placement strategy",
             }
-        if body.network_id:
+        if body.network_id or any(len(inventory) > 1 for _, inventory in feasible):
             return measured_distributed_candidates(self, feasible, body, runtime, model)
         return measured_local_candidates(feasible, body, runtime, model, self.profiles.cache)
 

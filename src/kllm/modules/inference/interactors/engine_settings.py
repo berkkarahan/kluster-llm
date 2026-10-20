@@ -13,7 +13,7 @@ from kllm.modules.inference.interactors.run_settings_http import ModelSettingsGa
 from kllm.modules.runtimes.interactors.selection import use_runtime
 
 REQUEST_ONLY = frozenset({"remember", "advanced_open", "settings_source", "network_id", "review"})
-PRIMA_DEFAULTS = {"cache_type_k": "f16", "cache_type_v": "f16", "flash_attention": "off"}
+PRIMA_DEFAULTS = {"cache_type_k": "f16", "cache_type_v": "f16", "flash_attention": "auto"}
 
 
 class EngineSettingsHandlers:

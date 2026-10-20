@@ -41,11 +41,36 @@ def reserve_graph_visits(allocations, cpu_layers, total_layers, master, overhead
         else:
             start, _, node = visits[-1]
             visits[-1] = (start, layer + 1, node)
-    graphs = {node: sum(owner == node for _, _, owner in visits) + (2 if node == master else 0)
-              for node in nodes}
-    # A relay still needs its process/runtime host reserve.
-    host_units = {node: max(1, count) - (1 if node == master else 0)
-                  for node, count in graphs.items()}
+    graphs = {
+        node: sum(owner == node for _, _, owner in visits) + (1 if node == master else 0)
+        for node in nodes
+    }
+    has_ram_alloc = {
+        node: any(a.node_id == node and a.memory_kind == "ram" for a in allocations)
+        for node in nodes
+    }
+    # Master cpu_base already includes 1x overhead; do not add 2x overhead on top to master RAM.
+    # Eliminate host overhead charges on pure GPU workers.
+    host_units = {}
+    for node in nodes:
+        if node == master:
+            master_host_visits = sum(
+                owner == master
+                and any(
+                    a.node_id == master
+                    and a.memory_kind == "ram"
+                    and a.layer_start < end
+                    and a.layer_end > start
+                    for a in allocations
+                )
+                for start, end, owner in visits
+            )
+            host_units[node] = max(0, master_host_visits - 1)
+        else:
+            if has_ram_alloc.get(node, False):
+                host_units[node] = max(1, sum(owner == node for _, _, owner in visits))
+            else:
+                host_units[node] = 0
     by_device = defaultdict(list)
     for index, allocation in enumerate(allocations):
         if allocation.memory_kind == "gpu":

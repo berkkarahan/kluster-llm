@@ -13,6 +13,8 @@ from kllm.shared.atomic_io import replace_file
 from kllm.shared.persistence.sqlite import file_lock
 
 
+
+
 class ModelSettingsChanged(ValueError):
     """The caller's observed revision no longer owns this write."""
 

@@ -215,7 +215,11 @@ def _compute_buffers(layout: Layout, settings: Settings, dimensions: MetricDimen
         activations += 4 * tokens * sum(projection_widths)
         activations += 4 * slots * tokens + 8 * slots * declared
     # BERT currently materializes F32 bidirectional scores even when FA is requested.
-    flash = settings.flash_attention == "on" and not (settings.prima_kv_sequences and arch == "bert")
+    supports_fa = arch.lower() not in ("bert",)
+    flash = (
+        settings.flash_attention == "on"
+        or (settings.flash_attention == "auto" and supports_fa)
+    ) and not (settings.prima_kv_sequences and arch == "bert")
     attention = 0
     mask_pools: dict[bool, int] = {}
     separate_masks = bool(settings.prima_kv_sequences and arch in ("gpt-oss", "gemma2", "gemma3", "granite_swa", "olmo2"))
@@ -432,7 +436,9 @@ def memory_costs(
             swa_layers = [(i + 1) % max(1, swa_layers) != 0 for i in range(len(layers))]
     sequences = settings.prima_kv_sequences or settings.parallel_slots
     compact_capacity = 0
-    flash = settings.flash_attention == "on"
+    flash = settings.flash_attention == "on" or (
+        settings.flash_attention == "auto" and arch.lower() not in ("bert",)
+    )
     default_head_width = embd // (int(_at(val("attention.head_count", 32), 0)) or 1)
     v_widths = [
         int(_at(val("attention.head_count_kv", val("attention.head_count", 32) if arch == "openelm" else 32), i))

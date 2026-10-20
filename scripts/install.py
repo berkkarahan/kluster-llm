@@ -1618,6 +1618,29 @@ def build_rust(python: Path, *, release: bool) -> None:
     (ROOT / "vendor" / "bin").mkdir(parents=True, exist_ok=True)
     shutil.copy2(helper_binary, ROOT / "vendor" / "bin" / helper_name)
 
+    # Dependency-free mDNS browser used by LAN discovery when the agent Python
+    # cannot use multicast sockets (macOS Local Network privacy / Zscaler).
+    mdns_target = ROOT / "target" / "mdns-browse"
+    mdns_command = [
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(ROOT / "crates" / "kllm-native" / "Cargo.toml"),
+        "--no-default-features",
+        "--features",
+        "mdns-browse",
+        "--bin",
+        "kllm-mdns-browse",
+        "--target-dir",
+        str(mdns_target),
+    ]
+    if release:
+        mdns_command.append("--release")
+    _run(mdns_command, env=env)
+    mdns_name = "kllm-mdns-browse.exe" if os.name == "nt" else "kllm-mdns-browse"
+    mdns_binary = mdns_target / ("release" if release else "debug") / mdns_name
+    shutil.copy2(mdns_binary, ROOT / "vendor" / "bin" / mdns_name)
+
 
 def build_ui(*, skip_install: bool) -> None:
     ensure_node()

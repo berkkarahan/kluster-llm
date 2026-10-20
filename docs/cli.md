@@ -74,6 +74,7 @@ the next agreed agent startup. No forwarding through an HTTP request is performe
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm update [--port PORT]` | Local maintenance: stop this node, `git pull --ff-only` (requires a clean checkout), then full rebuild (`scripts/install.py --sync`). Node stays stopped; start or join again when it finishes. |
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
+| `kllm cluster browse [--key KEY] [--timeout SECONDS] [--verbose]` | Discover LAN masters with each mDNS layer, then the HTTP subnet fallback. `--verbose` prints the per-layer result, helper interpreters, interfaces, and tunnel/Zscaler detection. Exits non-zero when nothing matches. |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind / overlay, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. A Hugging Face file URL keeps its revision and full path. Repository and tree page URLs are not downloads. |
@@ -107,7 +108,7 @@ kllm join --key <key> --overlay wireguard
 
 Requires system WireGuard (`wg` on PATH, plus `wg-quick` on Linux/macOS or WireGuard for Windows). PSK is derived from the join key; RPC moves to `10.66.87.0/24` while control-plane HTTP stays on the LAN. Dashboard Cluster panel exposes the same **RPC bind** and **Overlay** controls.
 
-Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN (falling back to a helper Python when the agent interpreter cannot see mDNS). Pass `--master` only when discovery is unavailable.
+Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN through four layers: in-process mDNS, the bundled `kllm-mdns-browse` helper, `python -m ...mdns_probe` under platform interpreters (for example `/usr/bin/python3` on macOS), then an HTTP `/health` subnet probe. Pass `--master` only when discovery is unavailable. Run `kllm cluster browse --verbose` to see which layer answered or why each one failed.
 
 ## GPU selection (multi-GPU hosts)
 

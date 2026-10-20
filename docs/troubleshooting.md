@@ -207,6 +207,15 @@ Run the full installer on every node before joining. A worker does not need a GG
 
 ### No matching master or join returns 401
 
+Run discovery with its per-layer trace first:
+
+```bash
+uv run kllm cluster browse --verbose
+```
+
+- `inprocess` failing with `EHOSTUNREACH` or `MDNS_BLOCKED` means the agent interpreter cannot use multicast. The native and Python helper layers should still answer; see [macOS Local Network and Zscaler](#macos-local-network-and-zscaler) when all three fail.
+- `native NOT_INSTALLED` means the bundled helper is missing; re-run `uv run python scripts/install.py` (it builds and stages `vendor/bin/kllm-mdns-browse`).
+- `python UNSUPPORTED_PYTHON_x.y` means every visible helper interpreter is older than 3.9 or equals the blocked agent interpreter.
 - Confirm the master is still running and copy its current join key.
 - Use `--master <private-ip>` to bypass mDNS.
 - Ensure the control port, normally 18765, is reachable between the nodes.
@@ -369,6 +378,17 @@ uv run kllm run --model model.gguf
 Row and tensor modes are only appropriate where the planner accepts the selected homogeneous/local backend combination.
 
 ## Network diagnosis
+
+### macOS Local Network and Zscaler
+
+Symptoms: `kllm join --key` reports no matching master even though the master is reachable from another node, `kllm cluster browse --verbose` shows the in-process layer failing, and `curl` to the master's `/health` may succeed from a system binary while the agent fails with `EHOSTUNREACH` (errno 65). This is client filtering, not routing: `IP_BOUND_IF` and host routes do not change it.
+
+macOS Local Network privacy and Zscaler inspect which executable opens the socket. Apple platform binaries keep LAN access; Homebrew or virtualenv interpreters and binaries shipped by Kluster can be denied. Kluster therefore retries mDNS through `/usr/bin/python3` and falls back to an HTTP subnet probe.
+
+1. Run `uv run kllm cluster browse --verbose`; the `zscaler` and `tunnels` lines confirm detection.
+2. If macOS prompts for Local Network access, allow `Terminal` (or the app that launches Kluster) under **System Settings → Privacy & Security → Local Network**, then restart the terminal and the agent.
+3. For Zscaler, ask IT to add a **Forwarding Profile** exception (bypass) for the cluster LAN subnet, for example `192.168.68.0/22`, so traffic to that destination is not forwarded through `100.64.0.0/10` tunnel gateways.
+4. As an immediate workaround, keep the key but skip discovery: `uv run kllm join --key '<join-key>' --master 192.168.10.1`. On macOS this pair uses the localhost control-plane proxy (`cp_proxy_port` in `kllm status`) so inference control still works.
 
 Use stable private addresses on dedicated links. Verify both directions with `ping`, then verify the control and RPC ports separately. High latency, packet loss, or DHCP address changes can interrupt inference even when cluster discovery succeeds.
 

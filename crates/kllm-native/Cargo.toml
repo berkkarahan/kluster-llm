@@ -10,6 +10,7 @@ default = ["python-bindings"]
 python-bindings = ["dep:pyo3"]
 extension-module = ["python-bindings", "pyo3/extension-module"]
 network-helper = []
+mdns-browse = ["dep:mdns-sd"]
 
 [lib]
 name = "kllm_native"
@@ -19,6 +20,11 @@ crate-type = ["cdylib", "rlib"]
 name = "kllm-network-helper"
 path = "src/bin/kllm-network-helper.rs"
 required-features = ["network-helper"]
+
+[[bin]]
+name = "kllm-mdns-browse"
+path = "src/bin/kllm-mdns-browse.rs"
+required-features = ["mdns-browse"]
 
 [dependencies]
 pyo3 = { version = "0.29", optional = true }
@@ -33,6 +39,7 @@ base64 = "0.23"
 ed25519-dalek = "3"
 sha2 = "0.11"
 regex = "1"
+mdns-sd = { version = "0.21", optional = true, default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [

@@ -124,7 +124,7 @@ def _browse_via_helper(timeout: float, key: str | None) -> list[DiscoveredMaster
     script = (
         "import json,sys\n"
         f"sys.path[:0]={paths!r}\n"
-        "from kllm.discovery import _browse_inprocess\n"
+        f"from {__name__} import _browse_inprocess\n"
         "key=sys.argv[1] or None\n"
         "timeout=float(sys.argv[2])\n"
         "found=_browse_inprocess(timeout, key)\n"

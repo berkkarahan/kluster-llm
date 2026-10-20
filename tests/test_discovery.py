@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import sys
 
 from kllm.modules.cluster.interactors import discovery
 from kllm.modules.cluster.interactors.discovery import DiscoveredMaster, browse_masters, join_key_id
@@ -51,6 +52,13 @@ def test_browse_masters_falls_back_to_helper(monkeypatch):
     found = browse_masters(timeout=0.1, key="secret")
     assert len(found) == 1
     assert found[0].host == "192.168.68.63"
+
+
+def test_helper_script_imports_current_discovery_module(monkeypatch):
+    """The helper subprocess must import the module that defines _browse_inprocess."""
+    monkeypatch.setattr(discovery, "_mdns_helper_candidates", lambda: [sys.executable])
+    result = discovery._browse_via_helper(0.05, None)
+    assert result is not None
 
 
 def test_browse_masters_skips_helper_when_inprocess_finds(monkeypatch):

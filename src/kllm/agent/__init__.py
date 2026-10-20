@@ -21,11 +21,10 @@ state_ref.bind_replace(_replace_state)
 
 
 def _load_runtime():
-    already = "kllm.agent.runtime" in sys.modules
+    if "kllm.agent.runtime" in sys.modules:
+        return sys.modules["kllm.agent.runtime"]
     from kllm.agent import runtime as wiring
 
-    if already:
-        importlib.reload(wiring)
     return wiring
 
 
@@ -46,6 +45,30 @@ threading = _wiring.threading
 model_settings_store = _wiring.model_settings_store
 cluster_update = _wiring.cluster_update
 
+
+def reload_agent_runtime():
+    """Explicitly reload kllm.agent.runtime and refresh exposed facades."""
+    global _wiring, app, lifespan, legacy_v1_router, health, native, netsec, discovery, http_clients, gateway, membership_mod, httpx, threading, model_settings_store, cluster_update
+    from kllm.agent import runtime as wiring
+
+    _wiring = importlib.reload(wiring)
+    app = _wiring.app
+    lifespan = _wiring.lifespan
+    legacy_v1_router = _wiring.legacy_v1_router
+    health = _wiring.health
+    native = _wiring.native
+    netsec = _wiring.netsec
+    discovery = _wiring.discovery
+    http_clients = _wiring.http_clients
+    gateway = _wiring.gateway
+    membership_mod = _wiring.membership_mod
+    httpx = _wiring.httpx
+    threading = _wiring.threading
+    model_settings_store = _wiring.model_settings_store
+    cluster_update = _wiring.cluster_update
+    return _wiring
+
+
 __all__ = [
     "STATE",
     "ClusterState",
@@ -63,6 +86,7 @@ __all__ = [
     "model_settings_store",
     "native",
     "netsec",
+    "reload_agent_runtime",
     "threading",
 ]
 

@@ -29,6 +29,54 @@ def service(tmp_path, role="master", node_id="master"):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prerequisite", [None, "ADMIN_REQUIRED", "HELPER_REFUSED", "TIMEOUT"])
+async def test_assessment_preserves_prerequisite_and_management_blockers(tmp_path, monkeypatch, prerequisite):
+    master = service(tmp_path)
+    adapter = dict(adapter_id="ethernet", os_interface="ethernet", physical_ethernet=True,
+                   connected=True, link_speed_mbps=1000, dhcp=False,
+                   addresses=["10.10.10.3/24"], facts={})
+    setup = dict(capability="managed-network-v2", administrator_enabled=True,
+                 error_code=prerequisite, message="Specific helper refusal")
+
+    async def inventories():
+        return {node: {"adapters": [adapter], "setup": setup} for node in ("master", "worker")}
+
+    monkeypatch.setattr(master, "inventories", inventories)
+    monkeypatch.setattr(master, "_management_hosts", lambda: ["10.10.10.3"])
+    app = FastAPI()
+    app.include_router(build_router(lambda: master, lambda token: token == "Bearer test"))
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://localhost", headers={"authorization": "Bearer test"}) as client:
+            response = await client.get("/v2/cluster/network-setup")
+            assert response.status_code == 200
+            assessment = response.json()
+            for computer in assessment["computers"]:
+                assert not computer["ready"]
+                assert computer["error_code"] == (prerequisite or "NO_ADAPTER")
+                assert "management connection" in computer["adapters"][0]["reason"]
+                if prerequisite:
+                    assert "management connection" not in computer["message"]
+                else:
+                    assert "management connection" in computer["message"]
+            response = await client.post("/v2/cluster/network-setup", json=dict(
+                request_id=str(uuid4()), nodes=["master", "worker"],
+                assessment_revision=assessment["assessment_revision"]))
+            assert response.status_code >= 400
+            assert (prerequisite or "NO_ADAPTER") in response.text
+            if not prerequisite:
+                monkeypatch.setattr(master, "_management_hosts", lambda: ["192.168.68.1"])
+                refreshed = (await client.get("/v2/cluster/network-setup")).json()
+                assert all(c["ready"] for c in refreshed["computers"])
+                stale = await client.post("/v2/cluster/network-setup", json=dict(
+                    request_id=str(uuid4()), nodes=["master", "worker"],
+                    assessment_revision=assessment["assessment_revision"]))
+                assert stale.status_code >= 400 and "STALE_REVISION" in stale.text
+    finally:
+        master.store.close()
+
+
 @pytest.mark.parametrize(
     ("speed", "reason"),
     [

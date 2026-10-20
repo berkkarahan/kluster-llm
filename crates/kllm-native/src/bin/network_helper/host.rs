@@ -119,6 +119,11 @@ pub(super) fn powershell(scope: &Scope, script: &str) -> Result<String> {
     )
 }
 
+#[cfg(windows)]
+pub(super) fn powershell_batch(scope: &Scope, script: &str) -> Result<String> {
+    powershell(scope, script)
+}
+
 pub fn identity(scope: &Scope) -> Result<()> {
     if !valid_name(&scope.adapter)
         || scope.index == 0

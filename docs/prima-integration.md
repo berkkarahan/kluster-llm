@@ -1,5 +1,77 @@
 # Prima.cpp preparation and qualification
 
+## Inference diagnostics
+
+The Logs page's **Inference** filter includes live Prima inspection, kernel and
+generation profiling, deployment, and HiGHS scheduling diagnostics. Entries use
+`[prima][inspection|profiling|deployment|highs]` prefixes with job/run identifiers
+and rank context where available. Worker lines retain their node identity through
+the existing cluster relay. For compatibility these entries use source `llama`.
+
+`KLLM_HOME/logs/prima.log` is a bounded diagnostic mirror. Native job files
+(`inspection.log`, `profile.log`, and `rank.log`) remain the authoritative output
+for validation and existing job-log endpoints. Large machine reports are summarized
+in the mirror; burst omissions and truncated lines are marked. The mirror includes
+stage transitions, profile results/cache use, staging progress, rank readiness and
+cleanup, solver iterations/candidates/pruning, selected allocations and fallback
+reasons. It does not turn kernel estimates into measured generation performance.
+
+The logging toggle gates the mirror and cluster feed. Output observed while logging
+is off is discarded, not replayed when logging resumes. Native evidence files keep
+their existing lifecycle because profiling and readiness validation depend on them.
+Restarted monitoring skips retained native history. Solver callbacks are local to
+each solve; logging failures do not change placement or inference results.
+
+## Deployment workspace
+
+Prima Deploy has **Deployment settings** and **Next deployment** tabs. Settings
+contains **Overview**, **Computers**, **Memory & speed**, **Responses & features**,
+and **Expert**. Search opens the matching control; Technical details and tab/section
+navigation preserve draft settings. Next deployment separates placement, asset
+preparation, profile coverage and inference qualification. Estimated memory and profile-informed costs are not
+measured generation performance.
+
+Choose the exact preview runtime, edit the next-deployment draft, explicitly
+Prepare files or Prepare & profile when needed, then Review deployment inline.
+Prepare and Review calculate a current plan automatically; there is no inspection
+step. A planning failure offers Retry planning, which only refreshes the plan.
+Changing the draft, runtime, connection or lifecycle during calculation cancels
+the requested action; choose Prepare or Review again for the updated draft. A runtime preview does not change the cluster target. Review
+captures the settings and plan identity; Run submits that snapshot with a server
+review precondition and refuses changed runtime/placement. Existing qualification,
+private admission, assets and participant ownership still govern execution.
+Older control APIs cannot silently fall back to unguarded Run.
+
+Prima profiles are saved separately from legacy/llama.cpp settings, with revision
+checks. Missing profiles start with explicit F16 K/V and Flash Attention off;
+loading saved settings does not rewrite their intent. Legacy settings are an
+explicit import candidate. Save, Revert and Defaults are separate: restoring
+defaults creates an unsaved draft, and edits made during Save remain dirty.
+Structured extra-argument edits preserve untouched token order and literal paths;
+ambiguous or malformed owned flags require repair in Expert rather than silent
+normalization. Modern control/alias conflicts remain errors.
+
+Preparation and progress observation are shared between Deploy and Settings.
+Profiling never starts on typing. Stop active inference explicitly before
+preparation or a new Prima Run, and wait for the existing lifecycle to settle.
+Prima does not automatically replace an already-owned active/loading run;
+changing a draft never stops or hot-edits the active model.
+Cancellation remains pending while local work settles. Remote leases may retire
+later, so local settlement is not proof of global cleanup. A lost Run response
+is an unknown outcome: reconcile status/activity, never automatically replay it.
+These controls do not introduce exactly-once deployment or enable deferred
+physical/performance qualification. See [Control API v2](control-api-v2.md#prima-deployment-review-and-engine-scoped-settings).
+
+Prima automatic MoE placement keeps each layer's experts with that layer. The
+llama.cpp expert-only RPC fallback is not supported by Prima's Ring-TCP manifest
+and is never used to make an otherwise overflowing Prima plan appear to fit.
+Explicit expert overrides remain unsupported. Preparation validates placement
+automatically: placement failures show their specific reason beside the controls,
+and Prepare refuses them before transferring files. Capacity failures retain the
+allocator's reason; reduce context or provide sufficient usable memory rather
+than assuming a faster private link will fix the allocation. GPU ranks must also
+share a compatible backend; network connectivity alone does not prove this.
+
 Generation profiling requires the prepared server's `model_structure_v1` capability.
 Its `--inspect-model --model FILE` mode reports a versioned
 `KLLM_PRIMA_MODEL_STRUCTURE` record with `architecture`, `stored_blocks`, and

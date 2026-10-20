@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import time
 from typing import Any, Literal
 
 from kllm.modules.inference.interactors.prima_graph_reserve import reserve_graph_visits
@@ -19,10 +20,13 @@ from kllm.modules.primacpp.entities import (
     SchedulerMode,
 )
 from kllm.modules.primacpp.interactors.execution import Segment
+from kllm.shared.prima_diagnostics import bound_emitter, emit, operation
 
 SLOW_DISK_THRESHOLD_BPS = 500.0 * 1000.0 * 1000.0  # 500 MB/s per Prima.cpp highs_scheduler.cpp
 MILP_TOLERANCE = 1e-9
 MAX_HALDA_ITERATIONS = 30
+MAX_BRANCH_AND_BOUND_NODES = 50_000
+MAX_SOLVER_SECONDS = 2.2
 
 
 @dataclass(frozen=True)
@@ -119,11 +123,21 @@ def _solve_with_highspy(model: HighsMilpModel) -> HighsMilpSolution | None:
     try:
         import highspy  # type: ignore[import-not-found]
     except ImportError:
+        emit("highs", "highspy unavailable; using exact MILP fallback")
         return None
     try:
         csc = model.to_csc()
         solver = highspy.Highs()
         solver.setOptionValue("output_flag", False)
+        # A callback belongs to this solver instance; never redirect process-wide stdout.
+        try:
+            log = bound_emitter("highs")
+            solver.cbLogging.subscribe(lambda event: log(event.message))
+            solver.setOptionValue("log_to_console", False)
+            solver.setOptionValue("output_flag", True)
+        except Exception:
+            solver.setOptionValue("output_flag", False)
+            emit("highs", "native solver callback unavailable; retaining summary diagnostics")
         lp = highspy.HighsLp()
         lp.num_col_ = csc["num_col"]
         lp.num_row_ = csc["num_row"]
@@ -145,6 +159,7 @@ def _solve_with_highspy(model: HighsMilpModel) -> HighsMilpSolution | None:
         solver.passModel(lp)
         solver.run()
         status = solver.getModelStatus()
+        emit("highs", "native solve finished", status=str(status), rows=model.num_row, columns=model.num_col)
         if status != highspy.HighsModelStatus.kOptimal:
             return HighsMilpSolution(
                 feasible=False,
@@ -160,12 +175,122 @@ def _solve_with_highspy(model: HighsMilpModel) -> HighsMilpSolution | None:
             col_values=[float(v) for v in sol.col_value],
             solver_backend="highspy",
         )
-    except Exception:
+    except Exception as error:
+        emit("highs", f"highspy failed; using exact MILP fallback: {error}")
         return None
 
 
+def _solve_capacity_proportional_heuristic(model: HighsMilpModel) -> HighsMilpSolution:
+    """Deterministic capacity-proportional greedy heuristic solver for HighsMilpModel."""
+    num_col = model.num_col
+    if num_col == 0:
+        return HighsMilpSolution(feasible=True, objective=0.0, col_values=[], solver_backend="highs_exact_milp")
+    for c in range(num_col):
+        if model.col_lower[c] > model.col_upper[c] + MILP_TOLERANCE:
+            return HighsMilpSolution(feasible=False, objective=float("inf"), col_values=[], solver_backend="highs_exact_milp")
+
+    assignment = [
+        float(int(math.ceil(model.col_lower[c]))) if model.integrality[c] else float(model.col_lower[c])
+        for c in range(num_col)
+    ]
+
+    def max_possible_add(col: int) -> float:
+        cap = model.col_upper[col] - assignment[col]
+        for r_idx, (r_cols, r_vals) in enumerate(model._row_entries):
+            if col in r_cols:
+                r_v = dict(zip(r_cols, r_vals))[col]
+                if r_v > 0:
+                    r_cur = sum(v * assignment[c] for c, v in zip(r_cols, r_vals))
+                    r_rem = model.row_upper[r_idx] - r_cur
+                    cap = min(cap, r_rem / r_v)
+        if model.integrality[col]:
+            return max(0.0, float(math.floor(cap + MILP_TOLERANCE)))
+        return max(0.0, float(cap))
+
+    # Pass 1: local rows (len(cols) < num_col)
+    for r_idx, (cols, vals) in enumerate(model._row_entries):
+        if len(cols) < num_col:
+            cur_val = sum(v * assignment[c] for c, v in zip(cols, vals))
+            if cur_val < model.row_lower[r_idx] - MILP_TOLERANCE:
+                candidates = [c for c, v in zip(cols, vals) if v > 0 and max_possible_add(c) > MILP_TOLERANCE]
+                candidates.sort(key=lambda c: model.col_cost[c])
+                for c in candidates:
+                    cur_val = sum(v * assignment[co] for co, v in zip(cols, vals))
+                    if cur_val >= model.row_lower[r_idx] - MILP_TOLERANCE:
+                        break
+                    needed = (model.row_lower[r_idx] - cur_val) / dict(zip(cols, vals))[c]
+                    add_amt = min(max_possible_add(c), needed)
+                    if model.integrality[c]:
+                        add_amt = float(math.ceil(add_amt - MILP_TOLERANCE))
+                        add_amt = min(max_possible_add(c), add_amt)
+                    assignment[c] += add_amt
+
+    # Pass 2: remaining rows (including global coverage)
+    for r_idx, (cols, vals) in enumerate(model._row_entries):
+        cur_val = sum(v * assignment[c] for c, v in zip(cols, vals))
+        while cur_val < model.row_lower[r_idx] - MILP_TOLERANCE:
+            loop_start_val = cur_val
+            deficit = model.row_lower[r_idx] - cur_val
+            candidates = [c for c, v in zip(cols, vals) if v > 0 and max_possible_add(c) > MILP_TOLERANCE]
+            if not candidates:
+                break
+            min_cost = min(model.col_cost[c] for c in candidates)
+            tier_cost_threshold = min_cost + 2.0
+            tier_candidates = [c for c in candidates if model.col_cost[c] <= tier_cost_threshold]
+            if not tier_candidates:
+                tier_candidates = candidates
+
+            # Weight by variable column capacity
+            caps = {c: max(1.0, model.col_upper[c] - model.col_lower[c]) for c in tier_candidates}
+            total_tier_cap = sum(caps.values())
+            for c in tier_candidates:
+                c_cap = max_possible_add(c)
+                prop = caps[c] / total_tier_cap
+                if model.integrality[c]:
+                    alloc = min(c_cap, float(math.floor(deficit * prop)))
+                else:
+                    alloc = min(c_cap, deficit * prop)
+                assignment[c] += alloc
+
+            cur_val = sum(v * assignment[c] for c, v in zip(cols, vals))
+            rem_deficit = model.row_lower[r_idx] - cur_val
+            if rem_deficit > MILP_TOLERANCE:
+                tier_candidates.sort(key=lambda c: (-(model.col_upper[c] - assignment[c]), model.col_cost[c]))
+                for c in tier_candidates:
+                    if rem_deficit <= MILP_TOLERANCE:
+                        break
+                    c_add = max_possible_add(c)
+                    if c_add > MILP_TOLERANCE:
+                        step = 1.0 if model.integrality[c] else rem_deficit
+                        add_amt = min(c_add, step if model.integrality[c] else rem_deficit)
+                        assignment[c] += add_amt
+                        rem_deficit -= add_amt
+            cur_val = sum(v * assignment[c] for c, v in zip(cols, vals))
+            if cur_val <= loop_start_val + MILP_TOLERANCE:
+                break
+
+    # Validate bounds
+    for c in range(num_col):
+        if assignment[c] < model.col_lower[c] - MILP_TOLERANCE or assignment[c] > model.col_upper[c] + MILP_TOLERANCE:
+            return HighsMilpSolution(feasible=False, objective=float("inf"), col_values=[], solver_backend="highs_exact_milp")
+    for r_idx, (cols, vals) in enumerate(model._row_entries):
+        r_val = sum(v * assignment[c] for c, v in zip(cols, vals))
+        if r_val < model.row_lower[r_idx] - MILP_TOLERANCE or r_val > model.row_upper[r_idx] + MILP_TOLERANCE:
+            return HighsMilpSolution(feasible=False, objective=float("inf"), col_values=[], solver_backend="highs_exact_milp")
+
+    obj = sum(model.col_cost[c] * assignment[c] for c in range(num_col))
+    return HighsMilpSolution(
+        feasible=True,
+        objective=float(obj),
+        col_values=[float(v) for v in assignment],
+        solver_backend="highs_exact_milp",
+    )
+
+
+@operation("highs")
 def _solve_highs_milp(model: HighsMilpModel) -> HighsMilpSolution:
     """Solve the CSC MILP model using highspy when present or the exact deterministic MILP solver."""
+    emit("highs", "MILP dimensions", rows=model.num_row, columns=model.num_col)
     highspy_res = _solve_with_highspy(model)
     if highspy_res is not None:
         return highspy_res
@@ -182,6 +307,10 @@ def _solve_highs_milp(model: HighsMilpModel) -> HighsMilpSolution:
     best_obj = float("inf")
     best_vals: list[float] | None = None
     assignment: list[float] = [0.0] * num_col
+    visited_nodes = 0
+    start_time = time.monotonic()
+    deadline = start_time + MAX_SOLVER_SECONDS
+    timed_out = False
 
     # Precompute row bounds and remaining min/max contribution per row for fast pruning
     row_cols_vals = model._row_entries
@@ -219,7 +348,11 @@ def _solve_highs_milp(model: HighsMilpModel) -> HighsMilpSolution:
         min_rem_cost[c] = min_rem_cost[c + 1] + (cost * bound if math.isfinite(bound) else 0.0)
 
     def search(col_idx: int, cur_obj: float) -> None:
-        nonlocal best_obj, best_vals
+        nonlocal best_obj, best_vals, visited_nodes, timed_out
+        visited_nodes += 1
+        if visited_nodes > MAX_BRANCH_AND_BOUND_NODES or time.monotonic() > deadline:
+            timed_out = True
+            return
         if cur_obj + min_rem_cost[col_idx] >= best_obj - MILP_TOLERANCE:
             return
         if not check_rows_partial(col_idx):
@@ -264,21 +397,42 @@ def _solve_highs_milp(model: HighsMilpModel) -> HighsMilpSolution:
             for val in candidates:
                 assignment[col_idx] = float(val)
                 search(col_idx + 1, cur_obj + cost * val)
+                if timed_out:
+                    return
         else:
             if lb > ub + MILP_TOLERANCE:
                 return
             val = lb if cost >= 0.0 else ub
             assignment[col_idx] = float(val)
             search(col_idx + 1, cur_obj + cost * val)
+            if timed_out:
+                return
 
     search(0, 0.0)
-    if best_vals is None:
+    if timed_out or best_vals is None:
+        emit(
+            "highs",
+            "exact MILP search exceeded budget or unfeasible; falling back to capacity-proportional heuristic",
+            visited_nodes=visited_nodes,
+            timed_out=timed_out,
+        )
+        fallback_sol = _solve_capacity_proportional_heuristic(model)
+        if fallback_sol.feasible:
+            return fallback_sol
+        if best_vals is not None:
+            return HighsMilpSolution(
+                feasible=True,
+                objective=float(best_obj),
+                col_values=best_vals,
+                solver_backend="highs_exact_milp",
+            )
         return HighsMilpSolution(
             feasible=False,
             objective=float("inf"),
             col_values=[],
             solver_backend="highs_exact_milp",
         )
+
     return HighsMilpSolution(
         feasible=True,
         objective=float(best_obj),
@@ -571,6 +725,7 @@ def assign_layers_to_device(
 
     for iteration in range(1, MAX_HALDA_ITERATIONS + 1):
         iterations = iteration
+        emit("highs", "Halda iteration", cycle=k, iteration=iteration, memory_sets=','.join(current_sets))
         sol, var_pairs = _solve_fixed_sets_milp(state, k, current_sets)
         if not sol.feasible:
             if state.mmap_mode == "none":
@@ -715,7 +870,10 @@ def _evaluate_all_cycles(
     best: HaldaCycleResult | None = None
 
     for k in divisors:
+        emit("highs", "evaluating cycle", cycle=k, window=L // k, nodes=len(state.devices))
         res = assign_layers_to_device(state, k)
+        emit("highs", "cycle result", cycle=k, feasible=res is not None,
+             objective_step_ms=res.objective_step_ms if res else None)
         if res is None:
             evaluated.append(
                 HighsCycleCandidate(
@@ -769,6 +927,7 @@ def assign_layers_and_select_devices(state: HaldaProblemState) -> HighsScheduleR
         )
         best, evaluated = _evaluate_all_cycles(cur_state)
         if best is None and cur_forced:
+            emit("highs", "relaxing slow-disk M4 constraint after infeasible solve")
             # Roll back slow-disk M4 forcing when it makes the MILP infeasible (FR-003 / FR-005)
             forced_m4_rollback = True
             cur_state = HaldaProblemState(
@@ -812,6 +971,7 @@ def assign_layers_and_select_devices(state: HaldaProblemState) -> HighsScheduleR
             if dev.is_master or dev.required:
                 continue
             if alloc.w_m == 0:
+                emit("highs", "pruned worker", node=alloc.node_id, reason="zero_layers_assigned")
                 newly_pruned.add(alloc.node_id)
                 pruned_nodes.append(
                     HighsPrunedNode(
@@ -824,6 +984,7 @@ def assign_layers_and_select_devices(state: HaldaProblemState) -> HighsScheduleR
                     )
                 )
             elif alloc.w_m <= 1 and alloc.n_m == 0 and len(active_devices) > 1:
+                emit("highs", "pruned worker", node=alloc.node_id, reason="weak_device_w_le_1_ngl_0")
                 newly_pruned.add(alloc.node_id)
                 pruned_nodes.append(
                     HighsPrunedNode(
@@ -1011,6 +1172,7 @@ def _fallback_allocations_from_plan(
     return result
 
 
+@operation("highs")
 def solve_highs_halda_schedule(
     *,
     body: Any,

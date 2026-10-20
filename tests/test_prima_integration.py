@@ -23,6 +23,7 @@ from kllm.modules.primacpp.interactors.placement import (
     graph_visits,
     require_layer_execution,
     rank_launch,
+    rank_cli_args,
     network_edges,
 )
 from kllm.modules.primacpp.interactors.preparation import (
@@ -379,11 +380,20 @@ def test_topology_preserves_roles_allocations_and_local_device_names():
     assert layer_windows(value) == [3, 5]
     launch = rank_launch(value, "worker")
     assert launch["ngl"] == 5 and launch["devices"] == ["CUDA0"]
-    assert launch["extra_args"][launch["extra_args"].index("-ngl") + 1] == "5"
+    assert launch["world"] == 2
+    assert launch["rank"] == 1
+    assert launch["master"] == "10.10.10.2"
+    assert launch["next"] == "10.10.10.2"
+    assert launch["data_port"] == 9000
+    assert launch["signal_port"] == 10000
+    assert launch["layer_window"] == "3,5"
     assert launch["env"] == {"KLLM_PRIMA_BIND": "10.10.10.3"}
     assert launch["tensor_split"] == "1"
-    assert launch["extra_args"][launch["extra_args"].index("-ts") + 1] == "1"
-    assert "3,5" in launch["extra_args"]
+    assert launch["extra_args"] == []
+    cli_args = rank_cli_args(launch)
+    assert cli_args[cli_args.index("-ngl") + 1] == "5"
+    assert cli_args[cli_args.index("-ts") + 1] == "1"
+    assert "3,5" in cli_args
     assert {e["port"] for e in network_edges(value)} == {9000, 9001, 10001}
 
 
@@ -501,6 +511,37 @@ def test_preview_refuses_missing_segmented_graph_capacity(tmp_path, monkeypatch)
     assert any("per-visit graph reservations" in error for error in blocked["qualification_errors"])
     source["prima_graph_counts"]["master"] = 4
     assert preview()["inference_supported"] is True
+
+
+def test_preparation_retains_placement_failure_before_asset_work(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = {**plan(), "expert_offloaded": True}
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": []}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: ["Unqualified runtime"])
+    value = planner.preview(body, runtime, members(), model, lambda *_: source)
+    assert value["prima_topology"] is None
+    assert len(value["placement_errors"]) == 1
+    assert "remote MoE tensor placement" in value["placement_errors"][0]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unsupported placement must not hash or stage model assets")
+
+    monkeypatch.setattr(planner, "asset_files", forbidden)
+    with pytest.raises(ValueError, match="remote MoE tensor placement"):
+        planner.materialize(body, runtime, members(), model, lambda *_: source,
+                            expected_digest=value["plan_digest"])
+
+
+def test_preparation_capacity_failure_preserves_allocator_reason():
+    from kllm.modules.primacpp.interactors.planner import candidates
+
+    with pytest.raises(ValueError, match="retained graph visits.*Reduce context"):
+        candidates(RunBody(model="model.gguf"), members(), lambda *_: {
+            "fit_status": "overflow", "hint": "Prima retained graph visits exceed host or device capacity"})
 
 
 def test_plan_digest_ignores_volatile_capacity_and_latency(tmp_path, monkeypatch):

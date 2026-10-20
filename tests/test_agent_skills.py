@@ -53,17 +53,29 @@ def run_installer(tmp_path, *args):
 
 def test_shipped_library_metadata_and_portable_references():
     catalog = skills.discover_skills(ROOT / "skills")
-    assert len(catalog) == 10
-    assert len({s.name for s in catalog}) == 10
+    on_demand_audit_skills = {
+        "kllm-audit",
+        "kllm-prima-delta-audit",
+        "kllm-prima-core-audit",
+    }
+    assert len(catalog) == 13
+    assert len({s.name for s in catalog}) == 13
     assert any(s.name == "kllm-prima" and s.category == "development" for s in catalog)
+    assert on_demand_audit_skills <= {
+        s.name for s in catalog if s.category == "development"
+    }
     assert len(skills.discover_skills(ROOT / "skills", "operations")) == 6
-    assert len(skills.discover_skills(ROOT / "skills", "development")) == 4
+    assert len(skills.discover_skills(ROOT / "skills", "development")) == 7
     for skill in catalog:
         text = (skill.path / "SKILL.md").read_text()
         metadata = yaml.safe_load(text.split("---", 2)[1])
         assert metadata["name"] == skill.name
         assert isinstance(metadata["description"], str) and metadata["description"]
-        assert not metadata.get("disable-model-invocation", False)
+        if skill.name in on_demand_audit_skills:
+            assert metadata.get("disable-model-invocation") is True
+            assert "explicit human" in text.lower()
+        else:
+            assert not metadata.get("disable-model-invocation", False)
         for target in re.findall(r"\]\(([^)]+)\)", text):
             if not target.startswith(("https://", "#")):
                 resolved = (skill.path / target).resolve()
@@ -316,7 +328,7 @@ def test_lock_blocks_mutation(library, tmp_path):
 def test_standalone_list_and_dry_run_do_not_write(tmp_path):
     destination = tmp_path / "destination"
     listed = run_installer(tmp_path, "--list", "--category", "development")
-    assert listed.returncode == 0 and len(listed.stdout.splitlines()) == 4
+    assert listed.returncode == 0 and len(listed.stdout.splitlines()) == 7
     dry = run_installer(tmp_path, "--dry-run", "--project-root", str(destination))
     assert dry.returncode == 0 and "codex, openclaw" in dry.stdout
     assert "no files changed" in dry.stdout and not destination.exists()
@@ -327,7 +339,7 @@ def test_standalone_installs_all_agents_from_another_directory(tmp_path):
     result = run_installer(tmp_path, "--project-root", str(destination))
     assert result.returncode == 0, result.stderr
     for root in skills.agent_destinations(["all"], "project", destination):
-        assert len(list(root.glob("*/SKILL.md"))) == 10
+        assert len(list(root.glob("*/SKILL.md"))) == 13
         assert (root / "kllm-10gbe/references/linux.md").is_file()
     before = snapshot(destination)
     repeated = run_installer(tmp_path, "--project-root", str(destination))

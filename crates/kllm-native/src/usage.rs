@@ -10,6 +10,8 @@ use std::time::Instant;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "linux", test))]
+pub mod linux;
 
 const MAX_FRAME: usize = 65536;
 
@@ -54,7 +56,11 @@ pub fn process_counters(pid: u32) -> Result<ProcessCounters, String> {
     {
         macos::process(pid)
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::process(pid)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = pid;
         Err("unsupported_counter".into())

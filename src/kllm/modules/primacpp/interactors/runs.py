@@ -35,8 +35,19 @@ def rank_log_tail(path: Path, *, max_bytes: int = RANK_LOG_TAIL_BYTES) -> str:
 
 
 def _exit_before_readiness(root: Path, run_id: str, *, max_chars: int = 2000) -> str:
-    """Readiness failure text carrying the rank log tail that explains it."""
+    """Explain recognized settings failures; retain log context for other exits."""
     tail = rank_log_tail(root / run_id / "rank.log")
+    if any(
+        line.strip().startswith("ggml_vulkan:")
+        and "Requested buffer size exceeds device memory allocation limit" in line
+        for line in tail.splitlines()
+    ):
+        return (
+            "Model settings exceed this GPU's buffer limit. "
+            "The model could not start because the current settings require a GPU buffer "
+            "larger than the device supports. Reduce Micro batch or Context size, or enable "
+            "Flash Attention if supported, then deploy again."
+        )
     if not tail:
         return "Prima exited before model readiness"
     return f"Prima exited before model readiness; rank log tail: {tail[-max_chars:]}"

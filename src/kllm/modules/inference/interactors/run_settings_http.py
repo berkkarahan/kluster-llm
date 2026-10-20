@@ -27,10 +27,12 @@ class RunSettingsHandlers:
         store: ModelSettingsGateway,
         resolve_model: Callable[[str], Path],
         available_threads: Callable[[], int],
+        capture_runtime: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self._store = store
         self._resolve_model = resolve_model
         self._available_threads = available_threads
+        self._capture_runtime = capture_runtime
 
     def remember(self, body: PlanBody | RunBody) -> None:
         if body.remember:
@@ -77,7 +79,27 @@ class RunSettingsHandlers:
         }
         return resolved
 
-    def capabilities(self, model: str | None = None) -> dict[str, Any]:
+    def capabilities(self, model: str | None = None, runtime_id: str | None = None) -> dict[str, Any]:
+        if runtime_id is not None:
+            from kllm.modules.runtimes.interactors.selection import use_runtime
+            from kllm.modules.inference.interactors.deployment_review import DEPLOYMENT_REVIEW_VERSION
+
+            if self._capture_runtime is None:
+                raise HTTPException(409, "Runtime catalog is unavailable")
+            try:
+                captured = self._capture_runtime(runtime_id)
+            except KeyError:
+                raise HTTPException(404, "Runtime does not exist") from None
+            except (ValueError, OSError) as error:
+                raise HTTPException(409, detail={"code": "RUNTIME_NOT_READY", "message": str(error)}) from error
+            with use_runtime(captured):
+                result = self.capabilities(model)
+            if not result["engine_available"]:
+                for descriptor in result["parameters"]:
+                    if descriptor["engine_flags"]:
+                        descriptor.update(available=False, unavailable_reason="Runtime parameter catalog is unavailable; support is unproven")
+            return {**result, "runtime_id": captured["runtime_id"], "engine": captured.get("engine", "llamacpp"),
+                    "deployment_review_version": DEPLOYMENT_REVIEW_VERSION if captured.get("engine") == "primacpp" else None}
         from kllm.modules.inference.interactors.chat_templates import PRESETS, selected_template_text
         from kllm.modules.models.interactors.gguf_meta import read_inference_metadata
 

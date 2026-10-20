@@ -60,3 +60,4 @@ CONTROL_V2: tuple[tuple[str, str, str], ...] = (
     ('/cluster/updates', 'POST', 'cluster_update_endpoint'),
     ('/cluster/updates/progress', 'POST', 'cluster_update_progress'),
 )
+

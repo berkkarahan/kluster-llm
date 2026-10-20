@@ -1,8 +1,11 @@
 <script lang="ts">
   import { createApp } from '#lib/app.svelte';
   import { routes } from '#lib/shared/navigation';
-  import { onDestroy, tick, untrack } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
+  import PrimaDeploymentShell from './PrimaDeploymentShell.svelte';
+  import PrimaDeploymentSummary from './PrimaDeploymentSummary.svelte';
   import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
+  import { primaPlacementError } from '#lib/modules/runtimes/presenter';
   import DownloadPanel from '#lib/modules/models/view/DownloadPanel.svelte';
   import LoadProgressPanel from '#lib/modules/run/view/LoadProgressPanel.svelte';
   import JinjaEditor from '#lib/modules/run/view/JinjaEditor.svelte';
@@ -26,8 +29,8 @@
     PARAMETER_LABELS,
     parseArgumentText,
     parsePrimaExtras,
-    serializePrimaExtras,
-    type PrimaExtrasState,
+    patchPrimaExtras,
+    type PrimaExtrasPatch,
     type PrimaHeadMode,
     type PrimaLoraAdapter,
     type PrimaPoolingMode,
@@ -45,65 +48,41 @@
     runtimes?: RuntimesInteractor;
   } = $props();
 
-  let deployStep = $state<1 | 2 | 3>(1);
+  let section = $state('overview');
+  let tab = $state('settings');
+  let search = $state('');
+  let technical = $state(false);
   let showJinjaEditor = $state(false);
   let featureOpen = $state(false);
-
-  function normalizePrimaDefaults(force = false) {
-    const saved = presenter.savedModelConfig;
-    let changed = false;
-    if (force || presenter.flashAttention === 'auto') {
-      if (!force && (saved?.cache_type_k || saved?.cache_type_v)) {
-        const vType = String(saved?.cache_type_v ?? presenter.cacheTypeV);
-        presenter.flashAttention = ['f32', 'f16', 'bf16'].includes(vType) ? 'off' : 'on';
-      } else {
-        presenter.flashAttention = 'off';
-        if (force || !saved?.cache_type_k) {
-          presenter.cacheTypeK = 'f16';
-        }
-        if (force || !saved?.cache_type_v) {
-          presenter.cacheTypeV = 'f16';
-        }
-      }
-      changed = true;
-    }
-    if (changed) {
-      presenter.markSettingsClean();
-      presenter.scheduleEstimate();
-    }
+  let reviewPanel = $state<HTMLElement>();
+  let defaultsDialog: HTMLDialogElement;
+  let confirmed = $state(false);
+  let defaultsSnapshot = $state<{field:string;before:unknown;after:unknown}[]>([]);
+  const deployment = $derived(runtimes.deployment);
+  const restorePrimaDefaults = () => presenter.useDefaultSettings();
+  const revertPrimaSavedSettings = () => presenter.revertSavedSettings();
+  const selectPrimaModel = (id: string) => presenter.selectModel(id);
+  onMount(() => runtimes.preparation.acquire());
+  onDestroy(() => deployment.stop());
+  async function openReview() {
+    if (!await deployment.openReview()) return;
+    confirmed = false;
+    tab = 'deployment';
+    await tick(); reviewPanel?.focus();
   }
-
-  function restorePrimaDefaults() {
-    presenter.useDefaultSettings();
-    normalizePrimaDefaults(true);
+  function showDefaults() {
+    if (presenter.settingsLoading) return;
+    defaultsSnapshot = presenter.defaultSettingsChanges();
+    defaultsDialog.showModal();
   }
-
-  function revertPrimaSavedSettings() {
-    presenter.revertSavedSettings();
-    normalizePrimaDefaults(false);
+  // Approval belongs to one frozen review, never to the next inspected snapshot.
+  $effect(() => { void deployment.review; untrack(() => { confirmed = false; }); });
+  function backToEditing() {
+    deployment.review = null;
+    confirmed = false;
+    tab = 'settings';
+    document.getElementById('prima-tab-settings')?.focus();
   }
-
-  async function selectPrimaModel(modelId: string) {
-    await presenter.selectModel(modelId);
-    normalizePrimaDefaults(false);
-  }
-
-  $effect(() => {
-    const selected = presenter.selectedModel;
-    if (
-      selected &&
-      !presenter.parameters.length &&
-      !presenter.settingsLoading &&
-      !presenter.settingsLoadError &&
-      presenter.savedModelConfig === null
-    ) {
-      untrack(() => void selectPrimaModel(selected));
-      return;
-    }
-    if (!presenter.settingsLoading && presenter.flashAttention === 'auto') {
-      untrack(() => normalizePrimaDefaults(false));
-    }
-  });
 
   const blocked = $derived(presenter.planRunBlockedReason());
   const runtimeBlocked = $derived(
@@ -141,30 +120,33 @@
   let lastSyncedExtraArgs = $state<string | null>(null);
   let templateKwargsDraft = $state('');
   let templateKwargsError = $state('');
+  let stopDraft = $state('');
+  let lastSyncedRevision = -1;
 
   $effect(() => {
     const raw = presenter.extraArgsText;
-    if (raw !== lastSyncedExtraArgs) {
+    const revision = presenter.editorRevision;
+    if (raw !== lastSyncedExtraArgs || revision !== lastSyncedRevision) {
       const parsed = parsePrimaExtras(raw);
       loraRows = parsed.loraAdapters.map((item) => ({ ...item }));
       templateKwargsDraft = parsed.templateKwargsText;
       templateKwargsError = '';
+      extrasEditError = '';
+      if (revision !== lastSyncedRevision) stopDraft = presenter.stopSequences === null ? '' : JSON.stringify(presenter.stopSequences);
+      lastSyncedRevision = revision;
       lastSyncedExtraArgs = raw;
     }
   });
 
-  function commitPrimaExtras(patch: Partial<Omit<PrimaExtrasState, 'parseError'>>) {
-    const nextState: Omit<PrimaExtrasState, 'parseError'> = {
-      swaMode: patch.swaMode ?? primaExtras.swaMode,
-      headMode: patch.headMode ?? primaExtras.headMode,
-      pooling: patch.pooling ?? primaExtras.pooling,
-      loraAdapters: patch.loraAdapters ?? loraRows,
-      templateKwargsText: patch.templateKwargsText ?? primaExtras.templateKwargsText,
-      otherTokens: patch.otherTokens ?? primaExtras.otherTokens
-    };
-    const serialized = serializePrimaExtras(nextState);
-    lastSyncedExtraArgs = serialized;
-    presenter.extraArgsText = serialized;
+  let extrasEditError = $state('');
+  function commitPrimaExtras(patch: PrimaExtrasPatch) {
+    presenter.noteRawDraftEdit();
+    try {
+      const serialized = patchPrimaExtras(presenter.extraArgsText, patch);
+      extrasEditError = '';
+      lastSyncedExtraArgs = serialized;
+      presenter.extraArgsText = serialized;
+    } catch (error) { extrasEditError = String(error); }
     presenter.scheduleEstimate();
   }
 
@@ -184,6 +166,7 @@
 
   function addLoraAdapter() {
     loraRows = [...loraRows, { path: '', scale: '1' }];
+    commitPrimaExtras({loraAdapters:loraRows});
   }
 
   function updateLoraAdapter(index: number, patch: Partial<PrimaLoraAdapter>) {
@@ -228,171 +211,57 @@
     presenter.scheduleEstimate();
   }
 
-  // Integrated Prima Preparation & Profiling state (Step 3)
-  let prepRuntimeId = $state('');
-  let prepPreview = $state<Record<string, any> | null>(null);
-  let prepJob = $state<Record<string, any> | null>(null);
-  let prepBusy = $state(false);
-  let prepError = $state('');
-  let prepGeneration = 0;
-  let prepTimer: ReturnType<typeof setTimeout> | null = null;
-  let reviewedSettings = $state('');
-
-  const runtimesLibrary = $derived(runtimes.status?.runtimes ?? presenter.status?.runtimes ?? null);
-  const primaVersions = $derived(
-    (runtimesLibrary?.versions ?? []).filter((v) => v.version.engine === 'primacpp' && v.build)
-  );
-  const targetPrimaVersion = $derived.by(() => {
-    const target = runtimesLibrary?.target?.version;
-    if (target?.engine === 'primacpp') return target;
-    return primaVersions[0]?.version ?? null;
-  });
-
+  const runtimesLibrary = $derived(runtimes.status?.runtimes ?? null);
+  const primaVersions = $derived((runtimesLibrary?.versions ?? []).filter(v => v.version.engine === 'primacpp' && v.build));
+  const targetPrimaVersion = $derived(runtimesLibrary?.target?.version.engine === 'primacpp'
+    ? runtimesLibrary.target.version : primaVersions[0]?.version ?? null);
   $effect(() => {
-    if (!prepRuntimeId && targetPrimaVersion?.runtime_id) {
-      prepRuntimeId = targetPrimaVersion.runtime_id;
-    }
+    if (presenter.settingsScope !== 'primacpp' || !deployment.runtimeId && targetPrimaVersion?.runtime_id)
+      untrack(() => void deployment.setRuntime(targetPrimaVersion?.runtime_id ?? ''));
   });
-
-  const currentSettingsJson = $derived.by(() => {
-    try {
-      return JSON.stringify(presenter.networkPlanPayload());
-    } catch {
-      return '';
-    }
-  });
-  const prepFresh = $derived(Boolean(prepPreview) && currentSettingsJson === reviewedSettings);
-  const prepActive = $derived(
-    Boolean(prepJob && !['prepared', 'failed', 'cancelled', 'interrupted'].includes(String(prepJob.phase)))
-  );
-  const livePrepJob = $derived(
-    (runtimes.primaPreparation ??
-      (runtimesLibrary as Record<string, any> | null)?.prima_preparation ??
-      null) as Record<string, any> | null
-  );
-
   $effect(() => {
-    if (!livePrepJob) return;
-    const currentId = prepJob?.job_id;
-    if (!currentId || livePrepJob.job_id === currentId || !prepActive) {
-      const prevPhase = prepJob?.phase;
-      prepJob = livePrepJob;
-      if (livePrepJob.phase === 'prepared' && prevPhase !== 'prepared') {
-        untrack(() => void presenter.refreshEstimate());
-      }
-    }
+    const key = deployment.semanticKey();
+    const loading = presenter.settingsLoading;
+    untrack(() => { if (key && !loading) deployment.schedule(); });
   });
-
-  const prepProgress = $derived((prepJob?.progress as PrimaPreparationProgress | undefined) ?? null);
-  const prepPct = $derived(
-    prepProgress
-      ? Math.min(100, Math.max(0, Math.round(Number(prepProgress.fraction ?? 0) * 100)))
-      : prepJob?.phase === 'prepared'
-        ? 100
-        : prepActive
-          ? 5
-          : 0
-  );
-  const prepTransferLabel = $derived(
-    prepProgress && Number(prepProgress.bytes_total ?? 0) > 0
-      ? composeProgressLabel(
-          Number(prepProgress.bytes_done ?? 0),
-          Number(prepProgress.bytes_total ?? 0),
-          prepProgress.rate_bps ?? null,
-          prepProgress.eta_seconds ?? null
-        )
-      : ''
-  );
-
-  const displayTopology = $derived(
-    ((prepPreview?.prima_topology as PrimaTopology | undefined) ?? planTopology)
-  );
+  $effect(() => { const job = runtimes.primaPreparation; untrack(() => runtimes.preparation.observe(job)); });
+  const displayTopology = $derived(deployment.fresh ? planTopology : null);
   const displayRanks = $derived((displayTopology?.ranks ?? []) as PrimaRankAllocation[]);
-  const displayScheduler = $derived(
-    ((prepPreview?.scheduler ?? prepPreview?.profiling?.scheduler ?? planScheduler) as HighsScheduleReport | null)
-  );
-
-  async function inspectPlacement() {
-    if (!prepRuntimeId || !presenter.selectedModel) return null;
-    const seq = ++prepGeneration;
-    prepBusy = true;
-    prepError = '';
-    try {
-      const settings = presenter.networkPlanPayload();
-      const data = await runtimes.primaPlan(prepRuntimeId, settings);
-      if (seq === prepGeneration) {
-        prepPreview = data;
-        reviewedSettings = JSON.stringify(settings);
-      }
-      return data;
-    } catch (e) {
-      if (seq === prepGeneration) prepError = String(e);
-      return null;
-    } finally {
-      if (seq === prepGeneration) prepBusy = false;
-    }
+  const displayScheduler = $derived(deployment.fresh ? planScheduler : null);
+  const fieldSections: Record<string,string> = {
+    model:'overview',context:'overview',context_auto:'overview',parallel_slots:'overview',max_output_tokens:'overview',
+    network:'computers',placement_strategy:'computers',required_nodes:'computers',node_shares:'computers',node_priority:'computers',device:'computers',gpu_ids:'computers',vram_percent:'computers',ram_percent:'computers',
+    cache_type_k:'memory',cache_type_v:'memory',flash_attention:'memory',swa:'memory',mmap_mlock:'memory',checkpoints:'memory',cache_ram:'memory',batch_size:'memory',micro_batch:'memory',threads:'memory',threads_batch:'memory',
+    saved_settings:'expert',extra_args:'expert',template_kwargs:'features',lora:'features',chat_template:'features',draft_model:'features',speculative:'features'
+  };
+  const fieldIds: Record<string,string> = { saved_settings:'prima-unrepresented', cache_type_k:'run-cache-k',cache_type_v:'run-cache-v',flash_attention:'run-flash',template_kwargs:'run-prima-template-kwargs',placement_strategy:'run-placement-mode',required_nodes:'prima-computers',node_shares:'prima-manual-shares',node_priority:'run-placement-mode',swa:'run-prima-swa',chat_template:'run-template',draft_model:'run-draft',lora:'prima-lora-add' };
+  function fieldSection(field:string) { return fieldSections[field] ?? 'features'; }
+  const issues = $derived(Object.entries({...presenter.fieldErrors,...presenter.localDraftErrors}).map(([field,message]) => ({field,message,section:fieldSection(field)})));
+  const searchItems = $derived([
+    ...Object.entries(PARAMETER_LABELS).filter(([field]) => field !== 'moe_offload' && presenter.parameterDescriptor(field)?.available !== false).map(([field,label]) => ({field,label:label+' '+(presenter.parameterDescriptor(field)?.cli ?? '--'+field.replaceAll('_','-'))})),
+    {field:'template_kwargs',label:'Template keywords --chat-template-kwargs'}, {field:'swa',label:'Sliding-window cache --swa-full --swa-compact'},
+    {field:'lora',label:'LoRA adapters --lora --lora-scaled'}, {field:'model',label:'Model --model'}, {field:'network',label:'Network --network-id'},
+    {field:'extra_args',label:'Extra arguments JSON argv --extra-arg'}, {field:'context',label:'Total context --ctx-size'},
+    {field:'head_mode',label:'Head mode --embedding --rerank'}, {field:'pooling',label:'Pooling --pooling'}
+  ]);
+  const matches = $derived(presenter.settingsLoading || presenter.busy || presenter.status?.role !== 'master' ? [] : searchItems.filter(item=>item.label.toLowerCase().includes(search.toLowerCase().trim())));
+  async function focusField(field:string) {
+    tab = 'settings';
+    section=fieldSection(field); technical=true; featureOpen=true;
+    await tick();
+    let element=document.getElementById(fieldIds[field] ?? (field==='head_mode' ? 'run-prima-head-mode' : field==='pooling' ? 'run-prima-pooling' : 'run-'+field.replaceAll('_','-')));
+    element ??= document.getElementById('run-'+field.replaceAll('_','-')+'-mode');
+    if (field==='context_auto' || field==='context' && presenter.contextAuto) element=document.getElementById('run-context-auto');
+    if (!element && ['draft_max','draft_model'].includes(field)) element=document.getElementById('run-speculative');
+    if (!element && field==='pooling') element=document.getElementById('run-prima-head-mode');
+    for (let parent=element?.parentElement;parent;parent=parent.parentElement) if(parent instanceof HTMLDetailsElement) parent.open=true;
+    element?.focus();
   }
-
-  async function pollPrepJob(id: string, seq: number) {
-    try {
-      const data = await runtimes.primaJob(id);
-      if (seq !== prepGeneration) return;
-      prepJob = data;
-      if (!['prepared', 'failed', 'cancelled', 'interrupted'].includes(String(data.phase))) {
-        prepTimer = setTimeout(() => void pollPrepJob(id, seq), 1000);
-      } else if (data.phase === 'prepared') {
-        void presenter.refreshEstimate();
-      }
-    } catch (e) {
-      if (seq === prepGeneration) prepError = String(e);
-    }
-  }
-
-  async function runPrepare(includeProfile: boolean) {
-    if (!prepRuntimeId || !presenter.selectedModel) return;
-    let activePreview = prepPreview;
-    if (!activePreview || !prepFresh) {
-      activePreview = await inspectPlacement();
-      if (!activePreview) return;
-    }
-    const digest = String(activePreview.plan_digest ?? presenter.planResult?.plan_digest ?? '');
-    if (!digest) {
-      prepError = 'Inspect placement first to compute a valid plan digest.';
-      return;
-    }
-    const seq = ++prepGeneration;
-    prepBusy = true;
-    prepError = '';
-    try {
-      const data = await runtimes.preparePrima(
-        prepRuntimeId,
-        presenter.networkPlanPayload(),
-        digest,
-        includeProfile
-      );
-      if (seq === prepGeneration) {
-        prepJob = data;
-        void pollPrepJob(String(data.job_id), seq);
-      }
-    } catch (e) {
-      if (seq === prepGeneration) prepError = String(e);
-    } finally {
-      if (seq === prepGeneration) prepBusy = false;
-    }
-  }
-
-  async function cancelPrepare() {
-    if (!prepJob?.job_id) return;
-    try {
-      await runtimes.cancelPrima(String(prepJob.job_id));
-    } catch (e) {
-      prepError = String(e);
-    }
-  }
-
-  onDestroy(() => {
-    ++prepGeneration;
-    if (prepTimer) clearTimeout(prepTimer);
+  $effect(() => {
+    const errors: Record<string,string> = {};
+    if (templateKwargsError) errors.template_kwargs=templateKwargsError;
+    if (extrasEditError || primaExtras.parseError) errors.extra_args=extrasEditError || primaExtras.parseError!;
+    untrack(() => { presenter.localDraftErrors=errors; presenter.validateRunSettings(); deployment.changed(); });
   });
 
   function gpuNamesFor(node: string): string[] {
@@ -420,19 +289,6 @@
     return rank.layers.map((r) => `${r.start}–${r.end - 1}`).join(', ');
   }
 
-  const fit = $derived(String(presenter.planResult?.fit_status ?? ''));
-  const ready = $derived(
-    !blocked &&
-      !runtimeBlocked &&
-      !!presenter.planResult &&
-      !presenter.estimating &&
-      !presenter.estimateError &&
-      ['fits', 'tight'].includes(fit) &&
-      inferenceSupported
-  );
-  const estimateReady = $derived(
-    presenter.status?.role === 'master' && !!presenter.selectedModel && !presenter.settingsLoading
-  );
   const changes = $derived(
     Object.entries(effective?.requested ?? {}).filter(
       ([key, value]) => JSON.stringify(value) !== JSON.stringify(presenter.savedModelConfig?.[key])
@@ -455,32 +311,6 @@
       return '';
     }
   });
-
-  $effect(() => {
-    if (estimateReady) untrack(() => presenter.scheduleEstimate());
-  });
-
-  async function nextStep(target: 1 | 2 | 3) {
-    if (target === 1) {
-      deployStep = 1;
-      return;
-    }
-    if (!presenter.selectedModel || presenter.settingsLoading || presenter.settingsLoadError) return;
-    if (!presenter.validateRunSettings(true) || templateKwargsError) {
-      deployStep = 2;
-      featureOpen = true;
-      await tick();
-      const first = Object.keys(presenter.fieldErrors)[0];
-      const element = document.getElementById(`run-${first?.replaceAll('_', '-')}`);
-      element?.closest('details')?.setAttribute('open', '');
-      element?.focus();
-      return;
-    }
-    if (target === 3 && (!presenter.planResult || presenter.estimating)) {
-      await presenter.refreshEstimate();
-    }
-    deployStep = target;
-  }
 
   function display(value: unknown): string {
     if (value === null || value === undefined) return 'Inherit default';
@@ -516,7 +346,7 @@
     <div>
       <p class="eyebrow">Deploy · Prima.cpp</p>
       <h1 id="page-title">Deploy a model</h1>
-      <p>Plan Ring-TCP rank placement, solve HiGHS Halda MILP layer windows, and prepare or deploy across your cluster.</p>
+      <p>Configure a draft and review the deployment before running.</p>
     </div>
     <div class="prima-header-badges">
       <span class="chip chip-info">Prima engine</span>
@@ -528,61 +358,12 @@
     </div>
   </header>
 
-  {#if modelSupport || qualificationErrors.length > 0 || presenter.planResult?.inference_supported !== undefined}
-    <section class="panel prima-status-strip" aria-label="Prima architecture and qualification status">
-      <div class="prima-status-row">
-        <div class="prima-status-cell">
-          <span class="small muted">Architecture support</span>
-          {#if modelSupport?.supported === false}
-            <span class="chip chip-danger">Unsupported architecture</span>
-          {:else if modelSupport?.warning}
-            <span class="chip chip-warn">Support unverified</span>
-          {:else if modelSupport?.supported === true}
-            <span class="chip chip-ok">Architecture supported</span>
-          {:else}
-            <span class="chip">Pending inspection</span>
-          {/if}
-        </div>
-        <div class="prima-status-cell">
-          <span class="small muted">Engine qualification</span>
-          {#if qualificationErrors.length > 0 || presenter.planResult?.inference_supported === false}
-            <span class="chip chip-warn">
-              Evaluation &amp; profiling mode · {qualificationErrors.length || 1} gate(s) open
-            </span>
-          {:else}
-            <span class="chip chip-ok">Qualified for live inference</span>
-          {/if}
-        </div>
-        <div class="prima-status-cell">
-          <span class="small muted">Active scheduler</span>
-          {#if displayScheduler}
-            <span class="chip mono">
-              {displayScheduler.scheduler_mode} · k={displayScheduler.cycle_count_k} · W={displayScheduler.window_size_w}
-            </span>
-          {:else}
-            <span class="chip">Awaiting plan</span>
-          {/if}
-        </div>
-      </div>
-      {#if modelSupport?.error}
-        <p class="small danger-text" role="alert">{modelSupport.error}</p>
-      {:else if modelSupport?.warning}
-        <p class="small warning-text">{modelSupport.warning}</p>
-      {/if}
-      {#if qualificationErrors.length > 0}
-        <p class="small muted">
-          Placement inspection, file staging, and native device profiling are active in Step 3. Live inference stays gated until qualification passes ({qualificationErrors.join(', ')}).
-        </p>
-      {/if}
-    </section>
-  {/if}
-
-  {#if presenter.status?.process_role === 'master' || presenter.status?.inference_up}
+  {#if deployment.lifecycleReason}
     <section class="panel running-model" aria-label="Running model">
       <div>
-        <span class="tag">Running</span>
+        <span class="tag">{presenter.status?.inference_up ? 'Running' : 'Starting or stopping'}</span>
         <strong>{presenter.status?.model_name ?? 'Loading model'}</strong>
-        <p class="small muted">Configuration edits apply to the next Prima deployment.</p>
+        <p class="small muted">{deployment.lifecycleReason}</p>
       </div>
       <button
         class="btn btn-danger"
@@ -591,41 +372,19 @@
     </section>
   {/if}
 
-  <nav class="steps" aria-label="Deploy steps">
-    {#each ['Select', 'Configure', 'Review & deploy'] as title, index}
-      {#if index}<span class="step-line"></span>{/if}
-      <button
-        type="button"
-        class="step"
-        class:active={deployStep === index + 1}
-        aria-current={deployStep === index + 1 ? 'step' : undefined}
-        disabled={index > 0 && (!presenter.selectedModel || presenter.settingsLoading)}
-        onclick={() => nextStep((index + 1) as 1 | 2 | 3)}
-      >
-        <span class="step-number">{index + 1}</span>{title}
-      </button>
-    {/each}
-  </nav>
-
-  <div class="deploy-layout">
-    <div class="stack">
-      <DownloadPanel />
-      {#if blocked}<p class="notice small" role="status">{blocked}</p>{/if}
-      {#if presenter.settingsLoadError}
-        <div class="actions">
-          <button class="btn" onclick={() => selectPrimaModel(presenter.selectedModel)}>Retry settings</button>
-          <button class="btn" onclick={restorePrimaDefaults}>Use defaults</button>
-        </div>
-      {/if}
-      {#if presenter.status?.apply_error}
-        <ErrorMessage source="apply" message={presenter.status.apply_error} />
-      {/if}
-
-      <section class="panel deployment-form">
-        {#if deployStep === 1}
+  <DownloadPanel />
+  {#if presenter.capabilitiesError}<p class="notice" role="status">{presenter.capabilitiesError}</p>{/if}
+  {#if presenter.settingsLoadError}<div class="notice" role="alert">{presenter.settingsLoadError}<button class="btn" onclick={() => selectPrimaModel(presenter.selectedModel)}>Retry settings</button></div>{/if}
+  {#if presenter.status?.apply_error}<ErrorMessage source="apply" message={presenter.status.apply_error} />{/if}
+  <div class="deploy-progress-slot"><LoadProgressPanel {presenter} /></div>
+  <PrimaDeploymentShell bind:tab bind:section bind:search bind:technical dirty={presenter.settingsDirty()} {issues} {matches} focus={focusField}>
+    {#snippet children()}
+      <fieldset disabled={presenter.status?.role !== 'master' || presenter.settingsLoading}
+        oninput={() => presenter.noteRawDraftEdit()} onchange={() => presenter.noteRawDraftEdit()}>
+      <div hidden={section !== 'overview'} data-section="overview">
           <div class="deploy-section">
-            <p class="eyebrow">01 / Model &amp; Architecture</p>
-            <h2>Choose a GGUF model for the Ring-TCP cluster</h2>
+            <p class="eyebrow">Model &amp; architecture</p>
+            <h2>Choose a model</h2>
             <label class="field" for="run-model">Model on the master
               <select
                 id="run-model"
@@ -651,9 +410,66 @@
             {/if}
           </div>
 
+        <div class="deploy-section">
+          <label class="field" for="prima-deploy-runtime">Preview runtime (does not change the cluster target)
+            <select id="prima-deploy-runtime" class="field" value={deployment.runtimeId} onchange={e => deployment.setRuntime(e.currentTarget.value)}>
+              <option value="">Choose an installed Prima runtime</option>
+              {#each primaVersions as entry}<option value={entry.version.runtime_id}>{entry.version.name || entry.version.commit.slice(0,12)}</option>{/each}
+            </select>
+          </label>
+          <p class="small muted mono">{deployment.runtimeId}</p>
+          {#if presenter.legacyModelConfig}<details><summary>Unscoped legacy settings (not imported)</summary><p>These settings may belong to another engine. They have not been applied or migrated. Compare them with this draft before manually choosing any values.</p><pre>{JSON.stringify(presenter.legacyModelConfig,null,2)}</pre></details>{/if}
+        </div>
           <div class="deploy-section">
-            <p class="eyebrow">02 / Ring Topology &amp; HiGHS Scheduler</p>
-            <h2>Choose how ranks participate in the Ring-TCP pipeline</h2>
+            <p class="eyebrow">Next workload</p>
+            <h2>Context and concurrency</h2>
+            <p class="small muted">
+              Prima-native parameters and launch extras. Rank 0 reserves <code>parallel_slots + 1</code> KV sequences for pipelined ring micro-batches.
+            </p>
+            <div class="field-grid">
+              <div class="parameter-control">
+                <label class="field" for="run-context">Total context capacity
+                  <input
+                    id="run-context"
+                    aria-invalid={!!presenter.fieldErrors.context}
+                    aria-describedby="prima-context-help"
+                    class="field mono"
+                    type="number"
+                    bind:value={presenter.context}
+                    min={MIN_CONTEXT}
+                    max={presenter.selectedModelMaxContext()}
+                    step="1"
+                    disabled={presenter.contextAuto}
+                    oninput={() => presenter.scheduleEstimate()}
+                  />
+                </label>
+                <label class="check-row">
+                  <input
+                    type="checkbox"
+                    id="run-context-auto"
+                    bind:checked={presenter.contextAuto}
+                    onchange={() => presenter.scheduleEstimate()}
+                  />
+                  Plan context automatically
+                </label>
+                <p class="small muted">
+                  Total KV capacity shared by concurrent requests. Model maximum: {presenter.selectedModelMaxContext().toLocaleString()} tokens.
+                </p>
+                {#if presenter.fieldErrors.context}
+                  <ErrorMessage source="validation:context" message={presenter.fieldErrors.context} snapshot={false} />
+                {/if}
+              </div>
+              <ParameterControl {presenter} name="parallel_slots" />
+              <ParameterControl {presenter} name="max_output_tokens" />
+
+            </div>
+          </div>
+
+      </div>
+      <div hidden={section !== 'computers'} data-section="computers" id="prima-computers" tabindex="-1">
+          <div class="deploy-section">
+            <p class="eyebrow">Placement constraints</p>
+            <h2>Choose participating computers</h2>
             <div class="field-grid">
               <label class="field" for="run-network">Inference network
                 <select
@@ -672,7 +488,7 @@
                 <select
                   id="run-placement-mode"
                   class="field"
-                  value={presenter.nodePriority ? 'priority' : presenter.placementStrategy}
+                  value={presenter.placementStrategy}
                   onchange={(e) => presenter.setPlacementStrategy(e.currentTarget.value as PlacementStrategyMode)}
                 >
                   <option value="auto">Automatic (HiGHS / Profiled)</option>
@@ -782,50 +598,14 @@
               </div>
             {/if}
           </div>
-        {:else if deployStep === 2}
-          <div class="deploy-section">
-            <p class="eyebrow">02 / Prima Configuration</p>
-            <h2>Configure context, SWA memory, and Prima runtime options</h2>
-            <p class="small muted">
-              Prima-native parameters and launch extras. Rank 0 reserves <code>parallel_slots + 1</code> KV sequences for pipelined ring micro-batches.
-            </p>
-            <div class="field-grid">
-              <div class="parameter-control">
-                <label class="field" for="run-context">Total context capacity
-                  <input
-                    id="run-context"
-                    class="field mono"
-                    type="number"
-                    bind:value={presenter.context}
-                    min={MIN_CONTEXT}
-                    max={presenter.selectedModelMaxContext()}
-                    step="1"
-                    disabled={presenter.contextAuto}
-                    oninput={() => presenter.scheduleEstimate()}
-                  />
-                </label>
-                <label class="check-row">
-                  <input
-                    type="checkbox"
-                    bind:checked={presenter.contextAuto}
-                    onchange={() => presenter.scheduleEstimate()}
-                  />
-                  Plan context automatically
-                </label>
-                <p class="small muted">
-                  Total KV capacity shared by concurrent requests. Model maximum: {presenter.selectedModelMaxContext().toLocaleString()} tokens.
-                </p>
-                {#if presenter.fieldErrors.context}
-                  <ErrorMessage source="validation:context" message={presenter.fieldErrors.context} snapshot={false} />
-                {/if}
-              </div>
-              <ParameterControl {presenter} name="parallel_slots" />
-              <ParameterControl {presenter} name="max_output_tokens" />
-              <ParameterControl {presenter} name="enable_thinking" />
-            </div>
-          </div>
-
-          <details class="advanced" open={presenter.advancedOpen}>
+        <div class="deploy-section field-grid">{#each ['device','vram_percent','ram_percent'] as name}<ParameterControl {presenter} {name} />{/each}</div>
+        {#if presenter.nodeShares}
+          <div class="deploy-section"><h3>Manual-share compatibility settings</h3><p>Saved shares are retained exactly. They have not been converted to priorities. Choose an explicit placement strategy to replace them.</p><pre id="prima-manual-shares" tabindex="-1">{JSON.stringify(presenter.nodeShares,null,2)}</pre></div>
+        {/if}
+        <p class="section-note">Unchecked computers remain eligible. Required computers must receive a layer. Hardware safety limits remain authoritative.</p>
+      </div>
+      <div hidden={section !== 'memory'} data-section="memory">
+          <details class="advanced" open>
             <summary>Memory &amp; loading (SWA, KV precision &amp; mmap)</summary>
             <div class="advanced-body">
               <p class="small muted">
@@ -833,7 +613,7 @@
                 <a class="text-button" href={routes.settings}>Node settings →</a>
               </p>
               <div class="field-grid">
-                {#each ['cache_type_k', 'cache_type_v', 'flash_attention', 'vram_percent', 'ram_percent', 'mmap_mlock', 'checkpoints', 'cache_ram'] as name}
+                {#each ['cache_type_k', 'cache_type_v', 'flash_attention', 'mmap_mlock', 'checkpoints', 'cache_ram'] as name}
                   <ParameterControl {presenter} {name} />
                 {/each}
                 <div class="parameter-control">
@@ -862,14 +642,17 @@
           <details class="advanced">
             <summary>Capacity &amp; performance</summary>
             <div class="advanced-body field-grid">
-              {#each ['batch_size', 'micro_batch', 'threads', 'threads_batch', 'device'] as name}
+              {#each ['batch_size', 'micro_batch', 'threads', 'threads_batch'] as name}
                 <ParameterControl {presenter} {name} />
               {/each}
             </div>
           </details>
 
-          <details class="advanced">
+      </div>
+      <div hidden={section !== 'features'} data-section="features">
+          <details class="advanced" open>
             <summary>Generation defaults</summary>
+            <div class="advanced-body"><ParameterControl {presenter} name="enable_thinking" /></div>
             <div class="advanced-body">
               <p class="small muted">
                 Defaults for requests to the next deployed model. Clients and chat sessions can override them.
@@ -882,10 +665,12 @@
               <label class="field" for="run-stop">Stop sequences (JSON array)
                 <textarea
                   id="run-stop"
+                  aria-invalid={!!presenter.stopParseError}
                   class="field mono"
-                  value={presenter.stopSequences === null ? '' : JSON.stringify(presenter.stopSequences)}
+                  value={stopDraft}
                   placeholder={'["END", "User:"]'}
                   oninput={(e) => {
+                    stopDraft = e.currentTarget.value;
                     try {
                       const value = e.currentTarget.value.trim() ? JSON.parse(e.currentTarget.value) : null;
                       if (value !== null && (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item))) {
@@ -980,7 +765,7 @@
               <div class="lora-section">
                 <div class="od-row">
                   <span class="field-title">Managed LoRA adapters (<code>--lora</code> / <code>--lora-scaled</code>)</span>
-                  <button type="button" class="btn" onclick={addLoraAdapter}>+ Add LoRA adapter</button>
+                  <button type="button" class="btn" id="prima-lora-add" onclick={addLoraAdapter}>+ Add LoRA adapter</button>
                 </div>
                 <p class="small muted">
                   LoRA adapter GGUFs are digest-verified and distributed across all Ring-TCP ranks during Prima preparation.
@@ -1044,18 +829,23 @@
                   id="run-prima-template-kwargs"
                   class="field mono"
                   type="text"
+                  aria-invalid={!!templateKwargsError}
+                  aria-describedby={templateKwargsError ? "prima-kwargs-error" : undefined}
                   value={templateKwargsDraft}
                   placeholder={'{"enable_thinking": true}'}
                   oninput={(e) => handleTemplateKwargsInput(e.currentTarget.value)}
                 />
               </label>
               {#if templateKwargsError}
-                <ErrorMessage source="validation:template-kwargs" message={templateKwargsError} snapshot={false} />
+                <p id="prima-kwargs-error" role="alert">{templateKwargsError}</p>
               {/if}
             </div>
           </details>
 
-          <details class="advanced">
+      </div>
+      <div hidden={section !== 'expert'} data-section="expert">
+        {#if Object.keys(presenter.unrepresentedSettings).length}<div class="deploy-section"><h3>Unrepresented saved intent</h3><pre id="prima-unrepresented" tabindex="-1">{JSON.stringify(presenter.unrepresentedSettings,null,2)}</pre><p>These values have not been discarded or forwarded. Explicitly restore defaults to remove them.</p></div>{/if}
+          <details class="advanced" open>
             <summary>Declared Prima launch extras (JSON argv)</summary>
             <div class="advanced-body">
               <p class="small muted">
@@ -1064,6 +854,7 @@
               <label class="field" for="run-extra-args">Extra arguments
                 <textarea
                   id="run-extra-args"
+                  aria-invalid={!!presenter.fieldErrors.extra_args}
                   class="field mono"
                   value={presenter.extraArgsText}
                   placeholder={'["--swa-full"]'}
@@ -1074,6 +865,7 @@
                       const parsed = parsePrimaExtras(e.currentTarget.value);
                       loraRows = parsed.loraAdapters.map((item) => ({ ...item }));
                       templateKwargsDraft = parsed.templateKwargsText;
+                      templateKwargsError = ''; extrasEditError = '';
                       parseArgumentText(e.currentTarget.value);
                       presenter.scheduleEstimate();
                     } catch {
@@ -1088,191 +880,19 @@
             </div>
           </details>
 
-          <div class="deploy-section">
-            <div class="actions">
-              <button
-                class="btn"
-                disabled={!presenter.savedModelConfig || !!presenter.busy}
-                onclick={revertPrimaSavedSettings}>Revert to saved</button>
-              <button
-                class="btn"
-                disabled={!!presenter.busy}
-                onclick={restorePrimaDefaults}>Restore defaults</button>
-              <button
-                class="btn"
-                class:btn-accent={presenter.settingsDirty()}
-                disabled={!!presenter.busy || presenter.settingsLoading || !!presenter.settingsLoadError}
-                onclick={() => presenter.saveModelSettings()}>Save model defaults</button>
-            </div>
-            <p class="small muted">
-              {presenter.settingsDirty() ? 'Unsaved changes' : 'Saved configuration loaded'} · saving affects future deployments.
-            </p>
-          </div>
-        {:else}
-          <div class="deploy-section">
-            <p class="eyebrow">03 / Prepare, Profile &amp; Deploy</p>
-            <h2>Stage Ring-TCP assets, profile devices, and deploy</h2>
-            <strong>{presenter.selectedModel}</strong>
-            <p class="small muted">
-              {presenter.status?.inference_up
-                ? `Deploying replaces ${presenter.status.model_name}.`
-                : 'Inspect placement, stage model & adapter files across ranks, or run native profiling to unlock HiGHS Halda MILP scheduling.'}
-            </p>
-
-            {#if presenter.status?.role === 'master'}
-              <section class="prima-prep-box" aria-label="Prima preparation and profiling">
-                <div class="od-row">
-                  <h3>Prima asset preparation &amp; device profiling</h3>
-                  {#if prepJob?.phase}
-                    <span class="tag mono" aria-live="polite">Job: {prepJob.phase}</span>
-                  {/if}
+            <details class="advanced">
+              <summary>Export configuration</summary>
+              <div class="advanced-body">
+                <div class="actions">
+                  <button class="btn" onclick={() => presenter.copyConfiguration('cli')}>Copy CLI</button>
+                  <button class="btn" onclick={() => presenter.copyConfiguration('json')}>Copy JSON</button>
                 </div>
-                {#if primaVersions.length > 0}
-                  <div class="prep-controls">
-                    <label class="field" for="prima-deploy-runtime">Prepared Prima runtime
-                      <select
-                        id="prima-deploy-runtime"
-                        class="field"
-                        bind:value={prepRuntimeId}
-                        onchange={() => {
-                          ++prepGeneration;
-                          prepPreview = null;
-                        }}
-                        disabled={prepBusy || prepActive}
-                      >
-                        {#each primaVersions as entry}
-                          <option value={entry.version.runtime_id}>
-                            {entry.version.name || entry.version.commit.slice(0, 12)}
-                          </option>
-                        {/each}
-                      </select>
-                    </label>
-                    <div class="actions">
-                      <button
-                        type="button"
-                        class="btn"
-                        onclick={inspectPlacement}
-                        disabled={!prepRuntimeId || !presenter.selectedModel || prepBusy || prepActive}
-                      >
-                        Inspect placement
-                      </button>
-                      <button
-                        type="button"
-                        class="btn"
-                        onclick={() => runPrepare(false)}
-                        disabled={!prepRuntimeId || !presenter.selectedModel || prepBusy || prepActive}
-                      >
-                        Prepare files
-                      </button>
-                      <button
-                        type="button"
-                        class="btn btn-accent"
-                        onclick={() => runPrepare(true)}
-                        disabled={!prepRuntimeId || !presenter.selectedModel || prepBusy || prepActive}
-                      >
-                        Prepare &amp; profile
-                      </button>
-                      {#if prepActive}
-                        <button type="button" class="btn btn-danger" onclick={cancelPrepare}>
-                          Cancel preparation
-                        </button>
-                      {/if}
-                    </div>
-                  </div>
-                  {#if prepPreview && !prepFresh}
-                    <p class="small warning-text">
-                      Draft settings changed since last inspection. Clicking Prepare will re-inspect placement automatically.
-                    </p>
-                  {/if}
-                  {#if prepPreview}
-                    <p class="small muted mono">
-                      Profiles: {prepPreview.profiling?.status ?? 'unmeasured'} · Candidates: {prepPreview.candidate_count ?? 0}
-                      {#if prepPreview.plan_digest} · Digest: {String(prepPreview.plan_digest).slice(0, 12)}{/if}
-                    </p>
-                  {/if}
-                  {#if prepJob}
-                    <div class="prep-progress-panel" aria-live="polite">
-                      <div class="flex items-center gap-2">
-                        {#if prepActive}<span class="spinner" aria-hidden="true"></span>{/if}
-                        <span
-                          class:chip={true}
-                          class:chip-ok={prepJob.phase === 'prepared'}
-                          class:chip-warn={prepActive}
-                          class:chip-danger={prepJob.phase === 'failed'}
-                          class:chip-muted={prepJob.phase === 'cancelled' || prepJob.phase === 'interrupted'}
-                        >
-                          {prepProgress?.label || `Preparation: ${prepJob.phase}`}
-                        </span>
-                        {#if prepProgress?.steps_total}
-                          <span class="small muted mono">
-                            Step {prepProgress.step} of {prepProgress.steps_total}
-                          </span>
-                        {/if}
-                        <span class="ml-auto mono text-[11px]" style="color: var(--muted)">
-                          {prepPct}%
-                        </span>
-                      </div>
-                      <div
-                        class="progress"
-                        role="progressbar"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={prepPct}
-                        aria-label="Prima preparation and profiling progress"
-                      >
-                        <span style:width={`${prepPct}%`}></span>
-                      </div>
-                      <div class="mono text-[11px]" style="color: var(--muted)">
-                        {#if prepProgress?.detail}
-                          <span>{prepProgress.detail}</span>
-                        {/if}
-                        {#if prepTransferLabel}
-                          <span>{prepProgress?.detail ? ' · ' : ''}{prepTransferLabel}</span>
-                        {/if}
-                        {#if prepJob.phase === 'prepared'}
-                          <span>{prepProgress?.detail || prepTransferLabel ? ' · ' : ''}Estimate refreshed with latest device profiles.</span>
-                        {/if}
-                      </div>
-
-                      {#if prepJob.nodes && Object.keys(prepJob.nodes).length > 0}
-                        <div class="prep-node-list">
-                          {#each Object.entries(prepJob.nodes) as [nodeId, nodeState] (nodeId)}
-                            {@const nodeProg = (nodeState as Record<string, any>)?.progress as PrimaPreparationProgress | undefined}
-                            {@const nodePhase = String((nodeState as Record<string, any>)?.phase ?? 'pending')}
-                            {@const nodePct = nodeProg
-                              ? Math.min(100, Math.max(0, Math.round(Number(nodeProg.fraction ?? 0) * 100)))
-                              : nodePhase === 'prepared'
-                                ? 100
-                                : 0}
-                            <div class="prep-node-row">
-                              <div class="od-row small mono">
-                                <span>{nodeId} · {nodeProg?.label || nodePhase}</span>
-                                <span class="muted">{nodeProg?.detail ? `${nodeProg.detail} · ` : ''}{nodePct}%</span>
-                              </div>
-                              <div class="progress prep-node-bar" aria-hidden="true">
-                                <span style:width={`${nodePct}%`}></span>
-                              </div>
-                            </div>
-                          {/each}
-                        </div>
-                      {/if}
-                    </div>
-                    {#if prepJob.error}
-                      <ErrorMessage source="prima-prepare" message={prepJob.error} />
-                    {/if}
-                  {/if}
-                  {#if prepError}
-                    <ErrorMessage source="prima-prepare" message={prepError} />
-                  {/if}
-                {:else}
-                  <p class="small muted">
-                    No built Prima runtime is available yet. Pin and build a Prima version in
-                    <a href={routes.settingsLlama}>Settings → Prima</a> to stage files and profile devices.
-                  </p>
-                {/if}
-              </section>
-            {/if}
-
+                <label class="field">CLI command<textarea class="field mono" readonly value={cliExport}></textarea></label>
+                <label class="field">API JSON<textarea class="field mono" readonly value={jsonExport}></textarea></label>
+              </div>
+            </details>
+        <details class="advanced"><summary>Installed flag catalog</summary><div class="advanced-body"><pre>{JSON.stringify(presenter.expertFlags,null,2)}</pre></div></details>
+        <div hidden={!technical}>
             {#if displayRanks.length > 0}
               <h3>Ring-TCP rank topology &amp; Halda schedule</h3>
               <p class="small muted">
@@ -1414,60 +1034,58 @@
               <p class="notice small">Refresh the estimate to review effective values.</p>
             {/if}
 
-            <details class="advanced">
-              <summary>Export configuration</summary>
-              <div class="advanced-body">
-                <div class="actions">
-                  <button class="btn" onclick={() => presenter.copyConfiguration('cli')}>Copy CLI</button>
-                  <button class="btn" onclick={() => presenter.copyConfiguration('json')}>Copy JSON</button>
-                </div>
-                <label class="field">CLI command<textarea class="field mono" readonly value={cliExport}></textarea></label>
-                <label class="field">API JSON<textarea class="field mono" readonly value={jsonExport}></textarea></label>
-              </div>
-            </details>
-            <label class="check-row">
-              <input type="checkbox" bind:checked={presenter.remember} />
-              Save as model default after successful deployment
-            </label>
-          </div>
-        {/if}
-
-        {#if Object.keys(presenter.fieldErrors).length}
-          <div class="notice small" role="alert">{Object.values(presenter.fieldErrors).join(' ')}</div>
-        {/if}
-        {#if runtimeBlocked}
-          <div class="notice small">
-            {runtimeBlocked} <a href={routes.settingsLlama}>Open Prima settings →</a>
-          </div>
-        {/if}
-
-        <div class="deploy-progress-slot">
-          <LoadProgressPanel {presenter} />
         </div>
-
-        <div class="form-foot">
-          <button class="btn" disabled={deployStep === 1} onclick={() => nextStep(deployStep === 3 ? 2 : 1)}>
-            Back
-          </button>
-          {#if deployStep < 3}
-            <button
-              class="btn btn-accent"
-              disabled={!presenter.selectedModel || presenter.settingsLoading || !!presenter.settingsLoadError}
-              onclick={() => nextStep(deployStep === 1 ? 2 : 3)}
-            >
-              {deployStep === 1 ? 'Configure' : 'Review deployment'}
-            </button>
-          {:else}
-            <button class="btn btn-accent" disabled={!ready || !!presenter.busy} onclick={() => presenter.run()}>
-              {presenter.status?.inference_up ? 'Replace running model' : 'Deploy model'}
-            </button>
-          {/if}
-        </div>
-      </section>
-    </div>
-    <DeploymentPlan {presenter} onRequestProfile={() => void nextStep(3)} />
-  </div>
+      </div>
+      </fieldset>
+    {/snippet}
+    {#snippet nextDeployment()}
+      <PrimaDeploymentSummary {deployment} {presenter} onReview={openReview} />
+      {#if issues.length}<div class="notice" role="alert"><strong>Check deployment settings</strong><ul>{#each issues as issue}<li><button class="text-button" onclick={() => focusField(issue.field)}>{issue.message}</button></li>{/each}</ul></div>{/if}
+      {#if deployment.review}
+        <section class="panel inline-review" bind:this={reviewPanel} tabindex="-1" aria-labelledby="prima-review-title">
+          <h2 id="prima-review-title">Review this exact deployment</h2>
+          <p>Model: {String(deployment.review.settings.model)}</p>
+          <p class="mono">Runtime: {deployment.review.runtimeId}</p>
+          <p>Only this reviewed snapshot will be submitted. Stop any existing run explicitly before deploying.</p>
+          <h3>Warnings and qualification</h3>
+          {#each [...(deployment.review.plan.estimate_warnings ?? []), ...(deployment.review.plan.qualification_errors ?? [])] as warning}<p>{typeof warning === 'string' ? warning : JSON.stringify(warning)}</p>{/each}
+          {#if deployment.review.plan.hint}<p>{deployment.review.plan.hint}</p>{/if}
+          <h3>Requested and effective settings</h3>
+          <div class="review-table"><table><thead><tr><th>Setting</th><th>Requested</th><th>Effective</th><th>Source / adjustment</th></tr></thead><tbody>
+            {#each Object.entries(deployment.review.settings).filter(([key]) => !['settings_source','remember','advanced_open'].includes(key)) as [key,value]}
+              <tr><th>{PARAMETER_LABELS[key] ?? key.replaceAll('_',' ')}</th><td>{display(value)}</td><td>{deployment.review.plan.effective_config?.values?.[key] === undefined ? '—' : display(deployment.review.plan.effective_config.values[key])}</td><td>{deployment.review.plan.effective_config?.sources?.[key] ?? '—'} {deployment.review.plan.effective_config?.adjustments?.[key] ?? ''}</td></tr>
+            {/each}
+          </tbody></table></div>
+          <h3>Participants and placement</h3>
+          <div class="review-table"><table><thead><tr><th>Rank</th><th>Computer</th><th>Layers</th><th>Devices</th><th>GPU layers</th></tr></thead><tbody>
+            {#each deployment.review.plan.prima_topology?.ranks ?? [] as rank}
+              <tr><td>{rank.rank}</td><td>{rank.node_id}</td><td>{formatLayerRanges(rank)}</td><td>{display(rank.devices)}</td><td>{rank.ngl ?? '—'}</td></tr>
+            {/each}
+          </tbody></table></div>
+          <details><summary>Technical details: exact snapshot and plan digest</summary><pre>{JSON.stringify(deployment.review,null,2)}</pre></details>
+          <label class="check-row"><input type="checkbox" bind:checked={confirmed} disabled={deployment.launchState === 'sending'} />I reviewed this exact configuration and placement.</label>
+          <div class="actions"><button class="btn" onclick={backToEditing}>Back to editing</button><button class="btn btn-accent" disabled={!confirmed || !!deployment.reviewReason} onclick={() => deployment.launch()}>{deployment.launchState === 'sending' ? 'Submitting deployment…' : 'Run reviewed deployment'}</button></div>
+        </section>
+      {/if}
+      {#if deployment.launchState === 'accepted'}<p class="notice" role="status">Deployment accepted. Follow the loading progress and running status above.</p>{/if}
+    {/snippet}
+    {#snippet footer()}
+      <div class="actions">
+        <button class="btn" disabled={presenter.status?.role !== 'master' || !deployment.runtimeId || !!presenter.busy || presenter.settingsLoading || !!presenter.settingsLoadError || issues.length > 0} onclick={() => presenter.saveModelSettings()}>Save draft</button>
+        <button class="btn" disabled={presenter.settingsLoading || !presenter.savedModelConfig || presenter.status?.role !== 'master'} onclick={revertPrimaSavedSettings}>Revert</button>
+        <button class="btn" disabled={presenter.settingsLoading || presenter.status?.role !== 'master'} onclick={showDefaults}>Defaults…</button>
+      </div>
+      <p class="small muted">Prima-only model settings · revision {presenter.settingsRevision}. Saving never changes active inference.</p>
+    {/snippet}
+  </PrimaDeploymentShell>
 </div>
+
+<dialog bind:this={defaultsDialog} aria-labelledby="prima-defaults-title">
+  <h2 id="prima-defaults-title">Restore defaults to this draft?</h2>
+  <p>Resets all deployment controls, including templates, sampling, adapters and extra arguments. This does not overwrite saved settings or affect a running model.</p>
+  <pre>{defaultsSnapshot.map(row=>`${row.field}: ${JSON.stringify(row.before)} → ${JSON.stringify(row.after)}`).join('\n') || 'No value changes. Confirming still creates an unsaved reset.'}</pre>
+  <div class="actions"><button class="btn" onclick={() => defaultsDialog.close()}>Keep draft</button><button class="btn" onclick={() => { restorePrimaDefaults(); defaultsDialog.close(); }}>Restore to draft</button></div>
+</dialog>
 
 {#if showJinjaEditor}
   <JinjaEditor
@@ -1482,15 +1100,23 @@
 {/if}
 
 <style>
-  .deployment-form { overflow: hidden; }
+  .prima-deploy-page { min-width:0;overflow-wrap:anywhere; }
+  .prima-deploy-page :global([hidden]) { display:none !important; }
+  .prima-deploy-page :global(.btn), .prima-deploy-page :global(select), .prima-deploy-page :global(input:not([type=checkbox])) {min-height:44px;max-width:100%;}
+  .prima-deploy-page :global(.plan-summary) {position:static;top:auto;min-width:0;border-radius:8px;}
+  .prima-deploy-page :global(.parameter-heading) {flex-wrap:wrap;}
+  .prima-deploy-page :global(.scope-label) {white-space:normal;}
+  fieldset {border:0;margin:0;padding:0;min-width:0;}
+  .section-note {padding:20px;font-size:14px;}
+  dialog {width:min(820px,calc(100vw - 32px));max-height:85vh;overflow:auto;padding:24px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);}
+  dialog::backdrop {background:#000a;}
+  dialog > * {margin-bottom:16px;}
+  dialog p {overflow-wrap:anywhere;}
+  dialog button {min-height:44px;}
+
   h2 { font-size: 20px; font-weight: 600; }
   h3 { font-size: 15px; font-weight: 600; }
   .prima-header-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .prima-status-strip { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
-  .prima-status-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-  .prima-status-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
-  .danger-text { color: var(--danger); }
-  .warning-text { color: var(--warn); }
   .warning-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-color: var(--warn); }
   .deploy-section { padding: 24px; display: flex; flex-direction: column; gap: 18px; }
   .advanced { border-top: 1px solid var(--border); border-bottom: 0; border-radius: 0; margin: 0; }
@@ -1510,14 +1136,11 @@
   .notice { padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
   .lora-section { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
   .lora-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto; gap: 10px; align-items: center; }
-  .prima-prep-box { padding: 18px; border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 14px; }
-  .prep-controls { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .prep-progress-panel { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
-  .prep-node-list { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
-  .prep-node-row { display: flex; flex-direction: column; gap: 4px; }
-  .prep-node-bar { height: 4px; }
-  .deploy-progress-slot { padding: 0 24px; }
-  .deploy-progress-slot:empty { display: none; }
+  .deploy-progress-slot:empty { display:none; }
+  .inline-review { padding:24px;display:grid;gap:16px;min-width:0; }
+  .inline-review summary { cursor:pointer;min-height:44px; }
+  .inline-review table { min-width:600px; }
+
   .review-table { overflow-x: auto; max-width: 100%; }
   table { width: 100%; font-size: 12px; text-align: left; border-collapse: collapse; }
   td, th { padding: 12px 8px; border-bottom: 1px solid var(--border); max-width: 240px; overflow-wrap: anywhere; }
@@ -1525,12 +1148,11 @@
   tr.changed td:first-child { color: var(--accent); }
   textarea { min-height: 90px; resize: vertical; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
-  .form-foot { padding: 20px 24px; }
   @media (max-width: 700px) {
-    .field-grid, .prima-status-row { grid-template-columns: 1fr; }
+    .field-grid { grid-template-columns: 1fr; }
     .lora-row { grid-template-columns: 1fr; }
     .deploy-section { padding: 18px; }
-    .deploy-progress-slot { padding: 0 18px; }
+    .inline-review { padding:18px; }
     .advanced summary { padding: 18px; }
     .advanced-body { padding: 0 18px 18px; }
   }

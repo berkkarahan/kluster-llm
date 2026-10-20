@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import threading
@@ -96,14 +97,28 @@ def strict_json(raw: str, limit: int = MAX_FRAME) -> dict[str, Any]:
     return data
 
 
+def _system32_executable(name: str) -> str:
+    exe_name = name if name.lower().endswith(".exe") else f"{name}.exe"
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    candidate = system_root / "System32" / exe_name
+    if candidate.is_file():
+        return str(candidate)
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+    return str(candidate)
+
+
 def _secure_directory(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if directory.is_symlink():
         raise IdentityError("identity directory cannot be a symlink")
     if os.name == "nt":
+        whoami_bin = _system32_executable("whoami")
+        icacls_bin = _system32_executable("icacls")
         # Resolve the current account SID without accepting account text as a command.
         result = subprocess.run(
-            ["whoami", "/user", "/fo", "csv", "/nh"],
+            [whoami_bin, "/user", "/fo", "csv", "/nh"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -114,7 +129,7 @@ def _secure_directory(directory: Path) -> None:
             raise IdentityError("cannot establish private identity ACL")
         subprocess.run(
             [
-                "icacls",
+                icacls_bin,
                 str(directory),
                 "/inheritance:r",
                 "/grant:r",

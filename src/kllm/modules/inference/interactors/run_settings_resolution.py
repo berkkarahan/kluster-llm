@@ -57,7 +57,9 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         "parallel_slots": 1 if body.parallel_slots == "auto" else int(body.parallel_slots),
         "batch_size": 512 if body.batch_size == "auto" else int(body.batch_size),
         "micro_batch": 128 if body.micro_batch == "auto" else int(body.micro_batch),
-        "moe_offload": body.moe_offload,
+        # Prima moves whole layers around its ring; llama.cpp's automatic
+        # expert-only RPC fallback cannot be represented by that manifest.
+        "moe_offload": 0 if prima and body.moe_offload == "auto" else body.moe_offload,
         "context": body.context,
         "cache_type_k": body.cache_type_k,
         "cache_type_v": body.cache_type_v,

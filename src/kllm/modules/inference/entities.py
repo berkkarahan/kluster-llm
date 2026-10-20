@@ -327,8 +327,23 @@ class PlanBody(NetworkRequestFields):
     pass
 
 
+class EngineModelSettingsBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
+    runtime_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_revision: int = Field(ge=0)
+    parameter_set: dict[str, Any]
+
+
+class DeploymentReview(BaseModel):
+    """Ephemeral optimistic precondition, excluded from execution identity."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    runtime_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RunBody(NetworkRequestFields):
-    pass
+    review: DeploymentReview | None = Field(default=None, exclude=True)
 
 
 class LegacyPlanBody(PlanBody):

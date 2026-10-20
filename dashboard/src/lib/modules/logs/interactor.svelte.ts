@@ -28,6 +28,8 @@ export const REFRESH_MS: Record<RefreshMode, number> = {
 export const REQUEST_TIMEOUT_MS = 5000;
 /** Newest accepted entries kept in the DOM; older rows are dropped with a notice. */
 export const MAX_ROWS = 2000;
+/** Maximum size for client-side log deduplication set to avoid unbounded memory growth. */
+export const MAX_SEEN_IDS = 5000;
 const INITIAL_N = 200;
 const POLL_N = 5000;
 
@@ -40,13 +42,13 @@ function nowMs(): number {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const SOURCES = new Set<LogSource>(['agent', 'llama', 'rpc', 'unknown']);
+const SOURCES = new Set<string>(['agent', 'llama', 'rpc', 'primacpp', 'system', 'network', 'unknown']);
 const GAP_REASONS = new Set(['retention', 'batch_limit', 'feed_reset']);
 
 function tagForSource(source: string): LogTag | null {
   if (source === 'agent') return 'ui';
-  if (source === 'llama' || source === 'rpc') return 'inference';
-  if (source === 'unknown') return 'unclassified';
+  if (source === 'llama' || source === 'rpc' || source === 'primacpp') return 'inference';
+  if (source === 'unknown' || source === 'system' || source === 'network') return 'unclassified';
   return null;
 }
 
@@ -58,7 +60,7 @@ function withTag(entry: Omit<LogEntry, 'tag'> & { tag?: LogTag }, index: number)
   if (entry.tag != null && entry.tag !== expected) {
     throw new Error(`Invalid log snapshot: line ${index} has a tag that does not match its source`);
   }
-  return entry.tag === expected ? entry as LogEntry : { ...entry, tag: expected };
+  return entry.tag === expected ? (entry as LogEntry) : { ...entry, tag: expected };
 }
 
 function validateSnapshot(value: unknown): LogSnapshot {
@@ -103,7 +105,7 @@ function validateSnapshot(value: unknown): LogSnapshot {
     if (typeof row.node_id !== 'string' || !row.node_id) {
       throw new Error(`Invalid log snapshot: line ${index} has no node ID`);
     }
-    if (typeof row.source !== 'string' || !SOURCES.has(row.source as LogSource)) {
+    if (typeof row.source !== 'string' || !SOURCES.has(row.source)) {
       throw new Error(`Invalid log snapshot: line ${index} has an invalid source`);
     }
     if (typeof row.line !== 'string') throw new Error(`Invalid log snapshot: line ${index} has no message`);
@@ -427,6 +429,10 @@ export class LogTrail {
       if (!entry || !entry.event_id) continue;
       const tagged = withTag(entry, index);
       if (this.seenIds.has(tagged.event_id)) continue;
+      if (this.seenIds.size >= MAX_SEEN_IDS) {
+        const oldestId = this.seenIds.keys().next().value;
+        if (oldestId) this.seenIds.delete(oldestId);
+      }
       this.seenIds.add(tagged.event_id);
       appended.push(tagged);
     }

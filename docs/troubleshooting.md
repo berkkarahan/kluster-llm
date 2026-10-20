@@ -1,5 +1,36 @@
 # Troubleshooting Guide
 
+## Prima deployment workspace
+
+- **Review revoked / `DEPLOYMENT_REVIEW_CHANGED` (409):** settings, runtime,
+  inventory or the authoritative placement changed. Inspect the current draft and
+  review it again. Do not remove the review precondition or reuse an old digest.
+- **`MODEL_SETTINGS_CHANGED` (409):** another save advanced the Prima profile
+  revision. Keep/export your draft, reload the saved profile, compare and save
+  intentionally. Do not retry with a guessed revision. Prima profiles are in
+  `engine-model-settings.json`; legacy settings are not overwritten.
+- **`MODEL_SETTINGS_INVALID`:** the scoped settings file is corrupt or
+  incompatible. Preserve it for recovery; do not delete it or silently replace it
+  with empty defaults. Repair from a known-good copy before saving.
+- **Review unsupported / scoped settings unavailable:** update the control API
+  through the supported installer. The UI does not silently switch to legacy
+  shared saving or unguarded Run. Selecting a preview runtime does not set the
+  actual cluster target; resolve target mismatch in runtime settings.
+- **Cancellation requested / local settlement unknown:** a terminal job label
+  alone does not prove local work has finished. Refresh job status. Remote leases
+  can still be retiring after local settlement; do not force-release ownership.
+- **Preparation outcome unknown:** reconcile the original request. A safe
+  preparation retry uses the same request ID and identical settings/runtime/digest,
+  not a newly generated request for a possibly still-running operation.
+- **Run outcome unknown:** inspect backend active configuration and Activity via
+  Reconcile run status. Do not repeatedly click Run or automatically replay the
+  POST; this UI does not provide a durable exactly-once launch journal.
+- **Profiles missing/unmeasured:** inspect the reported coverage/fallback reason.
+  Fresh profiles are not qualification, and profiling cannot fix unsupported
+  settings or an unrepresentable placement. Prepare & profile is explicit work,
+  never an automatic response to editing settings.
+
+
 ### Prima profiler exits before readiness
 
 Inspect the preparation/profile job logs, including `inspection.log` and each
@@ -284,6 +315,13 @@ uv run kllm run --model /absolute/path/model.gguf
 
 ### Out of memory
 
+**Model settings exceed this GPU's buffer limit:** Prima detected a Vulkan
+single-buffer allocation limit. Reduce **Micro batch** or **Context size**, or
+enable **Flash Attention** if supported, then deploy again. This limit is separate
+from total free VRAM; a successful memory estimate or profile does not guarantee
+that the deployment's buffers fit. The original native diagnostic remains in the
+run's `rank.log`.
+
 Inspect the plan before launching:
 
 ```bash
@@ -469,6 +507,27 @@ A local node-label change (for example, `cluster.json` was reset or restored whi
 Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.
 
 ### Guided setup and administrator support
+
+**Administrator enabled but setup disabled:** permission and adapter eligibility
+are separate requirements. Each computer's current explanation remains visible
+after dismissing errors or clearing notifications. Expand **Adapter details** for
+interface speeds and rejection reasons. The setup explanation names blocked computers.
+
+**This adapter carries the cluster’s management connection:** cluster control traffic
+already uses an address on that Ethernet adapter. Guided setup protects that path
+from reconfiguration. A manually configured Ethernet connection can work while the
+panel says **Not set up**, meaning Kluster has no active managed network. Enabling
+administrator access again does not resolve this refusal.
+
+Before migrating management, verify a separate LAN control path in both directions
+on every computer, including routes, and settle inference/reservations. Preserve
+signing identities, grants and user-owned addresses. Currently `start --rpc-bind`
+also sets the advertised address; start/join have no independent management-address
+option. Changing that bind also changes the unmanaged inference endpoint. If
+independent endpoints are required, preserve the current cluster until separation
+is supported; do not bypass the management-adapter check. After a supported
+migration, verify fresh heartbeats and signed channels, refresh the assessment, and
+create a new network rather than reusing a stopped network ID.
 
 **Administrator access needed:** open Kluster on the named computer and use the local enable button. A remote master cannot open the OS approval prompt. Denial leaves the computer unconfigured; retry locally. The helper is installed by the supported build/install flow, while the agent remains in the original user account. A missing helper binary means update Kluster through [agent installation](agent-install.md).
 

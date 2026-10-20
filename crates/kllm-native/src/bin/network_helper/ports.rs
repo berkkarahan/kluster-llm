@@ -601,6 +601,28 @@ fn removal_script(name: &str, current: &Value) -> Result<String> {
     Ok(format!("{} if ($null -ne $current) {{$old=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{expected}'))|ConvertFrom-Json; foreach ($field in $old.PSObject.Properties.Name) {{if ((ConvertTo-Json -InputObject $old.$field -Compress -Depth 5) -cne (ConvertTo-Json -InputObject $current.$field -Compress -Depth 5)) {{throw 'Prima firewall ownership changed; cleanup retained'}}}}; $r|Remove-NetFirewallRule}}", snapshot_script(name)))
 }
 
+#[cfg(windows)]
+fn batched_creation_script(name: &str, rule: &Rule) -> String {
+    let peers = rule
+        .peers
+        .iter()
+        .map(|p| format!("'{p}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "$name='{name}'; $r=@(Get-NetFirewallRule -Name $name -PolicyStore PersistentStore -ErrorAction SilentlyContinue); if ($r.Count -gt 0) {{ConvertTo-Json -InputObject @{{error='exists'}} -Compress; exit 0}}; $a=Get-NetAdapter -InterfaceIndex $i; $created=New-NetFirewallRule -Name $name -DisplayName 'Kluster Prima private rank' -Direction Inbound -Action Allow -Enabled True -Protocol TCP -LocalAddress $ip -RemoteAddress @({peers}) -LocalPort {} -InterfaceAlias $a.Name -Profile Any -PolicyStore PersistentStore -ErrorAction Stop; $p=$created|Get-NetFirewallPortFilter; $addr=$created|Get-NetFirewallAddressFilter; $f=$created|Get-NetFirewallInterfaceFilter; $current=[pscustomobject]@{{Name=$created.Name; InstanceID=$created.InstanceID; Direction=$created.Direction.ToString(); Action=$created.Action.ToString(); Enabled=$created.Enabled.ToString(); Profile=$created.Profile.ToString(); Protocol=$p.Protocol; Ports=@($p.LocalPort); Local=@($addr.LocalAddress); Remote=@($addr.RemoteAddress); Interface=@($f.InterfaceAlias)}}; ConvertTo-Json -InputObject @{{success=$true; current=$current}} -Compress -Depth 5",
+        rule.port
+    )
+}
+
+#[cfg(windows)]
+fn batched_removal_script(name: &str, current: &Value) -> Result<String> {
+    let expected = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(current)?);
+    Ok(format!(
+        "$name='{name}'; $r=@(Get-NetFirewallRule -Name $name -PolicyStore PersistentStore -ErrorAction SilentlyContinue); if ($r.Count -eq 0) {{ConvertTo-Json -InputObject @{{status='already_absent'}} -Compress; exit 0}}; if ($r.Count -gt 1) {{throw 'Ambiguous Prima firewall ownership'}}; $p=$r|Get-NetFirewallPortFilter; $a=$r|Get-NetFirewallAddressFilter; $f=$r|Get-NetFirewallInterfaceFilter; $current=[pscustomobject]@{{Name=$r[0].Name; InstanceID=$r[0].InstanceID; Direction=$r[0].Direction.ToString(); Action=$r[0].Action.ToString(); Enabled=$r[0].Enabled.ToString(); Profile=$r[0].Profile.ToString(); Protocol=$p.Protocol; Ports=@($p.LocalPort); Local=@($a.LocalAddress); Remote=@($a.RemoteAddress); Interface=@($f.InterfaceAlias)}}; $old=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{expected}'))|ConvertFrom-Json; foreach ($field in $old.PSObject.Properties.Name) {{if ((ConvertTo-Json -InputObject $old.$field -Compress -Depth 5) -cne (ConvertTo-Json -InputObject $current.$field -Compress -Depth 5)) {{ConvertTo-Json -InputObject @{{error='ownership_changed'}} -Compress; exit 0}}}}; $r|Remove-NetFirewallRule; $check=@(Get-NetFirewallRule -Name $name -PolicyStore PersistentStore -ErrorAction SilentlyContinue); if ($check.Count -gt 0) {{ConvertTo-Json -InputObject @{{error='not_drained'}} -Compress; exit 0}}; ConvertTo-Json -InputObject @{{status='drained'}} -Compress"
+    ))
+}
+
 pub fn snapshot(scope: &Scope, run: &str, port: u16) -> Result<Value> {
     let name = name(scope, run, port)?;
     #[cfg(windows)]
@@ -629,18 +651,19 @@ pub fn create(scope: &Scope, owner: &Owner, rule: &Rule) -> Result<Value> {
     if !host::has_address(scope)? {
         return Err(refuse("Prima private address disappeared"));
     }
-    if !snapshot(scope, &owner.run_id, rule.port)?.is_null() {
-        return Err(refuse(
-            "Prima firewall rule already exists; ownership not adopted",
-        ));
-    }
     #[cfg(windows)]
     {
         let name = name(scope, &owner.run_id, rule.port)?;
-        let created: Value =
-            serde_json::from_str(&host::powershell(scope, &creation_script(&name, rule))?)?;
-        let current = snapshot(scope, &owner.run_id, rule.port)?;
-        if !created.is_string() || current["InstanceID"] != created {
+        let script = batched_creation_script(&name, rule);
+        let output_str = host::powershell_batch(scope, &script)?;
+        let resp: Value = serde_json::from_str(&output_str)?;
+        if resp.get("error").and_then(|e| e.as_str()) == Some("exists") {
+            return Err(refuse(
+                "Prima firewall rule already exists; ownership not adopted",
+            ));
+        }
+        let current = resp.get("current").cloned().unwrap_or(Value::Null);
+        if current.is_null() || current.get("InstanceID").is_none_or(|id| !id.is_string()) {
             return Err(refuse(
                 "Created Prima rule identity changed; cleanup requires review",
             ));
@@ -649,6 +672,7 @@ pub fn create(scope: &Scope, owner: &Owner, rule: &Rule) -> Result<Value> {
     }
     #[cfg(not(windows))]
     {
+        let _ = rule;
         Err(refuse(
             "Prima private firewall backend requires implementation for this OS",
         ))
@@ -658,28 +682,33 @@ pub fn create(scope: &Scope, owner: &Owner, rule: &Rule) -> Result<Value> {
 pub fn remove(scope: &Scope, owner: &Owner, index: usize) -> Result<()> {
     host::identity(scope)?;
     let rule = &owner.contract.rules[index];
-    let current = snapshot(scope, &owner.run_id, rule.port)?;
-    if current.is_null() {
-        return Ok(());
-    }
-    if owner
-        .snapshots
-        .get(index)
-        .is_none_or(|old| old.is_null() || old != &current)
-    {
-        return Err(refuse("Prima firewall ownership changed; cleanup retained"));
-    }
+    let current_snapshot = match owner.snapshots.get(index) {
+        Some(s) if !s.is_null() => s.clone(),
+        _ => return Ok(()),
+    };
     #[cfg(windows)]
     {
         let name = name(scope, &owner.run_id, rule.port)?;
-        host::powershell(scope, &removal_script(&name, &current)?)?;
-        if !snapshot(scope, &owner.run_id, rule.port)?.is_null() {
+        let script = batched_removal_script(&name, &current_snapshot)?;
+        let output_str = host::powershell_batch(scope, &script)?;
+        let resp: Value = serde_json::from_str(&output_str)?;
+        if resp.get("error").and_then(|e| e.as_str()) == Some("ownership_changed") {
+            return Err(refuse("Prima firewall ownership changed; cleanup retained"));
+        }
+        if resp.get("error").and_then(|e| e.as_str()) == Some("not_drained") {
             return Err(refuse("Prima firewall rule has not drained"));
         }
-        return Ok(());
+        if resp.get("status").and_then(|s| s.as_str()) == Some("drained")
+            || resp.get("status").and_then(|s| s.as_str()) == Some("already_absent")
+        {
+            return Ok(());
+        }
+        return Err(refuse("Prima firewall rule has not drained"));
     }
     #[cfg(not(windows))]
     {
+        let _ = rule;
+        let _ = current_snapshot;
         Err(refuse(
             "Prima private firewall backend requires implementation for this OS",
         ))
@@ -836,6 +865,8 @@ mod tests {
             snapshot_script(&name),
             creation_script(&name, rule),
             removal_script(&name, &json!({"InstanceID":"owned", "Ports":["9000"]})).unwrap(),
+            batched_creation_script(&name, rule),
+            batched_removal_script(&name, &json!({"InstanceID":"owned", "Ports":["9000"]})).unwrap(),
         ] {
             let encoded = base64::engine::general_purpose::STANDARD.encode(script.as_bytes());
             let parser = format!("$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')), [ref]$tokens, [ref]$errors)|Out-Null; if ($errors.Count) {{throw ($errors|Out-String)}}; 'parsed'");

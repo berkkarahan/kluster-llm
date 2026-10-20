@@ -364,3 +364,4 @@ CONTROL_V2: tuple[tuple[str, str, str], ...] = (
     ('/telemetry/series', 'GET', 'usage_series'),
     ('/telemetry/readings', 'GET', 'usage_readings'),
 )
+

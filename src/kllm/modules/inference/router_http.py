@@ -21,6 +21,7 @@ from kllm.modules.inference.interactors.effective_config import effective_config
 from kllm.modules.inference.interactors.rpc_runs import remap_rpc_plan, selected_workers
 from kllm.modules.runtimes.interactors.selection import snapshot
 from kllm.modules.primacpp.interactors.recipe import require_qualified
+from kllm.modules.inference.interactors.deployment_review import DEPLOYMENT_REVIEW_VERSION, require_review
 
 
 class MasterLaunchBuilder(Protocol):
@@ -128,11 +129,14 @@ class InferenceHandlers:
             members = self._deps.network_members(body.network_id)
         result = self._deps.execute_plan(body, members)
         runtime_snapshot = snapshot()
+        if (runtime_snapshot or {}).get("engine") == "primacpp":
+            result["deployment_review_version"] = DEPLOYMENT_REVIEW_VERSION
         if (runtime_snapshot or {}).get("engine") == "primacpp" and result.get("fit_status") != "overflow":
             planner = getattr(self._deps, "prima_plan", None)
             if planner:
                 try:
                     result = planner(body, path, members)
+                    result["deployment_review_version"] = DEPLOYMENT_REVIEW_VERSION
                 except ValueError as error:
                     raise HTTPException(409, detail={"code": "PRIMA_PLAN_REFUSED", "message": str(error)}) from None
         if runtime_snapshot:
@@ -174,6 +178,9 @@ class InferenceHandlers:
             return self._run(body)
 
     def _run(self, body: RunBody) -> dict[str, Any]:
+        # Settings resolution rebuilds the request without ephemeral fields.
+        review = body.review
+        require_review(review, snapshot())
         try:
             require_qualified(snapshot() or {})
         except ValueError as error:
@@ -211,6 +218,7 @@ class InferenceHandlers:
                     plan_result = planner(body, path, members)
                 except ValueError as error:
                     raise HTTPException(409, detail={"code": "PRIMA_PLAN_REFUSED", "message": str(error)}) from None
+            require_review(review, snapshot(), plan_result)
             effective = effective_configuration(body, plan_result, path)
             try:
                 launched = self._deps.prima_run(body, path, plan_result, members)
@@ -411,4 +419,7 @@ CONTROL_V2: tuple[tuple[str, str, str], ...] = (
     ('/inference/load', 'GET', 'load_progress_endpoint'),
     ('/inference/model-settings/{model}', 'GET', 'get_model_settings'),
     ('/inference/model-settings/{model}', 'PUT', 'put_model_settings'),
+    ('/inference/engine-model-settings/{engine}/{model}', 'GET', 'get_engine_model_settings'),
+    ('/inference/engine-model-settings/{engine}/{model}', 'PUT', 'put_engine_model_settings'),
 )
+

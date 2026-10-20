@@ -12,6 +12,7 @@ from kllm.modules.managed_network.interactors.verification import StreamScope
 from kllm.modules.primacpp.interactors.execution import ExecutionManifest, profile_pairs
 from kllm.modules.primacpp.interactors.execution import authority_owner
 from kllm.shared.runtime_resources import prima_scope
+from kllm.shared.prima_diagnostics import emit
 
 
 def _guard(control, preparation_job_id, scope, owner, authorize):
@@ -222,6 +223,8 @@ def collect_links(control, manifest, operation_id, check, progress):
         measured.append(
             {"scope": scope.model_dump(mode="json"), **receipt, "received_at": time.time()}
         )
+        emit("profiling", "private link measured", identity=operation_id, source_node=source,
+             target_node=target, latency_ms=receipt["latency_ms"], bandwidth_bytes_s=receipt["bandwidth_bytes_s"])
         if hasattr(control, "_on_link_progress"):
             control._on_link_progress(operation_id, index, total_pairs, source, target)
         progress()

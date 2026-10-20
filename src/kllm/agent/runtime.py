@@ -450,9 +450,10 @@ _model_service = ModelService(
     ThreadPoolExecutor(max_workers=1, thread_name_prefix="kllm-download"),
 )
 membership_mod.reconcile_last_plan(state_ref.current())
-if not state_ref.current().node_id:
-    state_ref.current().node_id = secrets.token_hex(4)
-    state_ref.current().save()
+with state_ref.current().lock:
+    if not state_ref.current().node_id:
+        state_ref.current().node_id = secrets.token_hex(4)
+        state_ref.current().save()
 
 
 def _network_state_service() -> NetworkStateService:
@@ -670,13 +671,14 @@ def _worker_local_leave() -> None:
         runtime.clear_children()
     _managed_network_before_reset()
     _reset_netsec_state()
-    membership_mod.clear_membership_fields(state_ref.current())
-    state_ref.current().role = "idle"
-    state_ref.current().join_key = None
-    state_ref.current().master_host = None
-    state_ref.current().model_name = None
-    state_ref.current().gpu_ids = None
-    state_ref.current().save()
+    with state_ref.current().lock:
+        membership_mod.clear_membership_fields(state_ref.current())
+        state_ref.current().role = "idle"
+        state_ref.current().join_key = None
+        state_ref.current().master_host = None
+        state_ref.current().model_name = None
+        state_ref.current().gpu_ids = None
+        state_ref.current().save()
 
 
 def _master_control_base() -> str:
@@ -774,8 +776,9 @@ def _schedule_worker_latency_probe() -> None:
     def probe() -> None:
         global _latency_probe_inflight
         try:
-            _probe_worker_latencies()
-            state_ref.current().save()
+            with state_ref.current().lock:
+                _probe_worker_latencies()
+                state_ref.current().save()
         finally:
             with _latency_probe_lock:
                 _latency_probe_inflight = False
@@ -860,7 +863,7 @@ def _require_key(x_kllm_key: str | None = Header(default=None)) -> None:
         return
     if not state_ref.current().join_key:
         raise HTTPException(503, "master has no join key")
-    if x_kllm_key != state_ref.current().join_key:
+    if not secrets.compare_digest(x_kllm_key or "", state_ref.current().join_key or ""):
         raise HTTPException(401, "invalid join key")
 
 
@@ -1509,6 +1512,19 @@ def _run_settings_handlers() -> RunSettingsHandlers:
         model_settings_store,
         model_ops.resolve_local_model,
         available_threads,
+        capture_runtime=lambda identity: _runtime_registry().capture(identity),
+    )
+
+
+def _engine_settings_handlers():
+    from kllm.modules.inference.gateways.engine_settings import EngineSettingsStore
+    from kllm.modules.inference.interactors.engine_settings import EngineSettingsHandlers
+
+    return EngineSettingsHandlers(
+        EngineSettingsStore(home_dir() / "engine-model-settings.json"),
+        model_settings_store, model_ops.resolve_local_model,
+        lambda identity: _runtime_registry().capture(identity),
+        lambda body, path: _run_settings_handlers().preflight(body, path),
     )
 
 
@@ -1634,6 +1650,7 @@ from kllm.modules.cluster.endpoints import (  # noqa: E402
     register,
     unregister,
     heartbeat,
+    set_cluster_providers,
 )
 from kllm.modules.models.endpoints import (  # noqa: E402
     list_models,
@@ -1642,8 +1659,11 @@ from kllm.modules.models.endpoints import (  # noqa: E402
     download_progress,
     cancel_download,
     delete_model,
+    set_model_handlers_provider,
 )
 from kllm.modules.inference.endpoints import (  # noqa: E402
+    get_engine_model_settings,
+    put_engine_model_settings,
     load_progress_endpoint,
     chat_completions,
     embeddings,
@@ -1671,10 +1691,12 @@ from kllm.modules.inference.endpoints import (  # noqa: E402
     legacy_plan,
     legacy_run,
     legacy_put_model_settings,
+    set_inference_providers,
 )
 from kllm.modules.updates.endpoints import (  # noqa: E402
     cluster_update_endpoint,
     cluster_update_progress,
+    set_cluster_update_handlers_provider,
 )
 from kllm.modules.settings.endpoints import (  # noqa: E402
     get_api_token,
@@ -1684,6 +1706,7 @@ from kllm.modules.settings.endpoints import (  # noqa: E402
     get_gpus,
     put_config,
     get_home,
+    set_settings_handlers_provider,
 )
 from kllm.modules.logs.endpoints import (  # noqa: E402
     get_logging,
@@ -1691,6 +1714,7 @@ from kllm.modules.logs.endpoints import (  # noqa: E402
     put_logging,
     ingest_logs,
     get_logs,
+    set_logs_providers,
 )
 from kllm.modules.usage.endpoints import (  # noqa: E402
     usage_ingest,
@@ -1698,10 +1722,12 @@ from kllm.modules.usage.endpoints import (  # noqa: E402
     usage_lifetimes,
     usage_series,
     usage_readings,
+    set_usage_handlers_provider,
 )
 from kllm.modules.live.endpoints import (  # noqa: E402
     dashboard_live,
     dashboard_live_websocket,
+    set_live_providers,
 )
 
 _route_handlers: dict[str, Callable[..., Any]] = {
@@ -1755,6 +1781,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "load_progress_endpoint": load_progress_endpoint,
     "get_model_settings": get_model_settings,
     "put_model_settings": put_model_settings,
+    "get_engine_model_settings": get_engine_model_settings,
+    "put_engine_model_settings": put_engine_model_settings,
     "usage_live": usage_live,
     "usage_ingest": usage_ingest,
     "usage_lifetimes": usage_lifetimes,
@@ -1768,6 +1796,46 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_hf_token": get_hf_token,
     "put_hf_token": put_hf_token,
 }
+
+set_settings_handlers_provider(_settings_handlers)
+set_cluster_update_handlers_provider(_cluster_update_handlers)
+set_usage_handlers_provider(
+    ingest=_usage_ingest_handlers,
+    live=_usage_live_handlers,
+    history=_usage_history_handlers,
+)
+set_live_providers(
+    feed=_live_feed,
+    websocket_handler=_live_websocket_handler,
+)
+set_logs_providers(
+    handlers=_log_handlers,
+    proxy=_try_proxy_master_logs,
+)
+set_cluster_providers(
+    sync_master_liveness=_sync_master_liveness,
+    dashboard_status_service=_dashboard_status_service,
+    master_start_handler=_master_start_handler,
+    cluster_lifecycle_handlers=_cluster_lifecycle_handlers,
+    join_cluster=_join_cluster,
+    membership_handlers=_membership_handlers,
+)
+set_model_handlers_provider(_model_handlers)
+set_inference_providers(
+    observed_inference=_observed_inference,
+    active_config=_active_config,
+    connection_url=_connection_url,
+    connection_request_url=_connection_request_url,
+    master_lan_host=_master_lan_host,
+    inference_activity=_inference_activity,
+    run_settings_handlers=_run_settings_handlers,
+    engine_settings_handlers=_engine_settings_handlers,
+    template_validation_service=_template_validation_service,
+    inference_handlers=_inference_handlers,
+    managed_network_service=_managed_network_service,
+    managed_network_error=lambda: getattr(app.state, "managed_network_error", None),
+)
+
 legacy_v1_router = _build_v1_router(
     {
         **_route_handlers,

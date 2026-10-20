@@ -408,6 +408,10 @@ def _scope_errors(record: dict, runtime: dict, topology: str, context: dict | No
 
     errors: list[str] = []
     unrestricted = record.get("unrestricted") is True
+    allow_unrestricted = context.get("allow_unrestricted_override", False) if context else False
+    if unrestricted and not allow_unrestricted:
+        errors.append("unrestricted_profile_forbidden_in_production")
+        unrestricted = False
     expected_commit = (
         runtime.get("commit")
         if unrestricted and record.get("source_commit") is None

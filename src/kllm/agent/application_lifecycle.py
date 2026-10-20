@@ -82,8 +82,11 @@ class _LifespanSequence:
                 job.exception()
 
         task.add_done_callback(observe)
-        done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+        done, pending = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
         if not done:
+            for p in pending:
+                p.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
             raise PersistenceError(message)
         return task.result()
 

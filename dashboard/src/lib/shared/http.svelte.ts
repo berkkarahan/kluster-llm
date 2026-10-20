@@ -41,6 +41,17 @@ export function apiErrorMessage(data: unknown, text: string, status: number, fal
   return text || `${fallback} ${status}`;
 }
 
+/** HTTP responses are distinguishable from transport failures without changing Error rendering. */
+export class HttpResponseError extends Error {
+  readonly code: string | undefined;
+  constructor(message: string, readonly status: number, data?: unknown) {
+    super(message);
+    const body = data && typeof data === 'object' ? data as Record<string, any> : {};
+    const detail = body.error?.details ?? body.detail ?? body.error ?? body;
+    this.code = typeof detail?.code === 'string' ? detail.code : undefined;
+  }
+}
+
 /** Shared fetch gateway: bearer token, busy flag, and the command side effects. */
 export class HttpClient {
   apiToken = $state('');
@@ -98,7 +109,7 @@ export class HttpClient {
         data = text;
       }
       if (!r.ok) {
-        throw new Error(apiErrorMessage(data, text, r.status, path));
+        throw new HttpResponseError(apiErrorMessage(data, text, r.status, path), r.status, data);
       }
       if (path === '/v2/models/downloads' && data && typeof data === 'object'
         && typeof (data as { operation_id?: unknown }).operation_id === 'string') {

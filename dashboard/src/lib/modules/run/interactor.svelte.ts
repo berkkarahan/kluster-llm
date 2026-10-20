@@ -1,6 +1,6 @@
 import { formatArguments, parseArgumentText, PARAMETER_FIELDS, parameterBounds, shellQuote } from './configuration';
 import type { EffectiveConfig, ExpertFlag, LoadProgress, ParameterDescriptor, PlacementStrategyMode } from './entities';
-import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, normalizeKvCacheType } from './entities';
+import { DEFAULT_MAX_CONTEXT, MIN_CONTEXT, KV_CACHE_TYPES, normalizeKvCacheType } from './entities';
 import type { ModelDefaultsInfo } from '../models/entities';
 import { formatMemoryComponent } from '../../shared/format-memory';
 import { errors } from '../../shared/errors';
@@ -52,6 +52,21 @@ export class RunInteractor {
   settingsLoading = $state(false);
   settingsLoadError = $state('');
   savedModelConfig = $state<Record<string, unknown> | null>(null);
+  settingsScope = $state<'legacy' | 'primacpp'>('legacy');
+  settingsRuntimeId = $state('');
+  settingsRevision = $state(0);
+  editorRevision = $state(0);
+  rawDraftRevision = $state(0);
+  private savedRawDraftRevision = $state(0);
+  noteRawDraftEdit() { ++this.rawDraftRevision; }
+  legacyModelConfig = $state<Record<string, unknown> | null>(null);
+  capabilityMetadata = $state<Record<string, unknown>>({});
+  capabilitiesError = $state('');
+  localDraftErrors = $state<Record<string, string>>({});
+  unrepresentedSettings = $state<Record<string, unknown>>({});
+  private resetDirty = $state(false);
+  private saveSequence = 0;
+  primaEstimate: ((delay: number, force?: boolean) => void) | null = null;
   runDevice = $state<'cpu' | 'gpu' | null>(null);
   runGpuIds = $state<number[] | null>(null);
   runVramPercent = $state<number | null>(null);
@@ -225,6 +240,7 @@ export class RunInteractor {
 
   /** True when Plan & Run fields differ from the last saved / loaded baseline. */
   settingsDirty(): boolean {
+    if (this.resetDirty || this.rawDraftRevision !== this.savedRawDraftRevision || Object.keys(this.localDraftErrors).length || this.stopParseError) return true;
     if (!this.selectedModel) return false;
     return this.settingsFingerprint() !== this.settingsBaseline;
   }
@@ -240,10 +256,13 @@ export class RunInteractor {
   }
 
   markSettingsClean() {
+    this.resetDirty = false;
     this.settingsBaseline = this.settingsFingerprint();
+    this.savedRawDraftRevision = this.rawDraftRevision;
   }
 
   applyParameterSet(ps: Record<string, unknown>) {
+    ++this.editorRevision;
     this.draftModel = typeof ps.draft_model === 'string' ? ps.draft_model : '';
     this.mmproj = typeof ps.mmproj === 'string' ? ps.mmproj : '';
     this.chatTemplateText = typeof ps.chat_template_text === 'string' ? ps.chat_template_text : '';
@@ -258,9 +277,9 @@ export class RunInteractor {
     }
     if (typeof ps.context === 'number') this.context = ps.context;
     if (typeof ps.context_auto === 'boolean') this.contextAuto = ps.context_auto;
-    this.clampContextToModel();
-    if (typeof ps.cache_type_k === 'string') this.cacheTypeK = normalizeKvCacheType(ps.cache_type_k);
-    if (typeof ps.cache_type_v === 'string') this.cacheTypeV = normalizeKvCacheType(ps.cache_type_v);
+    if (this.settingsScope === 'legacy') this.clampContextToModel();
+    if (typeof ps.cache_type_k === 'string') this.cacheTypeK = this.settingsScope === 'legacy' ? normalizeKvCacheType(ps.cache_type_k) : ps.cache_type_k;
+    if (typeof ps.cache_type_v === 'string') this.cacheTypeV = this.settingsScope === 'legacy' ? normalizeKvCacheType(ps.cache_type_v) : ps.cache_type_v;
     if (ps.parallel_slots === 'auto' || typeof ps.parallel_slots === 'number')
       this.parallelSlots = ps.parallel_slots as number | 'auto';
     if (ps.batch_size === 'auto' || typeof ps.batch_size === 'number')
@@ -320,13 +339,52 @@ export class RunInteractor {
     else this.repeatPenalty = null;
     if (typeof ps.enable_thinking === 'boolean') this.enableThinking = ps.enable_thinking;
     else if (ps.enable_thinking === null) this.enableThinking = null;
+    if (this.settingsScope === 'primacpp') {
+      const known = new Set([...Object.keys(PARAMETER_FIELDS), ...Object.keys(this.planPayload())]);
+      this.unrepresentedSettings = Object.fromEntries(Object.entries(ps).filter(([key]) => !known.has(key)));
+      // Retain legacy intent for explicit repair, rather than translating shares.
+      this.nodeShares = ps.node_shares && typeof ps.node_shares === 'object' ? { ...ps.node_shares as Record<string, number> } : null;
+      this.nodePriority = Array.isArray(ps.node_priority) && ps.node_priority.length ? [...ps.node_priority] : null;
+      if (typeof ps.threads === 'number') this.threads = ps.threads;
+      for (const [key, value] of Object.entries(ps)) {
+        const field = PARAMETER_FIELDS[key];
+        if (field && !['extra_args', 'context_auto'].includes(key)) (this as unknown as Record<string, unknown>)[field] = value === null && ['draft_model','mmproj','chat_template_text'].includes(key) ? '' : value;
+      }
+    }
+  }
+
+  async setSettingsScope(scope: 'legacy' | 'primacpp', runtimeId = '') {
+    if (scope === this.settingsScope && runtimeId === this.settingsRuntimeId) return;
+    const sameScope = scope === this.settingsScope;
+    this.invalidateEstimate();
+    this.settingsScope = scope;
+    this.settingsRuntimeId = runtimeId;
+    ++this.selectionGeneration;
+    if (sameScope) {
+      const generation = this.selectionGeneration;
+      this.parameters = []; this.expertFlags = []; this.settingsLoading = true;
+      try { await this.loadRunCapabilities(); }
+      finally { if (generation === this.selectionGeneration) { this.settingsLoading = false; this.scheduleEstimate(); } }
+    }
+    else if (this.selectedModel) await this.selectModel(this.selectedModel);
+  }
+
+  private settingsPath(model: string) {
+    return this.settingsScope === 'primacpp'
+      ? `/v2/inference/engine-model-settings/primacpp/${encodeURIComponent(model)}`
+      : `/v2/inference/model-settings/${encodeURIComponent(model)}`;
   }
 
   async selectModel(id: string) {
     const generation = ++this.selectionGeneration;
     this.selectedModel = id;
+    const scope = this.settingsScope, runtimeId = this.settingsRuntimeId, path = this.settingsPath(id);
+    const current = () => generation === this.selectionGeneration && id === this.selectedModel
+      && scope === this.settingsScope && runtimeId === this.settingsRuntimeId;
     this.resetRunSettings();
     this.savedModelConfig = null;
+    this.legacyModelConfig = null;
+    this.settingsRevision = 0;
     this.settingsLoadError = '';
     this.settingsLoading = true;
     this.parameters = [];
@@ -337,20 +395,30 @@ export class RunInteractor {
     this.templatePresets = [];
     try {
       await this.loadRunCapabilities();
-      if (generation !== this.selectionGeneration) return;
-      const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(id)}`);
-      if (generation !== this.selectionGeneration) return;
-      if (!r.ok) throw new Error('Could not load saved settings. Retry or use defaults.');
-      const data = await r.json();
-      if (generation !== this.selectionGeneration) return;
-      this.savedModelConfig = data.parameter_set ?? {};
+      if (!current()) return;
+      let data;
+      if (this.settingsScope === 'primacpp') {
+        if (!this.http.apiToken) await this.loadToken();
+        if (!current()) return;
+        if (!this.http.apiToken) throw new Error('Could not load saved settings: authorization unavailable. Retry or use defaults.');
+        data = await this.http.networkRequest<Record<string, any>>(path);
+      } else {
+        const r = await fetch(path);
+        if (!current()) return;
+        if (!r.ok) throw new Error('Could not load saved settings. Retry or use defaults.');
+        data = await r.json();
+      }
+      if (!current()) return;
+      this.savedModelConfig = scope === 'primacpp' ? data.requested_parameter_set ?? data.parameter_set ?? {} : data.parameter_set ?? {};
+      this.settingsRevision = data.revision ?? 0;
+      this.legacyModelConfig = data.legacy_parameter_set ?? null;
       this.applyParameterSet(this.savedModelConfig ?? {});
       this.markSettingsClean();
     } catch (error) {
-      if (generation !== this.selectionGeneration) return;
+      if (!current()) return;
       this.settingsLoadError = String(error);
     } finally {
-      if (generation === this.selectionGeneration) {
+      if (current()) {
         this.settingsLoading = false;
         this.scheduleEstimate();
       }
@@ -358,6 +426,7 @@ export class RunInteractor {
   }
 
   revertSavedSettings() {
+    if (this.settingsLoading) return;
     this.resetRunSettings();
     if (this.savedModelConfig) this.applyParameterSet(this.savedModelConfig);
     this.markSettingsClean();
@@ -365,21 +434,28 @@ export class RunInteractor {
   }
 
   useDefaultSettings() {
+    if (this.settingsLoading) return;
     this.settingsLoadError = '';
     this.resetRunSettings();
+    this.resetDirty = true;
     this.scheduleEstimate();
   }
 
   async loadRunCapabilities() {
+    const generation = this.selectionGeneration;
+    this.capabilityMetadata = {};
+    this.capabilitiesError = '';
     try {
       const model = this.selectedModel;
-      const r = await fetch(`/v2/inference/capabilities?model=${encodeURIComponent(model)}`);
-      if (!r.ok) return;
+      const runtime = this.settingsScope === 'primacpp' ? `&runtime_id=${encodeURIComponent(this.settingsRuntimeId)}` : '';
+      const r = await fetch(`/v2/inference/capabilities?model=${encodeURIComponent(model)}${runtime}`);
+      if (!r.ok) throw new Error(`Runtime capabilities unavailable (${r.status}). Support has not been confirmed.`);
       const info = await r.json();
-      if (model !== this.selectedModel) return;
+      if (generation !== this.selectionGeneration || model !== this.selectedModel) return;
+      this.capabilityMetadata = info;
       if (typeof info.threads_max === 'number' && info.threads_max > 0) {
         this.threadsMax = info.threads_max;
-        this.threads = Math.min(this.threads, this.threadsMax);
+        if (this.settingsScope === 'legacy') this.threads = Math.min(this.threads, this.threadsMax);
       }
       this.parameters = Array.isArray(info.parameters) ? info.parameters : [];
       this.expertFlags = Array.isArray(info.expert_flags) ? info.expert_flags : [];
@@ -387,7 +463,9 @@ export class RunInteractor {
       this.templateEmbedded = !!info.template_embedded;
       this.modelTemplateText = typeof info.template_text === 'string' ? info.template_text : null;
       this.templatePresets = Array.isArray(info.templates) ? info.templates : [];
-    } catch { /* Selection resets capabilities; never reuse another model's metadata. */ }
+    } catch (error) {
+      if (generation === this.selectionGeneration && this.settingsScope === 'primacpp') this.capabilitiesError = String(error);
+    }
   }
 
   setNodeShare(node: string, share: number) {
@@ -454,6 +532,10 @@ export class RunInteractor {
   /** Persist the current run settings for this model. */
   async saveModelSettings() {
     const errorGeneration = errors.generation;
+    if (this.settingsScope === 'primacpp' && this.status?.role !== 'master') return;
+    if (this.settingsScope === 'primacpp' && !/^[0-9a-f]{64}$/.test(this.settingsRuntimeId)) {
+      pushToast('danger', 'Select an installed Prima runtime before saving scoped settings.'); return;
+    }
     if (!this.selectedModel) return;
     const model = this.selectedModel;
     const generation = this.selectionGeneration;
@@ -461,16 +543,25 @@ export class RunInteractor {
       pushToast('danger', 'Fix validation errors before saving', 4000, { generation: errorGeneration });
       return;
     }
+    const submittedFingerprint = this.settingsFingerprint();
+    const submittedRawRevision = this.rawDraftRevision;
+    const saveSequence = ++this.saveSequence;
     const body = this.planPayload();
     delete body.remember;
     delete body.advanced_open;
     delete body.settings_source;
-    this.busy = '/v2/inference/model-settings';
+    delete body.network_id;
+    delete body.review;
+    const path = this.settingsPath(model);
+    const saveBody = this.settingsScope === 'primacpp'
+      ? { runtime_id: this.settingsRuntimeId, expected_revision: this.settingsRevision, parameter_set: body }
+      : { parameter_set: body };
+    this.busy = path;
     try {
-      const r = await fetch(`/v2/inference/model-settings/${encodeURIComponent(model)}`, {
+      const r = await fetch(path, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parameter_set: body })
+        headers: { 'Content-Type': 'application/json', ...(this.http.apiToken ? { Authorization: `Bearer ${this.http.apiToken}` } : {}) },
+        body: JSON.stringify(saveBody)
       });
       const text = await r.text();
       let data: unknown = null;
@@ -480,71 +571,99 @@ export class RunInteractor {
         data = text;
       }
       if (!r.ok) {
-        pushToast('danger', apiErrorMessage(data, text, r.status, 'save settings'), 4000, { generation: errorGeneration });
+        if (generation === this.selectionGeneration) pushToast('danger', apiErrorMessage(data, text, r.status, 'save settings'), 4000, { generation: errorGeneration });
         return;
       }
-      pushToast('ok', `settings saved for ${model}`);
       if (generation !== this.selectionGeneration) return;
-      const saved = data as { parameter_set?: Record<string, unknown> };
-      this.savedModelConfig = saved.parameter_set ?? body;
-      this.applyParameterSet(this.savedModelConfig);
-      this.markSettingsClean();
+      pushToast('ok', `settings saved for ${model}`);
+      const saved = data as { parameter_set?: Record<string, unknown>; requested_parameter_set?: Record<string, unknown>; revision?: number };
+      this.savedModelConfig = saved.requested_parameter_set ?? saved.parameter_set ?? body;
+      this.settingsRevision = saved.revision ?? this.settingsRevision;
+      if (this.settingsFingerprint() === submittedFingerprint && this.rawDraftRevision === submittedRawRevision) {
+        this.applyParameterSet(this.savedModelConfig);
+        this.markSettingsClean();
+      } else {
+        this.settingsBaseline = submittedFingerprint;
+        this.savedRawDraftRevision = submittedRawRevision;
+      }
     } catch (e) {
-      pushToast('danger', String(e), 4000, { generation: errorGeneration });
+      if (generation === this.selectionGeneration) pushToast('danger', String(e), 4000, { generation: errorGeneration });
     } finally {
-      this.busy = '';
+      if (saveSequence === this.saveSequence && this.busy === path) this.busy = '';
     }
   }
 
+  private defaultEditorValues(): Record<string, unknown> {
+    return {
+      context: Math.min(4096, this.selectedModelMaxContext()),
+      contextAuto: false,
+      cacheTypeK: this.settingsScope === 'primacpp' ? 'f16' : 'q8_0',
+      cacheTypeV: this.settingsScope === 'primacpp' ? 'f16' : 'q8_0',
+      parallelSlots: 'auto',
+      batchSize: 'auto',
+      microBatch: 'auto',
+      moeOffload: 'auto',
+      flashAttention: this.settingsScope === 'primacpp' ? 'off' : 'auto',
+      nodeShares: null,
+      nodePriority: null,
+      placementStrategy: 'auto',
+      justEnoughMaster: false,
+      requiredNodes: [],
+      speculative: 'auto',
+      draftModel: '',
+      vision: false,
+      mmproj: '',
+      chatTemplate: 'default',
+      chatTemplateText: '',
+      mmapMlock: 'auto',
+      checkpoints: 'auto',
+      cacheRam: 'auto',
+      threads: Math.min(8, this.threadsMax),
+      extraArgsText: '',
+      runDevice: null,
+      runGpuIds: null,
+      runVramPercent: null,
+      runRamPercent: null,
+      threadsBatch: null,
+      draftMax: null,
+      frequencyPenalty: null,
+      seed: null,
+      maxOutputTokens: null,
+      stopSequences: null,
+      stopParseError: '',
+      reasoningEffort: null,
+      reasoningBudget: null,
+      reasoningFormat: null,
+      remember: false,
+      enableThinking: null,
+      advancedOpen: false,
+      fieldErrors: {},
+      localDraftErrors: {},
+      unrepresentedSettings: {},
+      vramWeight: 0.6,
+      latencyWeight: 0.4,
+      planResult: null,
+      distributableBytes: 0,
+      temperature: null,
+      topP: null,
+      topK: null,
+      minP: null,
+      presencePenalty: null,
+      repeatPenalty: null,
+    };
+  }
+
+  defaultSettingsChanges() {
+    const current = this as unknown as Record<string, unknown>;
+    return Object.entries(this.defaultEditorValues())
+      .filter(([field, after]) => !['fieldErrors','planResult','distributableBytes','localDraftErrors','stopParseError','advancedOpen','remember'].includes(field)
+        && JSON.stringify(current[field]) !== JSON.stringify(after))
+      .map(([field, after]) => ({ field, before: current[field], after }));
+  }
+
   resetRunSettings() {
-    this.context = Math.min(4096, this.selectedModelMaxContext());
-    this.contextAuto = false;
-    this.cacheTypeK = 'q8_0';
-    this.cacheTypeV = 'q8_0';
-    this.parallelSlots = 'auto';
-    this.batchSize = 'auto';
-    this.microBatch = 'auto';
-    this.moeOffload = 'auto';
-    this.flashAttention = 'auto';
-    this.nodeShares = null;
-    this.nodePriority = null;
-    this.placementStrategy = 'auto';
-    this.justEnoughMaster = false;
-    this.requiredNodes = [];
-    this.speculative = 'auto';
-    this.draftModel = '';
-    this.vision = false;
-    this.mmproj = '';
-    this.chatTemplate = 'default';
-    this.chatTemplateText = '';
-    this.mmapMlock = 'auto';
-    this.checkpoints = 'auto';
-    this.cacheRam = 'auto';
-    this.threads = Math.min(8, this.threadsMax);
-    this.extraArgsText = '';
-    this.runDevice = null;
-    this.runGpuIds = null;
-    this.runVramPercent = null;
-    this.runRamPercent = null;
-    this.threadsBatch = null;
-    this.draftMax = null;
-    this.frequencyPenalty = null;
-    this.seed = null;
-    this.maxOutputTokens = null;
-    this.stopSequences = null;
-    this.stopParseError = '';
-    this.reasoningEffort = null;
-    this.reasoningBudget = null;
-    this.reasoningFormat = null;
-    this.remember = false;
-    this.seedSamplingDefaults();
-    this.enableThinking = null;
-    this.advancedOpen = false;
-    this.fieldErrors = {};
-    this.vramWeight = 0.6;
-    this.latencyWeight = 0.4;
-    this.planResult = null;
-    this.distributableBytes = 0;
+    ++this.editorRevision;
+    Object.assign(this, this.defaultEditorValues());
   }
 
   planRunBlockedReason(): string | null {
@@ -568,7 +687,20 @@ export class RunInteractor {
   }
 
   validateRunSettings(explicit = false): boolean {
-    const err: Record<string, string> = {};
+    const err: Record<string, string> = { ...this.localDraftErrors };
+    if (this.settingsScope === 'primacpp') {
+      if (Object.keys(this.unrepresentedSettings).length) err.saved_settings = 'Saved settings contain unrepresented fields. Inspect them in Expert; explicitly restore defaults to discard them.';
+      if (!(KV_CACHE_TYPES as readonly string[]).includes(this.cacheTypeK)) err.cache_type_k = 'Saved K cache precision is unknown. Choose a supported precision explicitly.';
+      if (!(KV_CACHE_TYPES as readonly string[]).includes(this.cacheTypeV)) err.cache_type_v = 'Saved V cache precision is unknown. Choose a supported precision explicitly.';
+      if (this.cacheTypeV?.startsWith('q') && this.flashAttention === 'off' || this.cacheTypeV === 'iq4_nl' && this.flashAttention === 'off') {
+        err.cache_type_v = 'Quantized V cache requires compatible Flash Attention. Review cache precision.';
+        err.flash_attention = 'Flash Attention is off with a quantized V cache. Review both requested values.';
+      }
+      for (const name of ['context','threads','parallel_slots','batch_size','micro_batch','temperature','top_p','top_k','min_p','presence_penalty','repeat_penalty','frequency_penalty','seed','max_output_tokens','reasoning_budget']) {
+        const value = this.parameterValue(name);
+        if (value !== null && value !== 'auto' && (typeof value !== 'number' || !Number.isFinite(value))) err[name] = 'Enter a finite number or choose an automatic/inherited mode.';
+      }
+    }
     if (this.stopParseError) err.stop = this.stopParseError;
     const maxCtx = this.selectedModelMaxContext();
     if (!this.contextAuto && this.context < MIN_CONTEXT)
@@ -685,10 +817,10 @@ export class RunInteractor {
       moe_offload: this.moeOffload,
       flash_attention: this.flashAttention,
       node_shares: this.nodeShares,
-      node_priority: this.nodePriority ? [...new Set([...this.nodePriority, ...Object.keys(this.status?.members ?? {})])] : [],
-      placement_strategy: effectiveStrategy,
+      node_priority: this.settingsScope === 'primacpp' ? [...(this.nodePriority ?? [])] : this.nodePriority ? [...new Set([...this.nodePriority, ...Object.keys(this.status?.members ?? {})])] : [],
+      placement_strategy: this.settingsScope === 'primacpp' ? this.placementStrategy : effectiveStrategy,
       just_enough_master: this.justEnoughMaster,
-      required_nodes: this.nodeShares ? [] : [...this.requiredNodes],
+      required_nodes: this.settingsScope === 'primacpp' ? [...this.requiredNodes] : this.nodeShares ? [] : [...this.requiredNodes],
       vision: this.vision,
       mmproj: this.mmproj || null,
       device: this.runDevice,
@@ -733,6 +865,7 @@ export class RunInteractor {
   }
 
   async plan() {
+    if (this.settingsScope === 'primacpp') { this.primaEstimate?.(0, true); return; }
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings()) return;
     if (this.estimateTimer) clearTimeout(this.estimateTimer);
@@ -743,6 +876,7 @@ export class RunInteractor {
 
   /** Debounced silent plan for live Estimated VRAM (no toast / busy). */
   scheduleEstimate(delayMs = 300) {
+    if (this.settingsScope === 'primacpp') { this.primaEstimate?.(delayMs); return; }
     this.planResult = null;
     this.estimateError = '';
     errors.observe('estimate', '', '', false);
@@ -756,6 +890,7 @@ export class RunInteractor {
   }
 
   async refreshEstimate() {
+    if (this.settingsScope === 'primacpp') { this.primaEstimate?.(0, true); return; }
     const errorGeneration = errors.generation;
     if (this.planRunBlockedReason()) return;
     if (!this.selectedModel) return;
@@ -850,6 +985,7 @@ export class RunInteractor {
   }
 
   async run() {
+    if (this.settingsScope === 'primacpp') throw new Error('Prima requires a current frozen deployment review. Use Review deployment.');
     const errorGeneration = errors.generation;
     if (this.planRunBlockedReason()) return;
     if (!this.validateRunSettings(true)) return;

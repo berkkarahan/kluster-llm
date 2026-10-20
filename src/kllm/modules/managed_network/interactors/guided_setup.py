@@ -255,13 +255,13 @@ class GuidedSetup:
             if inventory and not error_code and setup.get("capability") != "managed-network-v2":
                 error_code = "UNSUPPORTED_CAPABILITY"
             message = MESSAGES.get(error_code, setup.get("message", "")) if error_code else ""
-            if not candidates:
+            if not candidates and not error_code:
                 physical = [a for a in adapters if a.get("physical_ethernet")]
                 if physical:
                     message = physical[0]["reason"]
                 elif not message:
                     message = "Connect a dedicated physical Ethernet adapter to this computer."
-                error_code = error_code or "NO_ADAPTER"
+                error_code = "NO_ADAPTER"
             selected = candidates[0]["adapter_id"] if len(candidates) == 1 else ""
             if len(candidates) > 1 and not error_code:
                 preferred = [

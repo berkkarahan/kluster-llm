@@ -53,30 +53,31 @@
 
 <div class="parameter-control">
   <div class="parameter-heading">
-    <label for={id}>{title}</label>
+    <label for={(nullable || autoNumber) && (value === null || value === 'auto') && !isBoolean && !choices.length ? id+'-mode' : id}>{title}</label>
     <span class="scope-label">Next deployment</span>
   </div>
   {#if isBoolean}
-    <select {id} class="field" value={value === null ? 'inherit' : value ? 'on' : 'off'} {disabled}
+    <select {id} class="field" aria-invalid={!!presenter.fieldErrors[name]} aria-describedby={presenter.fieldErrors[name] ? id+'-error' : undefined} value={value === null ? 'inherit' : value ? 'on' : 'off'} {disabled}
       onchange={(e) => presenter.setParameter(name, e.currentTarget.value === 'inherit' ? null : e.currentTarget.value === 'on')}>
       <option value="inherit">Model default</option><option value="on">On</option><option value="off">Off</option>
     </select>
   {:else if choices.length && !autoNumber}
-    <select {id} class="field" value={value === null ? 'inherit' : String(value)} {disabled}
+    <select {id} class="field" aria-invalid={!!presenter.fieldErrors[name]} aria-describedby={presenter.fieldErrors[name] ? id+'-error' : undefined} value={value === null ? 'inherit' : String(value)} {disabled}
       onchange={(e) => presenter.setParameter(name, e.currentTarget.value === 'inherit' ? null : e.currentTarget.value)}>
       {#if nullable}<option value="inherit">Inherit default</option>{/if}
+      {#if value !== null && !choices.includes(String(value))}<option value={String(value)}>{String(value)} (saved; support unknown)</option>{/if}
       {#each choices as choice}<option value={choice}>{choice === 'auto' ? 'Automatic' : choice}</option>{/each}
     </select>
   {:else}
     {#if nullable || autoNumber}
-      <select aria-label={`${title} mode`} class="field" value={value === null || value === 'auto' ? 'default' : 'edit'} {disabled}
+      <select id={id+'-mode'} aria-label={`${title} mode`} aria-invalid={!!presenter.fieldErrors[name]} aria-describedby={presenter.fieldErrors[name] ? id+'-error' : undefined} class="field" value={value === null || value === 'auto' ? 'default' : 'edit'} {disabled}
         onchange={(e) => presenter.setParameter(name, e.currentTarget.value === 'default' ? (autoNumber ? 'auto' : null) : editDefault())}>
         <option value="default">{autoNumber ? 'Automatic / default' : 'Inherit default'}</option>
         <option value="edit">Set a value</option>
       </select>
     {/if}
     {#if value !== null && value !== 'auto'}
-      <input {id} class="field mono" type="number" value={Number(value)} min={bounds.min} max={bounds.max}
+      <input {id} class="field mono" type="number" aria-invalid={!!presenter.fieldErrors[name]} aria-describedby={presenter.fieldErrors[name] ? id+'-error' : undefined} value={Number(value)} min={bounds.min} max={bounds.max}
         step={bounds.integer || autoNumber || ['threads', 'seed', 'max_output_tokens', 'draft_max', 'reasoning_budget'].includes(name) ? 1 : 'any'}
         {disabled} oninput={(e) => presenter.setParameter(name, e.currentTarget.value === '' ? NaN : Number(e.currentTarget.value))} />
     {/if}
@@ -89,7 +90,7 @@
       {#if presenter.effectiveConfig()?.adjustments[name]} · {presenter.effectiveConfig()?.adjustments[name]}{/if}
     {:else}Effective value appears after planning.{/if}
   </small>
-  {#if presenter.fieldErrors[name]}<p class="parameter-error" role="alert">{presenter.fieldErrors[name]}</p>{/if}
+  {#if presenter.fieldErrors[name]}<p id={id+'-error'} class="parameter-error" role="alert">{presenter.fieldErrors[name]}</p>{/if}
 </div>
 
 <style>

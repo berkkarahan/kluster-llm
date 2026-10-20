@@ -296,3 +296,4 @@ CONTROL_V2_FAST: tuple[tuple[str, str, str], ...] = (
     ('/cluster/fast-subnet/reachability', 'GET', 'fast_subnet_reachability'),
     ('/cluster/fast-subnet/reconnect', 'POST', 'fast_subnet_reconnect'),
 )
+

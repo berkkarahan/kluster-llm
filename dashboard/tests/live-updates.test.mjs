@@ -515,3 +515,62 @@ test('live log lines reject a source outside the stored set', async (t) => {
   assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 1), false);
   assert.equal(socket.readyState, 3);
 });
+
+test('validLogs accepts system, primacpp, and network log tags without closing socket', async (t) => {
+  const { sockets } = await setup(t);
+  const socket = sockets[0];
+  const frame = (batch, entry) => ({
+    type: 'data', generation: 1, batch, initial: batch === 1, epoch, server_time: stamp,
+    areas: snapshot().areas,
+    logs: {
+      availability: 'available',
+      sampled_at: stamp,
+      snapshot: {
+        lines: [entry],
+        source: 'cluster',
+        cursor: `${epoch}:${batch}`,
+        reset: null,
+        gap: false,
+        gap_reason: null,
+        continuity_id: epoch,
+        discontinuity: null
+      },
+      error: null
+    }
+  });
+
+  const primacppEntry = {
+    event_id: '00000000-0000-4000-8000-000000000101',
+    ts: 1,
+    node_id: 'master',
+    source: 'primacpp',
+    tag: 'inference',
+    line: 'prima serving initialized'
+  };
+  socket.receive(frame(1, primacppEntry));
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 1), true);
+  assert.equal(socket.readyState, 1);
+
+  const systemEntry = {
+    event_id: '00000000-0000-4000-8000-000000000102',
+    ts: 2,
+    node_id: 'master',
+    source: 'system',
+    tag: 'unclassified',
+    line: 'system interface up'
+  };
+  socket.receive(frame(2, systemEntry));
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 2), true);
+  assert.equal(socket.readyState, 1);
+
+  const networkEntry = {
+    event_id: '00000000-0000-4000-8000-000000000103',
+    ts: 3,
+    node_id: 'master',
+    source: 'network',
+    line: 'mesh link established'
+  };
+  socket.receive(frame(3, networkEntry));
+  assert.equal(socket.sent.some((item) => item.type === 'ack' && item.batch === 3), true);
+  assert.equal(socket.readyState, 1);
+});

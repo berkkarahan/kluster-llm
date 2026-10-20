@@ -15,7 +15,10 @@ def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopol
     if (plan.get("split_mode") or "layer") != "layer":
         raise ValueError("Prima row/tensor execution needs compatibility implementation")
     if plan.get("tensor_overrides") or plan.get("expert_offloaded"):
-        raise ValueError("Prima remote MoE tensor placement needs compatibility implementation")
+        raise ValueError(
+            "Prima remote MoE tensor placement needs compatibility implementation; "
+            "use automatic whole-layer placement and inspect again"
+        )
     masters = [node for node, member in members.items() if member.get("role") == "master"]
     if len(masters) != 1:
         raise ValueError("Prima requires exactly one current Kluster master")
@@ -244,33 +247,57 @@ def rank_launch(topology: PrimaTopology, node_id: str, *, segmented: bool = Fals
     ]
     if vulkan_devices:
         environment["GGML_VK_VISIBLE_DEVICES"] = ",".join(vulkan_devices)
-    arguments = [
-        "-ngl",
-        str(rank.ngl),
-        "--world",
-        str(len(topology.ranks)),
-        "--rank",
-        str(rank.rank),
-        "--master",
-        topology.ranks[0].address,
-        "--next",
-        following.address,
-        "--data-port",
-        str(topology.data_port),
-        "--signal-port",
-        str(topology.signal_port),
-        "-lw",
-        ",".join(str(v) for v in windows),
-    ]
-    if rank.tensor_split:
-        arguments.extend(("-ts", ",".join(format(v, ".12g") for v in rank.tensor_split)))
     return {
         "ngl": rank.ngl,
-        "tensor_split": ",".join(format(v, ".12g") for v in rank.tensor_split),
-        "devices": rank.devices,
-        "env": environment,
-        "extra_args": arguments,
+        "world": len(topology.ranks),
+        "rank": rank.rank,
+        "master": topology.ranks[0].address,
+        "next": following.address,
+        "data_port": topology.data_port,
+        "signal_port": topology.signal_port,
+        "layer_window": ",".join(str(v) for v in windows),
+        "tensor_split": ",".join(format(v, ".12g") for v in rank.tensor_split) if rank.tensor_split else None,
+        "devices": list(rank.devices),
+        "env": dict(environment),
+        "extra_args": [],
     }
+
+
+def rank_cli_args(launch_spec: dict[str, Any]) -> list[str]:
+    """Provide command-line argument formatting from a structured launch spec."""
+    args: list[str] = []
+    if launch_spec.get("ngl") is not None:
+        args.extend(["-ngl", str(launch_spec["ngl"])])
+    if launch_spec.get("world") is not None:
+        args.extend(["--world", str(launch_spec["world"])])
+    if launch_spec.get("rank") is not None:
+        args.extend(["--rank", str(launch_spec["rank"])])
+    if launch_spec.get("master"):
+        args.extend(["--master", str(launch_spec["master"])])
+    if launch_spec.get("next"):
+        args.extend(["--next", str(launch_spec["next"])])
+    if launch_spec.get("data_port") is not None:
+        args.extend(["--data-port", str(launch_spec["data_port"])])
+    if launch_spec.get("signal_port") is not None:
+        args.extend(["--signal-port", str(launch_spec["signal_port"])])
+    if launch_spec.get("layer_window"):
+        lw = launch_spec["layer_window"]
+        if isinstance(lw, (list, tuple)):
+            lw_str = ",".join(str(v) for v in lw)
+        else:
+            lw_str = str(lw)
+        args.extend(["-lw", lw_str])
+    if launch_spec.get("tensor_split"):
+        ts = launch_spec["tensor_split"]
+        if isinstance(ts, (list, tuple)):
+            ts_str = ",".join(format(v, ".12g") for v in ts)
+        else:
+            ts_str = str(ts)
+        if ts_str:
+            args.extend(["-ts", ts_str])
+    if launch_spec.get("extra_args"):
+        args.extend(list(launch_spec["extra_args"]))
+    return args
 
 
 def network_edges(topology: PrimaTopology) -> list[dict]:

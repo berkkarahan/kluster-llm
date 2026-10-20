@@ -113,3 +113,4 @@ CONTROL_V2_CREDENTIALS: tuple[tuple[str, str, str], ...] = (
     ('/credentials/huggingface', 'GET', 'get_hf_token'),
     ('/credentials/huggingface', 'PUT', 'put_hf_token'),
 )
+

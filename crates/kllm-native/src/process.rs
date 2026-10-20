@@ -47,7 +47,12 @@ pub struct LaunchResult {
 struct TrackedChild {
     child: Child,
     sink: Option<Child>,
+    #[cfg(windows)]
+    job: Option<windows_sys::Win32::Foundation::HANDLE>,
 }
+
+unsafe impl Send for TrackedChild {}
+unsafe impl Sync for TrackedChild {}
 
 impl Drop for TrackedChild {
     fn drop(&mut self) {
@@ -56,6 +61,12 @@ impl Drop for TrackedChild {
             std::thread::spawn(move || {
                 let _ = sink.wait();
             });
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+            }
         }
     }
 }
@@ -130,6 +141,56 @@ fn opt_string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>>
         Some(v) if v.is_none() => Ok(Vec::new()),
         Some(v) => v.extract(),
         None => Ok(Vec::new()),
+    }
+}
+
+fn opt_u32(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u32>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(None),
+        None => Ok(None),
+        Some(v) => {
+            if let Ok(n) = v.extract::<u32>() {
+                return Ok(Some(n));
+            }
+            if let Ok(n) = v.extract::<i64>() {
+                if (0..=u32::MAX as i64).contains(&n) {
+                    return Ok(Some(n as u32));
+                }
+            }
+            if let Ok(s) = v.extract::<String>() {
+                if let Ok(n) = s.parse::<u32>() {
+                    return Ok(Some(n));
+                }
+            }
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{key} must be an unsigned 32-bit integer or numeric string"
+            )))
+        }
+    }
+}
+
+fn opt_u16(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u16>> {
+    match dict.get_item(key)? {
+        Some(v) if v.is_none() => Ok(None),
+        None => Ok(None),
+        Some(v) => {
+            if let Ok(n) = v.extract::<u16>() {
+                return Ok(Some(n));
+            }
+            if let Ok(n) = v.extract::<i64>() {
+                if (0..=u16::MAX as i64).contains(&n) {
+                    return Ok(Some(n as u16));
+                }
+            }
+            if let Ok(s) = v.extract::<String>() {
+                if let Ok(n) = s.parse::<u16>() {
+                    return Ok(Some(n));
+                }
+            }
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{key} must be an unsigned 16-bit integer or numeric string"
+            )))
+        }
     }
 }
 
@@ -425,6 +486,28 @@ impl LaunchConfig {
         })
     }
 
+    pub fn is_reserved_flag(flag: &str) -> bool {
+        let reserved = [
+            "--model", "-m",
+            "--execution-manifest",
+            "--rank",
+            "--world",
+            "--host",
+            "--port",
+            "--layer-window", "-lw",
+            "--gpu-layers", "-ngl",
+            "--tensor-split", "-ts",
+            "--ctx-size", "-c",
+            "--threads", "-t",
+            "--master",
+            "--next",
+            "--data-port",
+            "--signal-port",
+        ];
+        let key = flag.split('=').next().unwrap_or("");
+        reserved.contains(&key)
+    }
+
     pub fn prima_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<Self> {
         let binary: String = dict
             .get_item("binary_path")?
@@ -498,10 +581,43 @@ impl LaunchConfig {
                 argv.extend(["--port".into(), port.to_string()]);
             }
         }
+        // Structured launch arguments (PRIMA-DELTA-MAINT-001 & Amendment 5.7):
+        if let Some(world) = opt_u32(dict, "world")? {
+            argv.extend(["--world".into(), world.to_string()]);
+        }
+        if let Some(master) = opt_string(dict, "master")? {
+            argv.extend(["--master".into(), master]);
+        }
+        if let Some(next) = opt_string(dict, "next")? {
+            argv.extend(["--next".into(), next]);
+        }
+        if let Some(data_port) = opt_u16(dict, "data_port")? {
+            argv.extend(["--data-port".into(), data_port.to_string()]);
+        }
+        if let Some(signal_port) = opt_u16(dict, "signal_port")? {
+            argv.extend(["--signal-port".into(), signal_port.to_string()]);
+        }
+        if let Some(lw) = opt_string(dict, "layer_window")? {
+            argv.extend(["-lw".into(), lw]);
+        }
+        if let Some(ngl) = opt_u32(dict, "ngl")? {
+            argv.extend(["-ngl".into(), ngl.to_string()]);
+        }
+        if let Some(ts) = opt_string(dict, "tensor_split")? {
+            if !ts.is_empty() {
+                argv.extend(["-ts".into(), ts]);
+            }
+        }
+
         let extra = opt_string_list(dict, "extra_args")?;
-        let reserved = ["--model", "-m", "--execution-manifest", "--rank", "--world", "--host", "--port", "--layer-window", "-lw", "--gpu-layers", "-ngl", "--tensor-split", "-ts", "--ctx-size", "-c", "--threads", "-t", "--master", "--next", "--data-port", "--signal-port"];
-        if extra.iter().any(|arg| reserved.contains(&arg.split('=').next().unwrap_or(""))) {
-            return Err(pyo3::exceptions::PyValueError::new_err("Prima extra arguments cannot override execution ownership"));
+        for arg in &extra {
+            if Self::is_reserved_flag(arg) {
+                let flag = arg.split('=').next().unwrap_or("");
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "extra_args cannot override reserved flag: {}",
+                    flag
+                )));
+            }
         }
         argv.extend(extra);
         Ok(Self {
@@ -790,15 +906,52 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
             return Err(error.into());
         }
     };
+
+    #[cfg(windows)]
+    let job = unsafe {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let job_handle = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+        if !job_handle.is_null() {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set_res = SetInformationJobObject(
+                job_handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set_res != 0 {
+                use std::os::windows::io::AsRawHandle;
+                AssignProcessToJobObject(job_handle, child.as_raw_handle() as _);
+            }
+            Some(job_handle)
+        } else {
+            None
+        }
+    };
+
     let log_sink_pid = sink.as_ref().map(Child::id);
     let pid = child.id();
-    let identity = crate::usage::process_counters(pid).ok();
-    tracked.push(TrackedChild { child, sink });
+    let (process_start_token, process_started_at) = match crate::usage::process_counters(pid) {
+        Ok(p) => (Some(p.token), Some(p.started)),
+        Err(e) if e == "unsupported_counter" => (Some("unsupported".to_string()), None),
+        Err(_) => (None, None),
+    };
+    tracked.push(TrackedChild {
+        child,
+        sink,
+        #[cfg(windows)]
+        job,
+    });
 
     Ok(LaunchResult {
         log_sink_pid,
-        process_start_token: identity.as_ref().map(|p| p.token.clone()),
-        process_started_at: identity.map(|p| p.started),
+        process_start_token,
+        process_started_at,
         pid,
         binary: cfg.binary.to_string_lossy().into(),
         argv: cfg.argv.clone(),
@@ -807,19 +960,52 @@ pub fn start_process(cfg: &LaunchConfig) -> Result<LaunchResult, ProcessError> {
 }
 
 pub fn stop_process(pid: u32, force: bool) -> bool {
-    if let Ok(mut guard) = children().lock() {
-        if let Some(idx) = guard.iter().position(|c| c.child.id() == pid) {
-            let mut tracked = guard.remove(idx);
-            if tracked.child.try_wait().ok().flatten().is_some() {
-                reap_exited(&mut guard);
-                return true;
-            }
-            let _ = tracked.child.kill();
-            let _ = tracked.child.wait();
-            let _ = force;
+    let tracked_opt = if let Ok(mut guard) = children().lock() {
+        let opt = guard.iter().position(|c| c.child.id() == pid).map(|idx| guard.remove(idx));
+        reap_exited(&mut guard);
+        opt
+    } else {
+        None
+    };
+
+    if let Some(mut tracked) = tracked_opt {
+        if tracked.child.try_wait().ok().flatten().is_some() {
             return true;
         }
-        reap_exited(&mut guard);
+
+        if !force {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+
+            #[cfg(windows)]
+            unsafe {
+                use windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent;
+                let _ = GenerateConsoleCtrlEvent(1, pid); // CTRL_BREAK_EVENT
+            }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5000);
+            while std::time::Instant::now() < deadline {
+                if let Ok(Some(_)) = tracked.child.try_wait() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        #[cfg(windows)]
+        if let Some(job) = tracked.job.take() {
+            unsafe {
+                use windows_sys::Win32::Foundation::CloseHandle;
+                use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+                TerminateJobObject(job, 1);
+                CloseHandle(job);
+            }
+        }
+        let _ = tracked.child.kill();
+        let _ = tracked.child.wait();
+        return true;
     }
 
     #[cfg(windows)]
@@ -829,8 +1015,12 @@ pub fn stop_process(pid: u32, force: bool) -> bool {
             args.push("/F".into());
         }
         args.push("/T".into());
-        let status = Command::new("taskkill").args(&args).status();
-        return status.map(|s| s.success()).unwrap_or(false);
+        let status = Command::new("taskkill")
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        status.map(|s| s.success()).unwrap_or(false)
     }
     #[cfg(unix)]
     {
@@ -859,12 +1049,49 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        let output = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output();
-        match output {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()),
-            Err(_) => false,
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, STILL_ACTIVE, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        const SYNCHRONIZE: u32 = 0x00100000;
+
+        unsafe {
+            // Request both PROCESS_QUERY_LIMITED_INFORMATION and SYNCHRONIZE to allow
+            // WaitForSingleObject check on process termination state.
+            let mut handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
+            if handle.is_null() {
+                // Fallback to query limited info alone if SYNCHRONIZE was not granted
+                handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            }
+            if handle.is_null() {
+                return false;
+            }
+
+            let mut exit_code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut exit_code);
+            if ok == 0 {
+                CloseHandle(handle);
+                return false;
+            }
+
+            // If exit code is not STILL_ACTIVE (259), the process has definitely terminated.
+            if exit_code != STILL_ACTIVE as u32 {
+                CloseHandle(handle);
+                return false;
+            }
+
+            // If exit code is STILL_ACTIVE, verify whether the process is genuinely running
+            // or has exited with status 259 (signaled vs nonsignaled state).
+            let wait_res = WaitForSingleObject(handle, 0);
+            CloseHandle(handle);
+
+            // A running process object is nonsignaled (WAIT_TIMEOUT).
+            // A terminated process object is signaled (WAIT_OBJECT_0).
+            wait_res == WAIT_TIMEOUT
         }
     }
     #[cfg(unix)]
@@ -892,7 +1119,12 @@ mod tests {
         #[cfg(unix)]
         let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
         child.wait().unwrap();
-        let mut tracked = vec![TrackedChild { child, sink: None }];
+        let mut tracked = vec![TrackedChild {
+            child,
+            sink: None,
+            #[cfg(windows)]
+            job: None,
+        }];
         reap_exited(&mut tracked);
         assert!(tracked.is_empty());
     }
@@ -916,5 +1148,204 @@ mod tests {
         let _ = stdio_for_log(&path).expect("open log");
         assert!(path.is_file());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_alive_current_and_dead() {
+        assert!(process_alive(std::process::id()));
+        assert!(!process_alive(0));
+        assert!(!process_alive(99_999_999));
+    }
+
+    #[test]
+    fn test_stop_process_tracked_and_untracked() {
+        #[cfg(windows)]
+        let cmd_path = std::env::var("COMSPEC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        #[cfg(windows)]
+        let cfg = LaunchConfig {
+            role: "test".into(),
+            binary: cmd_path.clone(),
+            argv: vec![
+                cmd_path.to_string_lossy().into(),
+                "/C".into(),
+                "ping".into(),
+                "-n".into(),
+                "10".into(),
+                "127.0.0.1".into(),
+            ],
+            env: HashMap::new(),
+            log_path: None,
+            log_helper_argv: Vec::new(),
+        };
+        #[cfg(unix)]
+        let cfg = LaunchConfig {
+            role: "test".into(),
+            binary: PathBuf::from("/bin/sleep"),
+            argv: vec!["/bin/sleep".into(), "10".into()],
+            env: HashMap::new(),
+            log_path: None,
+            log_helper_argv: Vec::new(),
+        };
+
+        let res = start_process(&cfg).expect("start_process");
+        let pid = res.pid;
+        assert!(process_alive(pid), "Process should be alive after start");
+
+        let stopped = stop_process(pid, false);
+        assert!(stopped, "stop_process should return true");
+        assert!(!process_alive(pid), "Process should be dead after stop_process");
+
+        let _ = stop_process(99_999_999, false);
+        let _ = stop_process(99_999_999, true);
+    }
+
+    #[test]
+    fn test_is_reserved_flag() {
+        for flag in [
+            "--model",
+            "-m",
+            "--execution-manifest",
+            "--rank",
+            "--world",
+            "--host",
+            "--port",
+            "--port=8080",
+            "--layer-window",
+            "-lw",
+            "--gpu-layers",
+            "-ngl",
+            "-ngl=33",
+            "--tensor-split",
+            "-ts",
+            "--ctx-size",
+            "-c",
+            "--threads",
+            "-t",
+            "--master",
+            "--next",
+            "--data-port",
+            "--signal-port",
+        ] {
+            assert!(
+                LaunchConfig::is_reserved_flag(flag),
+                "Should be reserved: {}",
+                flag
+            );
+        }
+
+        for flag in ["--flash-attn", "--temp", "--temp=0.7", "0.7", "--top-k=40"] {
+            assert!(
+                !LaunchConfig::is_reserved_flag(flag),
+                "Should not be reserved: {}",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_alive_tracked_child_normal_exit() {
+        #[cfg(windows)]
+        let cmd_path = std::env::var("COMSPEC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        #[cfg(windows)]
+        let cfg = LaunchConfig {
+            role: "test_exit0".into(),
+            binary: cmd_path.clone(),
+            argv: vec![
+                cmd_path.to_string_lossy().into(),
+                "/C".into(),
+                "exit".into(),
+                "0".into(),
+            ],
+            env: HashMap::new(),
+            log_path: None,
+            log_helper_argv: Vec::new(),
+        };
+        #[cfg(unix)]
+        let cfg = LaunchConfig {
+            role: "test_exit0".into(),
+            binary: PathBuf::from("/bin/sh"),
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            env: HashMap::new(),
+            log_path: None,
+            log_helper_argv: Vec::new(),
+        };
+
+        let res = start_process(&cfg).expect("start_process");
+        let pid = res.pid;
+        // Wait briefly for process to exit
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !process_alive(pid),
+            "Process with exit code 0 should be reported dead by process_alive"
+        );
+    }
+
+    #[test]
+    fn test_process_alive_exit_code_259_still_active_edge_case() {
+        // Exit code 259 is STILL_ACTIVE in Win32.
+        // A process that explicitly exits with code 259 MUST be reported as dead,
+        // not alive.
+        #[cfg(windows)]
+        {
+            let mut child = Command::new("cmd")
+                .args(["/C", "exit", "259"])
+                .spawn()
+                .expect("spawn cmd exit 259");
+            let pid = child.id();
+            let status = child.wait().expect("wait on child");
+            assert_eq!(status.code(), Some(259));
+            assert!(
+                !process_alive(pid),
+                "Process that exited with code 259 must return false from process_alive"
+            );
+        }
+    }
+
+    #[test]
+    fn test_process_alive_untracked_child_lifecycle() {
+        #[cfg(windows)]
+        {
+            let mut child = Command::new("cmd")
+                .args(["/C", "ping", "-n", "5", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn ping");
+            let pid = child.id();
+            assert!(
+                process_alive(pid),
+                "Untracked child should be alive while running"
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(
+                !process_alive(pid),
+                "Untracked child should be dead after kill and wait"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let mut child = Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .expect("spawn sleep");
+            let pid = child.id();
+            assert!(process_alive(pid), "Child should be alive while running");
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(!process_alive(pid), "Child should be dead after kill");
+        }
+    }
+
+    #[test]
+    fn test_process_alive_pid_boundaries() {
+        assert!(!process_alive(0));
+        assert!(!process_alive(u32::MAX));
+        assert!(!process_alive(99_999_999));
+        assert!(process_alive(std::process::id()));
     }
 }

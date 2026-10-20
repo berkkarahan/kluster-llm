@@ -228,3 +228,58 @@ def test_launch_failure_reports_the_rank_log_tail(tmp_path):
 
     assert _exit_before_readiness(root, "missing-run") == "Prima exited before model readiness"
     assert rank_log_tail(tmp_path / "nope.log") == ""
+
+
+def test_vulkan_buffer_limit_reports_settings_recovery_and_preserves_log(tmp_path):
+    log = tmp_path / "run-1" / "rank.log"
+    log.parent.mkdir()
+    content = (
+        "ggml_vulkan: Device memory allocation of size 3491480064 failed.\n"
+        "ggml_vulkan: Requested buffer size exceeds device memory allocation limit: ErrorOutOfDeviceMemory\n"
+        "llama_context_setup_backend_impl: failed to allocate compute buffers\n"
+        + "request: GET /health 127.0.0.1 503\n" * 70
+    )
+    log.write_text(content, encoding="utf-8")
+
+    message = _exit_before_readiness(tmp_path, "run-1")
+    assert message.startswith("Model settings exceed this GPU's buffer limit.")
+    assert "Micro batch" in message and "Context size" in message
+    assert "Flash Attention if supported" in message
+    assert "deploy again" in message
+    assert "503" not in message and "rank log tail" not in message
+    assert log.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "ggml_vulkan: Device memory allocation of size 3491480064 failed: ErrorOutOfDeviceMemory",
+    "llama_context_setup_backend_impl: failed to allocate compute buffers",
+    "aborted: unsupported tensor",
+])
+def test_other_startup_failures_are_not_classified_as_settings_errors(tmp_path, diagnostic):
+    log = tmp_path / "run-1" / "rank.log"
+    log.parent.mkdir()
+    log.write_text(diagnostic, encoding="utf-8")
+    message = _exit_before_readiness(tmp_path, "run-1")
+    assert message.startswith("Prima exited before model readiness")
+    assert diagnostic in message
+
+
+def test_readiness_failure_exposes_actionable_message(tmp_path, monkeypatch):
+    import threading
+
+    from kllm.modules.primacpp.interactors.runs import LocalPrimaRuns
+
+    log = tmp_path / "run-1" / "rank.log"
+    log.parent.mkdir()
+    log.write_text(
+        "ggml_vulkan: Requested buffer size exceeds device memory allocation limit: ErrorOutOfDeviceMemory\n",
+        encoding="utf-8",
+    )
+    runner = LocalPrimaRuns(SimpleNamespace(rank=SimpleNamespace(
+        root=tmp_path, lock=threading.RLock(), _owned_child_alive=lambda: False,
+    )))
+    monkeypatch.setattr(runner, "_check", lambda: None)
+    with pytest.raises(ValueError) as failure:
+        runner._wait_ready(SimpleNamespace(run_id="run-1"), 8080)
+    assert str(failure.value) == _exit_before_readiness(tmp_path, "run-1")
+    assert str(failure.value).startswith("Model settings exceed this GPU's buffer limit.")

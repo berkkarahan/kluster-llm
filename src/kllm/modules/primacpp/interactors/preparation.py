@@ -23,6 +23,7 @@ from kllm.modules.primacpp.interactors.kernel_profile import (decode_kernel_prof
     kernel_settings, kernel_hardware, storage_identity, require_vulkan_profile_device)
 from kllm.modules.primacpp.interactors.qualification import execution_host
 from kllm.shared.runtime_resources import node_resources, prima_scope
+from kllm.shared.prima_diagnostics import FileMirror, ProgressLog, emit, scope as log_scope, summary
 
 from kllm.modules.primacpp.interactors.preparation_metrics import (
     ProgressWindow, diagnostics_scope, digest_file, measure,
@@ -88,6 +89,7 @@ class ProfileJobs:
         self.cancelled: set[str] = set()
         self.checks = {}
         self._progress_windows = {}
+        self._log_progress = ProgressLog()
         self.closed = False
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prima-profile")
         try:
@@ -149,6 +151,7 @@ class ProfileJobs:
                 "bytes_total": max(0, int(bytes_total)),
                 "updated_at": time.time(),
             }
+            self._log_progress.update("profiling", identity, job["progress"])
             if phase in TERMINAL:
                 self._progress_windows.pop(identity, None)
             if save:
@@ -294,7 +297,7 @@ class ProfileJobs:
             raise ValueError("Profile job cancelled")
 
     def _run(self, identity: str, request: ProfileRequest, runtime: dict, model: Path):
-        with diagnostics_scope(self.jobs[identity], self.lock, lambda: self._check(identity), self.state().node_id):
+        with log_scope(identity), diagnostics_scope(self.jobs[identity], self.lock, lambda: self._check(identity), self.state().node_id), FileMirror(self.root / identity / "profile.log", "profiling"):
             return self._run_owned(identity, request, runtime, model)
 
     def _run_owned(self, identity: str, request: ProfileRequest, runtime: dict, model: Path):
@@ -352,6 +355,7 @@ class ProfileJobs:
             directory.mkdir(parents=True, exist_ok=True)
             output = directory / "profile.log"
             self._check(identity)
+            emit("profiling", "kernel profiler started", backend=backend, devices=settings.get("devices"))
             with measure("native_kernel_profiler"), output.open("w") as log:
                 process = subprocess.Popen(
                     [
@@ -441,6 +445,7 @@ class ProfileJobs:
                 raise ValueError("Prima profiler did not produce structured output")
             validation_started = time.monotonic()
             metrics = json.loads(raw)
+            emit("profiling", summary(metrics))
             if backend == "vulkan":
                 require_vulkan_profile_device(metrics, selected_devices[0])
             typed = metrics.get("schema_version") == 2
@@ -651,6 +656,7 @@ class ProfileJobs:
 
     def _record_refusal(self, identity: str, error: Exception) -> None:
         """Leave a refused job's owned log diagnosable instead of missing/empty."""
+        emit("profiling", f"profiling refused: {error}", identity=identity)
         path = self.root / identity / "profile.log"
         try:
             if path.exists() and path.stat().st_size:

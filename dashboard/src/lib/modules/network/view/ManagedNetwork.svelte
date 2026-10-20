@@ -42,6 +42,11 @@
   const selected = $derived(assessment?.computers.filter(c => c.master || included[c.node_id]) ?? []);
   const helperNeedsAttention = $derived(['TIMEOUT', 'HELPER_REFUSED', 'UPGRADE_REQUIRED'].includes(local?.error_code ?? ''));
   const canStart = $derived(!helperNeedsAttention && selected.length >= 2 && selected.every(c => !c.error_code && !!(adapters[c.node_id] || c.selected_adapter)));
+  const blockedComputers = $derived(selected.filter(c => c.error_code || !(adapters[c.node_id] || c.selected_adapter)));
+  const setupBlocker = $derived(!assessment ? 'Refresh to check connected computers.'
+    : helperNeedsAttention ? 'Resolve the network helper status on this computer before setup.'
+    : blockedComputers.length ? `Resolve setup requirements on: ${blockedComputers.map(c => c.name).join(', ')}.`
+    : selected.length < 2 ? 'Select at least one worker to connect to this master.' : '');
   const networkLabel = $derived(network?.observed_state === 'ready' ? 'Private network ready' : operation ? 'Setting up' : network ? ({preparing:'Checking computers', applying:'Configuring adapters', verifying:'Testing connections', degraded:'Connection needs attention', failed:'Setup needs attention', stopping:'Restoring settings', cleanup_pending:'Restoration needs attention'}[network.observed_state] ?? 'Not set up') : 'Not set up');
   const listenersRestorable = $derived(!!listenerReview && listenerReview.rules.every(rule => rule.ownership === 'exact' || rule.ownership === 'absent'));
   const ownershipLabels = {exact: 'Matches Kluster’s saved rule', changed: 'Changed outside Kluster', unknown: 'Creation receipt missing', absent: 'Already absent'};
@@ -211,6 +216,7 @@
   <summary><span>Private 10GbE network</span><span class:ready={network?.observed_state === 'ready'}>{networkLabel}</span></summary>
   <div class="guided-content">
     <p class="intro">Connect your computers to a dedicated Ethernet switch or cable. Links at 1 Gbps or faster are supported; 10 Gbps is preferred. Kluster handles the network settings and tests the connection.</p>
+    {#if assessment && !network}<p class="hint">Not set up means Kluster is not managing a private network. An existing manually configured Ethernet connection may still be carrying cluster traffic.</p>{/if}
     <section class="admin-notice" aria-label="Administrator access requirements">
       {#if helperNeedsAttention}
         <strong>Network helper needs attention on this computer</strong>
@@ -274,8 +280,14 @@
         {#each assessment?.computers ?? [] as computer (computer.node_id)}
           <div class="computer">
             <label class="check"><input type="checkbox" bind:checked={included[computer.node_id]} disabled={computer.master || !!network?.participants.some(p => p.node_id === computer.node_id)} /> <strong>{computer.name}</strong> {#if computer.master}<span class="hint">This computer · master</span>{/if}</label>
-            <p class:granted={!computer.error_code && !!(adapters[computer.node_id] || computer.selected_adapter)}>{computer.error_code ? 'Needs attention' : computer.message}</p>
-            <ErrorMessage source={`network-computer:${computer.node_id}`} message={computer.error_code ? computer.message : ''} />
+            <p class="hint" class:granted={computer.administrator_enabled}>Administrator access: {computer.administrator_enabled ? 'enabled' : 'not enabled'}</p>
+            <p class="computer-readiness" class:granted={!computer.error_code && !!(adapters[computer.node_id] || computer.selected_adapter)}>{computer.message || (computer.error_code ? 'Refresh to check setup requirements.' : 'Choose a dedicated Ethernet adapter.')}</p>
+            <details class="adapter-details">
+              <summary>Adapter details</summary>
+              {#each computer.adapters as adapter}
+                <p><strong>{adapter.os_interface}</strong> · {adapter.link_speed_mbps == null || adapter.link_speed_mbps <= 0 ? 'Speed unknown' : `${adapter.link_speed_mbps / 1000} Gbps`} · {adapter.reason || 'Eligible for dedicated networking'}</p>
+              {:else}<p>No adapter inventory available. Refresh after checking this computer’s connection.</p>{/each}
+            </details>
             {#if computer.adapters.filter(a => !a.reason).length > 1}
               <label>Dedicated Ethernet adapter
                 <select aria-label={`Dedicated adapter for ${computer.name}`} bind:value={adapters[computer.node_id]}>
@@ -302,12 +314,13 @@
         <p role="status">{phase === 'preparing' ? 'Checking each computer…' : phase === 'applying' ? 'Configuring dedicated adapters…' : phase === 'verifying' ? 'Testing private connections…' : 'Restoring network settings…'}</p>
         {#each participants as participant}<p>{assessment?.computers.find(c => c.node_id === participant.node_id)?.name ?? participant.node_id}: {participant.status.replaceAll('_', ' ')}</p>{/each}
         <button class="btn" disabled={busy} onclick={cancel}>Cancel setup and restore settings</button>
-      {:else if !network}<button class="btn btn-primary" disabled={busy || !canStart} onclick={() => setup()}>Set up private network</button>
+      {:else if !network}<button class="btn btn-primary" aria-describedby={setupBlocker ? 'network-setup-blocker' : undefined} disabled={busy || !canStart} onclick={() => setup()}>Set up private network</button>
       {:else}
         {#if ['failed', 'degraded', 'verifying'].includes(network.observed_state)}<button class="btn" disabled={busy || !canStart || network.blocking_runs.length > 0} onclick={() => setup('retry')}>Retry setup</button>{/if}
         {#if network.observed_state === 'ready' && selected.some(c => !network?.participants.some(p => p.node_id === c.node_id))}<button class="btn" disabled={busy || !canStart || network.blocking_runs.length > 0} onclick={() => setup('add')}>Add selected computers</button>{/if}
         <button class="btn" disabled={busy || network.blocking_runs.length > 0} onclick={stop}>Stop private network and restore settings</button>
       {/if}
+      {#if !operation && setupBlocker}<p id="network-setup-blocker" class="hint" role="status">{setupBlocker}</p>{/if}
     {:else}<p>The cluster’s master handles private-network setup. After enabling administrator access here, continue on the master.</p>{/if}
     <button class="btn" disabled={busy || !!operation} onclick={load}>Refresh computers</button>
     <details class="advanced" bind:open={advanced}>
@@ -334,6 +347,7 @@
   .computer-list, .network-status { border: 1px solid var(--border); padding: 12px; border-radius: 6px; }
   .computer + .computer { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
   .computer p, .computer > label:not(.check) { margin-left: 24px; }
+  .computer, .computer-list, .adapter-details { min-width: 0; overflow-wrap: anywhere; }
   select, input:not([type='checkbox']) { width: 100%; padding: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
   .ready, .granted { color: var(--success, #69b884); }
   .advanced { border-top: 1px solid var(--border); padding-top: 8px; }

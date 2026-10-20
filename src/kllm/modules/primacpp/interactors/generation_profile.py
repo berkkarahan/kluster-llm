@@ -20,11 +20,13 @@ from kllm.modules.primacpp.interactors.execution import ExecutionManifest, Segme
 from kllm.modules.primacpp.interactors.evidence import execution_reports, verify_vulkan_execution
 from kllm.modules.primacpp.interactors.model_structure import inspect_model, process_failure, OUTPUT_LIMIT
 from kllm.modules.primacpp.interactors.launch import device_arguments
+from kllm.shared.prima_diagnostics import FileMirror, emit, operation
 
 
 PROMPT = "This is an inference profiling request. Continue this sentence with a description of a clear morning: The sky is"
 
 
+@operation("profiling")
 def profile_generation(runtime: dict, model: Path, request, selected: list[dict], directory: Path, *, check, track, stop, progress=None, expected_layers=None):
     """Return CPU and selected-offload measurements; never qualifies inference."""
     if request.gpu_layers is None or request.gpu_layers <= 0 or len(selected) != 1:
@@ -67,7 +69,9 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
                        "KLLM_PRIMA_BIND": "127.0.0.1", "KLLM_PRIMA_EXECUTION_EVIDENCE": "1" if ngl else "0"}
         log_path = phase / "profile.log"
         peak = 0
-        with log_path.open("w", encoding="utf-8") as output:
+        emit("profiling", "generation pass started", backend=backend, ngl=ngl,
+             devices=','.join(str(device.get("name", device.get("device_identity", ""))) for device in selected))
+        with log_path.open("w", encoding="utf-8") as output, FileMirror(log_path, "profiling"):
             process = subprocess.Popen([runtime["llama_server"], "--model", str(model), "--host", "127.0.0.1",
                 "--port", str(port), "--ctx-size", str(request.context), "--threads", str(request.threads),
                 "--threads-batch", str(request.threads),
@@ -158,6 +162,9 @@ def profile_generation(runtime: dict, model: Path, request, selected: list[dict]
                 measured[backend] = {"samples": samples, "prefill_ms": median(s["prefill_ms"] for s in samples),
                     "decode_ms": median(s["decode_ms"] for s in samples), "peak_memory_bytes": peak,
                     "manifest_digest": manifest.digest, "execution_proof": proof}
+                emit("profiling", "generation pass completed", backend=backend,
+                     prefill_ms=measured[backend]["prefill_ms"], decode_ms=measured[backend]["decode_ms"],
+                     peak_memory_bytes=peak)
                 if progress is not None:
                     progress(f"{pass_label}: completed ({measured[backend]['decode_ms']:.1f} ms/tok)", base_fraction + 0.5, model_size, model_size)
             except (ValueError, OSError, httpx.HTTPError, psutil.Error) as error:

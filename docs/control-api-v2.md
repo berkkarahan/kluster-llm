@@ -33,7 +33,77 @@ On first startup with an older cluster-state file, the agent stops tracked model
 
 SQLite-backed telemetry and managed-network operations return the existing sanitized `503` unavailable response when bounded admission or checkout expires, or when the owner is closing. A usage-ingest `503` may follow a confirmed reading commit if a later retention unit failed; retries use the existing reading identity and do not create duplicate observations. A storage commit with an unknown outcome is never retried automatically.
 
+### Prima deployment review and engine-scoped settings
+
+Prima previews advertise `deployment_review_version: 1` as a control-API feature,
+not a native capability or qualification grant. A modern
+`POST /v2/inference/runs` may include:
+
+```json
+{"model":"toy.gguf","settings_source":"defaults","remember":false,"advanced_open":false,"review":{"runtime_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plan_digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+```
+
+The identities above illustrate the format, not valid runtime/plan values. Both
+must be exact lowercase 64-character hex strings from the inspected deployment.
+The captured runtime must be Prima and match the review; after authoritative
+replanning, the plan digest must match before dispatch. Mismatch returns HTTP 409
+with `error.details.code: DEPLOYMENT_REVIEW_CHANGED`. Inspect and review again;
+never retry by deleting the guard. `review` is request-only and excluded from
+serialized settings, plan/preparation digests, manifests and saved preferences.
+Requests without it retain their existing behavior. This is an optimistic
+consistency precondition, not an exactly-once apply journal or new authorization.
+
+`GET /v2/inference/capabilities?model=...&runtime_id=...` inspects that captured
+runtime without selecting it as the cluster target. Omit `runtime_id` for the
+existing behavior. Scoped responses identify `runtime_id`, `engine` and the
+review contract version. The runtime-specific Prima plan also returns the
+existing `effective_config` projection. A missing flag catalog is not evidence
+that every feature is supported.
+
+New authenticated profile resources are:
+
+- `GET /v2/inference/engine-model-settings/primacpp/{model}`
+- `PUT /v2/inference/engine-model-settings/primacpp/{model}`
+
+Other engine values currently return 422. GET returns `engine`, `model`,
+`revision`, `updated_at`, executable `parameter_set`, literal
+`requested_parameter_set`, and a separate `legacy_parameter_set` import
+candidate. A missing profile has revision 0 and conservative Prima defaults
+(F16 K/V and Flash Attention off); reading does not migrate or save a profile.
+PUT requires `{runtime_id, expected_revision, parameter_set}` and validates under
+that exact Prima runtime. A stale revision returns HTTP 409 with
+`error.details.code: MODEL_SETTINGS_CHANGED`. Retain the user's draft and reload
+or compare before saving again. Modern contradictory typed fields/native aliases
+remain validation errors; extra arguments do not universally take precedence.
+
+The inference-owned `engine-model-settings.json` sidecar uses atomic replacement
+and a finite cross-process compare-and-swap lock. Invalid/corrupt stored data is
+refused, not reset to empty. Unscoped model-settings routes, the legacy file and
+old remember semantics are unchanged. Request controls (`remember`,
+`advanced_open`, `settings_source`, `network_id`, `review`) are not reusable
+profile settings. The new editor sends explicit defaults-based deployment
+snapshots with `remember:false`; scoped Save is a separate operation.
+
 ### Optional Prima preparation resources
+
+Public preparation GET/latest/cancel projections add `local_work_pending`.
+A terminal `phase` alone does not prove that the local preparation future and
+reservation have settled; a prepared job can still be projected as `settling`.
+This field describes **local** owned work only. Remote cancellation can still
+settle through lease expiry, so `false` is not a cluster-wide cleanup receipt.
+Keep the same `request_id` and identical payload when reconciling an uncertain
+preparation POST; the existing server rejects reuse with different inputs.
+A lost Run response must be reconciled through status/activity, not replayed
+automatically. No durable exactly-once Run contract is introduced here.
+
+Prima plan previews include `placement_errors`, separate from inference
+`qualification_errors`. A nonempty placement list blocks Prepare files and
+Prepare & profile; clients show its reasons before creating a job. Older agents
+with `prima_topology: null` expose the reason through `qualification_errors`.
+Materialization rechecks placement and retains the specific error before asset
+hashing or staging. Automatic Prima MoE planning resolves expert-only offload to
+zero because its ring executes whole layers; explicit unsupported overrides are
+still refused.
 
 Preparation and profile HTTP job status may include `diagnostics.version: 1`.
 These node-local diagnostics are outside execution/profile identity and are

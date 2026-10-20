@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import time
 from kllm.modules.primacpp.interactors.preparation_metrics import measured
+from kllm.shared.prima_diagnostics import FileMirror, emit, operation, summary
 
 
 FEATURE = "model_structure_v1"
@@ -35,11 +36,12 @@ def process_failure(phase, process, path, reason):
 
 
 @measured("model_inspection")
+@operation("inspection")
 def inspect_model(runtime, model, directory, *, check, track, stop):
     require_model_inspection(runtime)
     check()
     path = directory / "inspection.log"
-    with path.open("w", encoding="utf-8") as output:
+    with path.open("w", encoding="utf-8") as output, FileMirror(path, "inspection"):
         process = subprocess.Popen(
             [runtime["llama_server"], "--inspect-model", "--model", str(model)],
             env={**os.environ, **runtime.get("runtime_env", {})},
@@ -70,6 +72,7 @@ def inspect_model(runtime, model, directory, *, check, track, stop):
                            for k in ("stored_blocks", "execution_layers"))
                     or report["execution_layers"] > report["stored_blocks"]):
                 raise ValueError("Invalid native model structure report")
+            emit("inspection", summary(report))
             return report
         except (ValueError, OSError) as error:
             raise process_failure(phase, process, path, str(error)) from error

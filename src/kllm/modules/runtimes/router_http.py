@@ -123,7 +123,20 @@ def build_router(
 
         authorize(request, master=True)
         value = await body(request, PlanBody)
-        return await work(lambda: control().prima.plan(identity, value))
+        def inspect():
+            from kllm.modules.runtimes.interactors.selection import use_runtime
+            from kllm.modules.inference.interactors.effective_config import effective_configuration
+            from kllm.modules.inference.interactors.deployment_review import DEPLOYMENT_REVIEW_VERSION
+
+            captured = registry().capture(identity)
+            prima = control().prima
+            # Do not resolve legacy saved settings here alone: preparation and
+            # Run must inspect the same fully materialized request settings.
+            with use_runtime(captured):
+                result = prima.plan(identity, value)
+                return {**result, "deployment_review_version": DEPLOYMENT_REVIEW_VERSION,
+                        "effective_config": effective_configuration(value, result, prima.resolve_model(value.model))}
+        return await work(inspect)
 
 
     @router.post("/cluster/prima-preparations")

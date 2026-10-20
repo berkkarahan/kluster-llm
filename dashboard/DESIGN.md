@@ -276,23 +276,62 @@ Cancel download is an actual store action, and terminal state is tied to an oper
 
 ### Deploy and effective configuration
 
-[src/routes/run/+page.svelte](src/routes/run/+page.svelte) implements **Select → Configure → Review & deploy** and automatically swaps between [RunPage.svelte](src/lib/modules/run/view/RunPage.svelte) (`llama.cpp`) and [PrimaRunPage.svelte](src/lib/modules/run/view/PrimaRunPage.svelte) (`prima.cpp`) via `resolveActiveEngine()` in [entities.ts](src/lib/modules/run/entities.ts) (matching Settings' engine derivation, with `?engine=prima|llama` URL query override support).
-Select chooses a local model, inference network and Automatic (`auto`, HiGHS / Profiled for Prima), Capacity-first (`capacity_first`), or Priority (`priority`) placement.
-“Must use this node” means at least one model layer; unchecked nodes remain eligible.
-Each node row shows that node's GPU names beside the node id (membership device names, or the plan's `node_gpu_names` when membership has none).
-Priority has explicit up/down actions and removal for unavailable saved entries.
-Configure begins with context, concurrent slots, response limit and thinking controls.
-In `llama.cpp` mode, disclosures group Capacity & performance, Memory & loading, Generation defaults,
-Model features & templates, and Expert engine options.
-In `prima.cpp` mode ([PrimaRunPage.svelte](src/lib/modules/run/view/PrimaRunPage.svelte)):
-- Header and status strip surface model architecture compatibility (`model_support`), qualification status (`qualification_errors`), and active scheduler (`highs_halda`, `capacity_first`, `priority`).
-- Step 1 shows per-node Ring-TCP rank assignments (`Rank k → next_node_id`, `-lw`, `-ngl`), Halda MILP telemetry (`w_m`, `n_m`, memory pressure sets `M1`–`M4`, `forced M4`, `graphs`, step latency breakdown), and pruned weak workers (`pruned_nodes`), plus a one-click sanitizer if saved settings contain `llama.cpp`-only flags (`vision`, `moe_offload`).
-- Step 2 replaces `llama.cpp`-only controls with Prima-native configuration backed by `parsePrimaExtras()` / `serializePrimaExtras()` in [configuration.ts](src/lib/modules/run/configuration.ts): Sliding-Window Attention layout (`--swa-compact` / `--swa-full`), head server mode (`generation` / `--embedding` + `--pooling` / `--rerank`), managed LoRA adapters (`--lora` / `--lora-scaled`), Rank 0 CPU draft-simple speculative decoding, and `--chat-template-kwargs`.
-- Step 3 embeds Prima asset preparation and native device profiling (`Inspect placement`, `Prepare files`, `Prepare & profile`, participant status polling, and automatic estimate refresh on completion) alongside the Ring-TCP rank placement table and evaluated Halda cycle candidates (`evaluated_cycles`).
-[ParameterControl.svelte](src/lib/modules/run/view/ParameterControl.svelte) uses descriptors, bounds, availability reasons,
-inherit/automatic modes and effective values/sources/adjustments. Its scope label is “Next deployment”.
-[ExpertArguments.svelte](src/lib/modules/run/view/ExpertArguments.svelte) exposes installed-engine options and structured argv;
-JSON arrays preserve literal values. Extra arguments can make the memory estimate incomplete.
+[src/routes/run/+page.svelte](src/routes/run/+page.svelte) swaps between the existing
+[RunPage.svelte](src/lib/modules/run/view/RunPage.svelte) (`llama.cpp`) wizard and
+[PrimaRunPage.svelte](src/lib/modules/run/view/PrimaRunPage.svelte) (`prima.cpp`)
+using `resolveActiveEngine()`. Engine query overrides choose the view, not the
+actual cluster target.
+
+Prima has two full-width main tabs: **Deployment settings** (the default) and
+**Next deployment**. Both panels stay mounted, preserving draft input and preparation
+observation when switching tabs. Arrow keys and Home/End navigate the main tabs.
+The settings tab contains five sections:
+**Overview**, **Computers**, **Memory & speed**, **Responses & features**, and
+**Expert**. `PrimaDeploymentShell.svelte` supplies section navigation, label/flag
+search, technical disclosure and validation summary. Error links activate the settings
+tab before focusing the affected control. Running status, Stop and loading progress
+remain outside the tab panels.
+The run-owned `PrimaDeployment` coordinator is composed in `app.svelte.ts`; views
+do not create another application or duplicate settings store.
+
+- Overview contains the model, exact preview runtime, total context capacity and
+  concurrent-request/output controls. Context is not relabeled as independent
+  per-request capacity without backend evidence.
+- Computers retains network, Automatic/Capacity-first/Priority constraints,
+  required-node and device/budget controls. Required means at least one layer;
+  unchecked remains eligible. Rank/device/HiGHS telemetry describes the inspected
+  plan, not mutable hardware configuration.
+- Memory & speed keeps cache/FA/SWA, loading, checkpoints, cache RAM, batches and
+  threads. Responses & features keeps sampling/reasoning, stop strings, head and
+  pooling, LoRA, draft-model/speculation, embedded/custom templates and kwargs.
+- Expert retains raw argv and CLI/JSON export. `patchPrimaExtras()` changes only
+  owned unambiguous token spans; invalid/unknown unrelated values and path literals
+  are not silently reordered or normalized. Ambiguous edits require raw repair.
+- In Next deployment, `PrimaDeploymentSummary.svelte` separates placement, assets,
+  profile coverage and qualification; reuses `DeploymentPlan.svelte` for actual
+  memory/planner evidence; and keeps backend active configuration separate from
+  next-deployment edits. A previous snapshot is explicitly stale.
+- Prepare files, Prepare & profile and Review automatically acquire a current
+  runtime-bound plan, reusing background planning when possible. There is no manual
+  inspection prerequisite. Planning errors offer Retry planning, which refreshes
+  evidence without replaying preparation or review. Changes during planning cancel
+  the requested action; another explicit click is required for the new draft.
+  Preparation never starts from navigation or typing. Deploy and Settings share
+  `PrimaPreparationObserver`/`PrimaPreparationStatus.svelte`.
+- Review expands inline in Next deployment with readable requested/effective settings
+  and participant tables; the exact snapshot and digest are expandable technical details.
+  Back to editing selects Deployment settings and clears confirmation. Ordinary tab
+  navigation preserves the review; a changed snapshot resets confirmation.
+  Explicit Run confirmation sends a server review precondition;
+  changed identity revokes approval. A legacy server cannot silently receive an
+  unguarded fallback. Unknown launch outcome offers reconciliation, not replay.
+
+Prima saves use revision-checked engine-scoped profiles, with legacy settings
+shown only as an explicit import candidate. Saved/requested/effective/active
+snapshots are distinct. Defaults creates an unsaved draft; late save responses
+cannot replace newer edits. The llama.cpp wizard and unscoped save behavior stay
+on their existing path. Parameter controls retain descriptors, effective values,
+nullable/automatic modes and server-validation errors.
 
 [DeploymentPlan.svelte](src/lib/modules/run/view/DeploymentPlan.svelte) keeps memory totals, components, usable budgets,
 Ring-TCP rank/port summary, HiGHS Halda scheduler summary, resolved settings, incomplete-estimate warnings and Refresh estimate beside the form.
@@ -303,7 +342,10 @@ The editable draft, saved model configuration, plan effective_config and activeR
 The active configuration comes from status.active_config/run results; draft changes do not rewrite it.
 Plan requests debounce by 300ms, invalidate stale estimates and use remember:false.
 Progression validates fields and attempts to focus the offending control; deploy requires a ready fit and runtime readiness.
-An active model changes the final action to “Replace running model”; do not describe this as hot editing.
+The llama.cpp wizard retains its existing “Replace running model” action; this is not hot editing.
+Prima requires an explicit Stop and settled lifecycle before reviewing/running another deployment.
+A model becoming active or loading while authentication is pending revokes Prima launch approval;
+the editor never promises automatic replacement of an already-owned Prima run.
 [JinjaEditor.svelte](src/lib/modules/run/view/JinjaEditor.svelte) uses CodeMirror/Jinja/One Dark, server validation and a 65,536-byte limit;
 syntax checks are explicitly not model-compatibility verification.
 
@@ -331,7 +373,7 @@ Prima evaluation adds a master-only **Prima preparation** panel through
 It uses the model and draft settings already selected in Deploy, displays a read-only
 rank/device/layer/`-ngl`/tensor preview, and exposes Prepare files, Prepare & profile,
 and cancellation with polled participant progress and errors. A settings change makes
-the preview stale and requires another inspection. The placement table scrolls locally
+the preview stale; the next preparation action recalculates it automatically. The placement table scrolls locally
 on narrow screens. Normal Prima target/deployment selection remains disabled while
 qualification is incomplete; this panel provides preparation and assessment groundwork.
 
@@ -441,6 +483,12 @@ optional Details and an accessible Dismiss error button (24px square).
 startup snapshots suppress historical failures, and generations reject stale asynchronous failures after clearing.
 Dismissal can also hide a matching toast; authoritative validation and failure state remain intact.
 The shell toast region is aria-live=polite. A dismissed diagnostic must never enable an unsafe action.
+
+Managed-network computer readiness is persistent status, independent of the
+dismissible diagnostic store. Administrator status is separate from setup readiness;
+adapter details show observed speed and rejection reasons, and the setup explanation
+names selected computers with unresolved requirements. Browser fixture checks cover
+first load, Clear/dismiss, refresh, changed blockers and recovery at 390px and 1280px.
 
 Keyboard behavior includes a skip link, visible focus outlines, native controls/dialogs and explicit mobile-menu containment.
 Global focus is 2px accent; earlier specific rules retain 2px offsets on buttons/links/fields, while generic controls may use 4px.

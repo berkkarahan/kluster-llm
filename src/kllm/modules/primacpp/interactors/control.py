@@ -20,6 +20,7 @@ from kllm.modules.primacpp.interactors.transfers import AssetReceiver, PushRecei
 from kllm.modules.runtimes.entities import body_digest
 from kllm.modules.runtimes.interactors.registry import atomic_json, file_digest
 from kllm.shared import native
+from kllm.shared.prima_diagnostics import ProgressLog, operation, scope as log_scope
 from kllm.modules.primacpp.interactors.devices import discover_vulkan_devices, select_vulkan_devices, vulkan_environment
 from kllm.modules.primacpp.interactors.launch import rank_arguments, execution_settings, materialize_template, device_arguments
 from kllm.modules.primacpp.interactors.execution import authority_owner, ExecutionManifest
@@ -454,6 +455,7 @@ class PrimaControl:
         return {"participant_evidence": evidence.model_dump(), "storage_identity": storage_identity(path).model_dump(),
                 "manifest_digest": manifest.digest}
 
+    @operation("deployment")
     def plan(self, runtime_id, body, *, members=None, model=None):
         runtime = self.registry.capture(runtime_id)
         if runtime.get("engine") != "primacpp":
@@ -600,6 +602,9 @@ class PrimaControl:
             }
             with measure("progress") as counts:
                 counts["publications"] = 1
+            if not hasattr(self, "_log_progress"):
+                self._log_progress = ProgressLog()
+            self._log_progress.update("deployment", identity, job["progress"])
             if phase in TERMINAL:
                 self._job_samples.pop(identity, None)
 
@@ -621,11 +626,8 @@ class PrimaControl:
         with self.lock:
             if not self.jobs:
                 return None
-            latest = max(self.jobs.values(), key=lambda item: float(item.get("created_at") or 0.0))
-            result = deepcopy(latest)
-            if result["phase"] == "prepared" and result["job_id"] in self.preparation_reservations:
-                result["phase"] = "settling"
-            return result
+            identity = max(self.jobs, key=lambda key: float(self.jobs[key].get("created_at") or 0.0))
+            return self._public_job(identity)
 
     def start_rank(self, manifest, model, check, *, command_owner=None):
         owner = command_owner or authority_owner(self.service.channels.master_authority())
@@ -671,7 +673,7 @@ class PrimaControl:
         return result
 
     def _prepare(self, identity, runtime_id, body, digest, include_profile):
-        with diagnostics_scope(self.jobs[identity], self.lock, lambda: self._check(identity),
+        with log_scope(identity), diagnostics_scope(self.jobs[identity], self.lock, lambda: self._check(identity),
                                self.service.state().node_id):
             return self._prepare_owned(identity, runtime_id, body, digest, include_profile)
 
@@ -1160,12 +1162,21 @@ class PrimaControl:
                     break
                 yield chunk
 
+    def _public_job(self, identity):
+        """Called under self.lock; local work is not proof of remote cleanup."""
+        result = deepcopy(self.jobs[identity])
+        future = self.preparation_futures.get(identity)
+        result["local_work_pending"] = (
+            identity in self.preparation_reservations
+            or (future is not None and not future.done())
+        )
+        if result["phase"] == "prepared" and identity in self.preparation_reservations:
+            result["phase"] = "settling"
+        return result
+
     def job(self, identity):
         with self.lock:
-            result = deepcopy(self.jobs[identity])
-            if result["phase"] == "prepared" and identity in self.preparation_reservations:
-                result["phase"] = "settling"
-            return result
+            return self._public_job(identity)
 
     def cancel(self, identity, *, reason=None):
         with self.lock:
@@ -1189,7 +1200,7 @@ class PrimaControl:
                 )
                 self._save()
                 self._settle_preparation(identity)
-            return deepcopy(job)
+            return self._public_job(identity)
 
     async def execute(self, command, deadline, authorize):
         def check():

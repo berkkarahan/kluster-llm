@@ -61,6 +61,7 @@ def candidates(body, members, execute_plan, *, limit=32):
             if len(options) >= limit:
                 break
     results, seen = [], set()
+    capacity_error = None
     for index, inventory in enumerate(options):
         try:
             plan = execute_plan(body, inventory)
@@ -69,6 +70,8 @@ def candidates(body, members, execute_plan, *, limit=32):
                 raise
             continue  # An optional subset may be invalid without invalidating the full plan.
         if plan.get("fit_status") == "overflow":
+            if index == 0:
+                capacity_error = plan.get("hint")
             continue
         key = body_digest(
             {
@@ -86,7 +89,11 @@ def candidates(body, members, execute_plan, *, limit=32):
             results.append((plan, inventory))
             seen.add(key)
     if not results:
-        raise ValueError("No feasible Kluster capacity plan")
+        detail = f": {capacity_error}" if capacity_error else ""
+        raise ValueError(
+            "No feasible Kluster capacity plan" + detail
+            + ". Reduce context or increase the selected nodes' usable memory for whole-layer placement."
+        )
     return results
 
 
@@ -154,11 +161,13 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         "placement": _stable_placement(plan),
     }
     errors = qualification_errors(runtime)
+    placement_errors = []
     topology = None
     try:
         topology = topology_from_plan(plan, members, runtime["runtime_id"])
         topology = topology.model_copy(update={"scheduler_report": scheduler_report})
     except ValueError as error:
+        placement_errors.append(str(error))
         errors = [*errors, str(error)]
     if topology is not None and (plan.get("split_mode") or "layer") == "layer":
         resolved = plan.get("resolved_launch_settings") or {}
@@ -170,6 +179,7 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
                 "prima_graph_counts": plan.get("prima_graph_counts"),
             })
         except ValueError as error:
+            placement_errors.append(str(error))
             errors = [*errors, str(error)]
     if topology is not None:
         resolved = plan.get("resolved_launch_settings") or {}
@@ -202,6 +212,7 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         "scheduler": scheduler_report.model_dump(),
         "placement_mode": scheduler_report.scheduler_mode,
         "inference_supported": not errors,
+        "placement_errors": placement_errors,
         "qualification_errors": errors,
         "qualification_warnings": warnings,
         "model_support": support,
@@ -238,8 +249,8 @@ def materialize(
     value = preview(body, runtime, members, model, execute_plan, score=score)
     if value["plan_digest"] != expected_digest:
         raise ValueError("Prima plan changed; refresh the plan before preparation")
-    if value["prima_topology"] is None:
-        raise ValueError("Prima cannot represent the selected placement")
+    if value["placement_errors"]:
+        raise ValueError("Prima placement is unsupported: " + "; ".join(value["placement_errors"]))
     from kllm.modules.primacpp.entities import PrimaTopology
 
     topology = PrimaTopology.model_validate(value["prima_topology"])

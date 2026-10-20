@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { createApp } from '#lib/app.svelte';
   import { resolveActiveEngine } from '#lib/modules/run/entities';
   import RunPage from '#lib/modules/run/view/RunPage.svelte';
@@ -25,6 +25,10 @@
       queryEngine
     )
   );
+  $effect(() => {
+    if (activeEngine !== 'primacpp' && app.run.settingsScope !== 'legacy')
+      untrack(() => void app.run.setSettingsScope('legacy'));
+  });
 </script>
 
 {#if activeEngine === 'primacpp'}

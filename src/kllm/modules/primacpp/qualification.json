@@ -71,133 +71,97 @@
       "platform": "Linux",
       "backend": "vulkan",
       "topology": "local",
-      "unrestricted": true,
+      "unrestricted": false,
       "source_commit": null,
       "recipe_digest": null,
       "gates": {
-        "vulkan_gpu_inference": true,
-        "api_parity": true,
-        "model_and_placement_parity": true,
-        "signed_rank_lifecycle": true,
-        "local_performance_gate": true
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false,
+        "hardware_performance_gate": false,
+        "distributed_ring_transport": false,
+        "vulkan_kv_cache_transfer": false
       },
-      "models": [
-        {
-          "name": "all",
-          "sha256": "*"
-        }
-      ],
-      "features": [
-        "*"
-      ],
-      "placements": [
-        "layer",
-        "row"
-      ],
+      "models": [],
+      "features": [],
+      "placements": [],
       "devices": [],
       "execution_scopes": [],
-      "receipts": [
-        "default-prima-runtime"
-      ]
+      "receipts": []
     },
     "linux-vulkan-distributed": {
       "platform": "Linux",
       "backend": "vulkan",
       "topology": "distributed",
-      "unrestricted": true,
+      "unrestricted": false,
       "source_commit": null,
       "recipe_digest": null,
       "gates": {
-        "vulkan_gpu_inference": true,
-        "api_parity": true,
-        "model_and_placement_parity": true,
-        "signed_rank_lifecycle": true,
-        "hardware_performance_gate": true
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false,
+        "hardware_performance_gate": false,
+        "distributed_ring_transport": false,
+        "vulkan_kv_cache_transfer": false
       },
-      "models": [
-        {
-          "name": "all",
-          "sha256": "*"
-        }
-      ],
-      "features": [
-        "*"
-      ],
-      "placements": [
-        "layer",
-        "row"
-      ],
+      "models": [],
+      "features": [],
+      "placements": [],
       "devices": [],
       "execution_scopes": [],
-      "receipts": [
-        "default-prima-runtime"
-      ]
+      "receipts": []
     },
     "darwin-vulkan-local": {
       "platform": "Darwin",
       "backend": "vulkan",
       "topology": "local",
-      "unrestricted": true,
+      "unrestricted": false,
       "source_commit": null,
       "recipe_digest": null,
       "gates": {
-        "vulkan_gpu_inference": true,
-        "api_parity": true,
-        "model_and_placement_parity": true,
-        "signed_rank_lifecycle": true,
-        "local_performance_gate": true
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false,
+        "hardware_performance_gate": false,
+        "distributed_ring_transport": false,
+        "vulkan_kv_cache_transfer": false
       },
-      "models": [
-        {
-          "name": "all",
-          "sha256": "*"
-        }
-      ],
-      "features": [
-        "*"
-      ],
-      "placements": [
-        "layer",
-        "row"
-      ],
+      "models": [],
+      "features": [],
+      "placements": [],
       "devices": [],
       "execution_scopes": [],
-      "receipts": [
-        "default-prima-runtime"
-      ]
+      "receipts": []
     },
     "darwin-vulkan-distributed": {
       "platform": "Darwin",
       "backend": "vulkan",
       "topology": "distributed",
-      "unrestricted": true,
+      "unrestricted": false,
       "source_commit": null,
       "recipe_digest": null,
       "gates": {
-        "vulkan_gpu_inference": true,
-        "api_parity": true,
-        "model_and_placement_parity": true,
-        "signed_rank_lifecycle": true,
-        "hardware_performance_gate": true
+        "vulkan_gpu_inference": false,
+        "api_parity": false,
+        "model_and_placement_parity": false,
+        "signed_rank_lifecycle": false,
+        "local_performance_gate": false,
+        "hardware_performance_gate": false,
+        "distributed_ring_transport": false,
+        "vulkan_kv_cache_transfer": false
       },
-      "models": [
-        {
-          "name": "all",
-          "sha256": "*"
-        }
-      ],
-      "features": [
-        "*"
-      ],
-      "placements": [
-        "layer",
-        "row"
-      ],
+      "models": [],
+      "features": [],
+      "placements": [],
       "devices": [],
       "execution_scopes": [],
-      "receipts": [
-        "default-prima-runtime"
-      ]
+      "receipts": []
     }
   }
 }

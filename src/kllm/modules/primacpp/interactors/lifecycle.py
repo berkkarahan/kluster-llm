@@ -15,6 +15,7 @@ from kllm.modules.primacpp.interactors.execution import (
 from kllm.modules.primacpp.interactors.model_support import require_model_support
 from kllm.modules.runtimes.interactors.registry import atomic_json
 from kllm.shared.runtime_resources import prima_scope
+from kllm.shared.prima_diagnostics import FileMirror, emit
 
 LEASE_SECONDS = 60
 MONITOR_SECONDS = 5
@@ -47,6 +48,8 @@ class RankSupervisor:
         self.lock = threading.RLock()
         self.resources, self.reservation = resources, None
         self.owner = None
+        self._log_mirror = None
+        self._logged_phase = None
         self.deadline = 0.0
         self.record_path = root / "rank.json"
         try:
@@ -61,8 +64,20 @@ class RankSupervisor:
         except FileNotFoundError:
             pass
 
+        if self.owner:
+            self._log_mirror = FileMirror(self.root / self.owner["run_id"] / "rank.log", "deployment",
+                identity=f"{self.owner['run_id']} rank={self.owner['rank']}", existing=True).start()
+
     def _save(self):
         atomic_json(self.record_path, self.owner)
+        phase = (self.owner["run_id"], self.owner["phase"]) if self.owner else None
+        if phase != self._logged_phase:
+            emit("deployment", "rank state changed", identity=(self.owner or {}).get("run_id"),
+                 phase=(self.owner or {}).get("phase", "idle"), rank=(self.owner or {}).get("rank"))
+            self._logged_phase = phase
+        if (not self.owner or self.owner["phase"] == "failed") and self._log_mirror:
+            self._log_mirror.close()
+            self._log_mirror = None
 
     def _check_owner(self, run_id: str):
         UUID(run_id)
@@ -156,10 +171,18 @@ class RankSupervisor:
                 self.reservation = self.resources.acquire(prima_scope(
                     manifest.run_id, command_owner, manifest.digest), "run")
             try:
+                self._log_mirror = FileMirror(directory / "rank.log", "deployment",
+                    identity=f"{manifest.run_id} rank={rank.rank}", existing=True).start()
+                emit("deployment", "rank launch", identity=manifest.run_id, rank=rank.rank,
+                     backend=backend, ngl=rank.ngl)
                 result = self.spawn(
                     runtime, rank, model, manifest_path, directory / "rank.log", manifest.settings
                 )
             except BaseException:
+                if self._log_mirror:
+                    self._log_mirror.close()
+                    self._log_mirror = None
+                emit("deployment", "rank launch failed", identity=manifest.run_id, rank=rank.rank)
                 if self.reservation is not None:
                     self.reservation.release()
                     self.reservation = None
@@ -209,6 +232,7 @@ class RankSupervisor:
             ):
                 raise ValueError("Rank execution acknowledgement disagrees with the manifest")
             self.owner["phase"] = "ready"
+            self.owner["readiness_report"] = dict(report)
             self._save()
             return dict(self.owner)
 
@@ -222,13 +246,15 @@ class RankSupervisor:
                 raise ValueError("Rank exited before model readiness")
             if self.owner["phase"] not in ("starting", "ready"):
                 raise ValueError("Reconcile the rank before checking readiness")
+            if self.owner["phase"] == "ready" and "readiness_report" in self.owner:
+                return dict(self.owner["readiness_report"])
             log = self.root / run_id / "rank.log"
             try:
                 with log.open("rb") as handle:
                     data = handle.read(4 * 1024 * 1024 + 1)
             except FileNotFoundError:
                 return None
-            if len(data) > 4 * 1024 * 1024:
+            if self.owner["phase"] == "starting" and len(data) > 4 * 1024 * 1024:
                 raise ValueError("Prima startup log exceeds the readiness limit")
             reports = []
             # An in-flight final line can be incomplete until the native fflush.
@@ -250,6 +276,9 @@ class RankSupervisor:
                     or any(type(report.get(k)) is not int for k in ("schema_version", "rank", "ngl", "layers"))
                     or report.get("manifest_mode") is not True):
                 raise ValueError("Rank readiness acknowledgement disagrees with the manifest")
+            if self.owner["phase"] == "ready":
+                self.owner["readiness_report"] = dict(report)
+                self._save()
             authorize()
             return report
 
@@ -396,6 +425,11 @@ class PrimaCoordinator:
             "manifest_digest": self.active.digest if self.active else None,
             "phase": self.phase, "pending_nodes": list(self.started),
             "command_owner": self.command_owner, "recovery_attempts": self.retries})
+        state = (self.active.run_id if self.active else None, self.phase, tuple(self.started))
+        if state != getattr(self, "_logged_state", None):
+            emit("deployment", "cluster run state changed", identity=state[0], phase=self.phase,
+                 pending_nodes=','.join(self.started), recovery_attempts=self.retries)
+            self._logged_state = state
 
     def _check(self, generation):
         if self.cancelled.is_set() or generation != self.generation:

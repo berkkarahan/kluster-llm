@@ -56,9 +56,21 @@ impl BridgeConfig {
     }
     fn check_child(&self) -> io::Result<()> {
         if let Some(pid) = self.child_pid {
-            let identity = crate::usage::process_counters(pid).map_err(|_| invalid("RPC child identity unavailable"))?;
-            if Some(&identity.token) != self.child_start_token.as_ref() {
-                return Err(invalid("RPC child identity changed"));
+            match crate::usage::process_counters(pid) {
+                Ok(identity) => {
+                    if Some(&identity.token) != self.child_start_token.as_ref() {
+                        return Err(invalid("RPC child identity changed"));
+                    }
+                }
+                Err(_) => {
+                    if !crate::process::process_alive(pid) {
+                        return Err(invalid("RPC child identity unavailable: process dead"));
+                    }
+                    if self.child_start_token.as_deref() == Some("unsupported") {
+                        return Ok(()); // Validated fallback for unsupported platform counters
+                    }
+                    return Err(invalid("RPC child identity unavailable"));
+                }
             }
         }
         Ok(())
@@ -279,4 +291,76 @@ pub fn start_network_bridge(py: Python<'_>, config: String) -> PyResult<NetworkB
     if config.len() > 8192 { return Err(pyo3::exceptions::PyValueError::new_err("bridge configuration too large")); }
     let parsed: BridgeConfig = serde_json::from_str(&config).map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid bridge configuration"))?;
     py.detach(|| NetworkBridge::start(parsed)).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_child_allows_no_child() {
+        let config = BridgeConfig {
+            role: "master".into(),
+            instance_id: "00000000-0000-4000-8000-000000000001".into(),
+            network_id: "00000000-0000-4000-8000-000000000002".into(),
+            assignment_revision: 1,
+            bind_host: Ipv4Addr::LOCALHOST,
+            bind_port: 0,
+            target_host: Ipv4Addr::LOCALHOST,
+            target_port: 8080,
+            source_host: Ipv4Addr::LOCALHOST,
+            allowed_peer: Ipv4Addr::LOCALHOST,
+            child_pid: None,
+            child_start_token: None,
+        };
+        assert!(config.check_child().is_ok());
+    }
+
+    #[test]
+    fn check_child_matches_valid_token() {
+        let current_pid = std::process::id();
+        let identity = crate::usage::process_counters(current_pid);
+        if let Ok(id) = identity {
+            let config = BridgeConfig {
+                role: "worker".into(),
+                instance_id: "00000000-0000-4000-8000-000000000001".into(),
+                network_id: "00000000-0000-4000-8000-000000000002".into(),
+                assignment_revision: 1,
+                bind_host: Ipv4Addr::new(10, 0, 0, 1),
+                bind_port: 50050,
+                target_host: Ipv4Addr::new(10, 0, 0, 1),
+                target_port: 50052,
+                source_host: Ipv4Addr::new(10, 0, 0, 1),
+                allowed_peer: Ipv4Addr::new(10, 0, 0, 2),
+                child_pid: Some(current_pid),
+                child_start_token: Some(id.token),
+            };
+            assert!(config.check_child().is_ok());
+
+            let mut mismatch = config.clone();
+            mismatch.child_start_token = Some("mismatched_token".into());
+            let err = mismatch.check_child().unwrap_err();
+            assert_eq!(err.to_string(), "RPC child identity changed");
+        }
+    }
+
+    #[test]
+    fn check_child_detects_dead_process() {
+        let config = BridgeConfig {
+            role: "worker".into(),
+            instance_id: "00000000-0000-4000-8000-000000000001".into(),
+            network_id: "00000000-0000-4000-8000-000000000002".into(),
+            assignment_revision: 1,
+            bind_host: Ipv4Addr::new(10, 0, 0, 1),
+            bind_port: 50050,
+            target_host: Ipv4Addr::new(10, 0, 0, 1),
+            target_port: 50052,
+            source_host: Ipv4Addr::new(10, 0, 0, 1),
+            allowed_peer: Ipv4Addr::new(10, 0, 0, 2),
+            child_pid: Some(99_999_999),
+            child_start_token: Some("unsupported".into()),
+        };
+        let err = config.check_child().unwrap_err();
+        assert!(err.to_string().contains("dead") || err.to_string().contains("unavailable"));
+    }
 }

@@ -761,3 +761,50 @@ test('an empty visit keeps the empty-visit copy when a tag is selected', async (
   );
   assert.equal(copy({ selectedNodeId: 'w1' }), 'No entries for the selected node in the current buffer.');
 });
+
+test('KLLM-PERF-004: seenIds is bounded by MAX_SEEN_IDS with FIFO eviction', async () => {
+  const f = install();
+  try {
+    const { LogTrail, MAX_SEEN_IDS } = await server.ssrLoadModule('/src/lib/modules/logs/interactor.svelte.ts');
+    assert.equal(MAX_SEEN_IDS, 5000);
+    const trail = new LogTrail();
+    trail.start();
+
+    // Commit 6000 entries across batches
+    const batch1 = Array.from({ length: 3000 }, (_, i) => ({
+      event_id: eventId(i + 1),
+      ts: i,
+      node_id: 'master',
+      source: 'agent',
+      line: `line ${i + 1}`
+    }));
+    f.respond(f.calls[0], snapshot(batch1, { cursor: `${EPOCH}:3000` }));
+    await f.flush();
+    assert.equal(trail.seenIds.size, 3000);
+
+    f.advance(1000);
+    const batch2 = Array.from({ length: 3000 }, (_, i) => ({
+      event_id: eventId(i + 3001),
+      ts: i + 3000,
+      node_id: 'master',
+      source: 'agent',
+      line: `line ${i + 3001}`
+    }));
+    f.respond(f.calls.at(-1), snapshot(batch2, { cursor: `${EPOCH}:6000` }));
+    await f.flush();
+
+    // Total emitted was 6000, but seenIds must cap at exactly MAX_SEEN_IDS (5000)
+    assert.equal(trail.seenIds.size, MAX_SEEN_IDS);
+
+    // Oldest 1000 IDs (1 to 1000) should have been evicted in FIFO order
+    assert.equal(trail.seenIds.has(eventId(1)), false, 'oldest id must be evicted');
+    assert.equal(trail.seenIds.has(eventId(1000)), false, 'id 1000 must be evicted');
+    // Newer IDs (1001 to 6000) must still be present
+    assert.equal(trail.seenIds.has(eventId(1001)), true, 'id 1001 must be retained');
+    assert.equal(trail.seenIds.has(eventId(6000)), true, 'newest id must be retained');
+
+    trail.stop();
+  } finally {
+    f.restore();
+  }
+});

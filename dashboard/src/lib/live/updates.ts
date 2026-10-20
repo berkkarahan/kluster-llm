@@ -107,10 +107,10 @@ function validSnapshot(value: unknown): value is LiveSnapshot {
 
 function tagMatchesSource(source: string, tag: unknown): boolean {
   const expected = source === 'agent' ? 'ui'
-    : source === 'llama' || source === 'rpc' ? 'inference'
-      : source === 'unknown' ? 'unclassified'
+    : source === 'llama' || source === 'rpc' || source === 'primacpp' ? 'inference'
+      : source === 'unknown' || source === 'system' || source === 'network' ? 'unclassified'
         : null;
-  return expected !== null && (tag === undefined || tag === expected);
+  return expected !== null && (tag === undefined || tag === null || tag === expected);
 }
 
 function validLogs(value: unknown): value is LiveLogs {

@@ -1,4 +1,6 @@
 import { errors } from '../../shared/errors';
+import { PrimaPreparationObserver } from './preparation.svelte';
+import { PrimaDeployment } from '../run/prima-deployment.svelte';
 import type { HttpClient } from '../../shared/http.svelte';
 import type { ClusterInteractor } from '../cluster/interactor.svelte';
 import type { RunInteractor } from '../run/interactor.svelte';
@@ -6,11 +8,17 @@ import type { RuntimeLibrary, RuntimeSources, RuntimeVersion, PrimaDeviceReport 
 
 /** llama.cpp library commands. The view keeps dialogs, busy flags, and focus. */
 export class RuntimesInteractor {
+  readonly preparation: PrimaPreparationObserver;
+  readonly deployment: PrimaDeployment;
   constructor(
     readonly http: HttpClient,
     readonly cluster: ClusterInteractor,
     readonly run: RunInteractor
-  ) {}
+  ) {
+    this.preparation = new PrimaPreparationObserver(this, () => this.status?.role === 'master');
+    this.deployment = new PrimaDeployment(run, this);
+    this.preparation.onSettled = job => this.deployment.onPrepared(job);
+  }
 
   get status() {
     return this.cluster.status;
@@ -78,23 +86,27 @@ export class RuntimesInteractor {
     return this.act(`/v2/cluster/runtime-target/nodes/${encodeURIComponent(nodeId)}/builds/${jobId}/cancel`, 'POST');
   }
 
-  primaPlan(runtimeId: string, settings: unknown) {
-    return this.http.networkRequest<Record<string, any>>(`/v2/node/runtimes/${runtimeId}/prima-plan`, 'POST', settings);
+  primaPlan(runtimeId: string, settings: unknown, signal?: AbortSignal) {
+    return this.http.networkRequest<Record<string, any>>(`/v2/node/runtimes/${encodeURIComponent(runtimeId)}/prima-plan`, 'POST', settings, signal);
   }
 
-  preparePrima(runtimeId: string, settings: unknown, planDigest: string, profile: boolean) {
+  preparePrima(runtimeId: string, settings: unknown, planDigest: string, profile: boolean, requestId: string = crypto.randomUUID()) {
     return this.http.networkRequest<Record<string, any>>('/v2/cluster/prima-preparations', 'POST', {
       runtime_id: runtimeId, settings, plan_digest: planDigest,
-      request_id: crypto.randomUUID(), include_profile: profile
+      request_id: requestId, include_profile: profile
     });
   }
 
-  primaJob(id: string) {
-    return this.http.networkRequest<Record<string, any>>(`/v2/cluster/prima-preparations/${id}`, 'GET');
+  primaJob(id: string, signal?: AbortSignal) {
+    return this.http.networkRequest<Record<string, any>>(`/v2/cluster/prima-preparations/${encodeURIComponent(id)}`, 'GET', undefined, signal);
   }
 
-  cancelPrima(id: string) {
-    return this.http.networkRequest(`/v2/cluster/prima-preparations/${id}/cancel`, 'POST');
+  async cancelPrima(id: string) {
+    if (this.status?.role !== 'master') return null;
+    if (!this.http.apiToken) await this.http.loadToken();
+    // Recheck at the last async boundary before the authenticated transport sends.
+    if (this.status?.role !== 'master' || !this.http.apiToken) return null;
+    return this.http.networkRequest(`/v2/cluster/prima-preparations/${encodeURIComponent(id)}/cancel`, 'POST');
   }
 
   sources(repository: string, signal?: AbortSignal) {

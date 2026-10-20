@@ -45,6 +45,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
     let listenerRefusal = false;
     let invalidListenerAck = false;
     let helperTimedOut = false;
+    let adapterBlocker = '';
     const status = () => ({role:'master',node_id:'master',members:{master:{host:'192.168.68.1'},worker:{host:'192.168.68.2'}},managed_networks:network ? [network] : []});
     const model = {name:'fixture.gguf',path:'fixture.gguf',size_bytes:100};
     try {
@@ -54,6 +55,8 @@ test('private network app setup, selected run, blocked stop and cleanup',
         import ManagedNetwork from '/src/lib/modules/network/view/ManagedNetwork.svelte';
         import Run from '/src/routes/run/+page.svelte';
         import {createApp} from '/src/lib/app.svelte.ts';
+        import {errors} from '/src/lib/shared/errors.ts';
+        errors.start(); window.networkErrors = errors;
         const appStore = createApp();
         window.networkStore = appStore;
         appStore.cluster.status = ${JSON.stringify(status())};
@@ -104,7 +107,7 @@ test('private network app setup, selected run, blocked stop and cleanup',
           listenerResources=[];
           return json({phase:'released',decision:body.decision});
         }
-        if(path==='/v2/cluster/network-setup' && req.method==='GET') return json({administrator_notice:'Administrator access is required on each computer. Original settings will be restored.',assessment_revision:'a'.repeat(64),master_node_id:'master',networks:network?[network]:[],computers:['master','worker','worker-b'].map(node_id=>({node_id,name:node_id,host:'192.168.68.1',master:node_id==='master',administrator_enabled:administratorEnabled,adapters:[{...adapter,reason:''}],selected_adapter:'eth-test',ready:administratorEnabled,error_code:administratorEnabled?null:'ADMIN_REQUIRED',message:administratorEnabled?'Ready':'Enable administrator access'}))});
+        if(path==='/v2/cluster/network-setup' && req.method==='GET') return json({administrator_notice:'Administrator access is required on each computer. Original settings will be restored.',assessment_revision:'a'.repeat(64),master_node_id:'master',networks:network?[network]:[],computers:['master','worker','worker-b'].map(node_id=>({node_id,name:node_id,host:'192.168.68.1',master:node_id==='master',administrator_enabled:administratorEnabled,adapters:[{...adapter,reason:adapterBlocker}],selected_adapter:adapterBlocker?'':'eth-test',ready:administratorEnabled&&!adapterBlocker,error_code:!administratorEnabled?'ADMIN_REQUIRED':adapterBlocker?'NO_ADAPTER':null,message:!administratorEnabled?'Enable administrator access':adapterBlocker||'Ready'}))});
         if(path==='/v2/cluster/network-setup' && req.method==='POST') {
           assert.equal(body.assessment_revision,'a'.repeat(64));
           assert.deepEqual(body.nodes,['master','worker','worker-b']);
@@ -207,9 +210,34 @@ test('private network app setup, selected run, blocked stop and cleanup',
       await evaluate("document.querySelector('.managed-network').open=true");
       await wait("document.body.textContent.includes('eth-test')");
       assert.equal(await evaluate("document.querySelector('.managed-network .advanced').open"),false);
+      await wait("document.querySelector('.computer-readiness')?.innerText.includes('Enable administrator access')");
+      await evaluate("window.networkErrors.clear()");
+      assert.match(await evaluate("document.querySelector('.computer-readiness').innerText"), /Enable administrator access/);
       assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Enable administrator access on this computer').disabled"),true);
       await evaluate("document.querySelector('.admin-notice input[type=checkbox]').click()");
       await click('Enable administrator access on this computer');
+      adapterBlocker='This adapter carries the cluster’s management connection.';
+      await click('Refresh computers');
+      await wait("document.querySelector('.computer-readiness')?.innerText.includes('management connection')");
+      assert.match(await evaluate("document.querySelector('.computer').innerText"), /Administrator access: enabled/);
+      assert.match(await evaluate("document.querySelector('#network-setup-blocker').innerText"), /master, worker, worker-b/);
+      await evaluate("window.networkErrors.publish('fixture', 'This adapter carries the cluster’s management connection.');window.networkErrors.dismiss('fixture');window.networkErrors.clear()");
+      await click('Refresh computers');
+      await wait("!Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Refresh computers').disabled");
+      assert.match(await evaluate("document.querySelector('.computer-readiness').innerText"), /management connection/);
+      assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Set up private network').disabled"),true);
+      assert.equal(requests.filter(r=>r.path==='/v2/cluster/network-setup'&&r.method==='POST').length,0);
+      for(const width of [390,1280]) {
+        await call('Emulation.setDeviceMetricsOverride',{width,height:1100,deviceScaleFactor:1,mobile:width<600});
+        await evaluate("document.querySelectorAll('.adapter-details').forEach(el=>el.open=true)");
+        assert.equal(await evaluate("Array.from(document.querySelectorAll('.computer-list,.adapter-details,.computer-readiness')).every(el=>{const r=el.getBoundingClientRect();return r.left>=-1&&r.right<=innerWidth+1})"),true);
+        assert.match(await evaluate("document.querySelector('.adapter-details').innerText"), /eth-test.*10 Gbps.*management connection/s);
+      }
+      await call('Emulation.clearDeviceMetricsOverride');
+      adapterBlocker='The connection speed could not be verified.';
+      await click('Refresh computers');
+      await wait("document.querySelector('.computer-readiness')?.innerText.includes('speed could not be verified')");
+      adapterBlocker='';
       helperTimedOut=true;
       await click('Refresh computers');
       await wait("document.body.textContent.includes('Network helper needs attention on this computer')");

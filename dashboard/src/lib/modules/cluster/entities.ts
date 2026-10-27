@@ -105,9 +105,6 @@ export type Status = {
   gpu_ids?: number[] | null;
   rpc_bind?: string | null;
   rpc_lifecycle?: { status: RpcStatus; workers?: string[]; retries?: number; error?: string | null };
-  overlay?: 'none' | 'wireguard' | string;
-  wg_address?: string | null;
-  overlay_status?: string | null;
   netsec_warnings?: string[];
   apply_error?: string | null;
   apply_warning?: string | null;

@@ -95,7 +95,6 @@ class HeartbeatPayloadBuilder:
                 if member.get(key) is not None
             },
             "lan_host": state.rpc_bind or member.get("lan_host"),
-            "wg_public_key": state.wg_public_key,
             "gpu_ids": state.gpu_ids,
             "git_head": identity.get("git_head"),
             "llama_release": identity.get("llama_release"),

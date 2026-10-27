@@ -120,7 +120,7 @@
             <p class="eyebrow">02 / Compute</p><h2>Choose how the cluster participates</h2>
             <label class="field" for="run-network">Inference network
               <select id="run-network" class="field" bind:value={presenter.selectedNetworkId} onchange={() => presenter.scheduleEstimate()}>
-                <option value="">LAN / WireGuard</option>
+                <option value="">Local LAN</option>
                 {#each presenter.status?.managed_networks ?? [] as network}<option value={network.network_id}>{network.subnet} · {network.observed_state}</option>{/each}
               </select>
             </label>

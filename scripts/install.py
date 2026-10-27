@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Full Kluster LLM install: toolchains, kllm CLI, llama.cpp binaries, WireGuard.
+"""Full Kluster LLM install: toolchains, kllm CLI, llama.cpp binaries.
 
 Usage:
   uv run python scripts/install.py
   python scripts/install.py
   uv run python scripts/install.py --skip-ui
   uv run python scripts/install.py --backend vulkan
-  uv run python scripts/install.py --skip-wireguard --skip-llama
+  uv run python scripts/install.py --skip-llama
   python scripts/install.py --llama-only
   python scripts/install.py --check
   python scripts/install.py --llama-only --from-source --force
@@ -165,7 +165,6 @@ def _augment_path(path: str) -> str:
         Path.home() / ".local" / "bin",
         Path.home() / ".cargo" / "bin",
         Path.home() / "scoop" / "apps" / "rustup" / "current" / ".cargo" / "bin",
-        Path(r"C:\Program Files\WireGuard"),
         Path("/usr/local/bin"),
         Path("/opt/homebrew/bin"),
     ):
@@ -1804,72 +1803,6 @@ def install_kllm_cli_on_path() -> tuple[Path, bool]:
     return bin_dir, path_updated
 
 
-# ── WireGuard ────────────────────────────────────────────────────────────────
-
-
-def wireguard_installed() -> bool:
-    if _which("wg"):
-        return True
-    if _is_windows() and Path(r"C:\Program Files\WireGuard\wg.exe").is_file():
-        return True
-    return False
-
-
-def install_wireguard() -> None:
-    if wireguard_installed():
-        print("WireGuard: OK")
-        return
-    print("Installing WireGuard…")
-    try:
-        if _is_windows():
-            winget = _which("winget")
-            if not winget:
-                raise RuntimeError("winget not found")
-            _run(
-                [
-                    winget,
-                    "install",
-                    "-e",
-                    "--id",
-                    "WireGuard.WireGuard",
-                    "--accept-package-agreements",
-                    "--accept-source-agreements",
-                ]
-            )
-        elif _is_macos():
-            brew = _which("brew")
-            if not brew:
-                # Install brew first
-                _run(
-                    [
-                        "bash",
-                        "-lc",
-                        '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
-                    ]
-                )
-                brew = _which("brew") or "/opt/homebrew/bin/brew"
-            _run([brew, "install", "wireguard-tools"])
-        elif _which("apt-get"):
-            _run(["sudo", "apt-get", "update", "-y"], check=False)
-            _run(["sudo", "apt-get", "install", "-y", "wireguard", "wireguard-tools"])
-        elif _which("dnf"):
-            _run(["sudo", "dnf", "install", "-y", "wireguard-tools"])
-        elif _which("pacman"):
-            _run(["sudo", "pacman", "-Sy", "--noconfirm", "wireguard-tools"])
-        else:
-            raise RuntimeError("no supported package manager for WireGuard")
-    except Exception as exc:
-        _warn(
-            f"WireGuard install failed ({exc}). "
-            "Overlay mode needs WireGuard from https://www.wireguard.com/install/"
-        )
-        return
-    if wireguard_installed():
-        print("WireGuard: installed")
-    else:
-        _warn("WireGuard package installed but `wg` not on PATH yet — open a new shell.")
-
-
 # ── llama.cpp ────────────────────────────────────────────────────────────────
 
 
@@ -2859,7 +2792,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-npm-install", action="store_true", help="Skip `npm install` (build only)"
     )
     p.add_argument("--skip-llama", action="store_true", help="Skip llama-server / rpc-server")
-    p.add_argument("--skip-wireguard", action="store_true", help="Skip WireGuard install")
     p.add_argument(
         "--skip-toolchains", action="store_true", help="Do not auto-install Rust/Node/git/cmake"
     )
@@ -3090,7 +3022,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.llama_only:
         args.skip_rust = True
         args.skip_ui = True
-        args.skip_wireguard = True
         args.skip_toolchains = True
 
     if args.check:
@@ -3115,11 +3046,6 @@ def main(argv: list[str] | None = None) -> int:
         if not args.skip_toolchains:
             ensure_node()
 
-    # Keep system package installs out of worker processes so package managers
-    # (brew/apt/winget) cannot contend with each other.
-    if not args.skip_wireguard:
-        print("\n=== WireGuard ===")
-        install_wireguard()
     if args.engine == "primacpp" and not args.skip_llama and not args.skip_toolchains:
         ensure_prima_deps(args.backend)
 
@@ -3219,8 +3145,6 @@ def main(argv: list[str] | None = None) -> int:
             )
     if not args.skip_ui:
         print("Dashboard: kllm ui")
-    if not args.skip_wireguard:
-        print("Optional overlay: kllm start --overlay wireguard")
     return 0
 
 

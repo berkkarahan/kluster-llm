@@ -9,9 +9,8 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from kllm.shared import netsec
 from kllm.modules.inference.interactors.placement_models import RpcDeviceInput
 from kllm.modules.managed_network.interactors import allocation as network_allocation
 from kllm.modules.managed_network.interactors.recovery import CleanupDecision
@@ -36,22 +35,31 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
+def reject_legacy_network_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        obsolete = ("overlay", "wg_public_key", "wg_listen_port")
+        found = [field for field in obsolete if field in value]
+        if found:
+            raise ValueError(f"Legacy network field {', '.join(found)} is no longer supported; use a private LAN")
+    return value
+
+
 class StartBody(BaseModel):
+    _reject_legacy = model_validator(mode="before")(reject_legacy_network_fields)
     key: str | None = None
     control_port: int = DEFAULT_CONTROL_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_bind: str | None = None
-    overlay: str = netsec.OVERLAY_NONE
     gpu_ids: list[int] | None = None
 
 
 class JoinBody(BaseModel):
+    _reject_legacy = model_validator(mode="before")(reject_legacy_network_fields)
     key: str
     master_host: str | None = None
     master_port: int = DEFAULT_CONTROL_PORT
     rpc_port: int = DEFAULT_RPC_PORT
     rpc_bind: str | None = None
-    overlay: str = netsec.OVERLAY_NONE
     gpu_ids: list[int] | None = None
 
 
@@ -64,6 +72,7 @@ class LoggingAcknowledgement(BaseModel):
 
 
 class RegisterBody(BaseModel):
+    _reject_legacy = model_validator(mode="before")(reject_legacy_network_fields)
     node_id: str
     host: str
     hostname: str | None = Field(
@@ -105,8 +114,6 @@ class RegisterBody(BaseModel):
     reclaimable_ram_bytes: int = 0
     lan_host: str | None = None
     rpc_bind: str | None = None
-    wg_public_key: str | None = None
-    wg_listen_port: int = netsec.WG_LISTEN_PORT
     gpu_ids: list[int] | None = None
     git_head: str | None = None
     llama_release: str | None = None

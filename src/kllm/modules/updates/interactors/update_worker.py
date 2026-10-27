@@ -164,7 +164,6 @@ def _join_local(params: dict[str, Any]) -> None:
         "master_port": int(params.get("master_port") or DEFAULT_CONTROL_PORT),
         "rpc_port": int(params.get("rpc_port") or DEFAULT_RPC_PORT),
         "rpc_bind": params.get("rpc_bind"),
-        "overlay": params.get("overlay") or "none",
     }
     if params.get("gpu_ids") is not None:
         payload["gpu_ids"] = params["gpu_ids"]

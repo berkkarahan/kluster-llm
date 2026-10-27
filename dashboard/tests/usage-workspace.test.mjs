@@ -422,7 +422,7 @@ test('browser workspace fills the viewport, shows node-local telemetry and defer
       assert.doesNotMatch(await evaluate("document.querySelector('.cluster-diagram').textContent"), /GbE|packet loss|\d+\s*ms/);
       assert.match(await evaluate("document.querySelector('.cluster-diagram').textContent"), /Blackwell|GPU/);
       assert.match(await evaluate("document.body.textContent"), /RPC port 50052 reachable/);
-      assert.match(await evaluate("document.body.textContent"), /up 10\.66\.87\.1 \(listen 51820\)/);
+      assert.doesNotMatch(await evaluate("document.body.textContent"), /up 10\.66\.87\.1 \(listen 51820\)/);
 
       const beforeSelect = await countsSnapshot();
       assert.deepEqual({ lifetimes: beforeSelect.lifetimes, series: beforeSelect.series, readings: beforeSelect.readings }, { lifetimes: 0, series: 0, readings: 0 },

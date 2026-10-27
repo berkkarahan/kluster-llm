@@ -4,7 +4,7 @@ Instructions for LLM coding agents working in this repository.
 
 ## Install / bootstrap (read first)
 
-Full machine setup (toolchains, `kllm`, llama.cpp `llama-server` + `rpc-server`, WireGuard, dashboard) is documented for agents here:
+Full machine setup (toolchains, `kllm`, llama.cpp `llama-server` + `rpc-server`, dashboard) is documented for agents here:
 
 **→ [docs/agent-install.md](docs/agent-install.md)**
 

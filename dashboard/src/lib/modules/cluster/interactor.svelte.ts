@@ -52,9 +52,6 @@ function fp(s: Status | null): string {
     last_plan: s.last_plan,
     process_pid: s.process_pid,
     rpc_bind: s.rpc_bind,
-    overlay: s.overlay,
-    wg_address: s.wg_address,
-    overlay_status: s.overlay_status,
     netsec_warnings: s.netsec_warnings,
     gpu_ids: s.gpu_ids,
     apply_error: s.apply_error,
@@ -78,7 +75,6 @@ export class ClusterInteractor {
   joinKeyInput = $state('');
   masterHostInput = $state('');
   rpcBindInput = $state('');
-  overlay = $state<'none' | 'wireguard'>('none');
   fastSubnetReachability = $state<FastSubnetReachability | null>(null);
   fastSubnetProbe = $state<'idle' | 'checking' | 'done' | 'failed'>('idle');
   reconnectingNodeId = $state('');
@@ -134,7 +130,6 @@ export class ClusterInteractor {
       if (data.join_key) this.joinKeyInput = data.join_key;
       if (data.master_host) this.masterHostInput = data.master_host;
       if (data.rpc_bind) this.rpcBindInput = data.rpc_bind;
-      if (data.overlay === 'none' || data.overlay === 'wireguard') this.overlay = data.overlay;
     }
     this.onAccel(data);
     const next = fp(data);
@@ -174,7 +169,6 @@ export class ClusterInteractor {
     const body: Record<string, unknown> = {
       key: this.joinKeyInput || null,
       rpc_bind: this.rpcBindInput || null,
-      overlay: this.overlay,
       ...this.gpuBody()
     };
     await this.http.command('/v2/cluster', body);
@@ -198,7 +192,6 @@ export class ClusterInteractor {
       master_port: 18765,
       rpc_port: 50052,
       rpc_bind: this.rpcBindInput || null,
-      overlay: this.overlay,
       ...this.gpuBody()
     };
     if (masterHost) body.master_host = masterHost;

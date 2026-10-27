@@ -59,7 +59,7 @@ Use `--split-mode layer` when devices span different backends (Metal / CUDA / RO
 - **Default:** bind `rpc-server` to a **private LAN / 10GbE / Thunderbolt** interface IP (not `0.0.0.0`). `kllm` prefers a local address on the app's private-network subnets (`10.10.10.0/24` first, then `192.168.234.0/24`, `172.29.234.0/24`, `10.234.234.0/24`) when one is present, otherwise the default-route private IPv4, unless `--rpc-bind` overrides. DHCP mid-run can still collapse the RPC state machine — prefer static IPs.
 - **One node identity:** durable per-node network identity (hostname, LAN host, RPC bind, dedicated private address, link speed) lives in `managed-network.sqlite` (`node_directory`) on the master and is mirrored to workers through the membership snapshot. The cluster view and Settings → llama.cpp both render from that directory; `rpc_bind` remains the advertised RPC address, while the managed-network assignment is the preferred display and inference address once applied.
 - Treat `rpc-server` as **LAN-only**. Upstream llama.cpp RPC has **no auth/TLS** and maintainers do not plan to add it ([discussion #14932](https://github.com/ggml-org/llama.cpp/discussions/14932)); HTTP `--api-key` on `llama-server` does **not** protect port **50052**. Firewall TCP 50052; never expose on the public internet. Reachability equals compromise (see e.g. CVE-2026-34159).
-- **Optional:** `--overlay wireguard` (CLI/dashboard) builds a join-key-derived WireGuard mesh and rebinds RPC to overlay IPs (`10.66.87.0/24`). Requires system WireGuard tooling (`wg` / `wg-quick` or WireGuard for Windows). Control-plane HTTP stays on the LAN.
+- **Dedicated fast Ethernet:** the managed private-network setup is a separate local link for cluster participants. It does not make unauthenticated RPC safe on shared or public networks.
 - Prefer worker **tensor cache** (`rpc-server -c`) to avoid re-shipping large tensors on reconnect.
 - Pass **`--threads`** on `rpc-server` from the same physical-core count as master `--threads-batch`. The binary's own default is 8, which leaves CPU layers idle on larger machines. Generation threads on `llama-server` stay capped at 8 so GPU decode is not oversubscribed.
 - Optional RDMA only when both ends support it (typically Linux RoCE); do not require it for baseline support.
@@ -77,7 +77,7 @@ Revisit replacing llama.cpp only if product requirements change to one of:
 - Process argv / split-mode propagation: `crates/kllm-native/src/process.rs`
 - Capacity probe / backend hint: `crates/kllm-native/src/hw.rs`
 - Layer budget planner: `crates/kllm-native/src/planner.rs`
-- RPC bind / optional WireGuard overlay: `src/kllm/netsec.py`
+- RPC bind and LAN hardening: `src/kllm/shared/netsec.py`
 
 ## Optional Prima development
 

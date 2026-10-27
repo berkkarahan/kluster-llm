@@ -121,7 +121,7 @@ def test_start_defaults_all_gpus(client, monkeypatch):
     ):
         Adv.return_value.start = lambda: None
         Adv.return_value.stop = lambda: None
-        r = c.post("/v1/start", json={"overlay": "none"})
+        r = c.post("/v1/start", json={})
     assert r.status_code == 200
     assert r.json()["gpu_ids"] == [0, 1]
     assert agent.STATE.gpu_ids == [0, 1]
@@ -161,7 +161,7 @@ def test_start_uses_config_gpu_ids_when_body_omits(client, monkeypatch):
     ):
         Adv.return_value.start = lambda: None
         Adv.return_value.stop = lambda: None
-        r = c.post("/v1/start", json={"overlay": "none"})
+        r = c.post("/v1/start", json={})
     assert r.status_code == 200
     assert r.json()["gpu_ids"] == [1]
 
@@ -190,7 +190,7 @@ def test_start_selects_subset(client, monkeypatch):
     ):
         Adv.return_value.start = lambda: None
         Adv.return_value.stop = lambda: None
-        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [1]})
+        r = c.post("/v1/start", json={"gpu_ids": [1]})
     assert r.status_code == 200
     assert r.json()["gpu_ids"] == [1]
     mem = agent.STATE.members[agent.STATE.node_id]
@@ -200,7 +200,7 @@ def test_start_selects_subset(client, monkeypatch):
 def test_start_rejects_unknown_gpu(client, monkeypatch):
     c, agent = client
     with patch.object(agent.native, "list_gpus", return_value=FAKE_GPUS):
-        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [9]})
+        r = c.post("/v1/start", json={"gpu_ids": [9]})
     assert r.status_code == 400
     assert "unknown gpu_ids" in r.json()["detail"]
 
@@ -241,7 +241,7 @@ def test_start_defaults_to_discrete_gpus_only(client, monkeypatch):
     ):
         Adv.return_value.start = lambda: None
         Adv.return_value.stop = lambda: None
-        r = c.post("/v1/start", json={"overlay": "none"})
+        r = c.post("/v1/start", json={})
     assert r.status_code == 200
     assert r.json()["gpu_ids"] == [0]
     assert agent.STATE.gpu_ids == [0]
@@ -288,7 +288,7 @@ def test_start_ignores_config_gpu_ids_when_inventory_empty(client, monkeypatch):
     ):
         Adv.return_value.start = lambda: None
         Adv.return_value.stop = lambda: None
-        r = c.post("/v1/start", json={"overlay": "none"})
+        r = c.post("/v1/start", json={})
     assert r.status_code == 200
     assert r.json()["gpu_ids"] == []
     assert agent.STATE.gpu_ids == []
@@ -322,7 +322,7 @@ def test_list_gpus_reports_missing_native(monkeypatch):
 def test_start_rejects_explicit_gpu_ids_when_inventory_empty(client, monkeypatch):
     c, agent = client
     with patch.object(agent.native, "list_gpus", return_value=EMPTY_GPUS):
-        r = c.post("/v1/start", json={"overlay": "none", "gpu_ids": [0]})
+        r = c.post("/v1/start", json={"gpu_ids": [0]})
     assert r.status_code == 503
     detail = r.json()["detail"]
     assert "no GPUs available" in detail
@@ -507,7 +507,7 @@ def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monk
         patch("httpx.Client", FakeClient),
     ):
         tc = TestClient(agent.app)
-        r = tc.post("/v1/join", json={"key": "secret", "overlay": "none", "gpu_ids": [0]})
+        r = tc.post("/v1/join", json={"key": "secret", "gpu_ids": [0]})
     assert r.status_code == 200, r.text
     assert r.json()["gpu_ids"] == [0]
     assert captured["payload"]["gpu_ids"] == [0]

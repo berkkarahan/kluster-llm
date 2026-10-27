@@ -7,7 +7,6 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from kllm.shared import netsec
 from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
 from kllm.shared.state import ClusterState
 
@@ -110,12 +109,6 @@ class CapacityService:
                 or self._pick_rpc_bind_host(None)
             )
             record = self.master_member_record(str(lan_host))
-            if previous:
-                for key in ("wg_address", "wg_public_key"):
-                    if previous.get(key) is not None:
-                        record[key] = previous[key]
-                if state.overlay == netsec.OVERLAY_WIREGUARD and previous.get("host"):
-                    record["host"] = previous["host"]
             state.members[node_id] = record
             if persist:
                 state.save()

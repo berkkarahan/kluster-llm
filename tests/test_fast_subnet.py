@@ -60,7 +60,7 @@ def _master(**members: dict) -> ClusterState:
 
 
 def test_register_and_heartbeat_record_observed_control_source() -> None:
-    state = ClusterState(role="master", node_id="master", overlay="none")
+    state = ClusterState(role="master", node_id="master")
     state.save = lambda: None  # type: ignore[method-assign]
     handlers = MembershipHandlers(
         lambda: state,
@@ -68,7 +68,6 @@ def test_register_and_heartbeat_record_observed_control_source() -> None:
         resources=SimpleNamespace(prune=lambda _: None),
         resource_probe_available=lambda: False,
         store=lambda: SimpleNamespace(end_node=lambda _: None),
-        master_lan_host=lambda: "192.168.1.1",
         inference_activity=lambda: {},
     )
     body = RegisterBody(node_id="w1", host="192.168.1.20", lan_host="192.168.1.20")
@@ -199,7 +198,6 @@ def test_worker_reconnect_rejoins_the_private_master_without_keeping_the_old_bin
         master_port=18765,
         rpc_port=50052,
         rpc_bind="192.168.1.20",
-        overlay="none",
         gpu_ids=[0, 1],
     )
     out = service.reconnect(

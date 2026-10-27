@@ -229,7 +229,6 @@ def test_join_uses_proxy_base(client, monkeypatch):
                 "key": "k",
                 "master_host": "10.9.9.9",
                 "master_port": 18765,
-                "overlay": "none",
                 "rpc_bind": "10.0.0.2",
             },
         )

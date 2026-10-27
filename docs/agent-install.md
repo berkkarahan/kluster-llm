@@ -22,7 +22,6 @@ After install on **this** machine:
 | 5 | `llama-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
 | 6 | `rpc-server` found | file under `vendor/bin/` or `vendor/llama.cpp/build/bin/` (`.exe` on Windows) |
 | 6b | llama.cpp pin matches | `python scripts/install.py --check` exits 0; stamp `vendor/bin/llama-release.txt` equals committed [`llama-release`](../llama-release) |
-| 7 | WireGuard CLI present (for overlay) | `wg --version` or `C:\Program Files\WireGuard\wg.exe` |
 | 8 | Agent starts | `kllm status` returns JSON-ish status (role `idle` is OK). Install adds a global `~/.local/bin/kllm` shim (`uv run kllm` for this checkout); open a **new terminal** if PATH was just updated. Skip with `python scripts/install.py --skip-path-shim`. |
 
 **Cluster smoke (needs 2+ machines):** master `kllm start` prints join key; worker `kllm join --key …` succeeds; master `kllm status` lists the worker; optional `kllm run --model …` after master-local model download (no GGUF copy to workers).
@@ -38,14 +37,13 @@ After install on **this** machine:
 | **Python ≥ 3.10** | `python --version` or `python3 --version`. On Windows prefer `python`, not the Store stub. |
 | **Repo root** | Directory containing `pyproject.toml`, `scripts/install.py`, `llama-release`, `src/kllm/`. |
 | **Network** | Outbound HTTPS to GitHub, PyPI, npm registry, rustup (or offline mirrors). |
-| **Admin/sudo** (often) | WireGuard / apt / winget package installs may need elevation. If denied, continue and report; overlay will be unavailable until WG is installed. |
+| **Admin/sudo** (sometimes) | Toolchain/package installs or guided fast Ethernet setup may need elevation. |
 
 ### Not required up front (installer installs these)
 
 - Rust (`cargo` / `rustc`) via rustup  
 - Node.js + npm  
 - git, cmake (when building llama from source)  
-- WireGuard tools  
 - `llama-server` / `rpc-server` binaries  
 
 ### Platform matrix (pick backend)
@@ -111,17 +109,15 @@ python3 scripts/install.py --backend cuda --from-source
 ### 2.3 What the installer does (in order)
 
 1. Ensures required toolchains (including **git**, **uv**, **Rust**, and **Node/npm**, unless `--skip-toolchains`), creates/repairs **`.venv`** (Python from **`.python-version`**).
-2. Installs **WireGuard** when requested. This runs outside the parallel build phase to avoid concurrent system package-manager operations.
-3. Runs the independent **kllm** build (`uv sync`, maturin, wheel install), **dashboard** build (`npm install` + `npm run build`), and **llama.cpp** install concurrently, subject to the skip flags. The installer waits for all stages and reports each failure before returning non-zero.
-4. The llama.cpp stage installs binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
+2. Runs the independent **kllm** build (`uv sync`, maturin, wheel install), **dashboard** build (`npm install` + `npm run build`), and **llama.cpp** install concurrently, subject to the skip flags. The installer waits for all stages and reports each failure before returning non-zero.
+3. The llama.cpp stage installs binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
    The macOS Homebrew dependencies are `molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`. The Vulkan gate checks `glslc` (provided by `shaderc`) and the `SPIRV-Headers` CMake config alongside Vulkan headers and the MoltenVK ICD manifest.
    The reusable `vendor/llama.cpp/build` tree is installer-owned: it is discarded when the pin, backend flags or a recorded OpenSSL package path changes, so a toolchain upgrade (`brew upgrade openssl@3`) cannot leave a cache that half-resolves a package. A dangling `-L` in an exported `LDFLAGS` is ignored rather than treated as stale, so it cannot force a rebuild every run.
    The four vendor runtime dirs — `vendor/bin`, `vendor/prima`, `vendor/llama.cpp`, `vendor/prima.cpp` — are installer-owned and fully rewritable. Before staging, the installer clears the artifacts it owns (binaries, shared libraries, stamps, transport/manifest records) so a backend or pin change leaves nothing stale, while a file it did not stage (e.g. `vendor/bin/kllm-network-helper.exe`) is preserved. A source tree without git metadata, or whose checkout does not peel to the pin, is wiped and re-cloned rather than trusted. If a binary is held open by a running node, the rewrite **fails loudly** with the in-use file named and a stop-and-retry remedy instead of leaving a half-written tree.
    On macOS the default install **aborts** when the Metal+Vulkan build fails; it never downgrades to a Metal-only pack, and `--prefer-prebuilt` is rejected outright. Verification probes the binary the runtime actually launches (`vendor/bin/llama-server`, which `kllm-native` resolves first), not the CMake build output, and `--check` exits non-zero on a backend mismatch.
    llama-server's embedded HTTPS server is the expendable part: if `cmake` configure fails, the installer clears the cached OpenSSL entries and dangling linker flags and retries **with HTTPS enabled** (the real fix); only if that fails does it fall back to `-DLLAMA_OPENSSL=OFF`, recorded as `https=off` in the stamp. The fallback is never latched, so the next run restores HTTPS.
    Runtime setup can reuse a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot. Joining only enrolls the node and never extracts a runtime pack or starts RPC.
-5. Installs **WireGuard** (winget / brew / apt/dnf/pacman). Warns but does not abort the whole install if WG needs admin.
-6. Installs a global **`kllm`** launcher under `~/.local/bin` (Windows: `kllm.cmd`) that runs `uv run kllm` for this checkout, and idempotently adds `~/.local/bin` to the user PATH when needed (`--skip-path-shim` to skip).
+4. Installs a global **`kllm`** launcher under `~/.local/bin` (Windows: `kllm.cmd`) that runs `uv run kllm` for this checkout, and idempotently adds `~/.local/bin` to the user PATH when needed (`--skip-path-shim` to skip).
 
 Expected wall time: several minutes to 30+ minutes (llama compile / large downloads).
 
@@ -164,15 +160,7 @@ ls vendor/llama.cpp/build/bin/llama-server vendor/llama.cpp/build/bin/rpc-server
 Get-ChildItem vendor\bin\llama-server.exe, vendor\bin\rpc-server.exe -ErrorAction SilentlyContinue
 ```
 
-WireGuard:
-
-```bash
-wg version
-# or Windows:
-& "C:\Program Files\WireGuard\wg.exe" --version
-```
-
-If steps 1–6 of §0 pass → **install phase complete**. Proceed to §4 for cluster bring-up.
+If steps 1–6b and 8 of §0 pass → **install phase complete**. Proceed to §4 for cluster bring-up.
 
 ---
 
@@ -248,7 +236,6 @@ remains the bootstrap default for existing installer commands and `--check`.
 | `--skip-ui` | No dashboard (CLI-only node). |
 | `--skip-rust` | Skip kllm package build (already built). |
 | `--skip-llama` | Skip llama binaries (already present). |
-| `--skip-wireguard` | Skip WG (LAN-only RPC; no overlay). |
 | `--skip-toolchains` | Do not auto-install Rust/Node/git/cmake. |
 | `--skip-npm-install` | Dashboard `npm run build` only. |
 
@@ -270,7 +257,7 @@ python scripts/install.py --llama-only --engine primacpp
 python scripts/install.py --check --engine primacpp
 ```
 
-**CLI/UI rebuild only** (no llama/WG/toolchains):
+**CLI/UI rebuild only** (no llama/toolchains):
 
 ```bash
 python scripts/build.py
@@ -302,8 +289,6 @@ Run install on **every** node. Then:
 ```bash
 source .venv/bin/activate   # or Windows Activate.ps1
 kllm start
-# Optional overlay (requires WireGuard on all nodes):
-# kllm start --overlay wireguard
 ```
 
 Record the printed **join key**. Control port default **18765**.
@@ -314,11 +299,9 @@ Record the printed **join key**. Control port default **18765**.
 source .venv/bin/activate
 kllm join --key '<join-key>'
 # if mDNS fails: kllm join --key '<join-key>' --master <master-lan-ip>
-# If master used overlay:
-# kllm join --key '<join-key>' --overlay wireguard
 ```
 
-Join uses the join key fingerprint over mDNS to find the master; `--master` is only needed when discovery fails. Overlay must match master (`none` vs `wireguard`). Control plane stays on LAN; RPC may move to `10.66.87.0/24` when overlay is on.
+Join uses the join key fingerprint over mDNS to find the master; `--master` is only needed when discovery fails. Control plane and default RPC stay on a trusted private LAN. The guided fast Ethernet feature can establish a separate dedicated RPC path.
 
 A joined worker is idle until the master selects it for a model run and commands RPC startup. Joining, heartbeats, runtime installation, and restarting the agent never independently start RPC. Stopping the model stops its workers' RPC processes and preserves cluster membership and networking. Managed private-network setup can verify connectivity before llama binaries are installed; the master checks runtime prerequisites at inference startup.
 
@@ -332,7 +315,7 @@ kllm run --model <name>
 kllm ui
 ```
 
-Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay private (LAN or WireGuard). Upstream llama.cpp RPC has **no auth**.
+Ports: control **18765**, RPC **50052**, inference **8080**. RPC must stay on a trusted private LAN or dedicated fast Ethernet link. Upstream llama.cpp RPC has **no auth**.
 
 ### 4.4 Updating software
 
@@ -365,7 +348,6 @@ Each worker runs `git pull --ff-only`, then `scripts/install.py` if `llama-relea
 | `KLLM_REPO_ROOT` | Repo root for binary resolution |
 | `KLLM_LLAMA_SERVER` | Absolute path to `llama-server` |
 | `KLLM_RPC_SERVER` | Absolute path to `rpc-server` |
-| `KLLM_WG` | Absolute path to `wg` / `wg.exe` |
 | `KLLM_API_KEY` | Inference API token override for harnesses |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face Hub token (overridden by `~/.kllm/hf_token`) |
 
@@ -384,12 +366,10 @@ Each worker runs `git pull --ff-only`, then `scripts/install.py` if `llama-relea
 | `rpc-server` missing | Some prebuilt packs omit it | `python scripts/install.py --llama-only --from-source` (`-DGGML_RPC=ON`); verify it was staged in `vendor/bin/` |
 | `Could NOT find Vulkan` / `missing: glslc` on Windows | Vulkan node without the LunarG SDK | Managed/source builds provision `KhronosGroup.VulkanSDK` via winget when missing; if winget or elevation is unavailable, install it from https://vulkan.lunarg.com/sdk/home#windows and retry in Settings → llama.cpp |
 | `install.py --check` mismatch | Mixed llama.cpp tags across nodes | Run `python scripts/install.py --llama-only` on **every** node; do not mix HEAD source with a pinned nightly |
-| WireGuard warning | No admin / no package manager | Install WG manually from https://www.wireguard.com/install/ ; do **not** use `--overlay wireguard` until `wg` works |
 | `kllm` command not found | Venv not activated | Activate `.venv` (§2.4) |
 | `native_available()` False | Extension not installed | Re-run `python scripts/install.py` without `--skip-rust` |
 | Join key 401 | Wrong key / master stopped | Re-`kllm start` on master; copy new key |
 | Worker join OK but `run` fails | RPC unreachable, wrong bind, or **llama.cpp tag mismatch** | `python scripts/install.py --check` on every node; `kllm status` → `rpc_bind`, firewall 50052; see troubleshooting.md |
-| Overlay start/join 400 | `wg` missing or overlay mismatch | Install WG; match `--overlay` on all nodes |
 
 **Do not:** download random third-party llama builds; mix llama.cpp tags across nodes; leave `rpc-server` on `0.0.0.0` on untrusted networks; expose 50052 to the internet; skip venv activation and install into system Python.
 
@@ -438,7 +418,7 @@ kllm run --model file.gguf
 | `vendor/llama.cpp/` | Source + cmake build tree |
 | `vendor/prima/` | Staged Prima `llama-server` / `llama-cli` / `profile-tool` + manifest |
 | `vendor/prima.cpp/` | Prima source + cmake build tree |
-| `~/.kllm/` | Runtime state (`cluster.json`, models, WG keys, API token, `hf_token`) |
+| `~/.kllm/` | Runtime state (`cluster.json`, models, API token, `hf_token`; old WireGuard keys are retained for operator recovery) |
 
 ---
 
@@ -448,7 +428,7 @@ kllm run --model file.gguf
 2. **Run install on each physical node** that will be master or worker.  
 3. **Activate `.venv`** before every `kllm` command in a new shell.  
 4. **Match** `--backend` to the GPU on that node; mixed backends across nodes are supported (layer split).  
-5. **Treat RPC as insecure** at the app layer; rely on LAN isolation or WireGuard overlay.  
+5. **Treat RPC as insecure** at the app layer; rely on a trusted private LAN or dedicated fast Ethernet isolation.
 6. **Keep every node on the same llama.cpp tag** (`llama-release` + `python scripts/install.py --llama-only`). Mixed tags break RPC HELLO.  
 7. After changes to Rust/Python packaging, re-run install or `python scripts/build.py` (not only `pip install -e .` unless you know maturin is required).  
 8. When reporting status to the user, cite which §0 checks passed/failed.

@@ -9,7 +9,6 @@ def test_heartbeat_payload_builder_combines_state_and_runtime_identity():
         node_id="worker-1",
         role="worker",
         rpc_bind="10.0.0.2",
-        wg_public_key="wg-key",
         gpu_ids=[1],
         process_pid=42,
         process_role="worker",
@@ -41,7 +40,7 @@ def test_heartbeat_payload_builder_combines_state_and_runtime_identity():
     assert payload["actual_backend"] == "cuda"
     assert payload["devices"] == [1]
     assert "unified_memory" not in payload
-    assert payload["wg_public_key"] == "wg-key"
+    assert "wg_public_key" not in payload
     assert payload["git_head"] == "abc123"
     assert payload["llama_release"] == "v1.0"
     assert payload["process_started_at"] == "2026-01-01T00:00:00Z"

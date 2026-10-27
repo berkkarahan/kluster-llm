@@ -27,7 +27,6 @@ class ClusterUpdateGateway(Protocol):
         control_port: int,
         rpc_port: int,
         rpc_bind: str | None,
-        overlay: str,
         gpu_ids: list[int] | None,
         master_base: str | None = None,
     ) -> dict[str, Any]: ...
@@ -84,7 +83,6 @@ class ClusterUpdateService:
                     control_port=state.control_port,
                     rpc_port=state.rpc_port,
                     rpc_bind=state.rpc_bind,
-                    overlay=state.overlay,
                     gpu_ids=state.gpu_ids,
                     master_base=self._master_base() if state.master_host else None,
                 )

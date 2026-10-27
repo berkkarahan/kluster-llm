@@ -24,9 +24,6 @@ def start(
             "else private LAN IP; not 0.0.0.0)"
         ),
     ),
-    overlay: str = typer.Option(
-        "none", "--overlay", help="RPC overlay: none | wireguard (join-key gated WireGuard mesh)"
-    ),
     gpus: Optional[str] = typer.Option(
         None, "--gpus", help="Comma-separated GPU indices to use (default: all / interactive)"
     ),
@@ -63,7 +60,6 @@ def start(
             "key": key,
             "control_port": port,
             "rpc_bind": rpc_bind,
-            "overlay": overlay,
         }
         if gpu_ids is not None:
             payload["gpu_ids"] = gpu_ids
@@ -74,14 +70,12 @@ def start(
         data = r.json()
     console.print(f"[green]Master started[/green] node={data['node_id']}")
     console.print(f"Join key: [bold]{data['join_key']}[/bold]")
-    console.print(f"RPC bind: {data.get('rpc_bind')}  overlay={data.get('overlay')}")
+    console.print(f"RPC bind: {data.get('rpc_bind')}")
     if data.get("gpu_ids") is not None:
         console.print(f"GPUs: {data.get('gpu_ids')}")
-    if data.get("wg_address"):
-        console.print(f"WireGuard: {data.get('wg_address')} ({data.get('overlay_status')})")
     for w in data.get("netsec_warnings") or []:
         console.print(f"[yellow]netsec:[/yellow] {w}")
-    console.print("Workers: kllm join --key <key> [--overlay wireguard]")
+    console.print("Workers: kllm join --key <key>")
 
 
 def stop(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
@@ -116,9 +110,6 @@ def join(
             "private-network IP; not 0.0.0.0)"
         ),
     ),
-    overlay: str = typer.Option(
-        "none", "--overlay", help="RPC overlay: none | wireguard (must match master when using WG)"
-    ),
     gpus: Optional[str] = typer.Option(
         None, "--gpus", help="Comma-separated GPU indices to use (default: all / interactive)"
     ),
@@ -147,7 +138,6 @@ def join(
         "master_port": master_port,
         "rpc_port": rpc_port,
         "rpc_bind": rpc_bind,
-        "overlay": overlay,
     }
     if master:
         payload["master_host"] = master
@@ -178,11 +168,9 @@ def join(
             raise typer.Exit(1)
         data = r.json()
     console.print(f"[green]Joined[/green] master={data['master']}")
-    console.print(f"RPC bind: {data.get('rpc_bind')}  overlay={data.get('overlay')}")
+    console.print(f"RPC bind: {data.get('rpc_bind')}")
     if data.get("gpu_ids") is not None:
         console.print(f"GPUs: {data.get('gpu_ids')}")
-    if data.get("wg_address"):
-        console.print(f"WireGuard: {data.get('wg_address')} ({data.get('overlay_status')})")
     for w in data.get("netsec_warnings") or []:
         console.print(f"[yellow]netsec:[/yellow] {w}")
     for w in data.get("llama_warnings") or []:

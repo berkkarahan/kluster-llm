@@ -247,13 +247,11 @@ def test_join_enrolls_without_runtime_side_effects():
             probe_capacity=lambda: {"backend": "cpu"},
             pick_rpc_bind_host=lambda *_, **__: "10.0.0.2",
             ensure_master_control_route=lambda *_: [],
-            load_or_create_keypair=lambda: ("private", "public"),
             software_identity=lambda: {},
             build_register_payload=lambda **kw: kw,
             post_register=lambda *_: {},
             drop_cp_proxy=lambda: None,
             apply_cluster_snapshot=lambda _: None,
-            worker_bring_up_wireguard=lambda *_: "10.66.87.2",
             post_worker_heartbeat=lambda: calls.append("heartbeat"),
         )
     )

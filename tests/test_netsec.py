@@ -212,27 +212,6 @@ def test_is_usable_lan_peer():
     assert not is_usable_lan_peer(None)
 
 
-def test_derive_wg_psk_stable():
-    from kllm.shared.netsec import derive_wg_psk
-
-    a = derive_wg_psk("cluster-secret")
-    b = derive_wg_psk("cluster-secret")
-    c = derive_wg_psk("other-secret")
-    assert a == b
-    assert a != c
-    # WireGuard PSK is 32 bytes → 44 chars base64 with padding
-    assert len(a) == 44
-
-
-def test_normalize_overlay():
-    from kllm.shared.netsec import normalize_overlay
-
-    assert normalize_overlay(None) == "none"
-    assert normalize_overlay("WireGuard") == "wireguard"
-    with pytest.raises(ValueError):
-        normalize_overlay("tailscale")
-
-
 def test_firewall_darwin_already_permitted(monkeypatch):
     from kllm.shared import firewall as netsec
 
@@ -327,26 +306,69 @@ def test_firewall_windows_access_denied_hint(monkeypatch):
     assert "Access is denied" not in out["warning"]
 
 
-def test_next_wg_address_skips_used():
-    from kllm.shared.netsec import next_wg_address
-
-    assert next_wg_address({}, master=True) == "10.66.87.1"
-    members = {"a": {"wg_address": "10.66.87.2"}, "b": {"wg_address": "10.66.87.3"}}
-    assert next_wg_address(members, master=False) == "10.66.87.4"
-
-
 def test_status_includes_netsec_fields(client):
     c, agent, _ = client
     agent.STATE.rpc_bind = "192.168.10.2"
-    agent.STATE.overlay = "none"
-    agent.STATE.overlay_status = "disabled"
     r = c.get("/v1/status")
     assert r.status_code == 200
     data = r.json()
     assert data["rpc_bind"] == "192.168.10.2"
-    assert data["overlay"] == "none"
-    assert data["overlay_status"] == "disabled"
     assert "netsec_warnings" in data
+
+
+def test_legacy_overlay_requests_fail_before_side_effects(client):
+    c, agent, _ = client
+    for path, body in (
+        ("/v2/cluster", {"overlay": "wireguard"}),
+        ("/v2/cluster/membership", {"key": "secret", "overlay": "none"}),
+    ):
+        response = c.post(path, json=body)
+        assert response.status_code == 422
+        assert "overlay" in response.text
+        assert agent.STATE.role == "idle"
+
+
+def test_legacy_worker_registration_cannot_silently_fall_back_to_lan(client):
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    agent.STATE.join_key = "secret"
+    response = c.post(
+        "/v1/register",
+        json={"node_id": "worker", "host": "192.168.1.2", "wg_public_key": "old-key"},
+        headers={"X-Kllm-Key": "secret"},
+    )
+    assert response.status_code == 422
+    assert "wg_public_key" in response.text
+    assert "worker" not in agent.STATE.members
+
+
+def test_legacy_saved_cluster_cannot_start_or_register_lan_worker(client):
+    c, agent, _ = client
+    agent.STATE.role = "master"
+    agent.STATE.overlay = "wireguard"
+    agent.STATE.join_key = "secret"
+    response = c.post("/v2/cluster", json={})
+    assert response.status_code == 409
+    response = c.post(
+        "/v1/register",
+        json={"node_id": "worker", "host": "192.168.1.2"},
+        headers={"X-Kllm-Key": "secret"},
+    )
+    assert response.status_code == 409
+    assert "worker" not in agent.STATE.members
+
+
+def test_failed_legacy_teardown_returns_actionable_error_and_preserves_state(client):
+    c, agent, _ = client
+    agent.STATE.role = "worker"
+    agent.STATE.overlay = "wireguard"
+    agent.STATE.rpc_bind = "10.66.87.2"
+    with patch.object(agent_runtime, "teardown_legacy_tunnel", side_effect=RuntimeError("stop kllm0 manually")):
+        response = c.delete("/v2/cluster/membership")
+    assert response.status_code == 409
+    assert "stop kllm0 manually" in response.text
+    assert agent.STATE.overlay == "wireguard"
+    assert agent.STATE.rpc_bind == "10.66.87.2"
 
 
 def test_start_sets_rpc_bind_not_wildcard(client):
@@ -381,51 +403,12 @@ def test_start_sets_rpc_bind_not_wildcard(client):
         ),
         patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.10.1"),
     ):
-        r = c.post("/v1/start", json={"key": "k", "overlay": "none"})
+        r = c.post("/v1/start", json={"key": "k"})
     assert r.status_code == 200
     data = r.json()
     assert data["rpc_bind"] == "192.168.10.1"
-    assert data["overlay"] == "none"
     assert agent.STATE.members[agent.STATE.node_id]["host"] == "192.168.10.1"
     assert agent.STATE.members[agent.STATE.node_id]["lan_host"] == "192.168.10.1"
-
-
-def test_start_wireguard_fails_without_tooling(client):
-    c, agent, netsec_mod = client
-
-    class FakeAdv:
-        def __init__(self, *a, **k):
-            pass
-
-        def start(self):
-            pass
-
-        def stop(self):
-            pass
-
-    with (
-        patch.object(agent.discovery, "MasterAdvertiser", FakeAdv),
-        patch.object(
-            agent.native,
-            "probe_capacity",
-            return_value={
-                "total_ram_bytes": 8,
-                "available_ram_bytes": 4,
-                "vram_bytes": None,
-                "backend": "cpu",
-            },
-        ),
-        patch.object(
-            netsec_mod,
-            "ensure_rpc_firewall",
-            return_value={"ok": True, "applied": False, "warning": None},
-        ),
-        patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.10.1"),
-        patch.object(netsec_mod, "wg_tooling_available", return_value=False),
-    ):
-        r = c.post("/v1/start", json={"key": "k", "overlay": "wireguard"})
-    assert r.status_code == 400
-    assert "WireGuard" in r.text
 
 
 def test_join_missing_native_returns_503(client):
@@ -445,7 +428,6 @@ def test_join_missing_native_returns_503(client):
                 "key": "secret",
                 "master_host": "192.168.68.63",
                 "master_port": 18765,
-                "overlay": "none",
             },
         )
     assert r.status_code == 503
@@ -528,7 +510,6 @@ def test_join_binds_private_host_not_wildcard(client, monkeypatch):
                 "master_host": "192.168.10.1",
                 "master_port": 18765,
                 "rpc_port": 50052,
-                "overlay": "none",
             },
         )
     assert r.status_code == 200
@@ -536,112 +517,6 @@ def test_join_binds_private_host_not_wildcard(client, monkeypatch):
     assert "host" not in captured
     assert agent.STATE.process_pid is None
     assert r.json()["rpc_bind"] == "192.168.10.2"
-
-
-@pytest.mark.unit
-def test_wireguard_join_uses_master_assignment_for_worker_tunnel(client, monkeypatch):
-    c, agent, netsec_mod = client
-    monkeypatch.setattr(agent_runtime, "_ensure_master_control_route", lambda *_args: [])
-    configurations = []
-    started = {}
-
-    class FakeResp:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "ok": True,
-                "members": 2,
-                "wg_address": "10.66.87.2",
-                "wg_peers": [
-                    {"public_key": "MASTERPUBKEY========", "allowed_ips": "10.66.87.1/32"}
-                ],
-            }
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def get(self, *args, **kwargs):
-            return type(
-                "HealthResponse",
-                (),
-                {
-                    "status_code": 200,
-                    "raise_for_status": lambda self: None,
-                    "json": lambda self: {"control_protocol": 2},
-                },
-            )()
-
-        def post(self, *args, **kwargs):
-            return FakeResp()
-
-    def start_worker(**kwargs):
-        started.update(kwargs)
-        return {"pid": 4242}
-
-    with (
-        patch.object(netsec_mod, "pick_rpc_bind_host", return_value="192.168.10.2"),
-        patch.object(netsec_mod, "ensure_rpc_firewall", return_value={"warning": None}),
-        patch.object(
-            agent.native,
-            "probe_capacity",
-            return_value={
-                "total_ram_bytes": 8,
-                "available_ram_bytes": 4,
-                "vram_bytes": 1,
-                "backend": "vulkan",
-            },
-        ),
-        patch.object(agent.native, "list_gpus", return_value={"backend": "vulkan", "gpus": []}),
-        patch.object(agent.native, "start_worker", side_effect=start_worker),
-        patch.object(
-            netsec_mod, "load_or_create_keypair", return_value=("worker-private", "worker-public")
-        ),
-        patch.object(netsec_mod, "derive_wg_psk", return_value="shared-psk"),
-        patch.object(
-            netsec_mod,
-            "build_wg_conf",
-            side_effect=lambda **kwargs: configurations.append(kwargs) or "wireguard-config",
-        ),
-        patch.object(netsec_mod, "bring_up_wireguard") as bring_up,
-        patch("httpx.Client", FakeClient),
-    ):
-        response = c.post(
-            "/v1/join",
-            json={
-                "key": "secret",
-                "master_host": "192.168.10.1",
-                "master_port": 18765,
-                "rpc_port": 50052,
-                "overlay": "wireguard",
-            },
-        )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["wg_address"] == "10.66.87.2"
-    assert response.json()["overlay_status"] == "up 10.66.87.2"
-    assert agent.STATE.wg_address == "10.66.87.2"
-    assert started == {}
-    assert agent.STATE.rpc_bind == "10.66.87.2"
-    assert agent.STATE.process_pid is None
-    assert configurations[-1] == {
-        "private_key": "worker-private",
-        "address": "10.66.87.2",
-        "listen_port": netsec_mod.WG_LISTEN_PORT,
-        "psk": "shared-psk",
-        "peers": [{"public_key": "MASTERPUBKEY========", "allowed_ips": "10.66.87.1/32"}],
-    }
-    bring_up.assert_called_once_with("wireguard-config")
 
 
 @pytest.mark.unit
@@ -717,7 +592,6 @@ def test_join_honors_rpc_bind_hint_from_master(client, monkeypatch):
                 "master_host": "192.168.68.62",
                 "master_port": 18765,
                 "rpc_port": 50052,
-                "overlay": "none",
             },
         )
     assert r.status_code == 200, r.text
@@ -797,7 +671,6 @@ def test_join_ignores_rpc_bind_hint_that_is_not_local(client, monkeypatch):
                 "master_host": "192.168.68.59",
                 "master_port": 18765,
                 "rpc_port": 50052,
-                "overlay": "none",
             },
         )
     assert r.status_code == 200, r.text
@@ -821,7 +694,7 @@ def test_reconcile_rpc_bind_replaces_foreign_address(monkeypatch):
     monkeypatch.setattr(
         netsec, "pick_rpc_bind_host", lambda preferred=None, toward=None: "192.168.68.51"
     )
-    bind, warn = netsec.reconcile_rpc_bind("192.168.68.56", toward="192.168.68.59", overlay="none")
+    bind, warn = netsec.reconcile_rpc_bind("192.168.68.56", toward="192.168.68.59")
     assert bind == "192.168.68.51"
     assert warn and "192.168.68.56" in warn
 
@@ -834,49 +707,6 @@ def test_control_client_keeps_idle_sockets():
     client = http_clients.control_client()
     assert client.timeout.connect == 5.0 or client.timeout is not None
     http_clients.close()
-
-
-def test_register_assigns_wg_when_overlay_on(client):
-    c, agent, netsec_mod = client
-    agent.STATE.role = "master"
-    agent.STATE.join_key = "secret-key"
-    agent.STATE.overlay = "wireguard"
-    agent.STATE.wg_address = "10.66.87.1"
-    agent.STATE.wg_public_key = "MASTERPUBKEY========"
-    agent.STATE.members[agent.STATE.node_id] = {
-        "node_id": agent.STATE.node_id,
-        "host": "10.66.87.1",
-        "lan_host": "192.168.10.1",
-        "role": "master",
-    }
-
-    with (
-        patch.object(netsec_mod, "add_peer_to_running", return_value={"ok": True}),
-        patch.object(netsec_mod, "bring_up_wireguard", return_value={"ok": True}),
-        patch.object(
-            netsec_mod, "load_or_create_keypair", return_value=("priv", "MASTERPUBKEY========")
-        ),
-    ):
-        r = c.post(
-            "/v1/register",
-            json={
-                "node_id": "w1",
-                "host": "192.168.10.2",
-                "lan_host": "192.168.10.2",
-                "wg_public_key": "WORKERPUBKEY========",
-                "total_ram_bytes": 1,
-                "available_ram_bytes": 1,
-                "vram_bytes": 1,
-                "backend": "vulkan",
-            },
-            headers={"X-Kllm-Key": "secret-key"},
-        )
-    assert r.status_code == 200
-    data = r.json()
-    assert data["wg_address"] == "10.66.87.2"
-    assert agent.STATE.members["w1"]["host"] == "10.66.87.2"
-    assert agent.STATE.members["w1"]["lan_host"] == "192.168.10.2"
-    assert data["wg_peers"][0]["public_key"] == "MASTERPUBKEY========"
 
 
 def test_netmask_to_prefix():

@@ -70,7 +70,11 @@
       <span class="step-num">{index + 1}</span>
       <span class="stage-headings">
         <strong class="stage-title">{title}</strong>
-        {#if stage.progress_label}<span class="stage-subtitle">{stage.progress_label}</span>{/if}
+        {#if retrying}
+          <span class="stage-subtitle">Retrying…</span>
+        {:else if stage.progress_label}
+          <span class="stage-subtitle">{stage.progress_label}</span>
+        {/if}
       </span>
       <span class="spacer"></span>
       {#if duration}<span class="duration-text">{duration}</span>{/if}

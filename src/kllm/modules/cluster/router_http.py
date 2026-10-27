@@ -161,6 +161,8 @@ class MembershipHandlers:
 
     def heartbeat(self, body: RegisterBody, request: Request) -> dict[str, Any]:
         state = self._state()
+        if body.node_id in state.members and isinstance(state.members[body.node_id], dict):
+            state.members[body.node_id]["last_seen"] = time.time()
         self._sync_liveness(shrink=True)
         accepted = body.node_id in state.members
         if accepted:

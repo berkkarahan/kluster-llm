@@ -398,7 +398,8 @@ class PrimaControl:
         if len(manifest.ranks) > 1:
             self.service.prima_admission.validate_worker(manifest)
             self.check_participant(manifest, self.service.state().node_id)
-            self.ports.validate(manifest, owner.get("command_owner"))
+            if manifest.network_id:
+                self.ports.validate(manifest, owner.get("command_owner"))
 
     def observe_participant(self, runtime_id, rank, backend):
         return observe_participant(self.registry.capture(runtime_id), self.service.state().node_id, rank, backend)
@@ -991,7 +992,8 @@ class PrimaControl:
                 if len(manifest.ranks) > 1:
                     self.service.prima_admission.validate_worker(manifest)
                     self.check_participant(manifest, self.service.state().node_id)
-                    self.ports.validate(manifest, command_owner)
+                    if manifest.network_id:
+                        self.ports.validate(manifest, command_owner)
                 require_qualified(self.registry.capture(manifest.runtime_id))
                 model_asset = next(a for a in manifest.assets if a.kind == "model")
                 def startup_check():
@@ -1001,7 +1003,7 @@ class PrimaControl:
                 def launch_rank():
                     return self.start_rank(manifest, self.cached_model(model_asset.sha256, job_id=preparation), startup_check,
                                            command_owner=command_owner)
-                return self.ports.launch(manifest, command_owner, launch_rank, check) if len(manifest.ranks) > 1 else launch_rank()
+                return self.ports.launch(manifest, command_owner, launch_rank, check) if (len(manifest.ranks) > 1 and manifest.network_id) else launch_rank()
             return await asyncio.to_thread(start_owned)
         if action == "prima_prepare":
             if set(value) != {"runtime_id", "assets", "operation_id"} or value[

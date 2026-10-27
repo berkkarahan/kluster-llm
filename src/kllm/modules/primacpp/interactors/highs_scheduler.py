@@ -1188,7 +1188,7 @@ def solve_highs_halda_schedule(
     if raw_strategy not in ("auto", "capacity_first", "priority"):
         raw_strategy = "auto"
     requested_strategy: PlacementStrategyMode = raw_strategy
-    node_priority = list(getattr(body, "node_priority", []) or [])
+    node_priority = [str(n) for n in (getattr(body, "node_priority", []) or []) if str(n) in members]
     if requested_strategy == "auto" and node_priority:
         requested_strategy = "priority"
 
@@ -1284,7 +1284,7 @@ def solve_highs_halda_schedule(
         next(iter(members.keys())),
     )
     ordered_ids = [master_id] + [str(nid) for nid in members if str(nid) != master_id]
-    required_set = set(getattr(body, "required_nodes", []) or [])
+    required_set = {str(n) for n in (getattr(body, "required_nodes", []) or []) if str(n) in members}
 
     layer_weights = list((layout or {}).get("layer_bytes") or [])
     if not layer_weights and (layout or {}).get("layers"):

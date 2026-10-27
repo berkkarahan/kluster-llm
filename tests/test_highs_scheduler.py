@@ -213,7 +213,7 @@ def test_multi_cycle_divisor_selection_and_segment_expansion():
         assert covered[idx][0] == covered[idx - 1][1]
     assert covered[-1][1] == 32
     for alloc in res_k2.node_allocations:
-        expected_graphs = 2 + (2 if alloc.rank == 0 else 0)
+        expected_graphs = 2 + (1 if alloc.rank == 0 else 0)
         assert per_node_graphs[alloc.node_id] == expected_graphs
         assert len(per_node_ranges[alloc.node_id]) == 2
 

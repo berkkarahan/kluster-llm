@@ -212,7 +212,7 @@ class ClusterState:
 
     def save(self) -> None:
         ensure_home()
-        with _STATE_LOCK, self.lock:
+        with self.lock, _STATE_LOCK:
             # Resilient snapshot with bounded retry loop against un-locked dictionary mutation:
             snapshot_members = None
             for _ in range(10):

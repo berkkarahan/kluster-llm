@@ -150,10 +150,15 @@ class _LifespanSequence:
     def _prepare_membership(self, _notice: LifecycleNotice) -> None:
         deps = self._deps
         deps.background_stop.clear()
+        state = deps.state()
         if deps.platform in ("win32", "darwin"):
-            state = deps.state()
             member = state.members.get(state.node_id) or {}
             deps.adopt_child_identity(state.process_pid, member.get("process_started_at"))
+        if deps.background_enabled() and state.role == "master":
+            now = time.time()
+            for member in state.members.values():
+                if isinstance(member, dict):
+                    member["last_seen"] = now
         deps.ensure_master_member(persist=True)
 
     async def _start_network(self, _notice: LifecycleNotice) -> None:

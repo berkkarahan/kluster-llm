@@ -774,9 +774,8 @@ def _schedule_worker_latency_probe() -> None:
     def probe() -> None:
         global _latency_probe_inflight
         try:
-            with state_ref.current().lock:
-                _probe_worker_latencies()
-                state_ref.current().save()
+            _probe_worker_latencies()
+            state_ref.current().save()
         finally:
             with _latency_probe_lock:
                 _latency_probe_inflight = False

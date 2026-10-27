@@ -336,9 +336,9 @@ class PrimaNetworkAdmission:
         service = self.service
         if not manifest.network_id:
             member = service.state().members.get(service.identity.node_id)
-            if member:
-                rank = next((r for r in manifest.ranks if r.node_id == service.identity.node_id), None)
-                raw_addr = (rank.address if rank else None) or member.get("lan_host") or member.get("host")
+            rank = next((r for r in manifest.ranks if r.node_id == service.identity.node_id), None)
+            if member or (rank is not None and service.state().role == "worker"):
+                raw_addr = (rank.address if rank else None) or (member or {}).get("lan_host") or (member or {}).get("host") or service.state().lan_host
                 addr = _canonical_private_ip(raw_addr, "192.168.1.1")
                 fingerprint = getattr(service.identity, "fingerprint", "") or ("0" * 64)
                 return NodeAssignment(

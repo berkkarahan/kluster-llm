@@ -436,3 +436,69 @@ def test_backward_compatibility_flag_off(monkeypatch, tmp_path, mock_gguf_model,
 
     # In legacy mode with non-existent or unconfigured candidate placement, it does not call auto_plan
     assert is_prima_auto_deploy_active(body) is False
+
+
+def test_auto_plan_ignores_legacy_llamacpp_saved_settings_and_stale_node_priority(
+    monkeypatch, tmp_path, mock_gguf_model, mock_prima_runtime, multi_node_members
+):
+    """Regression test: legacy llamacpp saved settings (stale node_priority, q8_0 KV) never poison Prima auto_plan."""
+    from types import SimpleNamespace
+    from kllm.modules.inference.interactors.run_settings_http import RunSettingsHandlers
+    from kllm.modules.primacpp.interactors.launch import execution_settings
+
+    legacy_store = SimpleNamespace(
+        get_model_settings=lambda model: {
+            "parameter_set": {
+                "placement_strategy": "priority",
+                "node_priority": ["stale-worker-from-other-cluster"],
+                "required_nodes": ["stale-worker-from-other-cluster"],
+                "cache_type_k": "q8_0",
+                "cache_type_v": "q8_0",
+                "flash_attention": "auto",
+            }
+        },
+        upsert_model_settings=lambda model, val: None,
+    )
+    monkeypatch.setattr("kllm.modules.runtimes.interactors.selection.snapshot", lambda: mock_prima_runtime)
+    handlers = RunSettingsHandlers(legacy_store, lambda m: mock_gguf_model, lambda: 8)
+    raw_body = PlanBody(model=mock_gguf_model.name, prima_auto_deploy=True)
+    resolved_body = handlers.resolve(raw_body)
+
+    assert resolved_body.cache_type_k == "f16"
+    assert resolved_body.cache_type_v == "f16"
+    assert resolved_body.node_priority == []
+
+    # Even if a caller passes stale node_priority directly to auto_plan, it is ignored
+    # and device descriptors with human names + canonical device IDs resolve to Vulkan0.
+    members = {
+        nid: {
+            **m,
+            "backend": "metal+vulkan" if nid != "master" else "vulkan",
+            "devices": [{"device": "Vulkan0", "name": "Apple M5 Pro" if nid != "master" else "AMD Radeon RX 9070 XT"}],
+        }
+        for nid, m in multi_node_members.items()
+    }
+    layout = {
+        "architecture": "llama",
+        "n_layers": 32,
+        "layers": [{"bytes": 200 * 1024 * 1024} for _ in range(32)],
+        "input_bytes": 1024 * 1024,
+        "output_bytes": 1024 * 1024,
+    }
+    monkeypatch.setattr("kllm.modules.models.interactors.gguf_meta.read_model_layout", lambda _: layout)
+    monkeypatch.setattr("kllm.modules.primacpp.interactors.model_support.model_architecture", lambda _: "llama")
+
+    poisoned_body = resolved_body.model_copy(
+        update={"placement_strategy": "priority", "node_priority": ["ghost-node"]}
+    )
+    plan = auto_plan(poisoned_body, members, model=mock_gguf_model, runtime=mock_prima_runtime)
+    assert plan["scheduler"]["requested_strategy"] == "auto"
+    assert len(plan["prima_topology"]["ranks"]) == 2
+    for rank in plan["prima_topology"]["ranks"]:
+        if rank["ngl"] > 0:
+            assert rank["devices"] == ["Vulkan0"]
+
+    settings = execution_settings(poisoned_body, plan, mock_gguf_model, 18080)
+    assert settings["cache_type_k"] == "f16"
+    assert settings["cache_type_v"] == "f16"
+    assert settings["prima_kv_sequences"] >= 1

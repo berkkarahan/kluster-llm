@@ -89,3 +89,94 @@ def test_replaced_cluster_state_starts_a_new_failure_streak(tmp_path, monkeypatc
     service.post_heartbeat()
 
     assert marks == []
+
+
+def test_probe_latencies_and_concurrent_state_save_do_not_deadlock(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    state = ClusterState(
+        role="master",
+        node_id="master",
+        members={
+            "master": {"node_id": "master", "role": "master", "host": "10.0.0.1"},
+            "w1": {"node_id": "w1", "role": "worker", "host": "10.0.0.2", "control_port": 18765},
+        },
+    )
+    in_http = threading.Event()
+    proceed_http = threading.Event()
+
+    def slow_get(*_args, **_kwargs):
+        in_http.set()
+        assert proceed_http.wait(timeout=2.0)
+        return SimpleNamespace(status_code=200)
+
+    service, _marks, _clears = _service({"state": state}, SimpleNamespace(get=slow_get))
+    errors: list[BaseException] = []
+
+    def run_probe():
+        try:
+            service.probe_latencies()
+            state.save()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_heartbeat_save():
+        try:
+            assert in_http.wait(timeout=2.0)
+            state.save()
+            proceed_http.set()
+        except BaseException as exc:
+            errors.append(exc)
+            proceed_http.set()
+
+    t1 = threading.Thread(target=run_probe)
+    t2 = threading.Thread(target=run_heartbeat_save)
+    t1.start()
+    t2.start()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+
+    assert not t1.is_alive(), "probe_latencies + state.save deadlocked"
+    assert not t2.is_alive(), "concurrent state.save deadlocked"
+    assert errors == []
+    assert state.members["w1"].get("latency_ms") is not None
+
+
+def test_heartbeat_refreshes_last_seen_before_liveness_sweep(tmp_path, monkeypatch):
+    import time
+    from kllm.modules.cluster.interactors.membership import LIVENESS_TIMEOUT_S, sweep_liveness
+    from kllm.modules.cluster.router_http import MembershipHandlers
+    from kllm.shared.schemas import RegisterBody
+
+    monkeypatch.setenv("KLLM_HOME", str(tmp_path))
+    now = time.time()
+    state = ClusterState(
+        role="master",
+        node_id="master",
+        members={
+            "master": {"node_id": "master", "role": "master", "last_seen": now},
+            "w1": {
+                "node_id": "w1",
+                "role": "worker",
+                "host": "10.0.0.2",
+                "last_seen": now - (LIVENESS_TIMEOUT_S + 30),
+            },
+        },
+    )
+    handlers = MembershipHandlers(
+        lambda: state,
+        sync_liveness=lambda **_: sweep_liveness(state),
+        resources=SimpleNamespace(prune=lambda _: None),
+        resource_probe_available=lambda: False,
+        store=lambda: SimpleNamespace(end_node=lambda _: None),
+        inference_activity=lambda: {},
+    )
+    body = RegisterBody(node_id="w1", host="10.0.0.2")
+    request = SimpleNamespace(client=SimpleNamespace(host="10.0.0.2"))
+
+    out = handlers.heartbeat(body, request)
+
+    assert out["accepted"] is True
+    assert "w1" in state.members
+

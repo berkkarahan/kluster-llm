@@ -19,7 +19,7 @@ from kllm.modules.primacpp.interactors.execution import (
     vulkan_kv_cache_error,
 )
 from kllm.modules.primacpp.interactors.placement import (
-    topology_from_plan, network_edges, require_layer_execution,
+    graph_visits, topology_from_plan, network_edges, require_layer_execution,
 )
 from kllm.modules.primacpp.interactors.model_support import architecture_support, model_architecture
 from kllm.modules.primacpp.interactors.platforms import normalize_platform, prima_member_backend
@@ -337,8 +337,9 @@ def materialize(
     if auto_deploy is None:
         from kllm.shared import config as kllm_config
         auto_deploy = kllm_config.get_feature_flag("prima-auto-deploy")
-    if auto_deploy:
-        value = auto_plan(body, members, model=model, runtime=runtime)
+    candidate = execute_plan(body, members) if auto_deploy and callable(execute_plan) else None
+    if isinstance(candidate, dict) and "prima_topology" in candidate and "plan_digest" in candidate:
+        value = candidate
     else:
         value = preview(body, runtime, members, model, execute_plan, score=score)
     if value["plan_digest"] != expected_digest:
@@ -575,18 +576,44 @@ def auto_plan(
     bytes_per_layer_kv = max(1, int(context * 4 * 1024))
     io_bytes = int((layout or {}).get("input_bytes", 0) or 0) + int((layout or {}).get("output_bytes", 0) or 0)
 
+    plan_updates: dict[str, Any] = {
+        "placement_strategy": "auto",
+        "node_priority": [],
+        "required_nodes": [],
+    }
+    fields_set = getattr(body, "model_fields_set", set()) or set()
+    if "cache_type_k" not in fields_set:
+        plan_updates["cache_type_k"] = "f16"
+    if "cache_type_v" not in fields_set:
+        plan_updates["cache_type_v"] = "f16"
+    plan_body = body.model_copy(update=plan_updates) if hasattr(body, "model_copy") else body
+
     gpu_budgets: dict[str, int] = {}
+    usable_vram_by_node: dict[str, int] = {}
     ram_budgets: dict[str, int] = {}
     profiles: dict[str, DeviceProfile] = {}
 
     now = time.time()
     for nid, m in plan_members.items():
         mb = prima_member_backend(m, runtime=runtime)
-        vram = int(m.get("vram_bytes") or 0)
-        has_gpu = mb not in ("cpu", "unknown") and (vram > 0 or bool(m.get("devices")))
-        ram = int(m.get("available_ram_bytes") or m.get("total_ram_bytes") or 8 * 1024**3)
-        gpu_budgets[nid] = vram if has_gpu else 0
+        raw_vram = int(m.get("vram_bytes") or 0)
+        has_gpu = mb not in ("cpu", "unknown") and (raw_vram > 0 or bool(m.get("devices")))
+        total_ram = int(m.get("total_ram_bytes") or m.get("available_ram_bytes") or 8 * 1024**3)
+        ram = int(total_ram * 0.85) if total_ram > 4 * 1024**3 else total_ram
+        is_uma = bool(m.get("unified_memory")) or normalize_platform(m.get("platform")) == "darwin"
+        if has_gpu:
+            if is_uma and total_ram >= 8 * 1024**3:
+                usable_vram = min(raw_vram, int(total_ram * 0.75))
+            elif raw_vram >= 16 * 1024**3:
+                usable_vram = int(raw_vram * 0.90)
+            else:
+                usable_vram = raw_vram
+        else:
+            usable_vram = 0
+        usable_vram_by_node[nid] = usable_vram
+        gpu_budgets[nid] = usable_vram
         ram_budgets[nid] = ram
+        vram_gib = usable_vram / float(1024**3)
         profiles[nid] = DeviceProfile(
             runtime_id=(runtime or {}).get("runtime_id", "0" * 64),
             model_sha256="0" * 64,
@@ -596,10 +623,20 @@ def auto_plan(
             backend=mb if has_gpu else "cpu",
             measured_at=now,
             cpu_layer_ms=10.0,
-            gpu_layer_ms=2.0 if has_gpu else None,
+            gpu_layer_ms=max(0.5, 2.0 - 1e-4 * vram_gib) if has_gpu else None,
             disk_read_bytes_s=1_000_000_000.0,
-            memory_available_bytes=vram if has_gpu else ram,
+            memory_available_bytes=usable_vram if has_gpu else ram,
         )
+
+    total_required_gpu = model_size_bytes + total_layers * bytes_per_layer_kv + io_bytes
+    total_usable_vram = sum(usable_vram_by_node.values())
+    gpu_node_count = sum(1 for v in usable_vram_by_node.values() if v > 0)
+    if gpu_node_count >= 2 and total_usable_vram > total_required_gpu:
+        layer_slack_bytes = 2 * (bytes_per_layer_weight + bytes_per_layer_kv)
+        for nid, uv in usable_vram_by_node.items():
+            if uv > 0:
+                prop = int(total_required_gpu * (uv / float(total_usable_vram))) + layer_slack_bytes
+                gpu_budgets[nid] = min(uv, max(bytes_per_layer_weight + bytes_per_layer_kv, prop))
 
     base_plan = {
         "estimated_layers": total_layers,
@@ -612,7 +649,7 @@ def auto_plan(
     }
 
     scheduler_report = solve_highs_halda_schedule(
-        body=body,
+        body=plan_body,
         runtime=runtime or {},
         members=plan_members,
         base_plan=base_plan,
@@ -626,6 +663,22 @@ def auto_plan(
         and bool(scheduler_report.node_allocations)
         and sum(a.w_m for a in scheduler_report.node_allocations) == total_layers
     )
+    if not feasible and gpu_budgets != usable_vram_by_node:
+        gpu_budgets = dict(usable_vram_by_node)
+        base_plan["node_gpu_budget_bytes"] = gpu_budgets
+        scheduler_report = solve_highs_halda_schedule(
+            body=plan_body,
+            runtime=runtime or {},
+            members=plan_members,
+            base_plan=base_plan,
+            layout=layout,
+            profiles=profiles,
+        )
+        feasible = (
+            scheduler_report.fallback_reason != "milp_infeasible_for_cluster_budget"
+            and bool(scheduler_report.node_allocations)
+            and sum(a.w_m for a in scheduler_report.node_allocations) == total_layers
+        )
     if not feasible:
         total_required = model_size_bytes + total_layers * bytes_per_layer_kv + io_bytes
         total_available = sum(gpu_budgets.values()) + sum(ram_budgets.values())
@@ -671,7 +724,7 @@ def auto_plan(
         cpu_l = w - ngl
         plan_cpu_layers = cpu_l
         m_devs = plan_members[master_id].get("devices") or []
-        m_dev = str(m_devs[0].get("name") or m_devs[0].get("device") or "0") if m_devs else "0"
+        m_dev = str(m_devs[0].get("device") or m_devs[0].get("name") or "0") if m_devs else "0"
         if prima_member_backend(plan_members[master_id], runtime=runtime) == "vulkan":
             m_dev = _vulkan_device_name(m_dev, 0)
         if ngl > 0:
@@ -684,7 +737,7 @@ def auto_plan(
                 "memory_kind": "gpu",
                 "local": True,
                 "backend": prima_member_backend(plan_members[master_id], runtime=runtime),
-                "budget_bytes": gpu_budgets.get(master_id, 0),
+                "budget_bytes": usable_vram_by_node.get(master_id, 0),
                 "estimated_bytes": ngl * bytes_per_layer_weight,
             })
     else:
@@ -698,7 +751,7 @@ def auto_plan(
             ngl = min(w_alloc.n_m, w)
             cpu_l = w - ngl
             w_devs = plan_members[w_alloc.node_id].get("devices") or []
-            w_dev = str(w_devs[0].get("name") or w_devs[0].get("device") or "0") if w_devs else "0"
+            w_dev = str(w_devs[0].get("device") or w_devs[0].get("name") or "0") if w_devs else "0"
             if prima_member_backend(plan_members[w_alloc.node_id], runtime=runtime) == "vulkan":
                 w_dev = _vulkan_device_name(w_dev, 0)
             if cpu_l > 0:
@@ -724,7 +777,7 @@ def auto_plan(
                     "memory_kind": "gpu",
                     "local": False,
                     "backend": prima_member_backend(plan_members[w_alloc.node_id], runtime=runtime),
-                    "budget_bytes": gpu_budgets.get(w_alloc.node_id, 0),
+                    "budget_bytes": usable_vram_by_node.get(w_alloc.node_id, 0),
                     "estimated_bytes": ngl * bytes_per_layer_weight,
                 })
         remaining_w = total_layers - cur_layer
@@ -732,7 +785,7 @@ def auto_plan(
             ngl_m = min(master_alloc.n_m, remaining_w)
             cpu_m = remaining_w - ngl_m
             m_devs = plan_members[master_id].get("devices") or []
-            m_dev = str(m_devs[0].get("name") or m_devs[0].get("device") or "0") if m_devs else "0"
+            m_dev = str(m_devs[0].get("device") or m_devs[0].get("name") or "0") if m_devs else "0"
             if prima_member_backend(plan_members[master_id], runtime=runtime) == "vulkan":
                 m_dev = _vulkan_device_name(m_dev, 0)
             if cpu_m > 0:
@@ -758,9 +811,33 @@ def auto_plan(
                     "memory_kind": "gpu",
                     "local": True,
                     "backend": prima_member_backend(plan_members[master_id], runtime=runtime),
-                    "budget_bytes": gpu_budgets.get(master_id, 0),
+                    "budget_bytes": usable_vram_by_node.get(master_id, 0),
                     "estimated_bytes": ngl_m * bytes_per_layer_weight,
                 })
+
+    from kllm.modules.inference.interactors.placement import PlacementSettings, effective_launch_settings
+    from kllm.modules.inference.interactors.run_settings_resolution import (
+        estimate_auxiliary_assets,
+        resolve_launch_settings,
+    )
+    from kllm.modules.runtimes.interactors.selection import use_runtime
+
+    with use_runtime(runtime):
+        resolved_settings = estimate_auxiliary_assets(plan_body, resolve_launch_settings(plan_body))
+        settings = resolved_settings.to_mapping()
+        typed_settings = effective_launch_settings(
+            PlacementSettings.from_mapping(settings),
+            context,
+        )
+        serialized_settings = dict(settings)
+        serialized_settings.update(typed_settings.to_mapping())
+
+    resolved_launch = {
+        key: value for key, value in serialized_settings.items() if not key.startswith("_")
+    }
+    resolved_launch["context"] = context
+    resolved_launch["split_mode"] = "layer"
+    resolved_launch["prima_graphs"] = True
 
     plan = {
         "device_allocations": device_allocations,
@@ -770,18 +847,14 @@ def auto_plan(
         "model_size_bytes": model_size_bytes,
         "split_mode": "layer",
         "fit_status": "fits",
-        "node_gpu_budget_bytes": gpu_budgets,
+        "node_gpu_budget_bytes": usable_vram_by_node,
         "node_ram_budget_bytes": ram_budgets,
-        "resolved_launch_settings": {
-            "context": context,
-            "parallel_slots": getattr(body, "parallel_slots", 1) if getattr(body, "parallel_slots", 1) != "auto" else 1,
-            "split_mode": "layer",
-            "prima_graphs": True,
-        },
+        "resolved_launch_settings": resolved_launch,
     }
 
     topology = topology_from_plan(plan, plan_members, runtime["runtime_id"])
     topology = topology.model_copy(update={"scheduler_report": scheduler_report})
+    plan["prima_graph_counts"] = graph_visits(topology)
 
     identity = {
         "runtime_id": runtime["runtime_id"],

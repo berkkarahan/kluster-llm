@@ -138,7 +138,7 @@ def test_engine_settings_defaults_and_explicit_raw_projection(tmp_path):
     assert initial["legacy_parameter_set"] == legacy
     assert initial["parameter_set"]["cache_type_k"] == "f16"
     assert initial["parameter_set"]["cache_type_v"] == "f16"
-    assert initial["parameter_set"]["flash_attention"] == "off"
+    assert initial["parameter_set"]["flash_attention"] == "auto"
     assert set(initial["parameter_set"]) == set(RunSettingsFields(model="toy.gguf").snapshot_for_remember())
     raw = {"temperature": None, "enable_thinking": False,
            "extra_args": ["--seed=0", "--top-k", "0"], "remember": True,

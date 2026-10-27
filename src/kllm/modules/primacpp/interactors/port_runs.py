@@ -130,6 +130,8 @@ class PortSupervisor:
                 raise
 
     def validate(self, manifest, command_owner=None):
+        if not manifest.network_id:
+            return {"phase": "admitted", "manifest_digest": manifest.digest}
         with self.lock:
             self._owned(manifest, command_owner)
             if self.owner["phase"] != "admitted" or self.clock() >= self.deadline:
@@ -141,6 +143,8 @@ class PortSupervisor:
             return result
 
     def renew(self, manifest, command_owner=None, native_renew=None):
+        if not manifest.network_id:
+            return {"phase": "admitted", "manifest_digest": manifest.digest}
         with self.lock:
             result = self.validate(manifest, command_owner)
             if native_renew is not None:
@@ -151,6 +155,10 @@ class PortSupervisor:
             return result
 
     def launch(self, manifest, command_owner, start, check):
+        if not manifest.network_id:
+            result = start()
+            check()
+            return result
         # Expiry/release and the validation-to-spawn interval share this lock.
         with self.lock:
             self.validate(manifest, command_owner)

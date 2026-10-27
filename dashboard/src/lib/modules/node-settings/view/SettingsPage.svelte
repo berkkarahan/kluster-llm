@@ -11,6 +11,7 @@
   import NetworkSecurity from '#lib/modules/node-settings/view/NetworkSecurity.svelte';
   import Tokens from '#lib/modules/node-settings/view/Tokens.svelte';
   import Software from '#lib/modules/node-settings/view/Software.svelte';
+  import FeatureFlags from '#lib/modules/node-settings/view/FeatureFlags.svelte';
   import LlamaRuntimes from '#lib/modules/runtimes/view/LlamaRuntimes.svelte';
   import PrimaRuntimes from '#lib/modules/runtimes/view/PrimaRuntimes.svelte';
   import { resolveActiveEngine } from '#lib/modules/run/entities';
@@ -36,7 +37,8 @@
     { id: 'tokens', label: 'Tokens' },
     { id: 'software', label: 'Software' },
     { id: 'llama', label: 'llama.cpp' },
-    { id: 'paths', label: 'Paths' }
+    { id: 'paths', label: 'Paths' },
+    { id: 'flags', label: 'Feature flags' }
   ];
 
   /**
@@ -65,11 +67,20 @@
       ? 'Prima replaces llama.cpp for this launch. Evaluation builds and placement previews only; inference stays blocked until every qualification gate passes.'
       : 'Version changes apply to the next model run. Preparation keeps active inference on its current version.'
   );
+  const sectionIntro = $derived(
+    section === 'llama'
+      ? runtimeIntro
+      : section === 'flags'
+        ? 'Feature flags toggle experimental workflows immediately without restarting the node.'
+        : 'Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.'
+  );
 
   onMount(async () => {
     const requested = new URLSearchParams(location.search).get('section');
     if (requested === 'llama' || requested === 'prima') section = 'llama';
+    else if (requested && sections.some((s) => s.id === requested)) section = requested;
     void settings.loadHome();
+    void settings.loadFeatureFlags();
   });
 </script>
 
@@ -78,7 +89,7 @@
     <div>
       <p class="eyebrow">Settings</p>
       <h1 id="page-title">Node settings</h1>
-      <p>{section === 'llama' ? runtimeIntro : 'Hardware, network, tokens, and software for this node. Changes apply on the next worker restart.'}</p>
+      <p>{sectionIntro}</p>
     </div>
     <p class="mono small muted">
       node {cluster.status?.node_id ?? '—'} · probed {settings.probedBackend}
@@ -121,6 +132,11 @@
           </div>
         {/if}
       </div>
+    </section>
+
+    <section class="panel panel-pad" aria-labelledby="flags-label" hidden={section !== 'flags'}>
+      <h2 id="flags-label">Feature flags</h2>
+      <FeatureFlags presenter={settings} />
     </section>
     </div>
   </div>

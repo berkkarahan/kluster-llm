@@ -188,6 +188,12 @@ class ConfigBody(BaseModel):
     split_mode: Literal["layer", "row", "tensor"] | None = None
 
 
+class FeatureFlagBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = Field(strict=True)
+
+
 class DownloadBody(BaseModel):
     source: str
     name: str | None = None

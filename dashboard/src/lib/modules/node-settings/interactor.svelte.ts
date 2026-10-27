@@ -4,8 +4,16 @@ import type { HttpClient } from '../../shared/http.svelte';
 import type { LiveInteractor } from '../../live/interactor.svelte';
 import type { AccelBackend, GpuInfo } from '../../shared/entities';
 import type { ClusterInteractor } from '../cluster/interactor.svelte';
-import type { HomePaths } from './entities';
+import { FEATURE_FLAG_CATALOG, type HomePaths } from './entities';
 import type { Status } from '../cluster/entities';
+
+function defaultFeatureFlags(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const item of FEATURE_FLAG_CATALOG) {
+    out[item.id] = false;
+  }
+  return out;
+}
 
 const ACCEL_LABELS: Record<AccelBackend, string> = {
   metal: 'Metal',
@@ -34,6 +42,9 @@ export class NodeSettingsInteractor {
   vramPercent = $state(80);
   ramPercent = $state(80);
   home = $state<HomePaths | null>(null);
+  featureFlags = $state<Record<string, boolean>>(defaultFeatureFlags());
+  pendingFlags = $state<Record<string, boolean>>({});
+  flagError = $state<string | null>(null);
   private gpusLoaded = false;
   private configGpuIds: number[] | null = null;
   private selectionHydrated = false;
@@ -65,7 +76,88 @@ export class NodeSettingsInteractor {
     if (warn && warn !== this.lastApplyWarning) pushToast('warn', warn);
     this.lastApplyError = err;
     this.lastApplyWarning = warn;
+    if (data.feature_flags && typeof data.feature_flags === 'object') {
+      this.applyFeatureFlags(data.feature_flags);
+    }
     if (!this.selectionHydrated) this.hydrateGpuSelection();
+  }
+
+  private applyFeatureFlags(raw: Record<string, unknown>) {
+    const next = defaultFeatureFlags();
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === 'boolean') next[k] = v;
+    }
+    this.featureFlags = next;
+    if (this.cluster.status) {
+      this.cluster.status = {
+        ...this.cluster.status,
+        feature_flags: { ...next }
+      };
+    }
+  }
+
+  isFeatureFlagEnabled(name: string): boolean {
+    if (this.status?.feature_flags && typeof this.status.feature_flags[name] === 'boolean') {
+      return Boolean(this.status.feature_flags[name]);
+    }
+    return Boolean(this.featureFlags[name]);
+  }
+
+  async loadFeatureFlags() {
+    try {
+      const r = await fetch('/v2/node/flags');
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && typeof data.flags === 'object' && data.flags !== null) {
+        this.applyFeatureFlags(data.flags as Record<string, unknown>);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async setFeatureFlag(name: string, enabled: boolean): Promise<boolean> {
+    if (this.pendingFlags[name]) return this.isFeatureFlagEnabled(name);
+    const errorGeneration = errors.generation;
+    this.flagError = null;
+    this.pendingFlags = { ...this.pendingFlags, [name]: true };
+    try {
+      const r = await fetch('/v2/node/flags', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, enabled })
+      });
+      const text = await r.text();
+      if (!r.ok) {
+        let message = text || `flags ${r.status}`;
+        try {
+          const parsed = text ? JSON.parse(text) : null;
+          if (parsed && typeof parsed.detail === 'string') message = parsed.detail;
+          else if (parsed?.error?.message) message = parsed.error.message;
+        } catch {
+          /* keep raw text */
+        }
+        throw new Error(message);
+      }
+      const data = text ? JSON.parse(text) : {};
+      if (data && typeof data.flags === 'object' && data.flags !== null) {
+        this.applyFeatureFlags(data.flags as Record<string, unknown>);
+      } else {
+        this.applyFeatureFlags({ ...this.featureFlags, [name]: enabled });
+      }
+      pushToast('ok', `${name} ${enabled ? 'enabled' : 'disabled'}`);
+      await this.refresh();
+      return this.isFeatureFlagEnabled(name);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.flagError = msg;
+      pushToast('danger', msg, 4000, { generation: errorGeneration });
+      return this.isFeatureFlagEnabled(name);
+    } finally {
+      const nextPending = { ...this.pendingFlags };
+      delete nextPending[name];
+      this.pendingFlags = nextPending;
+    }
   }
 
   watchLive() {
@@ -81,7 +173,7 @@ export class NodeSettingsInteractor {
     }
   }
 
-    async loadConfig() {
+  async loadConfig() {
     try {
       const r = await fetch('/v2/node/config');
       if (!r.ok) return;
@@ -328,6 +420,4 @@ export class NodeSettingsInteractor {
     }
     pushToast('warn', 'No local GPUs detected — inference will fall back to CPU layers.');
   }
-
 }
-

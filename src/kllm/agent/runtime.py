@@ -1657,6 +1657,8 @@ from kllm.modules.settings.endpoints import (  # noqa: E402
     get_gpus,
     put_config,
     get_home,
+    get_feature_flags,
+    put_feature_flag,
     set_settings_handlers_provider,
 )
 from kllm.modules.logs.endpoints import (  # noqa: E402
@@ -1687,6 +1689,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_config": get_config,
     "put_config": put_config,
     "get_home": get_home,
+    "get_feature_flags": get_feature_flags,
+    "put_feature_flag": put_feature_flag,
     "start_master": start_master,
     "stop": stop,
     "join_cluster": join_cluster,

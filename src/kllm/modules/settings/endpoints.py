@@ -7,6 +7,7 @@ from typing import Any, cast
 from fastapi import APIRouter
 from kllm.shared.schemas import (
     ConfigBody,
+    FeatureFlagBody,
     HfTokenBody,
 )
 
@@ -57,6 +58,16 @@ def get_home() -> dict[str, Any]:
     return cast(dict[str, Any], _get_handlers().home())
 
 
+def get_feature_flags() -> dict[str, Any]:
+    """Return all registered feature flags and their persisted boolean states."""
+    return cast(dict[str, Any], _get_handlers().get_feature_flags())
+
+
+def put_feature_flag(body: FeatureFlagBody) -> dict[str, Any]:
+    """Persist one feature flag update and return the updated feature flags map."""
+    return cast(dict[str, Any], _get_handlers().save_feature_flag(body))
+
+
 def create_settings_router(handlers: Any) -> APIRouter:
     router = APIRouter()
 
@@ -94,6 +105,16 @@ def create_settings_router(handlers: Any) -> APIRouter:
     @router.get("/node/home")
     def _home() -> dict[str, Any]:
         return handlers.home()
+
+    @router.get("/v1/flags")
+    @router.get("/node/flags")
+    def _feature_flags() -> dict[str, Any]:
+        return handlers.get_feature_flags()
+
+    @router.put("/v1/flags")
+    @router.put("/node/flags")
+    def _put_feature_flag(body: FeatureFlagBody) -> dict[str, Any]:
+        return handlers.save_feature_flag(body)
 
     return router
 

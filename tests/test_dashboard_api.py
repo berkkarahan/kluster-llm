@@ -1890,3 +1890,57 @@ def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
     assert failed.status_code == 400
     assert "all-down" in failed.json()["detail"]
     assert "results" not in failed.json()
+
+
+def test_node_feature_flags_api_get_put_and_sqlite_sync(client):
+    c, _, _ = client
+    from kllm.shared import config as kllm_config
+
+    r0 = c.get("/v2/node/flags")
+    assert r0.status_code == 200
+    assert r0.json() == {
+        "flags": {
+            "private-network-setup": False,
+            "prima-auto-deploy": False,
+        }
+    }
+
+    r1 = c.put("/v2/node/flags", json={"name": "prima-auto-deploy", "enabled": True})
+    assert r1.status_code == 200
+    assert r1.json() == {
+        "flags": {
+            "private-network-setup": False,
+            "prima-auto-deploy": True,
+        }
+    }
+    assert kllm_config.get_feature_flag("prima-auto-deploy") is True
+    assert c.get("/v2/cluster/status").json()["feature_flags"]["prima-auto-deploy"] is True
+
+    # Legacy v1 alias also works
+    r2 = c.put("/v1/flags", json={"name": "private-network-setup", "enabled": True})
+    assert r2.status_code == 200
+    assert r2.json()["flags"] == {
+        "private-network-setup": True,
+        "prima-auto-deploy": True,
+    }
+    assert c.get("/v1/flags").json()["flags"] == {
+        "private-network-setup": True,
+        "prima-auto-deploy": True,
+    }
+
+
+def test_node_feature_flags_api_rejects_invalid_payloads(client):
+    c, _, _ = client
+
+    bad_name = c.put("/v2/node/flags", json={"name": "unknown-flag", "enabled": True})
+    assert bad_name.status_code == 400
+    assert "unknown feature flag" in json.dumps(bad_name.json())
+
+    bad_bool = c.put("/v2/node/flags", json={"name": "prima-auto-deploy", "enabled": "yes"})
+    assert bad_bool.status_code == 422
+
+    extra_field = c.put(
+        "/v2/node/flags",
+        json={"name": "prima-auto-deploy", "enabled": True, "unexpected": 1},
+    )
+    assert extra_field.status_code == 422

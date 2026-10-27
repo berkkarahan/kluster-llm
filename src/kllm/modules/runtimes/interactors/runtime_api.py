@@ -1,4 +1,4 @@
-"""HTTP boundary and composition for local llama.cpp runtime setup."""
+"""Composition for the worker runtime service (no installation)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
-
-from kllm.shared.schemas import LlamaSetupBody
 from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
 from kllm.modules.runtimes.interactors.runtime_setup import RuntimeSetupService
-from kllm.shared.exceptions import NotFoundError, ValidationError
 from kllm.shared.state import ClusterState
 
 
@@ -29,16 +25,9 @@ def build_runtime_setup_service(
     process_alive: Callable[[int], bool] = lambda _pid: True,
     stop_stray_rpc_servers: Callable[[], int] = lambda: 0,
 ) -> RuntimeSetupService:
-    """Wire platform adapters into the domain runtime installer."""
-
-    def install_pack(tag: str | None, backend: str, force: bool) -> dict[str, Any]:
-        from kllm.shared.llama_pack import install_cached_llama_pack
-
-        return install_cached_llama_pack(tag=tag, backend=backend, force=force)
-
+    """Wire platform adapters into the worker runtime service."""
     return RuntimeSetupService(
         state=state,
-        install_pack=install_pack,
         repository_root=repository_root,
         gpu_visibility_env=gpu_visibility_env,
         stop_process=stop_process,
@@ -50,22 +39,3 @@ def build_runtime_setup_service(
         process_alive=process_alive,
         stop_stray_rpc_servers=stop_stray_rpc_servers,
     )
-
-
-def setup_runtime(
-    body: LlamaSetupBody | None,
-    api_key: str | None,
-    *,
-    state: ClusterState,
-    service: Callable[[], RuntimeSetupService],
-) -> dict[str, Any]:
-    """Authorize and execute the runtime setup operation at the HTTP boundary."""
-    if state.join_key and api_key != state.join_key:
-        raise HTTPException(401, "invalid join key")
-    try:
-        result = service().setup(body or LlamaSetupBody())
-    except NotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except ValidationError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return result.as_payload()

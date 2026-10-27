@@ -223,7 +223,11 @@ class LocalNetworkExecutor:
         if self.store.metadata(f"stopped_network:{command.network_id}") or (
             existing_network is not None and existing_network.observed_state == "stopped"
         ):
-            raise PlatformRefusal("STALE_REVISION", "Stopped network tombstone cannot be revived")
+            raise PlatformRefusal(
+                "STALE_REVISION",
+                "This computer has already stopped this network. Stop the private network "
+                "on the master, then set up a new network; Retry cannot revive a stopped network.",
+            )
         self.platform.eligible(self.platform.inspect(assignment.adapter_id))
         if self.store.network(network.network_id) is None:
             self.store.put_network(
@@ -768,6 +772,9 @@ class LocalNetworkExecutor:
                     "CLEANUP_PENDING",
                     "Reconcile requires an unchanged continuously observed assignment",
                 )
+            reconcile = getattr(self.platform, "reconcile", None)
+            if reconcile is not None:
+                await asyncio.to_thread(reconcile, command)
             (await self.store.arun(self.store.put_operation, proposal.operation))
             self.preparation[str(command.network_id)] = proposal
             diagnostic = self.diagnostics.get(str(command.network_id))

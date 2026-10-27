@@ -65,27 +65,17 @@ def _v4_routes(values: Sequence[str]) -> tuple[ipaddress.IPv4Network, ...]:
     return tuple(routes)
 
 
-def _inspect_windows(interface: str, powershell) -> InterfaceState:
-    if not interface.isdigit():
-        raise NetworkError("Windows --interface must be the adapter's numeric interface index")
-    script = r"""
-$ErrorActionPreference = 'Stop'
-$i = [int]$env:KLLM_10GBE_INTERFACE
-$a = Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop
-$ipif = Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop
-$addresses = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ IPAddress=$_.IPAddress; PrefixLength=$_.PrefixLength } })
-$routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -ne '0.0.0.0/0' } | Select-Object -ExpandProperty DestinationPrefix)
-[pscustomobject]@{ Name=$a.Name; Status=$a.Status.ToString(); LinkSpeed=$a.LinkSpeed.ToString(); Hardware=[bool]$a.HardwareInterface; Description=$a.InterfaceDescription; Default=(@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count -gt 0); Dhcp=($ipif.Dhcp -eq 'Enabled'); Addresses=$addresses; Routes=$routes } | ConvertTo-Json -Compress -Depth 5
-"""
-    try:
-        data = json.loads(powershell(script, {"interface": interface}))
-        addresses = tuple(
-            ipaddress.IPv4Interface(f"{item['IPAddress']}/{item['PrefixLength']}")
-            for item in data.get("Addresses", [])
-        )
-        routes = _v4_routes(data.get("Routes", []))
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise NetworkError(f"could not read Windows adapter state: {exc}") from exc
+def _windows_state(interface: str, data: dict) -> InterfaceState:
+    """Parse one adapter's combined Get-Net* payload into its bounded state.
+
+    Shared by the single-adapter manual path and the batched managed-network
+    inventory so both report identical facts for the same adapter.
+    """
+    addresses = tuple(
+        ipaddress.IPv4Interface(f"{item['IPAddress']}/{item['PrefixLength']}")
+        for item in data.get("Addresses", [])
+    )
+    routes = _v4_routes(data.get("Routes", []))
     description = data.get("Description", "")
     physical = data.get("Hardware", False) and not re.search(
         r"wi-?fi|wireless|802\.11", description, re.I
@@ -100,6 +90,25 @@ $routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorActi
         bool(physical),
         bool(data.get("Default", False)),
     )
+
+
+def _inspect_windows(interface: str, powershell) -> InterfaceState:
+    if not interface.isdigit():
+        raise NetworkError("Windows --interface must be the adapter's numeric interface index")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$i = [int]$env:KLLM_10GBE_INTERFACE
+$a = Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop
+$ipif = Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop
+$addresses = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ IPAddress=$_.IPAddress; PrefixLength=$_.PrefixLength } })
+$routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -ne '0.0.0.0/0' } | Select-Object -ExpandProperty DestinationPrefix)
+[pscustomobject]@{ Name=$a.Name; Status=$a.Status.ToString(); LinkSpeed=$a.LinkSpeed.ToString(); Hardware=[bool]$a.HardwareInterface; Description=$a.InterfaceDescription; Default=(@(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count -gt 0); Dhcp=($ipif.Dhcp -eq 'Enabled'); Addresses=$addresses; Routes=$routes } | ConvertTo-Json -Compress -Depth 5
+"""
+    try:
+        data = json.loads(powershell(script, {"interface": interface}))
+        return _windows_state(interface, data)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise NetworkError(f"could not read Windows adapter state: {exc}") from exc
 
 
 def _mac_service(interface: str, run) -> tuple[str, str]:

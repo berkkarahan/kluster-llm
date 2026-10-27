@@ -87,8 +87,59 @@ class HelperPlatform(PlatformAdapter):
             )
         return current
 
+    def reconcile(self, command: Any) -> None:
+        self.authorize(command)
+
     def restore_configuration(self, network_id: str) -> None:
         self.client.request("restore", network=network_id)
+
+    def apply_prima_ports(self, command: Any) -> dict[str, Any]:
+        return self._signed_prima_ports(command, "prima_admit_ports", "prima_ports_apply")
+
+    def renew_prima_ports(self, command: Any) -> dict[str, Any]:
+        return self._signed_prima_ports(command, "prima_renew_ports", "prima_ports_renew")
+
+    def _signed_prima_ports(self, command: Any, action: str, operation: str) -> dict[str, Any]:
+        from kllm.modules.managed_network.interactors.prima_ports import PrimaPortContract
+
+        if (command.action != action or command.type != "rpc_command"
+                or set(command.body) != {"contract"} or not command._wire):
+            raise ValueError("Prima port admission requires its complete signed runtime command")
+        contract = PrimaPortContract.model_validate(command.body["contract"])
+        return self.client.request(operation, network=str(contract.network_id),
+            run_id=str(command.run_id), wire=command._wire)
+
+    def prima_ports_available(self) -> bool:
+        import os
+
+        grant = self.grant()
+        status = self.client.status(grant) if grant else {}
+        return bool(os.name == "nt" and status.get("ready") is True
+                    and type(status.get("prima_ports_version")) is int and status["prima_ports_version"] == 2
+                    and type(status.get("prima_ports_watchdog_version")) is int and status["prima_ports_watchdog_version"] == 1
+                    and isinstance(status.get("prima_ports_owned_runs"), list)
+                    and not status.get("prima_ports_owned_runs"))
+
+    def prima_ports_status(self, network_id: str, run_id: str) -> dict[str, Any]:
+        return self.client.request("prima_ports_status", network=network_id, run_id=run_id)
+
+    def release_prima_ports(self, network_id: str, run_id: str) -> dict[str, Any]:
+        return self.client.request("prima_ports_release", network=network_id, run_id=run_id)
+
+    def review_prima_ports(self, network_id: str, run_id: str) -> dict[str, Any]:
+        self._require_prima_recovery()
+        return self.client.request("prima_ports_review", network=network_id, run_id=run_id)
+
+    def resolve_prima_ports(self, network_id: str, run_id: str, decision: str,
+                            snapshot_digest: str) -> dict[str, Any]:
+        self._require_prima_recovery()
+        return self.client.request("prima_ports_resolve", network=network_id, run_id=run_id,
+                                   decision=decision, snapshot_digest=snapshot_digest)
+
+    def _require_prima_recovery(self) -> None:
+        status = self.client.status()
+        if type(status.get("prima_ports_recovery_version")) is not int or status["prima_ports_recovery_version"] != 1:
+            raise PlatformRefusal("UPGRADE_REQUIRED", "Update the protected helper for Prima listener recovery")
 
     def add_exact(self, snapshot: AdapterSnapshot, assignment: NodeAssignment) -> None:
         self.client.request("add", network=str(assignment.network_id))

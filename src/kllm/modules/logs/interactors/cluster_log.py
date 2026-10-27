@@ -38,6 +38,7 @@ _TAG_BY_SOURCE = {
 LOCAL_SOURCES: tuple[tuple[str, str], ...] = (
     ("agent", "agent.log"),
     ("llama", "llama-server.log"),
+    ("llama", "prima.log"),
     ("rpc", "rpc-server.log"),
 )
 

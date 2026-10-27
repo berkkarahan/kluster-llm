@@ -313,6 +313,37 @@ def _expert_offload_manual(
     }
 
 
+def resolve_canonical_node_id(identifier: str, nodes: Sequence[PlacementNodeInput]) -> str:
+    """Resolve user/UI node identifier (e.g. hostname, role, host, or hex node_id) to canonical node_id."""
+    for n in nodes:
+        if n.node_id == identifier:
+            return n.node_id
+    for n in nodes:
+        aliases = getattr(n, "aliases", ())
+        if identifier in aliases or any(a.lower() == identifier.lower() for a in aliases):
+            return n.node_id
+        if getattr(n, "hostname", None) and str(n.hostname).lower() == identifier.lower():
+            return n.node_id
+        if getattr(n, "host", None) and str(n.host).lower() == identifier.lower():
+            return n.node_id
+        if getattr(n, "lan_host", None) and str(n.lan_host).lower() == identifier.lower():
+            return n.node_id
+    if identifier.lower() == "master":
+        master_node = next((n for n in nodes if n.is_master), None)
+        if master_node is not None:
+            return master_node.node_id
+    for n in nodes:
+        if len(identifier) >= 6 and (
+            n.node_id.lower().startswith(identifier.lower())
+            or identifier.lower().startswith(n.node_id.lower())
+        ):
+            return n.node_id
+    for n in nodes:
+        if n.node_id.lower() == identifier.lower():
+            return n.node_id
+    return identifier
+
+
 def plan_devices(
     nodes: Sequence[PlacementNodeInput],
     size: int,
@@ -329,21 +360,26 @@ def plan_devices(
     node_priority: Sequence[str] = (),
     just_enough_master: bool = False,
 ) -> DevicePlacementPlan:
-    required = frozenset(required_nodes)
+    resolved_required = tuple(resolve_canonical_node_id(nid, nodes) for nid in required_nodes)
+    resolved_priority = tuple(resolve_canonical_node_id(nid, nodes) for nid in node_priority)
+    if node_shares is not None:
+        node_shares = {resolve_canonical_node_id(k, nodes): v for k, v in node_shares.items()}
+    required = frozenset(resolved_required)
     unknown = required - {n.node_id for n in nodes}
     if unknown:
         raise ValidationError(f"required nodes are unavailable: {', '.join(sorted(unknown))}")
     if required and (node_shares is not None or settings.split_mode != "layer"):
         raise ValidationError("required_nodes require automatic layer placement")
-    if len(set(node_priority)) != len(node_priority) or any(
-        not nid.strip() or nid != nid.strip() for nid in node_priority
+    if len(set(resolved_priority)) != len(resolved_priority) or any(
+        not nid.strip() or nid != nid.strip() for nid in resolved_priority
     ):
         raise ValidationError("node_priority must contain unique nonempty node IDs")
-    unavailable = set(node_priority) - {n.node_id for n in nodes}
+    unavailable = set(resolved_priority) - {n.node_id for n in nodes}
     if unavailable:
         raise ValidationError(f"priority nodes are unavailable: {', '.join(sorted(unavailable))}")
-    if node_priority and (node_shares is not None or settings.split_mode != "layer"):
+    if resolved_priority and (node_shares is not None or settings.split_mode != "layer"):
         raise ValidationError("node_priority requires automatic layer placement")
+    node_priority = resolved_priority
     settings = effective_launch_settings(settings, context)
     context = settings.context
     device_count = sum(len(n.devices) for n in nodes) if device == "gpu" else 0
@@ -364,10 +400,16 @@ def plan_devices(
 
     cpu_budget = ram(master)
     inputs = memory.input_bytes + memory.auxiliary_weights_bytes
-    cpu_base = inputs + memory.overhead + memory.checkpoint_bytes + memory.auxiliary_runtime_bytes
+    host_cache = settings.prompt_cache_bytes
+    if host_cache < 0:
+        raise ValidationError("prompt cache host reservation must be nonnegative")
+    cpu_base = inputs + memory.overhead + memory.checkpoint_bytes + memory.auxiliary_runtime_bytes + host_cache + settings.prima_adapter_bytes
+    worker_host_cache = host_cache + (memory.checkpoint_bytes if settings.prima_checkpoints else 0) + settings.prima_adapter_bytes
     devices: list[Device] = []
     if device == "gpu":
         for n in nodes:
+            if not n.is_master and worker_host_cache > ram(n):
+                continue
             inventory = n.devices
             if not inventory and n.backend not in ("cpu", "unknown"):
                 raise ValidationError(
@@ -396,7 +438,7 @@ def plan_devices(
                     free + inventory_device.reclaimable_bytes,
                 )
                 if n.unified_memory:
-                    budget = min(budget, max(0, ram(n) - (cpu_base if n.is_master else 0)))
+                    budget = min(budget, max(0, ram(n) - (cpu_base if n.is_master else worker_host_cache)))
                 local = n.is_master
                 name = inventory_device.device
                 if not name:
@@ -443,7 +485,7 @@ def plan_devices(
                         device=f"RPC[{n.rpc_endpoint}]/{rpc_device.index}",
                         backend="cpu",
                         local=False,
-                        budget_bytes=ram(n),
+                        budget_bytes=max(0, ram(n) - worker_host_cache),
                         latency_ms=n.latency_ms,
                         rpc_endpoint=n.rpc_endpoint,
                         rpc_index=rpc_device.index,
@@ -467,7 +509,7 @@ def plan_devices(
     gpu_budgets = {
         n.node_id: (
             min(
-                max(0, ram(n) - (cpu_base if n.is_master else 0)),
+                max(0, ram(n) - (cpu_base if n.is_master else worker_host_cache)),
                 sum(d.budget_bytes for d in devices if d.node_id == n.node_id),
             )
             if n.unified_memory
@@ -483,12 +525,13 @@ def plan_devices(
         cpu_devices.sort(key=lambda d: priority_order.get(d.node_id, len(priority_order)))
     gpu_devices = list(devices)
     shared_budgets = {
-        n.node_id: max(0, ram(n) - (cpu_base if n.is_master else 0))
+        n.node_id: max(0, ram(n) - (cpu_base if n.is_master else worker_host_cache))
         for n in nodes
         if n.unified_memory
     }
     model_bytes = sum(costs)
-    overhead = memory.overhead
+    # Full adapter storage bounds are reserved on every selected allocation pool.
+    overhead = memory.overhead + settings.prima_adapter_bytes
     split_mode = settings.split_mode
     failure_reason: str | None = None
     routing_mode: Literal["manual", "local", "single_remote", "pool"] = "pool"
@@ -557,6 +600,7 @@ def plan_devices(
                 shared_budgets=shared_budgets,
                 allow_cpu_spill=spill,
                 node_priority=node_priority,
+                reserve_terminal_overhead=bool(settings.prima_graphs and len(nodes) > 1),
             )
 
         # GPU-first: a local CPU-spill shortcut must not hide a feasible GPU pool.
@@ -692,6 +736,94 @@ def plan_devices(
         cpu_count = solution.cpu_layers
         cpu_bytes = solution.cpu_bytes
         allocations = list(solution.allocations)
+    graph_host_extra: dict[str, int] = {}
+    graph_extra_units = 0
+    graph_counts: dict[str, int] = {}
+    if fits and settings.prima_graphs and split_mode == "layer" and not expert_offloaded:
+        terminal_alloc = next((a for a in allocations if a.layer_end == count), None)
+        if terminal_alloc is not None and (
+            terminal_alloc.node_id != master.node_id or terminal_alloc.layer_start < count - 1
+        ):
+            idx = allocations.index(terminal_alloc)
+            new_end = count - 1
+            new_layers = new_end - terminal_alloc.layer_start
+            if new_layers > 0:
+                allocations[idx] = replace(
+                    terminal_alloc,
+                    layer_end=new_end,
+                    layers=new_layers,
+                    output_layer=False,
+                    estimated_bytes=max(0, terminal_alloc.estimated_bytes - costs[count - 1]),
+                )
+            else:
+                allocations.pop(idx)
+
+            master_alloc = next(
+                (a for a in allocations if a.node_id == master.node_id and a.memory_kind == "gpu"),
+                None,
+            )
+            if master_alloc is None:
+                master_alloc = next((a for a in allocations if a.node_id == master.node_id), None)
+            if master_alloc is not None:
+                output_alloc = replace(
+                    master_alloc,
+                    layer_start=count - 1,
+                    layer_end=count,
+                    layers=1,
+                    output_layer=True,
+                    estimated_bytes=costs[count - 1] + memory.overhead,
+                )
+            else:
+                master_cand = next(
+                    (d for d in devices if d.node_id == master.node_id and d.local), None
+                )
+                if master_cand is None:
+                    master_cand = next((d for d in devices if d.node_id == master.node_id), None)
+                if master_cand is not None:
+                    output_alloc = master_cand.allocate(
+                        layer_start=count - 1,
+                        layer_end=count,
+                        estimated_bytes=costs[count - 1] + memory.overhead,
+                        total_layers=count,
+                    )
+                else:
+                    master_cpu = next((d for d in cpu_devices if d.node_id == master.node_id), None)
+                    if master_cpu is not None:
+                        output_alloc = master_cpu.allocate(
+                            layer_start=count - 1,
+                            layer_end=count,
+                            estimated_bytes=costs[count - 1] + memory.overhead,
+                            total_layers=count,
+                        )
+                    else:
+                        output_alloc = DeviceAllocation(
+                            node_id=master.node_id,
+                            device=master.devices[0].device if master.devices else "CPU",
+                            backend=master.backend,
+                            local=True,
+                            budget_bytes=cpu_budget,
+                            latency_ms=0.0,
+                            rpc_endpoint=None,
+                            rpc_index=0,
+                            rpc_device_count=0,
+                            unified_memory=master.unified_memory,
+                            score=1.0,
+                            layer_start=count - 1,
+                            layer_end=count,
+                            layers=1,
+                            output_layer=True,
+                            estimated_bytes=costs[count - 1] + memory.overhead,
+                            memory_kind="gpu" if master.devices else "ram",
+                        )
+            allocations.append(output_alloc)
+
+        from kllm.modules.inference.interactors.prima_graph_reserve import reserve_graph_visits
+
+        reserve = reserve_graph_visits(allocations, cpu_count, count - 1, master.node_id, memory.overhead)
+        allocations = list(reserve.allocations)
+        graph_host_extra = reserve.host_extra
+        graph_extra_units = reserve.extra_units
+        graph_counts = reserve.graph_counts
     ngl = count - cpu_count
     # Slightly bias interior boundaries downward to avoid float rounding assigning
     # a boundary layer to the previous device in upstream upper_bound(float).
@@ -719,9 +851,12 @@ def plan_devices(
     else:
         device_order = [a.device for a in allocations]
     node_ids = [n.node_id for n in nodes]
+    cache_nodes = ({a.node_id for a in allocations} if worker_host_cache else set()) | set(graph_host_extra)
     node_alloc = [
         sum(a.estimated_bytes for a in allocations if a.node_id == nid)
         + (cpu_bytes if nid == master.node_id else 0)
+        + (worker_host_cache if nid != master.node_id and nid in cache_nodes else 0)
+        + graph_host_extra.get(nid, 0)
         for nid in node_ids
     ]
     node_workload = {
@@ -730,11 +865,13 @@ def plan_devices(
         for nid in node_ids
     }
     ram_budgets = {
-        n.node_id: ram(n) if n.is_master or any(d.node_id == n.node_id for d in cpu_devices) else 0
+        n.node_id: ram(n) if n.is_master or n.node_id in cache_nodes or any(d.node_id == n.node_id for d in cpu_devices) else 0
         for n in nodes
     }
     node_ram = {
         n.node_id: (cpu_bytes if n.is_master else 0)
+        + (worker_host_cache if not n.is_master and n.node_id in cache_nodes else 0)
+        + graph_host_extra.get(n.node_id, 0)
         + sum(
             a.estimated_bytes
             for a in allocations
@@ -765,6 +902,22 @@ def plan_devices(
         else ram_budgets[n.node_id] + gpu_budgets[n.node_id]
         for n in nodes
     }
+    if fits and (any(graph_host_extra.values()) or graph_extra_units):
+        # Shared host/device pools and individual device limits are both binding.
+        device_usage: dict[tuple[str, str], int] = {}
+        device_limits: dict[tuple[str, str], int] = {}
+        for allocation in allocations:
+            key = (allocation.node_id, allocation.device)
+            device_usage[key] = device_usage.get(key, 0) + allocation.estimated_bytes
+            device_limits[key] = allocation.budget_bytes
+        exceeds = any(device_usage[key] > device_limits[key] for key in device_usage)
+        exceeds |= any(node_ram[n.node_id] > ram_budgets[n.node_id]
+                       or node_vram[n.node_id] > gpu_budgets[n.node_id]
+                       or (n.unified_memory and node_ram[n.node_id] + node_vram[n.node_id] > node_budgets[n.node_id])
+                       for n in nodes)
+        if exceeds:
+            fits = False
+            failure_reason = "Prima retained graph visits exceed host or device capacity"
     budget = sum(node_budgets.values())
     tight = fits and (
         cpu_bytes > cpu_budget * 0.9
@@ -780,6 +933,7 @@ def plan_devices(
     )
     device_effective = "gpu" if any(a.memory_kind == "gpu" for a in allocations) else "cpu"
     return DevicePlacementPlan(
+        prima_graph_counts=tuple(NodeByteValue(node, value) for node, value in sorted(graph_counts.items())),
         required_nodes=tuple(sorted(required)),
         node_priority=tuple(node_priority),
         node_ram_budget_bytes=tuple(
@@ -819,9 +973,9 @@ def plan_devices(
         checkpoint_estimate_bytes=memory.checkpoint_bytes,
         weights_estimate_bytes=memory.weights_bytes,
         auxiliary_weights_bytes=memory.auxiliary_weights_bytes,
-        compute_estimate_bytes=memory.compute_bytes * (len(allocations) + 1),
+        compute_estimate_bytes=memory.compute_bytes * (len(allocations) + 1 + graph_extra_units),
         auxiliary_runtime_bytes=memory.auxiliary_runtime_bytes,
-        execution_overhead_bytes=256 * MIB * (len(allocations) + 1),
+        execution_overhead_bytes=256 * MIB * (len(allocations) + 1 + graph_extra_units),
         estimate_complete=memory.complete,
         estimate_warnings=memory.warnings,
         estimated_bytes=sum(node_alloc),

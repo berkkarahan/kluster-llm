@@ -75,12 +75,14 @@ def test_every_harness_receives_complete_selected_pack(isolated, agent):
 def test_persistent_category_changes_and_none_preserve_user_skills(isolated, agent):
     first = build(agent, persist=True)
     root = skill_root(first)
-    assert len(list(root.glob("*/SKILL.md"))) == 9
+    assert len(list(root.glob("*/SKILL.md"))) == 13
+    assert (root / "kllm-prima/SKILL.md").is_file()
     (root / "user-custom").mkdir()
     (root / "user-custom/SKILL.md").write_text("User skill")
     second = build(agent, persist=True, kllm_skills="operations")
     assert skill_root(second) == root
     assert not (root / "kllm-develop").exists()
+    assert not (root / "kllm-prima").exists()
     assert len(list(root.glob("*/SKILL.md"))) == 7
     third = build(agent, persist=True, kllm_skills="none")
     assert not third.cleanup_dirs
@@ -114,7 +116,7 @@ def test_opencode_preserves_other_sources_and_provider(isolated, monkeypatch, v2
     else:
         assert cfg["skills"]["paths"][0] == "/existing"
         assert cfg["skills"]["urls"] == existing["urls"]
-    assert len(list(skill_root(plan).glob("*/SKILL.md"))) == 3
+    assert len(list(skill_root(plan).glob("*/SKILL.md"))) == 7
 
 
 def test_claude_additional_directory_precedes_argument_separator(isolated):

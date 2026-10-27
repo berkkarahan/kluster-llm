@@ -15,6 +15,7 @@ import anyio
 
 from kllm.modules.inference.interactors.model_defaults import apply_defaults_to_chat_body, resolve_model_defaults
 from kllm.modules.inference.interactors.effective_config import apply_active_defaults
+from kllm.modules.primacpp.interactors.qualification import require_api_features
 
 
 def infer_base(port: int) -> str:
@@ -68,7 +69,9 @@ def _apply_model_defaults(
         raise HTTPException(400, "request must be a JSON object")
     if active_config is not None:
         try:
-            return apply_active_defaults(body, active_config, protocol)
+            resolved = apply_active_defaults(body, active_config, protocol)
+            require_api_features(resolved, active_config, protocol)
+            return resolved
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
     if not model_path:
@@ -90,6 +93,167 @@ async def proxy_chat_completions(
     return await _proxy(request, port, "/v1/chat/completions", body)
 
 
+async def proxy_embeddings(
+    port: int, request: Request, *, active_config: dict[str, Any] | None = None,
+    path: str = "/v1/embeddings",
+) -> Response:
+    """Preserve native embedding input/formatting without generation defaults."""
+    if path not in ("/v1/embeddings", "/embedding", "/embeddings"):
+        raise HTTPException(404, "unknown embedding route")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    catalog = await served_models(port, request.app.state.inference_client)
+    entries = catalog["data"]
+    if (len(entries) != 1 or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+        raise HTTPException(503, "embedding inference requires one uniquely identified served model")
+    model_id = entries[0]["id"]
+    if (active_config and active_config.get("engine") == "primacpp"
+            and active_config.get("model") != model_id):
+        raise HTTPException(503, "served embedding model differs from the active Prima deployment")
+    if "model" in body and body["model"] != model_id:
+        raise HTTPException(404, "requested embedding model is not the served model")
+    body = {**body, "model": model_id}
+    try:
+        require_api_features(body, active_config,
+                             "embeddings" if path == "/v1/embeddings" else "embedding_raw")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, path, body)
+
+
+async def proxy_rerank(
+    port: int, request: Request, *, active_config: dict[str, Any] | None = None
+) -> Response:
+    """Forward a rerank request to the one served model under its own scope."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    catalog = await served_models(port, request.app.state.inference_client)
+    entries = catalog["data"]
+    if (len(entries) != 1 or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+        raise HTTPException(503, "reranking requires one uniquely identified served model")
+    model_id = entries[0]["id"]
+    if (active_config and active_config.get("engine") == "primacpp"
+            and active_config.get("model") != model_id):
+        raise HTTPException(503, "served rerank model differs from the active Prima deployment")
+    if "model" in body and body["model"] != model_id:
+        raise HTTPException(404, "requested rerank model is not the served model")
+    body = {**body, "model": model_id}
+    try:
+        require_api_features(body, active_config, "rerank")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, "/v1/rerank", body)
+
+
+async def proxy_model_utility(
+    port: int, request: Request, path: str, *, active_config: dict[str, Any] | None = None
+) -> Response:
+    """Forward model-bound tokenizer/template utilities under their own scope."""
+    if path not in ("/tokenize", "/detokenize", "/apply-template"):
+        raise HTTPException(404, "unknown model utility")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    catalog = await served_models(port, request.app.state.inference_client)
+    entries = catalog["data"]
+    if (len(entries) != 1 or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+        raise HTTPException(503, "model utility requires one uniquely identified served model")
+    model_id = entries[0]["id"]
+    if (active_config and active_config.get("engine") == "primacpp"
+            and active_config.get("model") != model_id):
+        raise HTTPException(503, "served utility model differs from the active Prima deployment")
+    if "model" in body and body["model"] != model_id:
+        raise HTTPException(404, "requested utility model is not the served model")
+    try:
+        require_api_features(body, active_config, path[1:].replace("-", "_"))
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, path, body)
+
+
+async def proxy_text_completions(
+    port: int, request: Request, *, active_config: dict[str, Any] | None = None
+) -> Response:
+    """Bind OpenAI text completions to the served model and qualified features."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    catalog = await served_models(port, request.app.state.inference_client)
+    entries = catalog["data"]
+    if (len(entries) != 1 or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+        raise HTTPException(503, "text completions require one uniquely identified served model")
+    model_id = entries[0]["id"]
+    if (active_config and active_config.get("engine") == "primacpp"
+            and active_config.get("model") != model_id):
+        raise HTTPException(503, "served completion model differs from the active Prima deployment")
+    if "model" in body and body["model"] != model_id:
+        raise HTTPException(404, "requested completion model is not the served model")
+    body = {**body, "model": model_id}
+    try:
+        require_api_features(body, active_config, "completions")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, "/v1/completions", body)
+
+async def proxy_infill(
+    port: int, request: Request, *, active_config: dict[str, Any] | None = None
+) -> Response:
+    """Bind a native FIM request to the current served model."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    catalog = await served_models(port, request.app.state.inference_client)
+    entries = catalog["data"]
+    if (len(entries) != 1 or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+        raise HTTPException(503, "infill requires one uniquely identified served model")
+    model_id = entries[0]["id"]
+    if (active_config and active_config.get("engine") == "primacpp"
+            and active_config.get("model") != model_id):
+        raise HTTPException(503, "served infill model differs from the active Prima deployment")
+    if "model" in body and body["model"] != model_id:
+        raise HTTPException(404, "requested infill model is not the served model")
+    body = {key: value for key, value in body.items() if key != "model"}
+    try:
+        require_api_features(body, active_config, "infill")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, "/infill", body)
+
+async def proxy_raw_completion(
+    port: int, request: Request, path: str, *, active_config: dict[str, Any] | None = None
+) -> Response:
+    """Forward a native-format completion only for the one served model."""
+    if path not in ("/completion", "/completions"):
+        raise HTTPException(404, "unknown raw completion route")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request must be a JSON object")
+    catalog = await served_models(port, request.app.state.inference_client)
+    entries = catalog["data"]
+    if (len(entries) != 1 or not isinstance(entries[0], dict)
+            or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+        raise HTTPException(503, "raw completions require one uniquely identified served model")
+    model_id = entries[0]["id"]
+    if (active_config and active_config.get("engine") == "primacpp"
+            and active_config.get("model") != model_id):
+        raise HTTPException(503, "served completion model differs from the active Prima deployment")
+    if "model" in body and body["model"] != model_id:
+        raise HTTPException(404, "requested completion model is not the served model")
+    body = {key: value for key, value in body.items() if key != "model"}
+    try:
+        require_api_features(body, active_config, "completion_raw")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, path, body)
+
+
 async def proxy_responses(
     port: int,
     request: Request,
@@ -102,11 +266,46 @@ async def proxy_responses(
     if not isinstance(body, dict):
         raise HTTPException(400, "request must be a JSON object")
     body = _coalesce_response_instructions(body)
-    if not count_tokens and active_config is not None:
-        body = apply_active_defaults(body, active_config, "responses")
+    try:
+        if active_config is not None:
+            body = apply_active_defaults(body, active_config, "responses")
+        require_api_features(body, active_config, "responses")
+        if count_tokens and active_config and active_config.get("engine") == "primacpp":
+            capabilities = (active_config.get("runtime") or {}).get("capabilities") or {}
+            if "response_input_tokens_v1" not in (capabilities.get("features") or []):
+                raise ValueError("Upgrade Prima for Responses input-token counting")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    if active_config and active_config.get("engine") == "primacpp":
+        catalog = await served_models(port, request.app.state.inference_client)
+        entries = catalog["data"]
+        if (len(entries) != 1 or not isinstance(entries[0], dict)
+                or not isinstance(entries[0].get("id"), str) or not entries[0]["id"]):
+            raise HTTPException(503, "Responses require one uniquely identified served model")
+        model_id = entries[0]["id"]
+        if active_config.get("model") != model_id:
+            raise HTTPException(503, "served Responses model differs from the active Prima deployment")
+        if "model" in body and body["model"] != model_id:
+            raise HTTPException(404, "requested Responses model is not the served model")
+        body = {**body, "model": model_id}
     return await _proxy(
         request, port, "/v1/responses/input_tokens" if count_tokens else "/v1/responses", body
     )
+
+
+async def proxy_completion_control(
+    port: int, request: Request, *, active_config: dict[str, Any] | None = None
+) -> Response:
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not 0 < len(body["id"]) <= 256:
+        raise HTTPException(400, "missing or invalid completion id")
+    if body.get("action") != "reasoning_end":
+        raise HTTPException(400, "unknown control action")
+    try:
+        require_api_features(body, active_config, "reasoning_control")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return await _proxy(request, port, "/v1/chat/completions/control", {"id": body["id"], "action": body["action"]})
 
 
 def _coalesce_response_instructions(body: dict[str, Any]) -> dict[str, Any]:

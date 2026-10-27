@@ -14,8 +14,12 @@ native skill interface.
 | Operations | `kllm-connect` | Agent endpoints, authentication and readiness |
 | Operations | `kllm-diagnose` | Evidence-led runtime/network troubleshooting |
 | Development | `kllm-develop` | Architecture-aware implementation and bug fixes |
+| Development | `kllm-prima` | Prima fork features, improvements and bugs through managed Kluster builds and qualification |
 | Development | `kllm-dashboard` | Live Svelte dashboard changes |
 | Development | `kllm-test` | Regression checks and validation boundaries |
+| Development | `kllm-audit` | On-demand full `kluster-llm` codebase audit (bugs, performance, maintainability; requires explicit human permission) |
+| Development | `kllm-prima-delta-audit` | On-demand `berkkarahan/prima.cpp` fork delta and Kluster integration boundary audit (requires explicit human permission) |
+| Development | `kllm-prima-core-audit` | On-demand `prima.cpp` native distributed runtime audit (requires explicit human permission) |
 
 Example requests: “Use kllm-10gbe to guide setup between my Windows worker and
 Mac master”; “Use kllm-develop and kllm-test to fix this CLI failure.” The 10GbE

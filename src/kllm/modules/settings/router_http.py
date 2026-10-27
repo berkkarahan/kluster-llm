@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from fastapi import HTTPException
 
-from kllm.shared.schemas import ConfigBody, HfTokenBody
+from kllm.shared.schemas import ConfigBody, FeatureFlagBody, HfTokenBody
 from kllm.shared.state import ClusterState
 
 
@@ -15,6 +15,10 @@ class ConfigGateway(Protocol):
     def load_config(self) -> dict[str, Any]: ...
 
     def save_config(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+
+    def feature_flags(self) -> dict[str, bool]: ...
+
+    def set_feature_flag(self, name: str, enabled: bool) -> bool: ...
 
 
 class SettingsHandlers:
@@ -88,6 +92,18 @@ class SettingsHandlers:
             "logs": str(self._logs_dir()),
         }
 
+    def get_feature_flags(self) -> dict[str, Any]:
+        return {"flags": self._config.feature_flags()}
+
+    def save_feature_flag(self, body: FeatureFlagBody) -> dict[str, Any]:
+        try:
+            self._config.set_feature_flag(body.name, body.enabled)
+            return {"flags": self._config.feature_flags()}
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
 LEGACY_V1_CREDENTIALS: tuple[tuple[str, str, str], ...] = (
     ('/v1/api-token', 'GET', 'get_api_token'),
     ('/v1/hf-token', 'GET', 'get_hf_token'),
@@ -99,6 +115,8 @@ LEGACY_V1_CONFIG: tuple[tuple[str, str, str], ...] = (
     ('/v1/gpus', 'GET', 'get_gpus'),
     ('/v1/config', 'PUT', 'put_config'),
     ('/v1/home', 'GET', 'get_home'),
+    ('/v1/flags', 'GET', 'get_feature_flags'),
+    ('/v1/flags', 'PUT', 'put_feature_flag'),
 )
 
 CONTROL_V2_NODE: tuple[tuple[str, str, str], ...] = (
@@ -106,6 +124,8 @@ CONTROL_V2_NODE: tuple[tuple[str, str, str], ...] = (
     ('/node/config', 'GET', 'get_config'),
     ('/node/config', 'PUT', 'put_config'),
     ('/node/home', 'GET', 'get_home'),
+    ('/node/flags', 'GET', 'get_feature_flags'),
+    ('/node/flags', 'PUT', 'put_feature_flag'),
 )
 
 CONTROL_V2_CREDENTIALS: tuple[tuple[str, str, str], ...] = (
@@ -113,3 +133,4 @@ CONTROL_V2_CREDENTIALS: tuple[tuple[str, str, str], ...] = (
     ('/credentials/huggingface', 'GET', 'get_hf_token'),
     ('/credentials/huggingface', 'PUT', 'put_hf_token'),
 )
+

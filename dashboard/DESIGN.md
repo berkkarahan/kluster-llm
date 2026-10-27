@@ -276,21 +276,65 @@ Cancel download is an actual store action, and terminal state is tied to an oper
 
 ### Deploy and effective configuration
 
-[src/routes/run/+page.svelte](src/routes/run/+page.svelte) implements **Select → Configure → Review & deploy**.
-Select chooses a local model, inference network and Automatic/Priority placement.
-“Must use this node” means at least one model layer; unchecked nodes remain eligible.
-Each node row shows that node's GPU names beside the node id (membership device names, or the plan's `node_gpu_names` when membership has none).
-Priority has explicit up/down actions and removal for unavailable saved entries.
-Configure begins with context, concurrent slots, response limit and thinking controls.
-Disclosures group Capacity & performance, Memory & loading, Generation defaults,
-Model features & templates, and Expert engine options.
-[ParameterControl.svelte](src/lib/components/ParameterControl.svelte) uses descriptors, bounds, availability reasons,
-inherit/automatic modes and effective values/sources/adjustments. Its scope label is “Next deployment”.
-[ExpertArguments.svelte](src/lib/components/ExpertArguments.svelte) exposes installed-engine options and structured argv;
-JSON arrays preserve literal values. Extra arguments can make the memory estimate incomplete.
+[src/routes/run/+page.svelte](src/routes/run/+page.svelte) swaps between the existing
+[RunPage.svelte](src/lib/modules/run/view/RunPage.svelte) (`llama.cpp`) wizard and
+[PrimaRunPage.svelte](src/lib/modules/run/view/PrimaRunPage.svelte) (`prima.cpp`)
+using `resolveActiveEngine()`. Engine query overrides choose the view, not the
+actual cluster target.
 
-[DeploymentPlan.svelte](src/lib/components/DeploymentPlan.svelte) keeps memory totals, components, usable budgets,
-resolved settings, incomplete-estimate warnings and Refresh estimate beside the form.
+Prima has two full-width main tabs: **Deployment settings** (the default) and
+**Next deployment**. Both panels stay mounted, preserving draft input and preparation
+observation when switching tabs. Arrow keys and Home/End navigate the main tabs.
+The settings tab contains five sections:
+**Overview**, **Computers**, **Memory & speed**, **Responses & features**, and
+**Expert**. `PrimaDeploymentShell.svelte` supplies section navigation, label/flag
+search, technical disclosure and validation summary. Error links activate the settings
+tab before focusing the affected control. Running status, Stop and loading progress
+remain outside the tab panels.
+The run-owned `PrimaDeployment` coordinator is composed in `app.svelte.ts`; views
+do not create another application or duplicate settings store.
+
+- Overview contains the model, exact preview runtime, total context capacity and
+  concurrent-request/output controls. Context is not relabeled as independent
+  per-request capacity without backend evidence.
+- Computers retains network, Automatic/Capacity-first/Priority constraints,
+  required-node and device/budget controls. Required means at least one layer;
+  unchecked remains eligible. Rank/device/HiGHS telemetry describes the inspected
+  plan, not mutable hardware configuration.
+- Memory & speed keeps cache/FA/SWA, loading, checkpoints, cache RAM, batches and
+  threads. Responses & features keeps sampling/reasoning, stop strings, head and
+  pooling, LoRA, draft-model/speculation, embedded/custom templates and kwargs.
+- Expert retains raw argv and CLI/JSON export. `patchPrimaExtras()` changes only
+  owned unambiguous token spans; invalid/unknown unrelated values and path literals
+  are not silently reordered or normalized. Ambiguous edits require raw repair.
+- In Next deployment, `PrimaDeploymentSummary.svelte` separates placement, assets,
+  profile coverage and qualification; reuses `DeploymentPlan.svelte` for actual
+  memory/planner evidence; and keeps backend active configuration separate from
+  next-deployment edits. A previous snapshot is explicitly stale.
+- Prepare files, Prepare & profile and Review automatically acquire a current
+  runtime-bound plan, reusing background planning when possible. There is no manual
+  inspection prerequisite. Planning errors offer Retry planning, which refreshes
+  evidence without replaying preparation or review. Changes during planning cancel
+  the requested action; another explicit click is required for the new draft.
+  Preparation never starts from navigation or typing. Deploy and Settings share
+  `PrimaPreparationObserver`/`PrimaPreparationStatus.svelte`.
+- Review expands inline in Next deployment with readable requested/effective settings
+  and participant tables; the exact snapshot and digest are expandable technical details.
+  Back to editing selects Deployment settings and clears confirmation. Ordinary tab
+  navigation preserves the review; a changed snapshot resets confirmation.
+  Explicit Run confirmation sends a server review precondition;
+  changed identity revokes approval. A legacy server cannot silently receive an
+  unguarded fallback. Unknown launch outcome offers reconciliation, not replay.
+
+Prima saves use revision-checked engine-scoped profiles, with legacy settings
+shown only as an explicit import candidate. Saved/requested/effective/active
+snapshots are distinct. Defaults creates an unsaved draft; late save responses
+cannot replace newer edits. The llama.cpp wizard and unscoped save behavior stay
+on their existing path. Parameter controls retain descriptors, effective values,
+nullable/automatic modes and server-validation errors.
+
+[DeploymentPlan.svelte](src/lib/modules/run/view/DeploymentPlan.svelte) keeps memory totals, components, usable budgets,
+Ring-TCP rank/port summary, HiGHS Halda scheduler summary, resolved settings, incomplete-estimate warnings and Refresh estimate beside the form.
 Review lists requested/effective/source values, highlights differences from saved configuration,
 shows device allocation and provides CLI/JSON export.
 Saving model defaults, reverting, restoring defaults and saving after successful deployment are separate actions.
@@ -298,8 +342,11 @@ The editable draft, saved model configuration, plan effective_config and activeR
 The active configuration comes from status.active_config/run results; draft changes do not rewrite it.
 Plan requests debounce by 300ms, invalidate stale estimates and use remember:false.
 Progression validates fields and attempts to focus the offending control; deploy requires a ready fit and runtime readiness.
-An active model changes the final action to “Replace running model”; do not describe this as hot editing.
-[JinjaEditor.svelte](src/lib/components/JinjaEditor.svelte) uses CodeMirror/Jinja/One Dark, server validation and a 65,536-byte limit;
+The llama.cpp wizard retains its existing “Replace running model” action; this is not hot editing.
+Prima requires an explicit Stop and settled lifecycle before reviewing/running another deployment.
+A model becoming active or loading while authentication is pending revokes Prima launch approval;
+the editor never promises automatic replacement of an already-owned Prima run.
+[JinjaEditor.svelte](src/lib/modules/run/view/JinjaEditor.svelte) uses CodeMirror/Jinja/One Dark, server validation and a 65,536-byte limit;
 syntax checks are explicitly not model-compatibility verification.
 
 ### Activity and Connect
@@ -326,9 +373,37 @@ Prima evaluation adds a master-only **Prima preparation** panel through
 It uses the model and draft settings already selected in Deploy, displays a read-only
 rank/device/layer/`-ngl`/tensor preview, and exposes Prepare files, Prepare & profile,
 and cancellation with polled participant progress and errors. A settings change makes
-the preview stale and requires another inspection. The placement table scrolls locally
+the preview stale; the next preparation action recalculates it automatically. The placement table scrolls locally
 on narrow screens. Normal Prima target/deployment selection remains disabled while
 qualification is incomplete; this panel provides preparation and assessment groundwork.
+
+### Prima engine settings (on-demand section swap)
+
+When the node runs the primacpp engine, the Settings runtime section renders
+[PrimaRuntimes.svelte](src/lib/modules/runtimes/view/PrimaRuntimes.svelte) instead of
+the llama.cpp panels; the navigation label switches from "llama.cpp" to "Prima" and the
+page header adds a Prima engine chip. The signal is the node's configured engine mode
+(`engine` in the status payload, written by `kllm start/join --engine`; on a worker the
+cluster target's engine also swaps the section, while a master's explicit flag wins over
+a saved Prima target), with the active run's effective configuration and the running
+runtime's engine as fallbacks; the UI introduces no second source of truth.
+`?section=llama` (and `?section=prima`) still address the runtime section, so the
+llama.cpp library stays reachable for adding or managing a Prima source.
+
+The Prima section reuses the runtime module's data and actions: the pinned Prima source
+(identity rows for repository, commit, recipe digest and source identity), the six
+source-controlled qualification gates rendered from `qualification_errors` (missing
+policy data renders closed, never passed), the cluster-target summary with the
+blocked-inference notice, the per-node managed-build table with the llama.cpp build
+contracts (phases, logs, retry, cancel), the existing Prima preparation panel, and a
+Compute panel that reports `GET /v2/node/prima-devices` — the pinned Prima build's own
+physical Vulkan device probe (name, UUID, driver, index) with explicit unavailable
+reasons. Capability badges come from the build's probed `capabilities.features` when the
+manifest carries them, else the recipe-documented set labeled as such. Backend/device
+selection ownership stays in Hardware and the Deploy plan (the planner assigns layers
+and derives the tensor split), and the panel states that instead of adding a parallel
+selector. Unavailable evidence stays an em-dash; the section never claims measured
+performance.
 
 [src/routes/settings/+page.svelte](src/routes/settings/+page.svelte) defaults to Hardware.
 Section order is **Hardware, Network, Tokens, Software, llama.cpp, Paths**.
@@ -409,6 +484,12 @@ startup snapshots suppress historical failures, and generations reject stale asy
 Dismissal can also hide a matching toast; authoritative validation and failure state remain intact.
 The shell toast region is aria-live=polite. A dismissed diagnostic must never enable an unsafe action.
 
+Managed-network computer readiness is persistent status, independent of the
+dismissible diagnostic store. Administrator status is separate from setup readiness;
+adapter details show observed speed and rejection reasons, and the setup explanation
+names selected computers with unresolved requirements. Browser fixture checks cover
+first load, Clear/dismiss, refresh, changed blockers and recovery at 390px and 1280px.
+
 Keyboard behavior includes a skip link, visible focus outlines, native controls/dialogs and explicit mobile-menu containment.
 Global focus is 2px accent; earlier specific rules retain 2px offsets on buttons/links/fields, while generic controls may use 4px.
 Input.field focus also has a 1px accent rule; UsageHistory uses its own 2px foreground outline with zero offset.
@@ -425,6 +506,19 @@ computed-style measurement, contrast audit, hardware run or full test suite was 
 Existing test definitions describe coverage, not a new passing result.
 Documentation checks verified all 43 local links and 15 palette values against the checkout;
 `git diff --check` passed after applying the regenerated file.
+
+2026-10-14 Prima settings addition: `npm --prefix dashboard run check` (0 errors, 0 warnings),
+`npm --prefix dashboard run build`, and the dashboard test suite (8/8 pass, including the
+browser fixture tests) were run after adding PrimaRuntimes.svelte and the SettingsPage
+engine swap. No new screenshot or dedicated browser pass for the Prima section was recorded.
+
+2026-10-14 Prima settings completion: dedicated browser test `prima-settings.test.mjs`
+(passes, fixture master at 390/768/1440 + mode-off comparison with screenshots in
+artifacts/prima-settings) locks the engine-mode swap and the llama.cpp fallback. The
+Compute panel now renders `GET /v2/node/prima-devices` device identity probes and
+capabilities come from the build manifest's probed `capabilities` when present
+(endpoint tests in tests/test_runtime_versions.py: selected-build report and the
+explicit unavailable state).
 
 2026-10-16 LAN-only change: Cluster and Settings no longer expose legacy WireGuard controls/status. Dedicated fast Ethernet setup remains; dashboard tests, type check and production build passed in the main worktree.
 

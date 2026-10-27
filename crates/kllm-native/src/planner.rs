@@ -23,7 +23,7 @@ pub enum PlanError {
     Message(String),
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct NodeCapacity {
     #[pyo3(get)]
@@ -269,7 +269,7 @@ impl PlanRequest {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PlanResult {
     #[pyo3(get)]

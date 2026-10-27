@@ -13,6 +13,7 @@ from kllm.modules.cluster.interactors.agent_runtime import _client
 from kllm.modules.connect.view_cli import console
 from kllm.modules.inference.entities import PlanBody, available_threads
 from kllm.shared.state import DEFAULT_CONTROL_PORT
+from kllm.shared import config as kllm_config
 from kllm.modules.inference.interactors.extra_args import tokenize_extra_args, ExtraArgsError
 
 
@@ -118,6 +119,7 @@ def _run_settings_options(
     node_priority: list[str] | None = None,
     just_enough_master: bool | None = None,
     network_id: str | None = None,
+    prima_auto_deploy: bool | None = None,
     chat_template_text: str | None = None,
 ) -> dict[str, object]:
     headroom = None
@@ -183,6 +185,7 @@ def _run_settings_options(
         node_priority=node_priority,
         just_enough_master=just_enough_master,
         network_id=network_id,
+        prima_auto_deploy=prima_auto_deploy,
     )
     if ctx is not None:
         aliases = {
@@ -207,6 +210,8 @@ def _run_settings_options(
             for key, value in payload.items()
             if key in explicit or key in {"model", "settings_source"}
         }
+    if "prima_auto_deploy" not in payload and kllm_config.get_feature_flag("prima-auto-deploy"):
+        payload["prima_auto_deploy"] = True
     return _validate_run_payload(payload)
 
 
@@ -345,6 +350,11 @@ def plan_cmd(
         help="Automatic placement: fill workers first; give the master only the trailing layers",
     ),
     network_id: Optional[str] = typer.Option(None, "--network-id"),
+    prima_auto_deploy: Optional[bool] = typer.Option(
+        None,
+        "--prima-auto-deploy/--no-prima-auto-deploy",
+        help="Enable/disable Prima auto-planning delegation for this plan",
+    ),
     chat_template_text: Optional[str] = typer.Option(
         None, "--chat-template-text", help="Inline custom Jinja template"
     ),
@@ -405,6 +415,7 @@ def plan_cmd(
         node_priority=node_priority,
         just_enough_master=just_enough_master,
         network_id=network_id,
+        prima_auto_deploy=prima_auto_deploy,
         chat_template_text=chat_template_text,
     )
     with _client(port) as c:
@@ -518,6 +529,11 @@ def run(
         help="Automatic placement: fill workers first; give the master only the trailing layers",
     ),
     network_id: Optional[str] = typer.Option(None, "--network-id"),
+    prima_auto_deploy: Optional[bool] = typer.Option(
+        None,
+        "--prima-auto-deploy/--no-prima-auto-deploy",
+        help="Enable/disable Prima auto-planning delegation for this run",
+    ),
     chat_template_text: Optional[str] = typer.Option(
         None, "--chat-template-text", help="Inline custom Jinja template"
     ),
@@ -577,6 +593,7 @@ def run(
         node_priority=node_priority,
         just_enough_master=just_enough_master,
         network_id=network_id,
+        prima_auto_deploy=prima_auto_deploy,
         chat_template_text=chat_template_text,
     )
     with _client(port) as c:

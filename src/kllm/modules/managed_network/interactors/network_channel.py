@@ -8,6 +8,7 @@ import random
 import secrets
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -57,6 +58,8 @@ class Pending:
 
 
 class ChannelSession:
+    runtime_timing = True  # Optional local observer; not a peer/wire capability.
+
     def __init__(
         self,
         wire: SocketWire,
@@ -75,14 +78,17 @@ class ChannelSession:
         self.task: asyncio.Task | None = None
         self.closed = False
 
-    async def send(self, command: SignedCommand | SignedRuntimeCommand) -> None:
+    async def send(self, command: SignedCommand | SignedRuntimeCommand, *, timing=None) -> None:
+        timing = timing or (lambda _: nullcontext())
         async with self.send_lock:
             self.fence.check_live()
             self.out_sequence += 1
             command.sequence = self.out_sequence
-            payload = self.identity.sign(command.model_dump(mode="json"))
+            with timing("channel_sign"):
+                payload = self.identity.sign(command.model_dump(mode="json"))
             try:
-                await self.wire.send(payload)
+                with timing("channel_send"):
+                    await self.wire.send(payload)
             except TimeoutError:
                 expired = True
             else:
@@ -150,7 +156,8 @@ class ChannelSession:
             self.pending.pop(key, None)
 
     async def request_runtime(
-        self, run_id: UUID, action: str, *, ttl_ms: int = 10000, body: dict[str, Any] | None = None
+        self, run_id: UUID, action: str, *, ttl_ms: int = 10000, body: dict[str, Any] | None = None,
+        timing=None,
     ) -> dict[str, Any]:
         if self.closed or len(self.pending) >= 16:
             raise IdentityError("node runtime command channel unavailable or full")
@@ -175,8 +182,13 @@ class ChannelSession:
         future = asyncio.get_running_loop().create_future()
         self.pending[key] = Pending(command, future)
         try:
-            await self.send(command)
-            return await asyncio.wait_for(future, ttl_ms / 1000)
+            if timing is None:
+                await self.send(command)
+                return await asyncio.wait_for(future, ttl_ms / 1000)
+            with timing("channel_send_with_queue"):
+                await self.send(command, timing=timing)
+            with timing("channel_ack_wait"):
+                return await asyncio.wait_for(future, ttl_ms / 1000)
         finally:
             self.pending.pop(key, None)
 

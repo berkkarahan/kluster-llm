@@ -104,13 +104,73 @@ def test_status_exposes_feature_flags(client):
     from kllm.shared import config as kllm_config
 
     body = c.get("/v1/status").json()
-    assert body["feature_flags"] == {"private-network-setup": False}
-    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": False}
+    assert body["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
+    v2_body = c.get("/v2/cluster/status").json()
+    assert v2_body["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
 
     assert kllm_config.set_feature_flag("private-network-setup", True) is True
     body = c.get("/v1/status").json()
-    assert body["feature_flags"] == {"private-network-setup": True}
-    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True}
+    assert body["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": False}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": False}
+
+    assert kllm_config.set_feature_flag("prima-auto-deploy", True) is True
+    body = c.get("/v1/status").json()
+    assert body["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": True}
+    v2_body = c.get("/v2/cluster/status").json()
+    assert v2_body["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": True}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": True}
+
+    assert kllm_config.set_feature_flag("prima-auto-deploy", False) is False
+    assert kllm_config.set_feature_flag("private-network-setup", False) is False
+    body = c.get("/v1/status").json()
+    assert body["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
+
+
+def test_toggling_prima_auto_deploy_does_not_interrupt_active_run(client, monkeypatch):
+    c, agent, _ = client
+    from kllm.shared import config as kllm_config
+    monkeypatch.setattr(agent_runtime, "_inference_activity", lambda: {"server_ready": True})
+
+    # Simulate an active inference run on the master
+    agent.STATE.role = "master"
+    agent.STATE.process_pid = 4242
+    agent.STATE.process_role = "master"
+    agent.STATE.model_name = "test-model.gguf"
+    agent.STATE.inference_activity = {"server_ready": True}
+    agent.STATE.active_config = {"process_pid": 4242, "model": "test-model.gguf"}
+
+    # Initially enabled
+    kllm_config.set_feature_flag("prima-auto-deploy", True)
+    status_enabled = c.get("/v1/status").json()
+    assert status_enabled["feature_flags"]["prima-auto-deploy"] is True
+    assert status_enabled["inference_up"] is True
+    assert status_enabled["process_pid"] == 4242
+    assert status_enabled["model_name"] == "test-model.gguf"
+
+    # Toggle off at runtime
+    kllm_config.set_feature_flag("prima-auto-deploy", False)
+    status_disabled = c.get("/v1/status").json()
+    assert status_disabled["feature_flags"]["prima-auto-deploy"] is False
+    # Active workload is completely uninterrupted
+    assert status_disabled["inference_up"] is True
+    assert status_disabled["process_pid"] == 4242
+    assert status_disabled["model_name"] == "test-model.gguf"
+    assert status_disabled["active_config"] == {"process_pid": 4242, "model": "test-model.gguf"}
+
+
+def test_status_exposes_the_configured_engine(client):
+    c, agent, _ = client
+    from kllm.shared import config as kllm_config
+
+    body = c.get("/v1/status").json()
+    assert body["engine"] == "llamacpp"
+    assert agent_runtime._live_status()["engine"] == "llamacpp"
+
+    kllm_config.save_config({"engine": "primacpp"})
+    body = c.get("/v1/status").json()
+    assert body["engine"] == "primacpp"
+    assert agent_runtime._live_status()["engine"] == "primacpp"
 
 
 def test_status_exposes_the_shared_node_directory(client, monkeypatch):
@@ -187,6 +247,99 @@ def test_served_models_and_responses_are_authenticated_native_passthrough(client
                 "input_tokens": 17
             }
             assert json.loads(calls[-1].content) == payload
+        finally:
+            agent.app.state.inference_client = previous
+
+
+def test_response_token_count_requires_prima_qualification(client, monkeypatch):
+    from kllm.modules.primacpp.interactors import qualification
+
+    c, _, token = client
+    active = {"engine": "primacpp", "runtime": {}, "qualification_context": {}}
+    monkeypatch.setattr(
+        agent_runtime,
+        "_active_config",
+        lambda: active,
+    )
+
+    response = c.post(
+        "/v1/responses/input_tokens",
+        json={"input": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422
+    assert "qualified execution context" in response.json()["detail"]
+
+    active = {
+        **active,
+        "qualification_context": {"scope": "local"},
+        "generation_defaults": {"reasoning_effort": "high"},
+    }
+    monkeypatch.setattr(
+        qualification,
+        "qualification_status",
+        lambda runtime, *, context: {"inference_supported": True, "qualified_features": ["responses"]},
+    )
+    response = c.post(
+        "/v1/responses/input_tokens",
+        json={"input": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+    assert "reasoning_controls" in response.json()["detail"]
+
+    active = {**active, "generation_defaults": {}}
+    response = c.post(
+        "/v1/responses/input_tokens",
+        json={"input": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+    assert "input-token counting" in response.json()["detail"]
+
+
+def test_prima_responses_bind_the_active_served_model(client, monkeypatch):
+    import httpx
+    from kllm.modules.primacpp.interactors import qualification
+
+    c, agent, token = client
+    served = "served.gguf"
+    active = {
+        "engine": "primacpp",
+        "model": "different.gguf",
+        "runtime": {"capabilities": {"features": ["response_input_tokens_v1"]}},
+        "qualification_context": {"scope": "local"},
+    }
+    monkeypatch.setattr(agent_runtime, "_active_config", lambda: active)
+    monkeypatch.setattr(
+        qualification,
+        "qualification_status",
+        lambda runtime, *, context: {"inference_supported": True, "qualified_features": ["responses"]},
+    )
+    forwarded = []
+
+    def upstream(request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": served}]})
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(200, json={"input_tokens": 3})
+
+    with mock_async_client(upstream) as target:
+        previous = agent.app.state.inference_client
+        agent.app.state.inference_client = target
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            path = "/v1/responses/input_tokens"
+            assert c.post(path, json={"input": "hello"}, headers=headers).status_code == 503
+            active = {**active, "model": served}
+            assert c.post(path, json={"model": "other.gguf", "input": "hello"}, headers=headers).status_code == 404
+            response = c.post(path, json={"input": "hello"}, headers=headers)
+            assert response.status_code == 200
+            assert response.json()["input_tokens"] == 3
+            assert forwarded == [{"input": "hello", "model": served}]
         finally:
             agent.app.state.inference_client = previous
 
@@ -1737,3 +1890,57 @@ def test_keyword_partial_and_total_failure_http_contract(client, monkeypatch):
     assert failed.status_code == 400
     assert "all-down" in failed.json()["detail"]
     assert "results" not in failed.json()
+
+
+def test_node_feature_flags_api_get_put_and_sqlite_sync(client):
+    c, _, _ = client
+    from kllm.shared import config as kllm_config
+
+    r0 = c.get("/v2/node/flags")
+    assert r0.status_code == 200
+    assert r0.json() == {
+        "flags": {
+            "private-network-setup": False,
+            "prima-auto-deploy": False,
+        }
+    }
+
+    r1 = c.put("/v2/node/flags", json={"name": "prima-auto-deploy", "enabled": True})
+    assert r1.status_code == 200
+    assert r1.json() == {
+        "flags": {
+            "private-network-setup": False,
+            "prima-auto-deploy": True,
+        }
+    }
+    assert kllm_config.get_feature_flag("prima-auto-deploy") is True
+    assert c.get("/v2/cluster/status").json()["feature_flags"]["prima-auto-deploy"] is True
+
+    # Legacy v1 alias also works
+    r2 = c.put("/v1/flags", json={"name": "private-network-setup", "enabled": True})
+    assert r2.status_code == 200
+    assert r2.json()["flags"] == {
+        "private-network-setup": True,
+        "prima-auto-deploy": True,
+    }
+    assert c.get("/v1/flags").json()["flags"] == {
+        "private-network-setup": True,
+        "prima-auto-deploy": True,
+    }
+
+
+def test_node_feature_flags_api_rejects_invalid_payloads(client):
+    c, _, _ = client
+
+    bad_name = c.put("/v2/node/flags", json={"name": "unknown-flag", "enabled": True})
+    assert bad_name.status_code == 400
+    assert "unknown feature flag" in json.dumps(bad_name.json())
+
+    bad_bool = c.put("/v2/node/flags", json={"name": "prima-auto-deploy", "enabled": "yes"})
+    assert bad_bool.status_code == 422
+
+    extra_field = c.put(
+        "/v2/node/flags",
+        json={"name": "prima-auto-deploy", "enabled": True, "unexpected": 1},
+    )
+    assert extra_field.status_code == 422

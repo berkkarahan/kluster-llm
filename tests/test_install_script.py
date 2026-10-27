@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import importlib.util
 import os
 import shutil
@@ -974,6 +976,74 @@ def test_busy_windows_launcher_is_omitted_from_reinstall(install, tmp_path):
         os.close(fd)
 
 
+def _native_wheel(tmp_path: Path, payload: bytes) -> Path:
+    wheel = tmp_path / "kllm-0.1.0-cp312-cp312-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("kllm/_native.cp312-win_amd64.pyd", payload)
+    return wheel
+
+
+def test_native_extension_replace_survives_a_transient_denial(install, tmp_path, monkeypatch):
+    """A momentary Windows denial must not fail the Rust stage."""
+    staged = tmp_path / "src" / "kllm"
+    staged.mkdir(parents=True)
+    destination = staged / "_native.cp312-win_amd64.pyd"
+    destination.write_bytes(b"old-native")
+    real_replace = install.os.replace
+    attempts: list[str] = []
+
+    def flaky_replace(source, target):
+        attempts.append(str(source))
+        if len(attempts) == 1:
+            # Shape of the observed failure: no winerror, both names attached.
+            raise PermissionError(errno.EACCES, "Access is denied", str(source), None, str(target))
+        return real_replace(source, target)
+
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install.os, "replace", flaky_replace)
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    install._stage_editable_extension(_native_wheel(tmp_path, b"new-native"))
+    assert destination.read_bytes() == b"new-native"
+    assert not destination.with_name(destination.name + ".new").exists()
+    assert len(attempts) == 2
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows refuses to overwrite a mapped image")
+def test_loaded_native_extension_is_parked_and_replaced(install, tmp_path, monkeypatch, capsys):
+    """A loaded extension is renamed aside so the freshly built module lands."""
+    staged = tmp_path / "src" / "kllm"
+    staged.mkdir(parents=True)
+    destination = staged / "_native.cp312-win_amd64.pyd"
+    shutil.copy2(Path(os.environ["SystemRoot"]) / "System32" / "version.dll", destination)
+    ctypes.WinDLL(str(destination))
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    install._stage_editable_extension(_native_wheel(tmp_path, b"new-native"))
+    assert destination.read_bytes() == b"new-native"
+    parked = destination.with_name(destination.name + ".locked")
+    assert parked.is_file()
+    assert "Restart Kluster" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing violation is error 32")
+def test_held_native_extension_reports_an_actionable_error(install, tmp_path, monkeypatch):
+    """An extension that cannot even be renamed aside fails with the remedy."""
+    staged = tmp_path / "src" / "kllm"
+    staged.mkdir(parents=True)
+    destination = staged / "_native.cp312-win_amd64.pyd"
+    destination.write_bytes(b"old-native")
+    monkeypatch.setattr(install, "ROOT", tmp_path)
+    monkeypatch.setattr(install.time, "sleep", lambda _seconds: None)
+    handle = os.open(destination, os.O_RDONLY)
+    try:
+        with pytest.raises(SystemExit, match="Stop the Kluster node"):
+            install._stage_editable_extension(_native_wheel(tmp_path, b"new-native"))
+    finally:
+        os.close(handle)
+    assert destination.read_bytes() == b"old-native"
+    assert not destination.with_name(destination.name + ".new").exists()
+
+
 def test_check_reports_https_fallback(install, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(install, "BIN_DIR", tmp_path)
     monkeypatch.setattr(install, "STAMP_FILE", tmp_path / "llama-release.txt")
@@ -1138,7 +1208,8 @@ def test_install_kllm_path_shim_unix(install, monkeypatch, tmp_path):
     assert ' kllm "$@"' in text
     assert str(uv.resolve()) in text
     assert str(repo.resolve()) in text
-    assert (shim.stat().st_mode & 0o111) != 0
+    if os.name != "nt":  # Windows does not expose POSIX executable permission bits.
+        assert (shim.stat().st_mode & 0o111) != 0
 
 
 def test_install_kllm_path_shim_windows(install, monkeypatch, tmp_path):
@@ -1221,3 +1292,407 @@ def test_llama_install_status_ok_requires_all_stamped_backends(install, monkeypa
     monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: MetalOnly())
     status = install.llama_install_status("v0.5.0")
     assert status["ok"] is False
+
+
+def test_parse_args_engine_defaults_to_llamacpp_and_accepts_primacpp(install):
+    default_args = install.parse_args([])
+    assert default_args.engine == "llamacpp"
+
+    llama_args = install.parse_args(["--engine", "llamacpp"])
+    assert llama_args.engine == "llamacpp"
+
+    prima_args = install.parse_args(["--engine", "primacpp"])
+    assert prima_args.engine == "primacpp"
+
+
+def test_prima_highs_is_enabled_by_install_script_and_recipe_is_sqlite_backed(install, tmp_path):
+    from kllm.modules.managed_network.gateways.store import NetworkStore
+    from kllm.modules.primacpp.interactors.build import prima_cmake_flags
+    from kllm.modules.primacpp.interactors.recipe import (
+        ROOT as PRIMA_ROOT,
+        recipe,
+        recipe_digest,
+        save_recipe,
+    )
+
+    # Source changes live in the pinned Prima fork; recipe lives in SQLite, not recipe.json.
+    assert "patches" not in recipe()
+    assert not (PRIMA_ROOT / "patches").exists()
+    assert not (PRIMA_ROOT / "recipe.json").exists()
+
+    with NetworkStore(tmp_path) as store:
+        seeded = store.prima_recipe()
+        assert seeded["source_commit"] == recipe()["source_commit"]
+    assert (tmp_path / "managed-network.sqlite").is_file()
+    initial_digest = recipe_digest(tmp_path)
+    updated = {**seeded, "build_recipe_version": seeded["build_recipe_version"] + 1}
+    save_recipe(updated, home=tmp_path)
+    assert recipe(tmp_path)["build_recipe_version"] == updated["build_recipe_version"]
+    assert recipe_digest(tmp_path) != initial_digest
+
+    flags = install._cmake_prima_flags("cpu")
+    assert "-DUSE_HIGHS=ON" in flags
+    assert prima_cmake_flags(install, "cpu") == flags
+
+    class WithoutHighs:
+        @staticmethod
+        def _cmake_prima_flags(_backend: str) -> list[str]:
+            return ["-DBUILD_SHARED_LIBS=OFF"]
+
+    with pytest.raises(ValueError, match="-DUSE_HIGHS=ON"):
+        prima_cmake_flags(WithoutHighs(), "cpu")
+
+
+def test_prima_install_status_requires_highs_and_all_binaries(install, monkeypatch, tmp_path):
+    prima_bin = tmp_path / "prima"
+    monkeypatch.setattr(install, "PRIMA_BIN_DIR", prima_bin)
+    monkeypatch.setattr(install, "PRIMA_STAMP_FILE", prima_bin / "prima-release.txt")
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+
+    _repo, commit, digest = install.read_prima_recipe_pin()
+    install.write_prima_install_stamp(
+        commit=commit,
+        recipe_digest=digest,
+        backend="vulkan",
+        highs="on",
+    )
+    for name in ("llama-server", "llama-cli", "profile-tool"):
+        (prima_bin / name).write_bytes(b"bin")
+
+    import json
+
+    class WithHighs:
+        returncode = 0
+        stdout = (
+            "Vulkan0: Test GPU (8192 MiB, 8000 MiB free)\n"
+            "KLLM_PRIMA_CAPABILITIES="
+            + json.dumps(
+                {
+                    "schema_version": 1,
+                    "ring_protocol_version": 1,
+                    "backends": ["vulkan"],
+                    "devices": [{"backend": "Vulkan", "name": "Vulkan0", "description": "Test GPU"}],
+                    "features": [
+                        "layer_window",
+                        "tensor_split",
+                        "ngl",
+                        "ring_tcp",
+                        "execution_manifest_v1",
+                        "highs",
+                    ],
+                }
+            )
+            + "\n"
+        )
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: WithHighs())
+    status = install.prima_install_status(expected="vulkan")
+    assert status["ok"] is True
+    assert status["highs"] == "on"
+    assert install.main(["--check", "--engine", "primacpp", "--backend", "vulkan"]) == 0
+
+    class WithoutHighsFeature:
+        returncode = 0
+        stdout = WithHighs.stdout.replace('"highs"', '"other"')
+        stderr = ""
+
+    monkeypatch.setattr(install.subprocess, "run", lambda *a, **k: WithoutHighsFeature())
+    status_no_highs = install.prima_install_status(expected="vulkan")
+    assert status_no_highs["ok"] is False
+    assert status_no_highs["highs"] == "off"
+    assert install.main(["--check", "--engine", "primacpp", "--backend", "vulkan"]) == 1
+
+
+def test_main_engine_primacpp_bootstrap_runs_prima_stage_without_touching_llama(
+    install, monkeypatch, tmp_path
+):
+    llama_bin = tmp_path / "bin"
+    prima_bin = tmp_path / "prima"
+    monkeypatch.setattr(install, "BIN_DIR", llama_bin)
+    monkeypatch.setattr(install, "PRIMA_BIN_DIR", prima_bin)
+    monkeypatch.setattr(install, "PRIMA_STAMP_FILE", prima_bin / "prima-release.txt")
+    monkeypatch.setattr(install, "detect_backend", lambda _b: "vulkan")
+    monkeypatch.setattr(install, "stamp_backend_for_install", lambda b: b)
+
+    called: list[tuple[str, bool, str | None]] = []
+
+    def fake_prima_stage(backend: str, *, force: bool, expected: str | None) -> None:
+        called.append((backend, force, expected))
+
+    monkeypatch.setattr(install, "_run_install_prima_stage", fake_prima_stage)
+    monkeypatch.setattr(
+        install,
+        "_run_install_llama_stage",
+        lambda *a, **k: pytest.fail("llamacpp stage must not run when --engine primacpp is selected"),
+    )
+    monkeypatch.setattr(install, "verify_prima_installed", lambda **_k: None)
+
+    rc = install.main(["--llama-only", "--engine", "primacpp", "--force", "--sync"])
+    assert rc == 0
+    assert called == [("auto", True, "vulkan")]
+    assert not llama_bin.exists()
+
+
+@pytest.mark.parametrize(
+    "bad_argv",
+    [
+        ["--engine", "primacpp", "--prefer-prebuilt"],
+        ["--engine", "primacpp", "--prebuilt"],
+        ["--engine", "primacpp", "--rpc-tcp-only"],
+        ["--engine", "primacpp", "--tag", "b5000"],
+        ["--engine", "primacpp", "--recipe-digest", "a" * 64],
+        ["--engine", "primacpp", "--source-repo", "https://github.com/berkkarahan/prima.cpp.git"],
+    ],
+)
+def test_main_engine_primacpp_rejects_incompatible_flags(install, bad_argv):
+    with pytest.raises(SystemExit):
+        install.main(bad_argv)
+
+
+def test_ensure_prima_deps_installs_missing_packages_on_macos_and_linux(
+    install, monkeypatch, tmp_path
+):
+    commands: list[list[str]] = []
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+    monkeypatch.setattr(install, "ensure_cmake", lambda: True)
+    monkeypatch.setattr(install, "detect_backend", lambda b: b)
+    monkeypatch.setattr(install, "_run", lambda cmd, **kw: commands.append(list(cmd)))
+
+    # macOS with missing fio, wget, highs, zeromq
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    monkeypatch.setattr(install, "_brew_prefix", lambda: tmp_path)
+    monkeypatch.setattr(install, "ensure_vulkan_macos", lambda: {})
+    monkeypatch.setattr(
+        install,
+        "_which",
+        lambda name: f"/usr/bin/{name}"
+        if name in {"brew", "gcc", "make", "cmake", "git", "curl"}
+        else None,
+    )
+
+    install.ensure_prima_deps("metal")
+    assert commands == [["/usr/bin/brew", "install", "fio", "wget", "highs", "zeromq"]]
+
+    # Linux with apt-get and missing fio/zmq/vulkan
+    commands.clear()
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        install,
+        "_which",
+        lambda name: f"/usr/bin/{name}"
+        if name in {"apt-get", "gcc", "g++", "make", "cmake", "git", "curl"}
+        else None,
+    )
+    install.ensure_prima_deps("vulkan")
+    assert any(cmd[:3] == ["sudo", "apt-get", "install"] and "fio" in cmd and "libzmq3-dev" in cmd for cmd in commands)
+
+
+def test_cmake_prima_flags_and_windows_env_preserve_cross_platform_compilation(
+    install, monkeypatch, tmp_path
+):
+    # Windows defines NOMINMAX for MSVC without breaking macOS or Linux CMake flags.
+    monkeypatch.setattr(install, "_is_windows", lambda: True)
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: False)
+    win_flags = install._cmake_prima_flags("vulkan")
+    assert "-DUSE_HIGHS=ON" in win_flags
+    assert "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /W3 /GR /EHsc /DNOMINMAX" in win_flags
+
+    monkeypatch.delenv("CL", raising=False)
+    win_env = install._windows_vulkan_env(None)
+    assert win_env["CL"] == "/DNOMINMAX"
+
+    # macOS and Linux must not receive MSVC-specific flags.
+    monkeypatch.setattr(install, "_is_windows", lambda: False)
+    monkeypatch.setattr(install, "_is_macos", lambda: True)
+    mac_flags = install._cmake_prima_flags("metal")
+    assert "-DUSE_HIGHS=ON" in mac_flags
+    assert not any(flag.startswith("-DCMAKE_CXX_FLAGS=") for flag in mac_flags)
+
+    monkeypatch.setattr(install, "_is_macos", lambda: False)
+    monkeypatch.setattr(install, "_is_linux", lambda: True)
+    linux_flags = install._cmake_prima_flags("vulkan")
+    assert "-DUSE_HIGHS=ON" in linux_flags
+    assert not any(flag.startswith("-DCMAKE_CXX_FLAGS=") for flag in linux_flags)
+
+
+def _winerror32() -> OSError:
+    exc = OSError(13, "The process cannot access the file")
+    exc.winerror = 32  # type: ignore[attr-defined]
+    return exc
+
+
+def test_reset_staged_binaries_clears_owned_and_keeps_unknown(install, tmp_path):
+    # A backend/pin change must not leave the previous backend's libraries behind,
+    # but files install.py never staged (e.g. the network helper) must survive.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    owned = [
+        "llama-server.exe",
+        "rpc-server.exe",
+        "ggml-rpc-server.exe",
+        "ggml-vulkan.dll",
+        "llama-common.dll",
+        "libomp.dll",
+        "llama-release.txt",
+        "rpc-transport.json",
+    ]
+    unknown = ["kllm-network-helper.exe", "component.dll", "notes.txt"]
+    for name in (*owned, *unknown):
+        (bin_dir / name).write_bytes(b"x")
+
+    install._reset_staged_binaries(bin_dir, install._owned_llama_artifact, what="vendor/bin")
+
+    for name in owned:
+        assert not (bin_dir / name).exists(), name
+    for name in unknown:
+        assert (bin_dir / name).exists(), name
+
+
+def test_reset_staged_prima_clears_owned_and_keeps_unknown(install, tmp_path):
+    prima_bin = tmp_path / "prima"
+    prima_bin.mkdir()
+    owned = ["llama-server.exe", "llama-cli.exe", "profile-tool.exe", "manifest.json"]
+    for name in (*owned, "prima-release.txt", "notes.txt"):
+        (prima_bin / name).write_bytes(b"x")
+
+    install._reset_staged_binaries(prima_bin, install._owned_prima_artifact, what="vendor/prima")
+
+    for name in (*owned, "prima-release.txt"):
+        assert not (prima_bin / name).exists(), name
+    assert (prima_bin / "notes.txt").exists()
+
+
+def test_clear_readonly_allows_remove(install, tmp_path):
+    target = tmp_path / "ggml-cpu.dll"
+    target.write_bytes(b"x")
+    target.chmod(0o444)
+    install._remove_vendor_file(target, "vendor/bin")
+    assert not target.exists()
+
+
+def test_remove_vendor_file_fails_loudly_when_locked(install, tmp_path, monkeypatch):
+    target = tmp_path / "llama-server.exe"
+    target.write_bytes(b"x")
+
+    def locked(_path):
+        raise _winerror32()
+
+    monkeypatch.setattr(install.os, "unlink", locked)
+    with pytest.raises(SystemExit, match="in use by a running process"):
+        install._remove_vendor_file(target, "vendor/bin")
+
+
+def test_remove_vendor_tree_fails_loudly_when_locked(install, tmp_path, monkeypatch):
+    tree = tmp_path / "llama.cpp"
+    tree.mkdir()
+    (tree / "llama-server.exe").write_bytes(b"x")
+
+    def locked(_path):
+        raise _winerror32()
+
+    monkeypatch.setattr(install.os, "unlink", locked)
+    with pytest.raises(SystemExit, match="in use by a running process"):
+        install._remove_vendor_tree(tree, "vendor/llama.cpp")
+
+
+def test_clone_or_update_replaces_non_git_tree(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    vendor.mkdir()
+    (vendor / "leftover.dll").write_bytes(b"x")
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    install.clone_or_update_llama("v0.5.0")
+
+    assert not (vendor / "leftover.dll").exists()
+    assert any("clone" in command for command in commands)
+
+
+def test_clone_or_update_repairs_stale_git_checkout(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    (vendor / ".git").mkdir(parents=True)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+
+    def fake_git_output(_path, *args):
+        # HEAD trails the pin, so the tree must be wiped and re-cloned.
+        return "deadbeef" if args == ("rev-parse", "HEAD") else "cafebabe"
+
+    monkeypatch.setattr(install, "_git_output", fake_git_output)
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    install.clone_or_update_llama("v0.5.0")
+
+    assert not (vendor / ".git").exists()
+    assert any("clone" in command for command in commands)
+
+
+def test_clone_or_update_keeps_matching_checkout(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    (vendor / ".git").mkdir(parents=True)
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+    monkeypatch.setattr(install, "ensure_git", lambda: None)
+    monkeypatch.setattr(install, "_git_output", lambda _path, *args: "same")
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(install, "_run", fake_run)
+    install.clone_or_update_llama("v0.5.0")
+
+    assert any("clean" in command for command in commands)
+    assert not any("clone" in command for command in commands)
+
+
+def test_discard_stale_build_uses_lock_aware_remover(install, tmp_path, monkeypatch):
+    vendor = tmp_path / "llama.cpp"
+    build = vendor / "build"
+    build.mkdir(parents=True)
+    (build / "CMakeCache.txt").write_text(
+        "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(vendor.resolve()) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(install, "VENDOR_LLAMA", vendor)
+
+    seen: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        install, "_remove_vendor_tree", lambda path, what: seen.append((path, what))
+    )
+
+    # A signature mismatch is a stale-cache reason, so the injected remover runs.
+    install._discard_stale_cmake_build(vendor, build, "signature")
+    assert seen == [(build, "vendor/llama.cpp/build")]

@@ -142,10 +142,28 @@ class RuntimeRegistry:
         for entry in value["versions"]:
             entry["qualification_errors"] = qualification_errors(entry["version"])
             entry["inference_supported"] = not entry["qualification_errors"]
+            if entry["version"].get("engine") == "primacpp" and entry.get("build"):
+                from kllm.modules.primacpp.interactors.qualification import qualification_status
+
+                status = qualification_status(entry["build"])
+                if entry["qualification_errors"]:
+                    status["qualification_errors"] = list(
+                        dict.fromkeys([*entry["qualification_errors"], *status["qualification_errors"]])
+                    )
+                    status["inference_supported"] = False
+                entry.update(status)
         prima = recipe()
-        value["engine_sources"] = [{
+        source_entry = {
             "engine": "primacpp", "repository": prima["source_repository"],
             "ref": prima["source_commit"], "ref_type": "commit",
+            # The digest every saved pin is checked against: the dashboard marks
+            # a saved source stale instead of offering a rebuild that cannot run.
+            "recipe_digest": recipe_digest(),
+        }
+        if prima.get("source_release"):
+            source_entry["release"] = prima["source_release"]
+            source_entry["release_commit"] = prima["source_release_commit"]
+        value["engine_sources"] = [{**source_entry,
             "qualification_errors": qualification_errors({"engine": "primacpp"}),
         }]
         repo = self.repository()
@@ -259,6 +277,39 @@ class RuntimeRegistry:
             self.data["running"] = deepcopy(value)
             self._save()
 
+    def claim_running(self, value: dict) -> None:
+        """Publish a run without replacing another engine or run's record."""
+        if (not isinstance(value, dict) or not isinstance(value.get("engine"), str)
+                or not isinstance(value.get("run_id"), str) or not value["run_id"]):
+            raise ValueError("Running runtime requires an engine and run ID")
+        with self.lock:
+            current = self.data["running"]
+            if current is not None and (not isinstance(current, dict)
+                    or current.get("engine") != value["engine"]
+                    or current.get("run_id") != value["run_id"]):
+                raise ValueError("Another run owns the runtime registry")
+            self.data["running"] = deepcopy(value)
+            try:
+                self._save()
+            except BaseException:
+                self.data["running"] = current
+                raise
+
+    def clear_running(self, *, engine: str, run_id: str) -> bool:
+        """Retire a recorded run only while it still owns the registry slot."""
+        with self.lock:
+            current = self.data["running"]
+            if (not isinstance(current, dict) or current.get("engine") != engine
+                    or current.get("run_id") != run_id):
+                return False
+            self.data["running"] = None
+            try:
+                self._save()
+            except BaseException:
+                self.data["running"] = current
+                raise
+            return True
+
     def remove(self, identity: str):
         with self.lock:
             target = (self.data["target"] or {}).get("version", {}).get("runtime_id")
@@ -304,10 +355,19 @@ class RuntimeRegistry:
                 ):
                     return deepcopy(job)
             entry = self.data["versions"][request.runtime_id]
+            version = RuntimeVersion.model_validate(entry["version"])
+            # A saved pin from an earlier build recipe can never satisfy the
+            # installer's recipe contract: refuse before spawning it so the
+            # retry keeps an actionable error instead of a doomed build log.
+            if version.engine == "primacpp" and version.recipe_digest != recipe_digest():
+                raise ValueError(
+                    "Prima build recipe changed; resolve the source again and re-apply the target"
+                )
             if entry["build"]:
                 try:
                     self.verify(entry["build"])
-                    if request.backend in ("auto", entry["build"]["backend"]):
+                    built_backend = str(entry["build"]["backend"] or "")
+                    if request.backend in ("auto", built_backend, *built_backend.split("+")):
                         return {
                             "job_id": None,
                             "runtime_id": request.runtime_id,

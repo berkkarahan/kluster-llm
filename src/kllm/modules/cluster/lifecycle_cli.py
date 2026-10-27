@@ -32,11 +32,28 @@ def start(
         "--backend",
         help="Preferred llama.cpp engine on this node: metal|cuda|rocm|vulkan (omit = all devices)",
     ),
+    engine: Optional[str] = typer.Option(
+        None,
+        "--engine",
+        help=(
+            "Node engine mode: llamacpp | primacpp. primacpp switches this node's "
+            "dashboard to the Prima settings; inference selection still requires a "
+            "qualified runtime."
+        ),
+    ),
 ) -> None:
     """Become cluster master and advertise on the LAN."""
     _replace_tracked_instance(port)
     if backend is not None:
         kllm_config.save_config({"accel_backend": backend.strip().lower()})
+    if engine is not None:
+        value = engine.strip().lower()
+        if value not in kllm_config.VALID_ENGINES:
+            console.print(
+                f"[red]--engine must be one of {sorted(kllm_config.VALID_ENGINES)}, got {engine!r}[/red]"
+            )
+            raise typer.Exit(2)
+        kllm_config.save_config({"engine": value})
     with _client(port) as c:
         gpu_ids = _resolve_cli_gpus(c, gpus)
         payload: dict = {
@@ -101,6 +118,15 @@ def join(
         "--backend",
         help="Preferred llama.cpp engine on this node: metal|cuda|rocm|vulkan (omit = all devices)",
     ),
+    engine: Optional[str] = typer.Option(
+        None,
+        "--engine",
+        help=(
+            "Node engine mode: llamacpp | primacpp. primacpp switches this node's "
+            "dashboard to the Prima settings; inference selection still requires a "
+            "qualified runtime."
+        ),
+    ),
 ) -> None:
     """Join as worker using the join key (mDNS discovery) or an explicit --master."""
     if not key:
@@ -121,6 +147,14 @@ def join(
     _replace_tracked_instance(port)
     if backend is not None:
         kllm_config.save_config({"accel_backend": backend.strip().lower()})
+    if engine is not None:
+        value = engine.strip().lower()
+        if value not in kllm_config.VALID_ENGINES:
+            console.print(
+                f"[red]--engine must be one of {sorted(kllm_config.VALID_ENGINES)}, got {engine!r}[/red]"
+            )
+            raise typer.Exit(2)
+        kllm_config.save_config({"engine": value})
     with _client(port) as c:
         gpu_ids = _resolve_cli_gpus(c, gpus)
         if gpu_ids is not None:

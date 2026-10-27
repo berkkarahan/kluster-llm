@@ -88,11 +88,20 @@ class RegisterBody(BaseModel):
     ram_percent: int = Field(default=80, ge=10, le=100)
     actual_backend: str | None = None
     requested_backend: str | None = None
+    installed_backends: list[str] | None = None
     devices: list[dict[str, Any]] = Field(default_factory=list)
     rpc_devices: list[dict[str, Any]] = Field(default_factory=list)
     rpc_capabilities: list[dict[str, Any]] = Field(default_factory=list)
     rpc_control_version: int = Field(default=0, ge=0, le=1)
     prima_control_version: int = Field(default=0, ge=0, le=1)
+    prima_inventory_version: int = Field(default=0, ge=0, le=1)
+    prima_asset_lease_version: int = Field(default=0, strict=True, ge=0, le=1)
+    prima_profile_version: int = Field(default=0, strict=True, ge=0, le=2)
+    prima_link_profile_version: int = Field(default=0, strict=True, ge=0, le=2)
+    prima_profile_context_version: int = Field(default=0, strict=True, ge=0, le=1)
+    prima_resources_version: int = Field(default=0, strict=True, ge=0, le=1)
+    prima_lora_assets_version: int = Field(default=0, strict=True, ge=0, le=1)
+    prima_ports_version: int = Field(default=0, strict=True, ge=0, le=2)
     runtime_management_version: int = Field(default=0, ge=0, le=1)
     runtime: dict[str, Any] = Field(default_factory=dict)
     rpc_status: Literal[
@@ -108,6 +117,9 @@ class RegisterBody(BaseModel):
     gpu_ids: list[int] | None = None
     git_head: str | None = None
     llama_release: str | None = None
+    # Node OS/CPU for cross-platform Prima planning (platform.system()/machine()).
+    platform: str | None = Field(default=None, max_length=32)
+    architecture: str | None = Field(default=None, max_length=64)
     process_pid: int | None = None
     process_role: str | None = None
     process_started_at: str | None = None
@@ -176,6 +188,12 @@ class ConfigBody(BaseModel):
     split_mode: Literal["layer", "row", "tensor"] | None = None
 
 
+class FeatureFlagBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = Field(strict=True)
+
+
 class DownloadBody(BaseModel):
     source: str
     name: str | None = None
@@ -191,12 +209,6 @@ class HfTokenBody(BaseModel):
 
 class DeleteBody(BaseModel):
     name: str
-
-
-class LlamaSetupBody(BaseModel):
-    tag: str | None = None
-    backend: str = "auto"
-    force: bool = False
 
 
 class TemplateCheckBody(BaseModel):
@@ -218,3 +230,29 @@ ManagedNetworkCancelBody = network_allocation.CancelRequest
 ManagedNetworkOperationBody = network_allocation.OperationRequest
 ManagedNetworkStartBody = network_allocation.StartRequest
 ManagedNetworkCleanupBody = CleanupDecision
+
+
+class InferencePlanBody(BaseModel):
+    """Plan request schema accepting top-level or nested parameters.placement_strategy."""
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    placement_strategy: Literal["auto", "capacity_first", "priority"] | None = None
+    parameters: dict[str, Any] | None = None
+
+    @classmethod
+    def to_plan_body(cls, value: dict[str, Any] | Any):
+        from kllm.modules.inference.entities import PlanBody
+
+        if isinstance(value, PlanBody):
+            return value
+        if isinstance(value, dict):
+            merged = dict(value)
+            nested = merged.pop("parameters", None)
+            if isinstance(nested, dict):
+                for k, v in nested.items():
+                    merged.setdefault(k, v)
+            return PlanBody.model_validate(merged)
+        return PlanBody.model_validate(value)
+

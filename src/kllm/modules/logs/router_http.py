@@ -221,3 +221,4 @@ CONTROL_V2: tuple[tuple[str, str, str], ...] = (
     ('/logs', 'GET', 'get_logs'),
     ('/logs', 'POST', 'ingest_logs'),
 )
+

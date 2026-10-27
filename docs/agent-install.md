@@ -113,6 +113,7 @@ python3 scripts/install.py --backend cuda --from-source
 3. The llama.cpp stage installs binaries (`llama-server` + `rpc-server`) for the tag in committed [`llama-release`](../llama-release): on **macOS** (non-CPU), compiles a Metal+Vulkan source build by default; otherwise prefers GitHub prebuilt assets, with cmake source fallback. Stages to `vendor/bin/` and writes `vendor/bin/llama-release.txt`. Re-runs when the stamp does not match the pin.
    The macOS Homebrew dependencies are `molten-vk vulkan-headers vulkan-loader shaderc spirv-headers`. The Vulkan gate checks `glslc` (provided by `shaderc`) and the `SPIRV-Headers` CMake config alongside Vulkan headers and the MoltenVK ICD manifest.
    The reusable `vendor/llama.cpp/build` tree is installer-owned: it is discarded when the pin, backend flags or a recorded OpenSSL package path changes, so a toolchain upgrade (`brew upgrade openssl@3`) cannot leave a cache that half-resolves a package. A dangling `-L` in an exported `LDFLAGS` is ignored rather than treated as stale, so it cannot force a rebuild every run.
+   The four vendor runtime dirs — `vendor/bin`, `vendor/prima`, `vendor/llama.cpp`, `vendor/prima.cpp` — are installer-owned and fully rewritable. Before staging, the installer clears the artifacts it owns (binaries, shared libraries, stamps, transport/manifest records) so a backend or pin change leaves nothing stale, while a file it did not stage (e.g. `vendor/bin/kllm-network-helper.exe`) is preserved. A source tree without git metadata, or whose checkout does not peel to the pin, is wiped and re-cloned rather than trusted. If a binary is held open by a running node, the rewrite **fails loudly** with the in-use file named and a stop-and-retry remedy instead of leaving a half-written tree.
    On macOS the default install **aborts** when the Metal+Vulkan build fails; it never downgrades to a Metal-only pack, and `--prefer-prebuilt` is rejected outright. Verification probes the binary the runtime actually launches (`vendor/bin/llama-server`, which `kllm-native` resolves first), not the CMake build output, and `--check` exits non-zero on a backend mismatch.
    llama-server's embedded HTTPS server is the expendable part: if `cmake` configure fails, the installer clears the cached OpenSSL entries and dangling linker flags and retries **with HTTPS enabled** (the real fix); only if that fails does it fall back to `-DLLAMA_OPENSSL=OFF`, recorded as `https=off` in the stamp. The fallback is never latched, so the next run restores HTTPS.
    Runtime setup can reuse a pack already in `~/.kllm/models` without changing which backends are installed: it skips when the install already satisfies the contract and refuses a pack that cannot. Joining only enrolls the node and never extracts a runtime pack or starts RPC.
@@ -223,6 +224,7 @@ remains the bootstrap default for existing installer commands and `--check`.
 
 | Flag | When to use |
 |------|-------------|
+| `--engine llamacpp\|primacpp` | Choose the inference engine to install (default: `llamacpp`). When `primacpp` is selected, `scripts/install.py` compiles the pinned Prima recipe into `vendor/prima` with `-DUSE_HIGHS=ON` (Prima's CMake keeps `USE_HIGHS=OFF` by default). |
 | `--backend auto\|metal\|cuda\|rocm\|vulkan\|cpu` | Force accelerator; default `auto`. |
 | `--prefer-prebuilt` | Prefer GitHub release zips (default on Windows/Linux; rejected on macOS, which must build Metal+Vulkan). |
 | `--from-source` | Compile the pinned llama.cpp tag in `vendor/llama.cpp` (macOS default for Metal+Vulkan). |
@@ -245,6 +247,14 @@ python scripts/install.py --check
 python scripts/install.py --llama-only --backend metal    # macOS: Metal+Vulkan multi-backend (default)
 # Vulkan-master cluster: keep the multi binary; prefer Vulkan at runtime:
 #   export KLLM_ACCEL_BACKEND=vulkan
+```
+
+**prima.cpp bootstrap (with HiGHS)** (pinned in `src/kllm/modules/primacpp/recipe.json`; stages `llama-server`, `llama-cli`, `profile-tool`, `manifest.json`, and `prima-release.txt` into `vendor/prima` without modifying `vendor/bin`):
+
+```bash
+python scripts/install.py --engine primacpp
+python scripts/install.py --llama-only --engine primacpp
+python scripts/install.py --check --engine primacpp
 ```
 
 **CLI/UI rebuild only** (no llama/toolchains):
@@ -406,6 +416,8 @@ kllm run --model file.gguf
 | `vendor/bin/` | Staged `llama-server` / `rpc-server` |
 | `vendor/bin/llama-release.txt` | Local stamp of the installed tag (gitignored under `vendor/`) |
 | `vendor/llama.cpp/` | Source + cmake build tree |
+| `vendor/prima/` | Staged Prima `llama-server` / `llama-cli` / `profile-tool` + manifest |
+| `vendor/prima.cpp/` | Prima source + cmake build tree |
 | `~/.kllm/` | Runtime state (`cluster.json`, models, API token, `hf_token`; old WireGuard keys are retained for operator recovery) |
 
 ---
@@ -451,7 +463,7 @@ independent. CONNECT provisions copies automatically from this checkout through
 
 ## Guided private-network administrator helper
 
-The supported installer builds and copies `vendor/bin/kllm-network-helper` (`.exe` on Windows) independently of Python. No helper runs with elevated privileges during install/build. The Home → Private 10GbE network panel is hidden until `kllm flags private-network-setup --enable`; once shown it displays the administrator notice, and the local enable button requests OS approval and installs the protected helper for the original user's account and pinned cluster master.
+The supported installer builds and copies `vendor/bin/kllm-network-helper` and `vendor/bin/kllm-mdns-browse` (`.exe` on Windows) independently of Python. No helper runs with elevated privileges during install/build. The Home → Private 10GbE network panel is hidden until `kllm flags private-network-setup --enable`; once shown it displays the administrator notice, and the local enable button requests OS approval and installs the protected helper for the original user's account and pinned cluster master.
 
 macOS uses a protected `/Library/PrivilegedHelperTools/com.kllm.network` binary and system LaunchDaemon; Linux uses `/usr/local/libexec/kllm-network-helper`, `/etc/kllm-network` grants/journals and a systemd service, with `pkexec` for local authorization; Windows uses a protected Program Files helper and SYSTEM scheduled task. IPC is an account-restricted local socket or named pipe. The helper never imports Python or receives arbitrary executable paths or commands. Keep the ordinary agent under its existing account and credential directory.
 

@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
-from kllm.modules.runtimes.interactors.registry import file_digest
+from kllm.modules.primacpp.interactors.preparation_metrics import digest_file, measure
 from kllm.shared.atomic_io import replace_file
 
 
@@ -39,6 +39,8 @@ class ModelStager:
         *,
         check: Callable[[], None],
         reserve_bytes: int = 64 * 1024 * 1024,
+        progress: Callable[[int, int], None] | None = None,
+        stage_progress: Callable[[str, int, int], None] | None = None,
     ) -> Path:
         if isinstance(size, bool) or size <= 0 or reserve_bytes < 0:
             raise ValueError("Model size and disk reserve must be valid")
@@ -48,26 +50,60 @@ class ModelStager:
             raise ValueError("Model cache cannot be a symlink")
         final, partial = self._paths(digest)
         offset = self.offset(digest)
-        if final.exists() and final.stat().st_size == size and file_digest(final) == digest:
+        def report(stage, done, total):
+            if stage_progress is not None:
+                stage_progress(stage, done, total)
+
+        if final.exists() and final.stat().st_size == size and digest_file(
+            final, check=check, stage="cache_verify", asset=digest,
+            progress=lambda done, total: report("cache_verify", done, total),
+        ) == digest:
+            check()
+            with measure("cache_hit", asset=digest) as counts:
+                counts["cache_hit_bytes"] = size
+                counts["accepted_bytes"] = size
+            report("cache_hit", size, size)
+            if progress is not None:
+                progress(size, size)
             return final
         if offset > size:
             partial.unlink()
             offset = 0
         if self.disk_free(self.root) < size - offset + reserve_bytes:
             raise ValueError("Not enough disk space to stage the selected model")
-        with partial.open("ab") as output:
+        with measure("resume", asset=digest) as counts:
+            counts["resume_bytes"] = offset
+        report("resume", offset, size)
+        if progress is not None:
+            progress(offset, size)
+        copied = 0
+        with measure("local_copy", asset=digest) as counts, partial.open("ab") as output:
+            report("local_copy", offset, size)
             for chunk in chunks(offset):
                 check()
-                if not isinstance(chunk, bytes) or offset + len(chunk) > size:
+                if not isinstance(chunk, bytes) or not chunk or offset + len(chunk) > size:
                     raise ValueError("Model transfer exceeds the declared asset size")
                 output.write(chunk)
                 offset += len(chunk)
+                copied += len(chunk)
+                counts["copied_bytes"] = copied
+                counts["accepted_bytes"] = copied
+                counts["callbacks"] = counts.get("callbacks", 0) + 1
+                report("local_copy", offset, size)
+                if progress is not None:
+                    progress(offset, size)
         check()
         if offset != size:
             raise ValueError("Model transfer incomplete; resume from the cached offset")
-        if file_digest(partial) != digest:
+        if digest_file(partial, check=check, stage="final_verify", asset=digest,
+                       progress=lambda done, total: report("final_verify", done, total)) != digest:
             partial.unlink()
             raise ValueError("Model transfer digest mismatch; retry from the beginning")
         check()
-        replace_file(partial, final)
+        with measure("publication", asset=digest) as counts:
+            replace_file(partial, final)
+            counts["publications"] = 1
+        report("publication", size, size)
+        if progress is not None:
+            progress(size, size)
         return final

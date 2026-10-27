@@ -13,13 +13,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from kllm.modules.inference.entities import RunBody
 from kllm.modules.primacpp.entities import DeviceProfile, ProfileRequest, PrimaTopology
 from kllm.modules.primacpp.interactors.benchmark import Measurement, Workload, evaluate
 from kllm.modules.primacpp.interactors.build import managed_prima_build, parse_device_report
 from kllm.modules.primacpp.interactors.placement import (
     topology_from_plan,
     layer_windows,
+    graph_visits,
+    require_layer_execution,
     rank_launch,
+    rank_cli_args,
     network_edges,
 )
 from kllm.modules.primacpp.interactors.preparation import (
@@ -34,7 +38,7 @@ from kllm.modules.primacpp.interactors.profiles import (
 )
 from kllm.modules.primacpp.interactors.recipe import recipe, recipe_digest, require_qualified
 from kllm.modules.primacpp.interactors.staging import ModelStager
-from kllm.modules.runtimes.entities import SourceRequest, RuntimeVersion, runtime_id
+from kllm.modules.runtimes.entities import BuildRequest, SourceRequest, RuntimeVersion, runtime_id
 from kllm.modules.runtimes.interactors.source import resolve
 from kllm.modules.runtimes.interactors.registry import RuntimeRegistry, file_digest
 from kllm.modules.runtimes.interactors.runtime_control import RuntimeControlService
@@ -136,6 +140,137 @@ def test_prima_stale_saved_build_is_retained_but_requires_rebuild(tmp_path):
         with pytest.raises(ValueError, match="resolve and rebuild"):
             registry.capture(old_version.runtime_id)
         assert registry.data["versions"][old_version.runtime_id]["build"] is not None
+    finally:
+        registry.close()
+
+
+def test_prima_stale_pin_never_reaches_the_installer(tmp_path):
+    """A pin saved under an earlier recipe is refused before any build starts."""
+    definition = recipe()
+    old_digest = "0" * 64
+    stale = RuntimeVersion(
+        engine="primacpp", repository=definition["source_repository"],
+        ref=definition["source_commit"], ref_type="commit",
+        commit=definition["source_commit"], recipe_digest=old_digest,
+        runtime_id=runtime_id(
+            definition["source_repository"], definition["source_commit"], "primacpp", old_digest
+        ),
+    )
+    started = []
+    registry = RuntimeRegistry(
+        tmp_path, lambda: tmp_path,
+        builder=lambda version, backend, identity: started.append(identity),
+    )
+    try:
+        registry.add(stale)
+        with pytest.raises(ValueError, match="resolve the source again"):
+            registry.build(BuildRequest(
+                runtime_id=stale.runtime_id, backend="vulkan", request_id=str(uuid4()),
+            ))
+        assert started == []
+        assert registry.data["jobs"] == {}
+        assert registry.data["versions"][stale.runtime_id]["build"] is None
+    finally:
+        registry.close()
+
+
+def test_prima_snapshot_reports_probed_build_capabilities(tmp_path):
+    """The managed build manifest's capability probe reaches the dashboard."""
+    version = prima_version()
+    capabilities = {
+        "backends": ["vulkan"],
+        "devices": [{"backend": "Vulkan", "name": "Vulkan0", "description": "Fixture GPU"}],
+        "features": ["ring_tcp", "t5_segmented_v1", "explicit_devices_v1"],
+    }
+    registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
+    try:
+        registry.add(version)
+        registry.data["versions"][version.runtime_id]["build"] = {
+            **version.model_dump(), "transport": "prima-ring-tcp",
+            "build_id": "fixture", "backend": "vulkan", "platform": "Windows",
+            "capabilities": capabilities,
+            "artifact_dir": str(registry.root / "fixture-build"),
+        }
+        registry._save()
+    finally:
+        registry.close()
+    registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
+    try:
+        entry = registry.snapshot()["versions"][0]
+        assert entry["build"]["capabilities"]["features"] == capabilities["features"]
+        assert "vulkan" in entry["build"]["capabilities"]["backends"]
+    finally:
+        registry.close()
+
+
+def test_prima_release_tag_resolves_to_the_pinned_identity(monkeypatch):
+    from kllm.modules.runtimes.interactors import source as source_mod
+
+    definition = recipe()
+
+    def refs(repository):
+        assert repository == definition["source_repository"]
+        return {f"refs/tags/{definition['source_release']}": definition["source_commit"]}
+
+    monkeypatch.setattr(source_mod, "refs", refs)
+    by_tag = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref=definition["source_release"], ref_type="tag", name=f"Prima.cpp {definition['source_release']}",
+    ))
+    by_commit = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref=definition["source_commit"], ref_type="commit",
+    ))
+    assert by_tag.commit == by_commit.commit == definition["source_commit"]
+    assert by_tag.runtime_id == by_commit.runtime_id
+    assert by_tag.recipe_digest == recipe_digest()
+
+
+def test_prima_resolves_custom_tags_branches_commits_and_rejects_moved_release(monkeypatch):
+    from kllm.modules.runtimes.interactors import source as source_mod
+
+    definition = recipe()
+    monkeypatch.setattr(source_mod, "refs", lambda repository: {
+        "refs/tags/1.0.0": "b" * 40,
+        "refs/heads/feat/ring": "d" * 40,
+        f"refs/tags/{definition['source_release']}": "c" * 40,
+    })
+    by_tag = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref="1.0.0", ref_type="tag",
+    ))
+    assert by_tag.commit == "b" * 40
+    assert by_tag.recipe_digest == recipe_digest()
+
+    by_branch = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository="https://github.com/example-lab/prima.cpp.git",
+        ref="feat/ring", ref_type="branch",
+    ))
+    assert by_branch.commit == "d" * 40
+    assert by_branch.recipe_digest == recipe_digest()
+
+    by_commit = source_mod.resolve(SourceRequest(
+        engine="primacpp", repository=definition["source_repository"],
+        ref="e" * 40, ref_type="commit",
+    ))
+    assert by_commit.commit == "e" * 40
+    assert by_commit.recipe_digest == recipe_digest()
+
+    with pytest.raises(ValueError, match="moved"):
+        source_mod.resolve(SourceRequest(
+            engine="primacpp", repository=definition["source_repository"],
+            ref=definition["source_release"], ref_type="tag",
+        ))
+
+
+def test_prima_snapshot_publishes_the_pinned_release(tmp_path):
+    definition = recipe()
+    registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
+    try:
+        source = registry.snapshot()["engine_sources"][0]
+        assert source["release"] == definition["source_release"]
+        assert source["release_commit"] == definition["source_release_commit"] == definition["source_commit"]
+        assert source["recipe_digest"] == recipe_digest()
     finally:
         registry.close()
 
@@ -245,12 +380,49 @@ def test_topology_preserves_roles_allocations_and_local_device_names():
     assert layer_windows(value) == [3, 5]
     launch = rank_launch(value, "worker")
     assert launch["ngl"] == 5 and launch["devices"] == ["CUDA0"]
-    assert launch["extra_args"][launch["extra_args"].index("-ngl") + 1] == "5"
+    assert launch["world"] == 2
+    assert launch["rank"] == 1
+    assert launch["master"] == "10.10.10.2"
+    assert launch["next"] == "10.10.10.2"
+    assert launch["data_port"] == 9000
+    assert launch["signal_port"] == 10000
+    assert launch["layer_window"] == "3,5"
     assert launch["env"] == {"KLLM_PRIMA_BIND": "10.10.10.3"}
     assert launch["tensor_split"] == "1"
-    assert launch["extra_args"][launch["extra_args"].index("-ts") + 1] == "1"
-    assert "3,5" in launch["extra_args"]
+    assert launch["extra_args"] == []
+    cli_args = rank_cli_args(launch)
+    assert cli_args[cli_args.index("-ngl") + 1] == "5"
+    assert cli_args[cli_args.index("-ts") + 1] == "1"
+    assert "3,5" in cli_args
     assert {e["port"] for e in network_edges(value)} == {9000, 9001, 10001}
+
+
+def test_rpc_gpu_indices_and_multidevice_boundaries_preserve_exact_layers():
+    inventory = members()
+    inventory["worker"]["devices"] = [{"device": "Vulkan0"}, {"device": "Vulkan1"}]
+    inventory["worker"]["rpc_devices"] = [
+        {"index": 0, "device": "CPU", "memory_kind": "ram", "backend": "cpu"},
+        {"index": 1, "device": "Vulkan0", "memory_kind": "gpu", "backend": "vulkan"},
+        {"index": 2, "device": "Vulkan1", "memory_kind": "gpu", "backend": "vulkan"},
+    ]
+    source = plan()
+    source["estimated_layers"] = 3
+    source["device_allocations"] = [
+        {"node_id": "worker", "layer_start": start, "layer_end": end,
+         "layers": end - start, "device": f"RPC[10.10.10.3:50052]/{index}",
+         "rpc_index": index, "local": False, "memory_kind": "gpu"}
+        for start, end, index in ((0, 2, 1), (2, 3, 2))
+    ]
+    value = topology_from_plan(source, inventory, "a" * 64)
+    assert value.ranks[1].devices == ["Vulkan0", "Vulkan1"]
+    assert value.ranks[1].tensor_split == [2.0, 1.0]
+    assert rank_launch(value, "worker")["tensor_split"] == "2,1"
+    source["device_allocations"].append({
+        **source["device_allocations"][0], "layer_start": 3, "layer_end": 4, "layers": 1,
+    })
+    source["estimated_layers"] = 4
+    with pytest.raises(ValueError, match="interleaved GPU device"):
+        topology_from_plan(source, inventory, "a" * 64)
 
 
 def test_cpu_worker_and_zero_layer_master_are_preserved():
@@ -300,6 +472,164 @@ def test_master_cpu_prefix_and_gpu_suffix_are_not_silently_reordered():
     value = topology_from_plan(source, members(), "a" * 64)
     with pytest.raises(ValueError, match="window order"):
         layer_windows(value)
+
+
+def test_segmented_graph_visits_match_absolute_rank_transitions():
+    source = plan()
+    source["cpu_layers"] = 2
+    source["device_allocations"][0].update(layer_start=2, layers=3)
+    value = topology_from_plan(source, members(), "a" * 64)
+    assert graph_visits(value) == {"master": 4, "worker": 1}
+    with pytest.raises(ValueError, match="window order"):
+        require_layer_execution(value, set(), {})
+    with pytest.raises(ValueError, match="per-visit graph reservations"):
+        require_layer_execution(value, {"segmented_placement"}, {
+            "prima_graphs": True, "prima_graph_counts": {"master": 3, "worker": 1}})
+    require_layer_execution(value, {"segmented_placement"}, {
+        "prima_graphs": True, "prima_graph_counts": {"master": 4, "worker": 1}})
+
+
+def test_preview_refuses_missing_segmented_graph_capacity(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = plan()
+    source["cpu_layers"] = 2
+    source["device_allocations"][0].update(layer_start=2, layers=3)
+    source["resolved_launch_settings"] = {"prima_graphs": True}
+    source["prima_graph_counts"] = {"master": 3, "worker": 1}
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": ["segmented_placement"]}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+
+    def preview():
+        return planner.preview(body, runtime, members(), model, lambda *_: source)
+
+    blocked = preview()
+    assert blocked["inference_supported"] is False
+    assert any("per-visit graph reservations" in error for error in blocked["qualification_errors"])
+    source["prima_graph_counts"]["master"] = 4
+    assert preview()["inference_supported"] is True
+
+
+def test_preparation_retains_placement_failure_before_asset_work(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = {**plan(), "expert_offloaded": True}
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": []}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: ["Unqualified runtime"])
+    value = planner.preview(body, runtime, members(), model, lambda *_: source)
+    assert value["prima_topology"] is None
+    assert len(value["placement_errors"]) == 1
+    assert "remote MoE tensor placement" in value["placement_errors"][0]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unsupported placement must not hash or stage model assets")
+
+    monkeypatch.setattr(planner, "asset_files", forbidden)
+    with pytest.raises(ValueError, match="remote MoE tensor placement"):
+        planner.materialize(body, runtime, members(), model, lambda *_: source,
+                            expected_digest=value["plan_digest"])
+
+
+def test_preparation_capacity_failure_preserves_allocator_reason():
+    from kllm.modules.primacpp.interactors.planner import candidates
+
+    with pytest.raises(ValueError, match="retained graph visits.*Reduce context"):
+        candidates(RunBody(model="model.gguf"), members(), lambda *_: {
+            "fit_status": "overflow", "hint": "Prima retained graph visits exceed host or device capacity"})
+
+
+def test_plan_digest_ignores_volatile_capacity_and_latency(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": []}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+    first = plan()
+    first["device_allocations"][0].update(
+        budget_bytes=100, latency_ms=1.5, score=0.9, estimated_bytes=4096
+    )
+    second = json.loads(json.dumps(first))
+    # Live capacity, probe latency and their derived score change between
+    # consecutive plans on a real cluster and must not invalidate the digest.
+    second["device_allocations"][0].update(budget_bytes=200, latency_ms=9.9, score=0.1)
+    stable = planner.preview(body, runtime, members(), model, lambda *_: first)["plan_digest"]
+    moved = planner.preview(body, runtime, members(), model, lambda *_: second)["plan_digest"]
+    assert stable == moved
+    second["device_allocations"][0]["layers"] = 4
+    changed = planner.preview(body, runtime, members(), model, lambda *_: second)["plan_digest"]
+    assert changed != stable
+
+
+def test_preview_refuses_a_family_the_runtime_does_not_implement(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = plan()
+    runtime = {
+        "runtime_id": "a" * 64,
+        "capabilities": {"features": [], "architectures": ["llama", "qwen35"]},
+    }
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+    monkeypatch.setattr(planner, "model_architecture", lambda _: "kolibri1")
+
+    blocked = planner.preview(body, runtime, members(), model, lambda *_: source)
+    assert blocked["inference_supported"] is False
+    assert blocked["model_support"]["supported"] is False
+    assert any("PRIMA_MODEL_UNSUPPORTED" in error for error in blocked["qualification_errors"])
+
+    monkeypatch.setattr(planner, "model_architecture", lambda _: "qwen35")
+    allowed = planner.preview(body, runtime, members(), model, lambda *_: source)
+    assert allowed["inference_supported"] is True
+    assert allowed["qualification_warnings"] == []
+    assert allowed["model_support"] == {"supported": True, "error": None, "warning": None}
+
+    # A runtime that does not advertise its families plans with a warning, never a refusal.
+    monkeypatch.setattr(planner, "model_architecture", lambda _: None)
+    unknown = planner.preview(
+        body, {**runtime, "capabilities": {"features": []}}, members(), model, lambda *_: source
+    )
+    assert unknown["inference_supported"] is True
+    assert any("PRIMA_MODEL_SUPPORT_UNKNOWN" in w for w in unknown["qualification_warnings"])
+
+
+def test_preview_reports_a_measured_decline_instead_of_missing_profiles(tmp_path, monkeypatch):
+    from kllm.modules.primacpp.interactors import planner
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    body = RunBody(model=model.name)
+    source = plan()
+    members_value = members()
+    runtime = {"runtime_id": "a" * 64, "capabilities": {"features": []}}
+    monkeypatch.setattr(planner, "qualification_errors", lambda _: [])
+
+    def declined(feasible):
+        return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None,
+            "reason": "Profiled costs do not cover these effective execution settings: f16 K/V cache"}
+
+    result = planner.preview(body, runtime, members_value, model, lambda *_: source, score=declined)
+    assert result["scheduler"]["fallback_reason"].startswith("Profiled costs do not cover")
+    assert result["scheduler"]["missing_profile_nodes"] == []
+    assert result["profiling"]["status"] == "unmeasured"
+    assert result["profiling"]["reason"].startswith("Profiled costs do not cover")
+
+    # Without a measured reason the honest missing-profile gate is preserved.
+    def silent(feasible):
+        return feasible[0], {"status": "unmeasured", "predicted_decode_ms": None}
+
+    plain = planner.preview(body, runtime, members_value, model, lambda *_: source, score=silent)
+    assert plain["scheduler"]["fallback_reason"] == "missing_device_profiles"
+    assert plain["scheduler"]["missing_profile_nodes"]
 
 
 @pytest.mark.parametrize("change", [{"split_mode": "tensor"}, {"expert_offloaded": True}])
@@ -357,6 +687,10 @@ def test_artifact_verification_and_selection_gate(tmp_path):
 def test_native_launch_gate_precedes_process_creation(monkeypatch):
     monkeypatch.setattr(
         native, "require_native", lambda: pytest.fail("Must not reach native spawn")
+    )
+    gates = {**recipe()["qualification"], "vulkan_gpu_inference": False}
+    monkeypatch.setattr(
+        "kllm.modules.primacpp.interactors.recipe.recipe", lambda: {"qualification": gates}
     )
     with use_runtime({"engine": "primacpp"}):
         with pytest.raises(ValueError, match="not qualified"):
@@ -543,12 +877,14 @@ def test_real_profile_process_and_owned_logs(tmp_path, backend):
         result = jobs.job(job["job_id"])
         if backend == "vulkan":
             assert result["phase"] == "failed", result
-            assert "vulkan GPU profiling is unavailable" in result["error"]
+            assert "physical Vulkan profiler device evidence" in result["error"]
             assert not jobs.cache.root.exists()
+            # A refused job still owns a diagnosable log with the refusal reason.
+            assert "physical Vulkan profiler device evidence" in jobs.logs(job["job_id"])
         else:
             assert result["phase"] == "prepared", result
             assert result["profile"]["cpu_layer_ms"] == 1.0
-        assert "KLLM_PRIMA_PROFILE=" in jobs.logs(job["job_id"])
+            assert "KLLM_PRIMA_PROFILE=" in jobs.logs(job["job_id"])
         assert jobs.start(request)["job_id"] == job["job_id"]
         state.process_pid = 123
         with pytest.raises(ValueError, match="active run"):
@@ -616,7 +952,7 @@ def test_preparation_http_rejects_malformed_identity_before_control(tmp_path):
         registry.close()
 
 
-def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path):
+def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path, monkeypatch):
     registry = RuntimeRegistry(tmp_path, lambda: tmp_path)
     state = ClusterState(role="master", node_id="master")
     authority = SimpleNamespace(cluster_binding_id=uuid4())
@@ -639,6 +975,14 @@ def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path):
     try:
         version = prima_version()
         registry.add(version)
+        default_recipe = recipe()
+        unqualified = {
+            **default_recipe,
+            "qualification": {**default_recipe["qualification"], "vulkan_gpu_inference": False},
+        }
+        monkeypatch.setattr(
+            "kllm.modules.primacpp.interactors.recipe.recipe", lambda *_: unqualified
+        )
         with TestClient(app, client=("127.0.0.1", 12)) as client:
             response = client.put(
                 "/v2/cluster/runtime-target",
@@ -649,10 +993,145 @@ def test_unqualified_cluster_target_is_refused_without_changing_state(tmp_path):
                     "request_id": str(uuid4()),
                 },
             )
-        assert response.status_code == 409
-        assert "not qualified" in response.json()["detail"]["message"]
-        assert registry.target() is None
-        assert registry.data["running"] is None
-        assert not registry.data["jobs"]
+            assert response.status_code == 409
+            assert "not qualified" in response.json()["detail"]["message"]
+            assert registry.target() is None
+            assert registry.data["running"] is None
+            assert not registry.data["jobs"]
+
+            monkeypatch.setattr(
+                "kllm.modules.primacpp.interactors.recipe.recipe", lambda *_: default_recipe
+            )
+            accepted = client.put(
+                "/v2/cluster/runtime-target",
+                headers={"Authorization": "valid"},
+                json={
+                    "runtime_id": version.runtime_id,
+                    "expected_revision": 0,
+                    "request_id": str(uuid4()),
+                },
+            )
+            assert accepted.status_code == 200
+            assert registry.target()["version"]["runtime_id"] == version.runtime_id
     finally:
         registry.close()
+
+
+def test_multinode_live_cluster_prima_topology_with_terminal_output_pinning():
+    # Tests live cluster topology where master is 049f6c77, worker 1 is master1, and worker 2 is a83ac5b6
+    members_data = {
+        "049f6c77": {
+            "node_id": "049f6c77",
+            "role": "master",
+            "hostname": "win-master-host",
+            "host": "10.10.10.3",
+            "lan_host": "10.10.10.3",
+            "backend": "vulkan",
+            "actual_backend": "vulkan",
+            "platform": "Windows",
+            "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 16 * 1024**3}],
+        },
+        "master1": {
+            "node_id": "master1",
+            "role": "worker",
+            "hostname": "Karahan-M1-Pro.local",
+            "host": "10.10.10.2",
+            "lan_host": "10.10.10.2",
+            "backend": "vulkan",
+            "actual_backend": "vulkan",
+            "platform": "Darwin",
+            "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 32 * 1024**3}],
+            "rpc_devices": [{"device": "GPU0", "index": 0, "memory_kind": "gpu"}],
+        },
+        "a83ac5b6": {
+            "node_id": "a83ac5b6",
+            "role": "worker",
+            "hostname": "LMUK-CJ7G5VHVFC",
+            "host": "10.10.10.1",
+            "lan_host": "10.10.10.1",
+            "backend": "vulkan",
+            "actual_backend": "vulkan",
+            "platform": "Darwin",
+            "devices": [{"device": "GPU0", "backend": "vulkan", "vram_bytes": 40 * 1024**3}],
+            "rpc_devices": [{"device": "GPU0", "index": 0, "memory_kind": "gpu"}],
+        },
+    }
+    # Plan where master holds 0..10, worker1 holds 10..20, worker2 holds 20..32,
+    # and the terminal output stage (32..33) is pinned to master 049f6c77.
+    plan_data = {
+        "estimated_layers": 32,
+        "split_mode": "layer",
+        "fit_status": "fits",
+        "cpu_layers": 0,
+        "device_allocations": [
+            {
+                "node_id": "049f6c77",
+                "layer_start": 0,
+                "layer_end": 10,
+                "layers": 10,
+                "device": "GPU0",
+                "local": True,
+                "memory_kind": "gpu",
+            },
+            {
+                "node_id": "master1",
+                "layer_start": 10,
+                "layer_end": 20,
+                "layers": 10,
+                "device": "RPC[10.10.10.2:50052]/0",
+                "rpc_index": 0,
+                "local": False,
+                "memory_kind": "gpu",
+            },
+            {
+                "node_id": "a83ac5b6",
+                "layer_start": 20,
+                "layer_end": 32,
+                "layers": 12,
+                "device": "RPC[10.10.10.1:50052]/0",
+                "rpc_index": 0,
+                "local": False,
+                "memory_kind": "gpu",
+            },
+            {
+                "node_id": "049f6c77",
+                "layer_start": 32,
+                "layer_end": 33,
+                "layers": 1,
+                "device": "GPU0",
+                "local": True,
+                "memory_kind": "gpu",
+            },
+        ],
+    }
+    topology = topology_from_plan(plan_data, members_data, "a" * 64)
+    assert len(topology.ranks) == 3
+    # Master node must be at rank 0
+    assert topology.ranks[0].node_id == "049f6c77"
+    assert topology.ranks[0].role == "master"
+    assert topology.ranks[0].output_gpu is True
+    assert topology.ranks[0].ngl == 10
+    # Worker nodes follow in layer execution order
+    assert topology.ranks[1].node_id == "master1"
+    assert topology.ranks[1].role == "worker"
+    assert topology.ranks[1].ngl == 10
+    assert topology.ranks[2].node_id == "a83ac5b6"
+    assert topology.ranks[2].role == "worker"
+    assert topology.ranks[2].ngl == 12
+
+    # Verify that if a worker had been given the terminal output stage (e.g. layer_end=33 on a83ac5b6),
+    # topology_from_plan rejects it with ValueError
+    bad_plan = {
+        **plan_data,
+        "device_allocations": [
+            plan_data["device_allocations"][0],
+            plan_data["device_allocations"][1],
+            {
+                **plan_data["device_allocations"][2],
+                "layer_end": 33,
+                "layers": 13,
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="Prima output stage must remain on the rank-zero master"):
+        topology_from_plan(bad_plan, members_data, "a" * 64)

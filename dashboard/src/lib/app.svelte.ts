@@ -78,12 +78,16 @@ export function createApp(): App {
   http.loadModels = () => models.loadModels();
   http.onDownloadAccepted = (id) => models.noteAcceptedDownload(id);
 
-  live.onArea('status', (data) => cluster.applyStatus(data as Status));
+  live.onArea('status', (data) => {
+    cluster.applyStatus(data as Status);
+    runtimes.preparation.observe((data as Status).runtimes?.prima_preparation ?? null);
+    if (run.settingsScope === 'primacpp') runtimes.deployment.schedule();
+  });
   live.onArea('usage', (data) => usage.applyUsage(data as UsageLive));
   live.onArea('load', (data) => run.applyLoad(data as LiveProgress<LoadProgress>));
   live.onArea('download', (data) => models.applyDownloadRecords(data as LiveProgress<DownloadJob>));
   live.refreshDirect = () => cluster.refreshDirect();
-  live.onConnectionLost = clearErrors;
+  live.onConnectionLost = () => { clearErrors(); runtimes.deployment.changed(); };
   live.onUnavailable = () => {
     cluster.statusSeen = true;
   };
@@ -128,6 +132,8 @@ export function createApp(): App {
       http.apiToken = '';
       live.stop();
       run.stopTimers();
+      runtimes.deployment.stop();
+      runtimes.preparation.stop();
     }
   };
   singleton = app;

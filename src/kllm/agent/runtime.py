@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 import httpx
 from kllm.shared import http_clients, rpc_cache
 from kllm.modules.runtimes.interactors.registry import RuntimeRegistry
+from kllm.modules.runtimes.interactors.selection import snapshot as inference_runtime_snapshot
 from kllm.modules.runtimes.interactors.runtime_control import RuntimeControlService
 from kllm.modules.runtimes.router_http import build_router as build_runtime_router
 import secrets
@@ -449,9 +450,10 @@ _model_service = ModelService(
     ThreadPoolExecutor(max_workers=1, thread_name_prefix="kllm-download"),
 )
 membership_mod.reconcile_last_plan(state_ref.current())
-if not state_ref.current().node_id:
-    state_ref.current().node_id = secrets.token_hex(4)
-    state_ref.current().save()
+with state_ref.current().lock:
+    if not state_ref.current().node_id:
+        state_ref.current().node_id = secrets.token_hex(4)
+        state_ref.current().save()
 
 
 def _network_state_service() -> NetworkStateService:
@@ -667,13 +669,14 @@ def _worker_local_leave() -> None:
         runtime.clear_children()
     _managed_network_before_reset()
     _reset_netsec_state()
-    membership_mod.clear_membership_fields(state_ref.current())
-    state_ref.current().role = "idle"
-    state_ref.current().join_key = None
-    state_ref.current().master_host = None
-    state_ref.current().model_name = None
-    state_ref.current().gpu_ids = None
-    state_ref.current().save()
+    with state_ref.current().lock:
+        membership_mod.clear_membership_fields(state_ref.current())
+        state_ref.current().role = "idle"
+        state_ref.current().join_key = None
+        state_ref.current().master_host = None
+        state_ref.current().model_name = None
+        state_ref.current().gpu_ids = None
+        state_ref.current().save()
 
 
 def _master_control_base() -> str:
@@ -857,7 +860,7 @@ def _require_key(x_kllm_key: str | None = Header(default=None)) -> None:
         return
     if not state_ref.current().join_key:
         raise HTTPException(503, "master has no join key")
-    if x_kllm_key != state_ref.current().join_key:
+    if not secrets.compare_digest(x_kllm_key or "", state_ref.current().join_key or ""):
         raise HTTPException(401, "invalid join key")
 
 
@@ -1459,19 +1462,43 @@ def _run_settings_handlers() -> RunSettingsHandlers:
         model_settings_store,
         model_ops.resolve_local_model,
         available_threads,
+        capture_runtime=lambda identity: _runtime_registry().capture(identity),
+    )
+
+
+def _engine_settings_handlers():
+    from kllm.modules.inference.gateways.engine_settings import EngineSettingsStore
+    from kllm.modules.inference.interactors.engine_settings import EngineSettingsHandlers
+
+    return EngineSettingsHandlers(
+        EngineSettingsStore(home_dir() / "engine-model-settings.json"),
+        model_settings_store, model_ops.resolve_local_model,
+        lambda identity: _runtime_registry().capture(identity),
+        lambda body, path: _run_settings_handlers().preflight(body, path),
     )
 
 
 def _inference_handlers() -> InferenceHandlers:
+    from kllm.shared.runtime_resources import node_resources
+
     service = getattr(app.state, "managed_network", None)
     return InferenceHandlers(
         InferenceDependencies(
             state=state_ref.current(),
+            runtime_resources=(lambda: node_resources(service.runtimes.registry))
+            if service is not None and service.runtimes is not None else None,
             runtime_context=(
                 service.runtimes.operation
                 if service is not None and service.runtimes is not None
                 else None
             ),
+            prima_run=(lambda body, path, plan, members: service.runtimes.prima.runs.launch(body, path, plan, members))
+            if service is not None and service.runtimes is not None else None,
+            prima_stop=(lambda: service.runtimes.prima.runs.stop())
+            if service is not None and service.runtimes is not None else None,
+            prima_plan=(lambda body, path, members: service.runtimes.prima.plan(
+                inference_runtime_snapshot()["runtime_id"], body, model=path, members=members))
+            if service is not None and service.runtimes is not None else None,
             resolve_settings=lambda body: _run_settings_handlers().resolve(body),
             preflight=lambda body, path: _run_settings_handlers().preflight(body, path),
             ensure_master_member=lambda: _ensure_master_member(persist=True),
@@ -1509,7 +1536,11 @@ def _inference_handlers() -> InferenceHandlers:
             network_diagnostics=lambda network_id: _managed_network_service().admission.diagnostics(
                 network_id
             ),
-            network_members=lambda network_id: _managed_network_service().admission.members(
+            network_members=lambda network_id: (
+                _managed_network_service().prima_admission
+                if (inference_runtime_snapshot() or {}).get("engine") == "primacpp"
+                else _managed_network_service().admission
+            ).members(
                 network_id
             ),
             network_run=lambda network_id: (
@@ -1559,9 +1590,6 @@ def _mount_dashboard() -> None:
     _mount_dashboard_routes(app, _dashboard_dir())
 
 
-from kllm.modules.runtimes.endpoints import (  # noqa: E402
-    llama_setup,
-)
 from kllm.modules.cluster.endpoints import (  # noqa: E402
     discover,
     status,
@@ -1572,6 +1600,7 @@ from kllm.modules.cluster.endpoints import (  # noqa: E402
     register,
     unregister,
     heartbeat,
+    set_cluster_providers,
 )
 from kllm.modules.models.endpoints import (  # noqa: E402
     list_models,
@@ -1580,10 +1609,23 @@ from kllm.modules.models.endpoints import (  # noqa: E402
     download_progress,
     cancel_download,
     delete_model,
+    set_model_handlers_provider,
 )
 from kllm.modules.inference.endpoints import (  # noqa: E402
+    get_engine_model_settings,
+    put_engine_model_settings,
     load_progress_endpoint,
     chat_completions,
+    embeddings,
+    raw_embeddings,
+    rerank,
+    tokenize,
+    detokenize,
+    apply_template,
+    text_completions,
+    infill,
+    raw_completions,
+    chat_completion_control,
     anthropic_messages,
     responses,
     response_tokens,
@@ -1599,10 +1641,12 @@ from kllm.modules.inference.endpoints import (  # noqa: E402
     legacy_plan,
     legacy_run,
     legacy_put_model_settings,
+    set_inference_providers,
 )
 from kllm.modules.updates.endpoints import (  # noqa: E402
     cluster_update_endpoint,
     cluster_update_progress,
+    set_cluster_update_handlers_provider,
 )
 from kllm.modules.settings.endpoints import (  # noqa: E402
     get_api_token,
@@ -1612,6 +1656,9 @@ from kllm.modules.settings.endpoints import (  # noqa: E402
     get_gpus,
     put_config,
     get_home,
+    get_feature_flags,
+    put_feature_flag,
+    set_settings_handlers_provider,
 )
 from kllm.modules.logs.endpoints import (  # noqa: E402
     get_logging,
@@ -1619,6 +1666,7 @@ from kllm.modules.logs.endpoints import (  # noqa: E402
     put_logging,
     ingest_logs,
     get_logs,
+    set_logs_providers,
 )
 from kllm.modules.usage.endpoints import (  # noqa: E402
     usage_ingest,
@@ -1626,10 +1674,12 @@ from kllm.modules.usage.endpoints import (  # noqa: E402
     usage_lifetimes,
     usage_series,
     usage_readings,
+    set_usage_handlers_provider,
 )
 from kllm.modules.live.endpoints import (  # noqa: E402
     dashboard_live,
     dashboard_live_websocket,
+    set_live_providers,
 )
 
 _route_handlers: dict[str, Callable[..., Any]] = {
@@ -1638,7 +1688,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_config": get_config,
     "put_config": put_config,
     "get_home": get_home,
-    "llama_setup": llama_setup,
+    "get_feature_flags": get_feature_flags,
+    "put_feature_flag": put_feature_flag,
     "start_master": start_master,
     "stop": stop,
     "join_cluster": join_cluster,
@@ -1653,6 +1704,16 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "fast_subnet_reconnect": fast_subnet_reconnect,
     "list_models": list_models,
     "chat_completions": chat_completions,
+    "embeddings": embeddings,
+    "raw_embeddings": raw_embeddings,
+    "rerank": rerank,
+    "tokenize": tokenize,
+    "detokenize": detokenize,
+    "apply_template": apply_template,
+    "text_completions": text_completions,
+    "infill": infill,
+    "raw_completions": raw_completions,
+    "chat_completion_control": chat_completion_control,
     "anthropic_messages": anthropic_messages,
     "responses": responses,
     "response_tokens": response_tokens,
@@ -1674,6 +1735,8 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "load_progress_endpoint": load_progress_endpoint,
     "get_model_settings": get_model_settings,
     "put_model_settings": put_model_settings,
+    "get_engine_model_settings": get_engine_model_settings,
+    "put_engine_model_settings": put_engine_model_settings,
     "usage_live": usage_live,
     "usage_ingest": usage_ingest,
     "usage_lifetimes": usage_lifetimes,
@@ -1687,6 +1750,46 @@ _route_handlers: dict[str, Callable[..., Any]] = {
     "get_hf_token": get_hf_token,
     "put_hf_token": put_hf_token,
 }
+
+set_settings_handlers_provider(_settings_handlers)
+set_cluster_update_handlers_provider(_cluster_update_handlers)
+set_usage_handlers_provider(
+    ingest=_usage_ingest_handlers,
+    live=_usage_live_handlers,
+    history=_usage_history_handlers,
+)
+set_live_providers(
+    feed=_live_feed,
+    websocket_handler=_live_websocket_handler,
+)
+set_logs_providers(
+    handlers=_log_handlers,
+    proxy=_try_proxy_master_logs,
+)
+set_cluster_providers(
+    sync_master_liveness=_sync_master_liveness,
+    dashboard_status_service=_dashboard_status_service,
+    master_start_handler=_master_start_handler,
+    cluster_lifecycle_handlers=_cluster_lifecycle_handlers,
+    join_cluster=_join_cluster,
+    membership_handlers=_membership_handlers,
+)
+set_model_handlers_provider(_model_handlers)
+set_inference_providers(
+    observed_inference=lambda *a, **k: _observed_inference(*a, **k),
+    active_config=lambda: _active_config(),
+    connection_url=lambda *a, **k: _connection_url(*a, **k),
+    connection_request_url=lambda *a, **k: _connection_request_url(*a, **k),
+    master_lan_host=lambda: _master_lan_host(),
+    inference_activity=lambda: _inference_activity(),
+    run_settings_handlers=lambda: _run_settings_handlers(),
+    engine_settings_handlers=lambda: _engine_settings_handlers(),
+    template_validation_service=lambda: _template_validation_service(),
+    inference_handlers=lambda: _inference_handlers(),
+    managed_network_service=lambda: getattr(app.state, "managed_network", None),
+    managed_network_error=lambda: getattr(app.state, "managed_network_error", None),
+)
+
 legacy_v1_router = _build_v1_router(
     {
         **_route_handlers,

@@ -96,3 +96,53 @@ def status(port: int = typer.Option(DEFAULT_CONTROL_PORT, "--port")) -> None:
         console.print(mt)
     if data.get("last_plan"):
         console.print(f"Last plan: {data['last_plan']}")
+
+
+def browse(
+    key: str | None = typer.Option(None, "--key", help="Only show masters whose key id matches."),
+    timeout: float = typer.Option(2.0, "--timeout", help="How long to listen for mDNS replies."),
+    verbose: bool = typer.Option(False, "--verbose", help="Show every discovery layer and the LAN path."),
+) -> None:
+    """Discover LAN masters through mDNS, then the HTTP subnet fallback."""
+    from kllm.modules.cluster.interactors import discovery
+    from kllm.shared import lan_path
+
+    trace = discovery.BrowseTrace()
+    found = discovery.browse_masters(timeout=timeout, key=key, trace=trace)
+    if found:
+        table = Table(title="Discovered masters")
+        table.add_column("name")
+        table.add_column("host")
+        table.add_column("port")
+        table.add_column("key id")
+        for master in found:
+            table.add_row(master.name, master.host, str(master.port), master.key_id or "—")
+        console.print(table)
+    else:
+        console.print("[yellow]No masters discovered[/yellow]")
+    if verbose:
+        attempts = Table(title="Discovery layers")
+        attempts.add_column("layer")
+        attempts.add_column("target")
+        attempts.add_column("result")
+        attempts.add_column("time")
+        for attempt in trace.attempts:
+            result = "ok" if attempt.ok else (attempt.reason or "failed")
+            attempts.add_row(
+                attempt.layer,
+                attempt.target,
+                f"{result}, {attempt.masters} masters",
+                f"{attempt.duration_ms} ms",
+            )
+        if trace.attempts:
+            console.print(attempts)
+        caps = discovery.probe_capabilities()
+        console.print(f"interpreter: [dim]{caps['interpreter']}[/dim]")
+        console.print(f"python helpers: {caps['python_helpers'] or '—'}")
+        console.print(f"native helpers: {caps['native_helpers'] or '—'}")
+        console.print(f"interfaces: {caps['interfaces'] or '—'}")
+        path = lan_path.detect()
+        console.print(f"zscaler: {path.zscaler}  tunnels: {path.tunnel_interfaces or '—'}")
+        for tip in path.advice():
+            console.print(f"[yellow]{tip}[/yellow]")
+    raise typer.Exit(0 if found else 1)

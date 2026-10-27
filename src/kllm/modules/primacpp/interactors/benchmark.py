@@ -23,9 +23,13 @@ class Workload(Record):
     oom_failures: int = Field(ge=0)
 
 
-def evaluate(workloads: list[Workload]) -> dict:
+def evaluate(workloads: list[Workload], *, scope: str = "distributed") -> dict:
+    if scope not in ("local", "distributed"):
+        raise ValueError("Unknown Prima performance qualification scope")
     if not workloads:
         raise ValueError("Performance gate requires measured workloads")
+    if scope == "local" and any(w.target_distributed for w in workloads):
+        raise ValueError("Local qualification cannot label a workload as physical distributed")
     reports = []
     for workload in workloads:
         required = {
@@ -75,6 +79,8 @@ def evaluate(workloads: list[Workload]) -> dict:
             }
         )
     return {
-        "passed": all(r["passed"] for r in reports) and any(r["target_improved"] for r in reports),
+        "scope": scope,
+        "passed": all(r["passed"] for r in reports)
+        and (scope == "local" or any(r["target_improved"] for r in reports)),
         "workloads": reports,
     }

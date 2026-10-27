@@ -356,3 +356,4 @@ CONTROL_V2: tuple[tuple[str, str, str], ...] = (
     ('/events', 'GET', 'dashboard_live'),
     ('/events', 'WEBSOCKET', 'dashboard_live_websocket'),
 )
+

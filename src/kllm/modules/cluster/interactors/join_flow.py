@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 from collections.abc import Callable
 from typing import Any
 
@@ -9,6 +10,7 @@ import httpx
 from fastapi import HTTPException
 
 from kllm.modules.cluster.interactors import discovery
+from kllm.shared import lan_path
 from kllm.shared.config import CONTROL_PROTOCOL_VERSION
 from kllm.shared.state import DEFAULT_CONTROL_PORT
 from kllm.modules.cluster.presenters.heartbeat_payload import local_hostname
@@ -18,9 +20,10 @@ def resolve_master_endpoint(master_host: str | None, master_port: int, key: str)
     """Use the given master, or the single LAN master that matches the join key."""
     if master_host:
         return master_host, master_port
+    trace = discovery.BrowseTrace()
     try:
         found = discovery.browse_masters(
-            timeout=2.5, key=key, port=master_port or DEFAULT_CONTROL_PORT
+            timeout=2.5, key=key, port=master_port or DEFAULT_CONTROL_PORT, trace=trace
         )
     except Exception as exc:
         raise HTTPException(
@@ -28,10 +31,14 @@ def resolve_master_endpoint(master_host: str | None, master_port: int, key: str)
             f"master discovery failed: {exc}; pass master_host or check the join key",
         ) from exc
     if not found:
-        raise HTTPException(
-            404,
-            "no matching master discovered on LAN; pass master_host or check join key",
-        )
+        detail = "no matching master discovered on LAN; pass master_host or check join key"
+        summary = trace.summary()
+        if summary:
+            detail += f" [discovery: {summary}]"
+        advice = lan_path.advice()
+        if advice:
+            detail += "; " + "; ".join(advice)
+        raise HTTPException(404, detail)
     if len(found) > 1:
         hosts = ", ".join(f"{m.host}:{m.port}" for m in found)
         raise HTTPException(
@@ -69,12 +76,15 @@ def build_register_payload(
         "backend": backend,
         "actual_backend": backend,
         "requested_backend": cap.get("requested_backend"),
+        "installed_backends": list(cap.get("installed_backends") or []),
         "devices": gpus,
         "unified_memory": cap.get("unified_memory", False),
         "binary_version": cap.get("binary_version"),
         "gpu_ids": gpu_ids,
         "git_head": git_head,
         "llama_release": llama_release,
+        "platform": platform.system() or None,
+        "architecture": platform.machine() or None,
     }
 
 
@@ -149,16 +159,3 @@ def post_register(
     if not isinstance(payload, dict):
         raise HTTPException(502, "master returned an invalid response")
     return payload
-
-
-def cached_llama_pack_warning(backend: str) -> str | None:
-    """Install a cached llama pack. Return a warning, or None when nothing should be recorded."""
-    try:
-        from kllm.shared.llama_pack import PackNotInstallable, install_cached_llama_pack
-
-        install_cached_llama_pack(backend=str(backend), force=False)
-    except PackNotInstallable as exc:
-        return str(exc)
-    except Exception:
-        return None
-    return None

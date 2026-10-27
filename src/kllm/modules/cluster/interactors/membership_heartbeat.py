@@ -103,9 +103,11 @@ class MembershipHeartbeatService:
         if state.role != "master":
             return
         master_id = state.node_id
-        if master_id in state.members:
-            state.members[master_id]["latency_ms"] = 0.0
-        for node_id, member in list(state.members.items()):
+        with state.lock:
+            if master_id in state.members:
+                state.members[master_id]["latency_ms"] = 0.0
+            snapshot = list(state.members.items())
+        for node_id, member in snapshot:
             if node_id == master_id or (member or {}).get("role") == "master":
                 continue
             raw = member or {}
@@ -121,10 +123,14 @@ class MembershipHeartbeatService:
                 sample_ms = (time.perf_counter() - started) * 1000.0
             except Exception:
                 continue
-            previous = raw.get("latency_ms")
-            smoothed = (
-                sample_ms
-                if previous is None
-                else _LATENCY_EMA_ALPHA * sample_ms + (1.0 - _LATENCY_EMA_ALPHA) * float(previous)
-            )
-            state.members[node_id]["latency_ms"] = smoothed
+            with state.lock:
+                current = state.members.get(node_id)
+                if not isinstance(current, dict):
+                    continue
+                previous = current.get("latency_ms")
+                smoothed = (
+                    sample_ms
+                    if previous is None
+                    else _LATENCY_EMA_ALPHA * sample_ms + (1.0 - _LATENCY_EMA_ALPHA) * float(previous)
+                )
+                current["latency_ms"] = smoothed

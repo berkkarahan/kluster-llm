@@ -89,7 +89,7 @@ fn start_worker(py: Python<'_>, config: &Bound<'_, PyDict>) -> PyResult<LaunchRe
 #[pyfunction]
 fn start_prima_rank(py: Python<'_>, config: &Bound<'_, PyDict>) -> PyResult<LaunchResult> {
     let cfg = LaunchConfig::prima_from_pydict(config)?;
-    py.allow_threads(|| process::start_process(&cfg))
+    py.detach(|| process::start_process(&cfg))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 

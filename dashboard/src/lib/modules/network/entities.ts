@@ -24,6 +24,23 @@ export type NetworkInventory = {
   error_code?: string;
 };
 
+export type PrimaListenerResource = {
+  network_id: string;
+  run_id: string;
+  manifest_digest: string;
+};
+
+export type PrimaListenerReview = PrimaListenerResource & {
+  snapshot_digest: string;
+  rules: Array<{
+    port: number;
+    peers: string[];
+    ownership: 'exact' | 'changed' | 'unknown' | 'absent';
+    original: unknown;
+    current: unknown;
+  }>;
+};
+
 export type ManagedNetwork = {
   network_id: string;
   subnet: string;

@@ -76,8 +76,20 @@ def client(tmp_path, monkeypatch):
         agent_mod.STATE.node_id = "testnode"
         agent_mod.STATE.save()
     test_client = TestClient(agent_mod.app)
-    yield test_client, agent_mod
-    test_client.close()
+    try:
+        yield test_client, agent_mod
+    finally:
+        feed = getattr(agent_mod.app.state, "live_feed", None)
+        if feed is not None:
+            try:
+                feed.stop()
+            except Exception:
+                pass
+            agent_mod.app.state.live_feed = None
+        deadline = time.monotonic() + 2.0
+        while agent_runtime._membership_maintenance._inflight and time.monotonic() < deadline:
+            time.sleep(0.01)
+        test_client.close()
 
 
 def _start_master(c, agent, *, node_id="testnode"):
@@ -309,7 +321,7 @@ def test_join_applies_cluster_members(client, monkeypatch):
         },
     }
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765, trace=None):
         return [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
 
     class FakeResp:

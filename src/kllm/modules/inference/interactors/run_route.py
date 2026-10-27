@@ -68,7 +68,13 @@ def finish_master_launch(
     if launched.get("pid"):
         runtime.register_child(int(launched["pid"]), "llama-server")
         try:
-            load_progress.begin(path.name, int(launched["pid"]), path.stat().st_size)
+            active = getattr(load_progress, "_active", None)
+            if not (
+                isinstance(active, dict)
+                and active.get("model") == path.name
+                and active.get("pid") == int(launched["pid"])
+            ):
+                load_progress.begin(path.name, int(launched["pid"]), path.stat().st_size)
         except OSError:
             pass
     state.save()

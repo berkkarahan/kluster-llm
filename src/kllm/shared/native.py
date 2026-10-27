@@ -394,6 +394,8 @@ def plan_split(
 
 def start_master(**kwargs: Any) -> dict[str, Any]:
     require_qualified(selected_runtime() or {})
+    if (selected_runtime() or {}).get("engine") == "primacpp":
+        raise ValueError("Prima requires manifest-based rank dispatch; llama.cpp master launch is not compatible")
     n = require_native()
     selected = selected_binary("llama-server")
     if selected:

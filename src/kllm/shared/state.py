@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import secrets
+import threading
 import time
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -10,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from kllm.shared.atomic_io import replace_file
+
+_STATE_LOCK = threading.RLock()
 
 DEFAULT_CONTROL_PORT = 18765
 DEFAULT_RPC_PORT = 50052
@@ -79,6 +83,12 @@ def state_path() -> Path:
 
 def config_path() -> Path:
     return home_dir() / "config.toml"
+
+
+def app_db_path(home: Path | None = None) -> Path:
+    """Unified application SQLite database path."""
+    base = Path(home) if home is not None else home_dir()
+    return base / "managed-network.sqlite"
 
 
 def runtime_path() -> Path:
@@ -194,17 +204,47 @@ class ClusterState:
     logging_generation: str = ""
     schema_version: int = CLUSTER_STATE_SCHEMA_VERSION
 
+    @property
+    def lock(self) -> threading.RLock:
+        if not hasattr(self, "_lock"):
+            object.__setattr__(self, "_lock", threading.RLock())
+        return self._lock
+
     def save(self) -> None:
         ensure_home()
-        # Output sinks read the policy independently; never expose partial JSON.
-        fd, name = tempfile.mkstemp(prefix=".cluster-", dir=home_dir())
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(asdict(self), handle, indent=2)
-            replace_file(name, state_path())
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+        with self.lock, _STATE_LOCK:
+            # Resilient snapshot with bounded retry loop against un-locked dictionary mutation:
+            snapshot_members = None
+            for _ in range(10):
+                try:
+                    snapshot_members = {k: copy.deepcopy(v) for k, v in list(self.members.items())}
+                    break
+                except RuntimeError:
+                    time.sleep(0.001)
+            if snapshot_members is None:
+                try:
+                    snapshot_members = copy.deepcopy(dict(list(self.members.items())))
+                except RuntimeError:
+                    snapshot_members = dict(self.members)
+
+            state_copy = copy.copy(self)
+            state_copy.members = {}
+            if self.inference_activity is not None:
+                state_copy.inference_activity = copy.deepcopy(self.inference_activity)
+            data = asdict(state_copy)
+            data["members"] = snapshot_members
+
+            fd, name = tempfile.mkstemp(prefix=".cluster-", dir=home_dir())
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2)
+                replace_file(name, state_path())
+            finally:
+                if os.path.exists(name):
+                    try:
+                        os.unlink(name)
+                    except OSError:
+                        pass
 
     @classmethod
     def upgrade_pending(cls) -> bool:

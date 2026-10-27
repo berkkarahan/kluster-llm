@@ -50,6 +50,13 @@ class PlacementSettings:
     draft_cache_type_k: str = "f16"
     draft_cache_type_v: str = "f16"
     draft_size_bytes: int = 0
+    draft_contexts: int = 1
+    prompt_cache_bytes: int = 0
+    prima_checkpoints: bool = False
+    prima_graphs: bool = False
+    prima_kv_sequences: int = 0
+    prima_adapter_bytes: int = 0
+    prima_adapter_scratch_per_token: int = 0
     draft_layout: ModelLayout | None = None
     vision_runtime: bool = False
     estimate_warnings: tuple[str, ...] = ()
@@ -59,6 +66,10 @@ class PlacementSettings:
     requested_micro_batch: int | None = None
     device_count: int = 0
     moe_offload: int | str = "auto"
+
+    def __post_init__(self) -> None:
+        if type(self.prima_kv_sequences) is not int or not 0 <= self.prima_kv_sequences <= 2**31 - 1:
+            raise ValidationError("Prima KV sequence count must be a bounded non-negative integer")
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> PlacementSettings:
@@ -84,6 +95,13 @@ class PlacementSettings:
             draft_cache_type_k=str(values.get("draft_cache_type_k", "f16")),
             draft_cache_type_v=str(values.get("draft_cache_type_v", "f16")),
             draft_size_bytes=int(values.get("draft_size_bytes", 0)),
+            draft_contexts=int(values.get("draft_contexts", 1)),
+            prompt_cache_bytes=int(values.get("prompt_cache_bytes", 0)),
+            prima_checkpoints=bool(values.get("prima_checkpoints", False)),
+            prima_graphs=bool(values.get("prima_graphs", False)),
+            prima_kv_sequences=values.get("prima_kv_sequences", 0),
+                prima_adapter_bytes=int(values.get("prima_adapter_bytes", 0)),
+                prima_adapter_scratch_per_token=int(values.get("prima_adapter_scratch_per_token", 0)),
             draft_layout=ModelLayout.from_mapping(draft_layout)
             if isinstance(draft_layout, Mapping)
             else None,
@@ -128,6 +146,12 @@ class PlacementSettings:
             "draft_cache_type_k": self.draft_cache_type_k,
             "draft_cache_type_v": self.draft_cache_type_v,
             "draft_size_bytes": self.draft_size_bytes,
+            "draft_contexts": self.draft_contexts,
+            "prompt_cache_bytes": self.prompt_cache_bytes,
+            "prima_checkpoints": self.prima_checkpoints,
+            "prima_graphs": self.prima_graphs,
+            "prima_adapter_bytes": self.prima_adapter_bytes,
+            "prima_adapter_scratch_per_token": self.prima_adapter_scratch_per_token,
             "_draft_layout": (
                 self.draft_layout.to_mapping() if self.draft_layout is not None else None
             ),
@@ -142,6 +166,8 @@ class PlacementSettings:
             values["requested_batch_size"] = self.requested_batch_size
         if self.requested_micro_batch is not None:
             values["requested_micro_batch"] = self.requested_micro_batch
+        if self.prima_kv_sequences:
+            values["prima_kv_sequences"] = self.prima_kv_sequences
         return values
 
 
@@ -364,6 +390,10 @@ class PlacementNodeInput:
     rpc_devices: tuple[RpcDeviceInput, ...] = ()
     ram_fraction: float = 1.0
     vram_fraction: float = 1.0
+    aliases: tuple[str, ...] = ()
+    hostname: str | None = None
+    host: str | None = None
+    lan_host: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> PlacementNodeInput:
@@ -381,9 +411,21 @@ class PlacementNodeInput:
         rpc_devices = RpcDeviceInput.parse_inventory(
             value.get("rpc_capabilities") or value.get("rpc_devices") or ()
         )
+        aliases_raw = value.get("aliases")
+        aliases: list[str] = (
+            list(aliases_raw) if isinstance(aliases_raw, (list, tuple, set)) else []
+        )
+        if value.get("hostname"):
+            aliases.append(str(value["hostname"]))
+        if value.get("host"):
+            aliases.append(str(value["host"]))
+        if value.get("lan_host"):
+            aliases.append(str(value["lan_host"]))
+        if value.get("role") == "master" or value.get("is_master"):
+            aliases.append("master")
         return cls(
             node_id=node_id,
-            is_master=bool(value.get("is_master")),
+            is_master=bool(value.get("is_master") or value.get("role") == "master"),
             backend=str(value.get("backend") or "unknown"),
             total_ram_bytes=int(value.get("total_ram_bytes") or 0),
             available_ram_bytes=int(value.get("available_ram_bytes") or 0),
@@ -397,6 +439,10 @@ class PlacementNodeInput:
             rpc_devices=rpc_devices,
             ram_fraction=max(0.1, min(1.0, float(value.get("ram_fraction", 1.0)))),
             vram_fraction=max(0.1, min(1.0, float(value.get("vram_fraction", 1.0)))),
+            aliases=tuple(dict.fromkeys(aliases)),
+            hostname=str(value["hostname"]) if value.get("hostname") is not None else None,
+            host=str(value["host"]) if value.get("host") is not None else None,
+            lan_host=str(value["lan_host"]) if value.get("lan_host") is not None else None,
         )
 
 
@@ -533,6 +579,7 @@ class DevicePlacementPlan:
     node_ram_budget_bytes: tuple[NodeByteValue, ...] = ()
     node_ram_alloc_bytes: tuple[NodeByteValue, ...] = ()
     node_vram_alloc_bytes: tuple[NodeByteValue, ...] = ()
+    prima_graph_counts: tuple[NodeByteValue, ...] = ()
     required_nodes: tuple[str, ...] = ()
     node_priority: tuple[str, ...] = ()
     expert_offloaded: bool = False
@@ -544,6 +591,7 @@ class DevicePlacementPlan:
     def to_payload(self) -> dict[str, object]:
         """Convert this domain result to the existing JSON response contract."""
         return {
+            "prima_graph_counts": {row.node_id: row.value for row in self.prima_graph_counts},
             "required_nodes": list(self.required_nodes),
             "node_priority": list(self.node_priority),
             "node_ram_budget_bytes": {row.node_id: row.value for row in self.node_ram_budget_bytes},

@@ -1,21 +1,17 @@
-"""Install the pinned llama.cpp runtime and refresh a worker's RPC process."""
+"""Start a worker's RPC process once the signed runtime service grants it."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kllm.shared.schemas import LlamaSetupBody
 from kllm.modules.settings.interactors.gpus import ResolvedGpuSelection
 from kllm.modules.inference.interactors.rpc_devices import worker_rpc_devices
-from kllm.shared.exceptions import NotFoundError, ValidationError
 from kllm.modules.inference.entities import cpu_batch_threads
 from kllm.shared.state import DEFAULT_RPC_PORT, ClusterState
 
-PackInstaller = Callable[[str | None, str, bool], dict[str, Any]]
 WorkerStarter = Callable[..., dict[str, Any]]
 GpuSelection = Callable[[list[int] | None], ResolvedGpuSelection]
 
@@ -29,26 +25,13 @@ _LAUNCH_FAILED_MESSAGE = (
 )
 
 
-@dataclass(frozen=True)
-class RuntimeSetupResult:
-    """Outcome of pack installation and any required worker relaunch."""
-
-    installation: dict[str, Any]
-    relaunch: dict[str, Any] | None
-
-    def as_payload(self) -> dict[str, Any]:
-        """Return the stable HTTP response payload."""
-        return {**self.installation, "relaunch": self.relaunch}
-
-
 class RuntimeSetupService:
-    """Coordinate local runtime installation and worker process replacement."""
+    """Coordinate worker RPC process replacement; never installs runtimes."""
 
     def __init__(
         self,
         state: Callable[[], ClusterState],
         *,
-        install_pack: PackInstaller,
         repository_root: Callable[[], Path | None],
         gpu_visibility_env: Callable[[str, list[int] | None], dict[str, str]],
         stop_process: Callable[..., Any],
@@ -61,7 +44,6 @@ class RuntimeSetupService:
         stop_stray_rpc_servers: Callable[[], int] = lambda: 0,
     ) -> None:
         self._state = state
-        self._install_pack = install_pack
         self._repository_root = repository_root
         self._gpu_visibility_env = gpu_visibility_env
         self._stop_process = stop_process
@@ -72,26 +54,6 @@ class RuntimeSetupService:
         self._rpc_log_path = rpc_log_path
         self._process_alive = process_alive
         self._stop_stray_rpc_servers = stop_stray_rpc_servers
-
-    def setup(self, body: LlamaSetupBody) -> RuntimeSetupResult:
-        """Install the selected pack and restart a worker RPC server if needed."""
-        state = self._state()
-        if (
-            state.process_pid
-            and state.process_role == "worker"
-            and self._process_alive(state.process_pid)
-        ):
-            raise ValidationError(
-                "Stop the model on its master before replacing the worker runtime"
-            )
-        try:
-            result = self._install_pack(body.tag, body.backend, body.force)
-        except FileNotFoundError as exc:
-            raise NotFoundError(str(exc)) from exc
-        except Exception as exc:
-            raise ValidationError(str(exc)) from exc
-
-        return RuntimeSetupResult(result, None)
 
     def ensure_worker(self, state: ClusterState) -> dict[str, Any] | None:
         """Restart a joined worker's rpc-server when its process is missing or dead.

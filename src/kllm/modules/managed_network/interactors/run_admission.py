@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
@@ -15,12 +16,16 @@ from kllm.modules.managed_network.entities import AdmissionLease, RunNetworkRese
 from kllm.shared.platform.base import PlatformRefusal
 from kllm.modules.managed_network.gateways.store import StoreConflict
 
+DEFAULT_ADMISSION_TIMEOUT = 30.0
+
 
 class RunAdmission:
-    def __init__(self, service: Any):
+    def __init__(self, service: Any, timeout: float = DEFAULT_ADMISSION_TIMEOUT):
         self.service = service
+        self.timeout = timeout
 
-    def call(self, coroutine):
+    def call(self, coroutine, timeout: float | None = None):
+        wait_timeout = timeout if timeout is not None else self.timeout
         try:
             # HTTP inference handlers run in FastAPI's thread pool. No blocking
             # wait is allowed on the event loop that owns the control sockets.
@@ -31,7 +36,19 @@ class RunAdmission:
             except RuntimeError as error:
                 if str(error) != "no running event loop":
                     raise
-            return asyncio.run_coroutine_threadsafe(coroutine, self.service.loop).result()
+            future = asyncio.run_coroutine_threadsafe(coroutine, self.service.loop)
+            try:
+                return future.result(timeout=wait_timeout)
+            except concurrent.futures.TimeoutError as timeout_err:
+                future.cancel()
+                self.service.loop.call_soon_threadsafe(future.cancel)
+                raise HTTPException(
+                    504,
+                    detail={
+                        "code": "ADMISSION_TIMEOUT",
+                        "message": f"Network admission timed out after {wait_timeout}s",
+                    },
+                ) from timeout_err
         except (PlatformRefusal, StoreConflict, KeyError) as error:
             raise HTTPException(
                 409,
@@ -43,7 +60,8 @@ class RunAdmission:
         return result
 
     def inventory(
-        self, network_id: UUID, *, runtime: bool = False, selected: list[str] | None = None
+        self, network_id: UUID, *, runtime: bool = False, selected: list[str] | None = None,
+        engine: str = "llamacpp"
     ) -> tuple[Any, list, dict]:
         service = self.service
         network = service.store.network(network_id)
@@ -77,6 +95,11 @@ class RunAdmission:
                     "STALE_REVISION", "Selected participant is no longer enrolled"
                 )
             member = deepcopy(original)
+            if engine == "primacpp":
+                member.update(host=assignment.address, rpc_bind=assignment.address,
+                    network_revision=assignment.assignment_revision)
+                members[assignment.node_id] = member
+                continue
             if assignment.node_id != service.identity.node_id:
                 if not runtime:
                     endpoint = assignment.logical_rpc_endpoint
@@ -268,6 +291,8 @@ class RunAdmission:
             service.lock.release()
 
     async def release(self, reservation):
+        if reservation.engine == "primacpp":
+            raise PlatformRefusal("CLEANUP_PENDING", "Stop all owned Prima ranks before releasing their admission")
         service = self.service
         reservation.state = "releasing"
         (await service.store.arun(service.store.reservation, reservation))

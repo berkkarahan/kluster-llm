@@ -88,3 +88,4 @@ CONTROL_V2: tuple[tuple[str, str, str], ...] = (
     ('/models/downloads/cancel', 'POST', 'cancel_download'),
     ('/models/deletions', 'POST', 'delete_model'),
 )
+

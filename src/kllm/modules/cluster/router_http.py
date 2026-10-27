@@ -161,10 +161,17 @@ class MembershipHandlers:
 
     def heartbeat(self, body: RegisterBody, request: Request) -> dict[str, Any]:
         state = self._state()
+        if body.node_id in state.members and isinstance(state.members[body.node_id], dict):
+            state.members[body.node_id]["last_seen"] = time.time()
         self._sync_liveness(shrink=True)
         accepted = body.node_id in state.members
         if accepted:
             update = body.model_dump(exclude={"resource_session"})
+            if (
+                update.get("installed_backends") is None
+                and state.members[body.node_id].get("installed_backends") is not None
+            ):
+                update.pop("installed_backends", None)
             if not update.get("process_pid") and state.members[body.node_id].get("process_pid"):
                 try:
                     self._store().end_node(body.node_id)
@@ -208,6 +215,7 @@ CONTROL_V2_NODE_STATUS: tuple[tuple[str, str, str], ...] = (
 
 CONTROL_V2_CLUSTER: tuple[tuple[str, str, str], ...] = (
     ('/cluster', 'GET', 'status'),
+    ('/cluster/status', 'GET', 'status'),
     ('/cluster', 'POST', 'start_master'),
     ('/cluster', 'DELETE', 'stop'),
 )
@@ -226,3 +234,4 @@ CONTROL_V2_FAST: tuple[tuple[str, str, str], ...] = (
     ('/cluster/fast-subnet/reachability', 'GET', 'fast_subnet_reachability'),
     ('/cluster/fast-subnet/reconnect', 'POST', 'fast_subnet_reconnect'),
 )
+

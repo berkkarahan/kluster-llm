@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from pathlib import Path
 
@@ -28,9 +29,16 @@ def ensure_api_token() -> str:
     return token
 
 
+_BEARER_PATTERN = re.compile(r"^bearer\s+(.+)$", re.IGNORECASE)
+
+
 def verify_api_token(provided: str | None) -> bool:
     if not provided:
         return False
-    # Bearer prefix optional
-    raw = provided.removeprefix("Bearer ").strip()
+    stripped = provided.strip()
+    if not stripped:
+        return False
+    # Bearer prefix optional (case-insensitive per RFC 7235 / RFC 6750)
+    match = _BEARER_PATTERN.match(stripped)
+    raw = match.group(1).strip() if match else stripped
     return secrets.compare_digest(raw, ensure_api_token())

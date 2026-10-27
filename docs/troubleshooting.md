@@ -1,5 +1,47 @@
 # Troubleshooting Guide
 
+## Prima deployment workspace
+
+- **Review revoked / `DEPLOYMENT_REVIEW_CHANGED` (409):** settings, runtime,
+  inventory or the authoritative placement changed. Inspect the current draft and
+  review it again. Do not remove the review precondition or reuse an old digest.
+- **`MODEL_SETTINGS_CHANGED` (409):** another save advanced the Prima profile
+  revision. Keep/export your draft, reload the saved profile, compare and save
+  intentionally. Do not retry with a guessed revision. Prima profiles are in
+  `engine-model-settings.json`; legacy settings are not overwritten.
+- **`MODEL_SETTINGS_INVALID`:** the scoped settings file is corrupt or
+  incompatible. Preserve it for recovery; do not delete it or silently replace it
+  with empty defaults. Repair from a known-good copy before saving.
+- **Review unsupported / scoped settings unavailable:** update the control API
+  through the supported installer. The UI does not silently switch to legacy
+  shared saving or unguarded Run. Selecting a preview runtime does not set the
+  actual cluster target; resolve target mismatch in runtime settings.
+- **Cancellation requested / local settlement unknown:** a terminal job label
+  alone does not prove local work has finished. Refresh job status. Remote leases
+  can still be retiring after local settlement; do not force-release ownership.
+- **Preparation outcome unknown:** reconcile the original request. A safe
+  preparation retry uses the same request ID and identical settings/runtime/digest,
+  not a newly generated request for a possibly still-running operation.
+- **Run outcome unknown:** inspect backend active configuration and Activity via
+  Reconcile run status. Do not repeatedly click Run or automatically replay the
+  POST; this UI does not provide a durable exactly-once launch journal.
+- **Profiles missing/unmeasured:** inspect the reported coverage/fallback reason.
+  Fresh profiles are not qualification, and profiling cannot fix unsupported
+  settings or an unrepresentable placement. Prepare & profile is explicit work,
+  never an automatic response to editing settings.
+
+
+### Prima profiler exits before readiness
+
+Inspect the preparation/profile job logs, including `inspection.log` and each
+CPU/Vulkan `profile.log`. Errors include the phase, child exit code and native
+diagnostic. `Absolute ownership differs from the model layer count` means the
+execution manifest and native loader disagree; increasing a timeout cannot fix it.
+Prepare the current managed Prima runtime with `model_structure_v1`, refresh the
+placement, and retry Prepare & profile. The profiler obtains executable layers
+from that exact runtime and checks approved preparation ownership. Do not edit
+model metadata or remove auxiliary tensors to work around this error.
+
 Use the Python installer and `kllm` CLI for every supported platform. Avoid manual binary copies or alternate launch scripts until the recovery steps in [agent-install.md](agent-install.md) are exhausted.
 
 ## Installation
@@ -15,6 +57,19 @@ python scripts/install.py
 ```
 
 The installer stages `llama-server`, `rpc-server`, and their shared libraries under `vendor/bin`.
+
+### Native rebuild while a node is running (`Access is denied`)
+
+A running `kllm` / `kllm-agent` / dashboard maps `src/kllm/_native.*.pyd`
+(`.so` on Unix) for its whole lifetime, and on Windows that makes the built
+extension unwritable. The installer now handles it: it retries a briefly held
+file, then renames the loaded copy aside as `_native.<abi>.pyd.locked` and puts
+the fresh build at the canonical path. The live process keeps its old module
+until it restarts, so restart Kluster to pick up the new extension; the parked
+copy is a throwaway duplicate the next installer run deletes once nothing maps
+it. If the file cannot even be renamed aside, the stage stops with
+`error: cannot replace the native extension (...)`: stop the node and any
+active inference, then re-run `uv run python scripts/install.py`.
 
 ### Verify an installation
 
@@ -152,6 +207,15 @@ Run the full installer on every node before joining. A worker does not need a GG
 
 ### No matching master or join returns 401
 
+Run discovery with its per-layer trace first:
+
+```bash
+uv run kllm cluster browse --verbose
+```
+
+- `inprocess` failing with `EHOSTUNREACH` or `MDNS_BLOCKED` means the agent interpreter cannot use multicast. The native and Python helper layers should still answer; see [macOS Local Network and Zscaler](#macos-local-network-and-zscaler) when all three fail.
+- `native NOT_INSTALLED` means the bundled helper is missing; re-run `uv run python scripts/install.py` (it builds and stages `vendor/bin/kllm-mdns-browse`).
+- `python UNSUPPORTED_PYTHON_x.y` means every visible helper interpreter is older than 3.9 or equals the blocked agent interpreter.
 - Confirm the master is still running and copy its current join key.
 - Use `--master <private-ip>` to bypass mDNS.
 - Ensure the control port, normally 18765, is reachable between the nodes.
@@ -254,6 +318,13 @@ uv run kllm run --model /absolute/path/model.gguf
 
 ### Out of memory
 
+**Model settings exceed this GPU's buffer limit:** Prima detected a Vulkan
+single-buffer allocation limit. Reduce **Micro batch** or **Context size**, or
+enable **Flash Attention** if supported, then deploy again. This limit is separate
+from total free VRAM; a successful memory estimate or profile does not guarantee
+that the deployment's buffers fit. The original native diagnostic remains in the
+run's `rank.log`.
+
 Inspect the plan before launching:
 
 ```bash
@@ -301,6 +372,17 @@ uv run kllm run --model model.gguf
 Row and tensor modes are only appropriate where the planner accepts the selected homogeneous/local backend combination.
 
 ## Network diagnosis
+
+### macOS Local Network and Zscaler
+
+Symptoms: `kllm join --key` reports no matching master even though the master is reachable from another node, `kllm cluster browse --verbose` shows the in-process layer failing, and `curl` to the master's `/health` may succeed from a system binary while the agent fails with `EHOSTUNREACH` (errno 65). This is client filtering, not routing: `IP_BOUND_IF` and host routes do not change it.
+
+macOS Local Network privacy and Zscaler inspect which executable opens the socket. Apple platform binaries keep LAN access; Homebrew or virtualenv interpreters and binaries shipped by Kluster can be denied. Kluster therefore retries mDNS through `/usr/bin/python3` and falls back to an HTTP subnet probe.
+
+1. Run `uv run kllm cluster browse --verbose`; the `zscaler` and `tunnels` lines confirm detection.
+2. If macOS prompts for Local Network access, allow `Terminal` (or the app that launches Kluster) under **System Settings → Privacy & Security → Local Network**, then restart the terminal and the agent.
+3. For Zscaler, ask IT to add a **Forwarding Profile** exception (bypass) for the cluster LAN subnet, for example `192.168.68.0/22`, so traffic to that destination is not forwarded through `100.64.0.0/10` tunnel gateways.
+4. As an immediate workaround, keep the key but skip discovery: `uv run kllm join --key '<join-key>' --master 192.168.10.1`. On macOS this pair uses the localhost control-plane proxy (`cp_proxy_port` in `kllm status`) so inference control still works.
 
 Use stable private addresses on dedicated links. Verify both directions with `ping`, then verify the control and RPC ports separately. High latency, packet loss, or DHCP address changes can interrupt inference even when cluster discovery succeeds.
 
@@ -430,6 +512,8 @@ A connected worker showing **Joined · idle** has no running RPC process by desi
 
 `INFERENCE_ACTIVE` blocks network stop/add/retry while a reservation, active run or unresolved admission owns its assignments. Stop inference first, then let the app obtain drain acknowledgements. Missing acknowledgements stay uncertain; they are not reported as successful cleanup. Cleanup pending on an unreachable worker is retained and retried after control connectivity returns.
 
+If a participant reports that it has already stopped the network (`Stopped network tombstone cannot be revived` on older agents), Retry cannot reuse that network identity. Use **Stop private network and restore settings** on the master, wait for all participants to finish with no cleanup pending, then **Set up private network** again. Existing user-owned addresses are preserved. Preparation failures retain the participant's refusal code and message rather than reporting every refusal as an adapter problem.
+
 After an abrupt agent restart, prior address observations and readiness are invalid. Present addresses with lost ownership remain untouched. Open that node's local cleanup review: inspect the current exact address and adapter snapshot, then either keep the address and release app ownership or explicitly confirm that exact delta for removal. A changed snapshot refuses removal and requires another review. Never delete all addresses from an adapter to resolve one journal. Graceful shutdown stops a matching dependent managed inference before closing bridges; unrelated legacy inference is identified separately.
 
 A local node-label change (for example, `cluster.json` was reset or restored while `managed-network.sqlite` kept its pairing) is recoverable: the agent keeps the pinned signing key and adopts the current label, clearing superseded authority and channel fences, so rejoin the cluster to pair again. A worker that still holds a pinned master peer while the master rebuilt or restored its own network state (the reverse split) re-asserts the pairing automatically and throttles the mutual join-secret bootstrap it once trusted. Because the Ed25519 key is the cryptographic identity, a rotated master label or cluster binding is adopted the same way; adoption now proceeds even while a managed network is live or a local cleanup journal is unresolved, because the unchanged key proves the identity and owned addresses stay valid. Only a genuinely changed private key is still refused (`explicit re-pairing required`), because that is an identity swap rather than a label rotation. After adoption the master re-stamps a saved llama.cpp target whose master label changed under the same signing binding and re-sends it automatically; if the signing binding itself changed, Settings → **llama.cpp** reports that the target needs re-application and keeps the saved version selectable. Failed or interrupted preparation is retried automatically with a bounded backoff; a manual **Retry** stays immediate. Until a worker's signed channel is paired, Settings → **llama.cpp** shows *Runtime control channel not connected … re-pair it*, and forcing a sync returns `CHANNEL_UNAVAILABLE` instead of a bare conflict; use the manual identity pairing under Advanced details with *Explicitly replace an existing pairing* only for a changed key. While signed cluster control is unavailable, Settings → **llama.cpp** still lists, saves, builds and locally selects versions; setting or enforcing a cluster target and starting managed inference require the recovered agent.
@@ -437,6 +521,27 @@ A local node-label change (for example, `cluster.json` was reset or restored whi
 Physical Windows/Linux/macOS and mixed-node acceptance remains required before treating this feature as validated on a particular deployment. Local controlled tests do not demonstrate 10GbE throughput or distributed model generation.
 
 ### Guided setup and administrator support
+
+**Administrator enabled but setup disabled:** permission and adapter eligibility
+are separate requirements. Each computer's current explanation remains visible
+after dismissing errors or clearing notifications. Expand **Adapter details** for
+interface speeds and rejection reasons. The setup explanation names blocked computers.
+
+**This adapter carries the cluster’s management connection:** cluster control traffic
+already uses an address on that Ethernet adapter. Guided setup protects that path
+from reconfiguration. A manually configured Ethernet connection can work while the
+panel says **Not set up**, meaning Kluster has no active managed network. Enabling
+administrator access again does not resolve this refusal.
+
+Before migrating management, verify a separate LAN control path in both directions
+on every computer, including routes, and settle inference/reservations. Preserve
+signing identities, grants and user-owned addresses. Currently `start --rpc-bind`
+also sets the advertised address; start/join have no independent management-address
+option. Changing that bind also changes the unmanaged inference endpoint. If
+independent endpoints are required, preserve the current cluster until separation
+is supported; do not bypass the management-adapter check. After a supported
+migration, verify fresh heartbeats and signed channels, refresh the assessment, and
+create a new network rather than reusing a stopped network ID.
 
 **Administrator access needed:** open Kluster on the named computer and use the local enable button. A remote master cannot open the OS approval prompt. Denial leaves the computer unconfigured; retry locally. The helper is installed by the supported build/install flow, while the agent remains in the original user account. A missing helper binary means update Kluster through [agent installation](agent-install.md).
 
@@ -453,9 +558,28 @@ drop-in API or platform compatibility. Qualification errors in the runtime libra
 expected during development. Continue serving with llama.cpp; do not remove launch
 options or edit manifests to bypass the gate. See [remaining implementation](../specs/017-prima-integration/tasks.md).
 
+**Prima scope per platform:** qualification is evaluated against the scope for the node's own
+operating system, `<windows|linux|darwin>-vulkan-<local|distributed>` (macOS uses Vulkan through
+MoltenVK). Only Windows has recorded evidence in this repository; the Linux and macOS scopes are
+defined but unqualified (`qualification_evidence_missing`) until physical hardware receipts are
+recorded. A platform never borrows another platform's evidence. In a mixed-OS run every
+participant platform must have its own qualified scope; errors for a non-local platform are
+prefixed with that scope (for example `linux-vulkan-distributed: qualification_evidence_missing`).
+`platform_unrecognized` means the node did not report a known OS; it is never assumed to be Windows.
+
+**Prima ring mixes GPU backends:** a Prima ring needs one shared accelerator backend. Planning
+fails with `Prima rings require one shared compatible GPU backend` and names each node, its
+platform and its backend (for example a Metal macOS node with a Vulkan Linux node). Select
+Vulkan on the differing node, or exclude it. A coordinator-only CPU master is exempt on any OS.
+
+**Prima participant identity differs:** preparation names the node and the differing identity
+(`runtime`, `source commit` or `recipe`). Nodes on different operating systems and architectures
+are accepted when source commit and recipe match; their binaries (`build_id`, artifacts) may differ.
+Rebuild the named node from the same managed source version.
+
 **Prima recipe changed:** resolve the supported Prima source again and build a new
-isolated version. The recipe digest covers the patch series and build implementation;
-an old artifact is never silently attributed to a changed recipe.
+isolated version. The recipe digest covers the pinned source, dependency hashes and build
+implementation; an old artifact is never silently attributed to a changed recipe.
 
 **Prima profiling failed:** inspect the profile job log. The model must be local and the
 node must have no active inference. Structured Q4K estimates may be unavailable for other

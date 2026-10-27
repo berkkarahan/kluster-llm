@@ -64,6 +64,7 @@ PARAMETERS: dict[str, tuple[str, tuple[str, ...], str, bool]] = {
     "latency_weight": ("--latency-weight", (), "placement", True),
     "required_nodes": ("--require-node", (), "placement", True),
     "node_priority": ("--node-priority", (), "placement", True),
+    "placement_strategy": ("--placement-strategy", (), "placement", True),
     "node_shares": ("--node-share", (), "placement", True),
     "split_mode": ("--split-mode", (), "placement", True),
     "extra_args": ("--extra-arg", (), "expert", True),
@@ -103,6 +104,7 @@ CONTROL_FIELDS = {
     "settings_source",
     "remember",
     "advanced_open",
+    "prima_auto_deploy",
 }
 SAMPLING_DEFAULTS = {
     "temperature": 0.7,

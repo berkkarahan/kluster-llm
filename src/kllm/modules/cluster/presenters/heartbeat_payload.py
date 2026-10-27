@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import re
 import socket
 from collections.abc import Callable
@@ -25,6 +26,7 @@ class HeartbeatPayloadBuilder:
     _OPTIONAL_MEMBER_FIELDS = (
         "actual_backend",
         "requested_backend",
+        "installed_backends",
         "devices",
         "unified_memory",
         "binary_version",
@@ -63,6 +65,14 @@ class HeartbeatPayloadBuilder:
             "rpc_capabilities": member.get("rpc_capabilities", []),
             "rpc_control_version": 1,
             "prima_control_version": 1,
+            "prima_inventory_version": 1,
+            "prima_asset_lease_version": 1,
+            "prima_profile_version": 2,
+            "prima_link_profile_version": 2,
+            "prima_profile_context_version": 1,
+            "prima_resources_version": 1,
+            "prima_lora_assets_version": 1,
+            "prima_ports_version": 2,
             "runtime_management_version": 1,
             "runtime": self._runtime_status(),
             "rpc_status": member.get("rpc_status", "idle"),
@@ -75,6 +85,8 @@ class HeartbeatPayloadBuilder:
             "available_ram_bytes": member.get("available_ram_bytes") or 0,
             "vram_bytes": member.get("vram_bytes"),
             "backend": member.get("backend") or "unknown",
+            "platform": platform.system() or None,
+            "architecture": platform.machine() or None,
             "vram_percent": config["vram_percent"],
             "ram_percent": config["ram_percent"],
             **{

@@ -10,6 +10,7 @@ default = ["python-bindings"]
 python-bindings = ["dep:pyo3"]
 extension-module = ["python-bindings", "pyo3/extension-module"]
 network-helper = []
+mdns-browse = ["dep:mdns-sd"]
 
 [lib]
 name = "kllm_native"
@@ -19,6 +20,11 @@ crate-type = ["cdylib", "rlib"]
 name = "kllm-network-helper"
 path = "src/bin/kllm-network-helper.rs"
 required-features = ["network-helper"]
+
+[[bin]]
+name = "kllm-mdns-browse"
+path = "src/bin/kllm-mdns-browse.rs"
+required-features = ["mdns-browse"]
 
 [dependencies]
 pyo3 = { version = "0.29", optional = true }
@@ -33,9 +39,20 @@ base64 = "0.23"
 ed25519-dalek = "3"
 sha2 = "0.11"
 regex = "1"
+mdns-sd = { version = "0.21", optional = true, default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_System_Console",
+] }
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_NetworkManagement_Ndis", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -27,13 +27,17 @@ class RunSettingsHandlers:
         store: ModelSettingsGateway,
         resolve_model: Callable[[str], Path],
         available_threads: Callable[[], int],
+        capture_runtime: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self._store = store
         self._resolve_model = resolve_model
         self._available_threads = available_threads
+        self._capture_runtime = capture_runtime
 
     def remember(self, body: PlanBody | RunBody) -> None:
-        if body.remember:
+        from kllm.modules.runtimes.interactors.selection import snapshot
+
+        if body.remember and (snapshot() or {}).get("engine") != "primacpp":
             self._store.upsert_model_settings(body.model, body.snapshot_for_remember())
 
     def get(self, model: str) -> dict[str, Any]:
@@ -58,11 +62,36 @@ class RunSettingsHandlers:
         return canonicalize_parameters(reusable, legacy=True)
 
     def resolve(self, body: PlanBody | RunBody) -> PlanBody | RunBody:
+        from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active
+        from kllm.modules.runtimes.interactors.selection import snapshot
+
         explicit = body.model_dump(include=body.model_fields_set)
-        saved = (
-            self._store.get_model_settings(body.model) if body.settings_source == "saved" else None
-        )
-        base = self._saved_parameters(saved["parameter_set"]) if saved else {}
+        engine = (snapshot() or {}).get("engine")
+        auto_deploy = is_prima_auto_deploy_active(body)
+        if auto_deploy or engine == "primacpp":
+            from kllm.modules.inference.interactors.engine_settings import PRIMA_DEFAULTS
+
+            saved = None
+            if not auto_deploy and body.settings_source == "saved":
+                try:
+                    from kllm.modules.inference.gateways.engine_settings import EngineSettingsStore
+                    from kllm.shared.state import home_dir
+
+                    saved = EngineSettingsStore(home_dir() / "engine-model-settings.json").get(
+                        "primacpp", body.model
+                    )
+                except Exception:
+                    saved = None
+            saved_params = self._saved_parameters(saved["parameter_set"]) if saved else {}
+            base = {**PRIMA_DEFAULTS, **saved_params}
+        else:
+            saved = (
+                self._store.get_model_settings(body.model)
+                if body.settings_source == "saved"
+                else None
+            )
+            saved_params = self._saved_parameters(saved["parameter_set"]) if saved else {}
+            base = saved_params
         try:
             resolved = type(body).model_validate(
                 {**base, **explicit, "model": body.model, "settings_source": body.settings_source}
@@ -72,12 +101,36 @@ class RunSettingsHandlers:
                 422, f"Saved configuration is invalid: {exc}; use settings_source=defaults to reset"
             ) from exc
         resolved._sources = {
-            name: "override" if name in explicit else "saved" if name in base else "default"
+            name: "override"
+            if name in explicit
+            else "saved"
+            if name in saved_params
+            else "default"
             for name in PARAMETERS
         }
         return resolved
 
-    def capabilities(self, model: str | None = None) -> dict[str, Any]:
+    def capabilities(self, model: str | None = None, runtime_id: str | None = None) -> dict[str, Any]:
+        if runtime_id is not None:
+            from kllm.modules.runtimes.interactors.selection import use_runtime
+            from kllm.modules.inference.interactors.deployment_review import DEPLOYMENT_REVIEW_VERSION
+
+            if self._capture_runtime is None:
+                raise HTTPException(409, "Runtime catalog is unavailable")
+            try:
+                captured = self._capture_runtime(runtime_id)
+            except KeyError:
+                raise HTTPException(404, "Runtime does not exist") from None
+            except (ValueError, OSError) as error:
+                raise HTTPException(409, detail={"code": "RUNTIME_NOT_READY", "message": str(error)}) from error
+            with use_runtime(captured):
+                result = self.capabilities(model)
+            if not result["engine_available"]:
+                for descriptor in result["parameters"]:
+                    if descriptor["engine_flags"]:
+                        descriptor.update(available=False, unavailable_reason="Runtime parameter catalog is unavailable; support is unproven")
+            return {**result, "runtime_id": captured["runtime_id"], "engine": captured.get("engine", "llamacpp"),
+                    "deployment_review_version": DEPLOYMENT_REVIEW_VERSION if captured.get("engine") == "primacpp" else None}
         from kllm.modules.inference.interactors.chat_templates import PRESETS, selected_template_text
         from kllm.modules.models.interactors.gguf_meta import read_inference_metadata
 

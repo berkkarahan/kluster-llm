@@ -374,7 +374,8 @@ def test_managed_placement_cannot_be_overridden(flag):
 def test_moe_expert_offload_to_remote_nodes():
     m = dict(
         architecture="qwen2moe",
-        metadata={"qwen2moe.attention.head_count_kv": 1},
+        metadata={"qwen2moe.attention.head_count_kv": 1,
+                  "qwen2moe.expert_count": 4, "qwen2moe.expert_used_count": 2},
         layers=[1000 * MIB] * 4,
         expert_layers=[800 * MIB] * 4,
         output_bytes=1000 * MIB,
@@ -395,6 +396,16 @@ def test_moe_expert_offload_to_remote_nodes():
     assert result["tensor_overrides"]
     assert all("ffn_" in pattern for pattern in result["tensor_overrides"])
     assert result["node_ram_alloc_bytes"]["worker"] >= 4 * 800 * MIB
+
+    # The same automatic request must never invent llama.cpp RPC expert
+    # assignments when the selected engine can only execute whole layers.
+    from kllm.modules.runtimes.interactors.selection import use_runtime
+
+    with use_runtime({"engine": "primacpp"}):
+        prima = plan([worker, master], model=m)
+        assert settings(moe_offload=3)["moe_offload"] == 3  # explicit input is retained
+    assert prima["expert_offloaded"] is False
+    assert prima["tensor_overrides"] == []
 
 
 def test_moe_expert_offload_in_manual_node_shares():

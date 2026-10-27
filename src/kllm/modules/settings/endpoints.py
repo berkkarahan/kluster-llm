@@ -2,39 +2,121 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, cast
+from fastapi import APIRouter
 from kllm.shared.schemas import (
     ConfigBody,
+    FeatureFlagBody,
     HfTokenBody,
 )
 
-def _host():
-    from kllm.agent import runtime as host
+_settings_handlers_provider: Callable[[], Any] | None = None
 
-    return host
+
+def set_settings_handlers_provider(provider: Callable[[], Any]) -> None:
+    global _settings_handlers_provider
+    _settings_handlers_provider = provider
+
+
+def _get_handlers() -> Any:
+    if _settings_handlers_provider is not None:
+        return _settings_handlers_provider()
+    raise RuntimeError("settings handlers provider is not configured")
+
 
 def get_api_token() -> dict[str, Any]:
     """Return loopback API token (local operator helper)."""
-    return cast(dict[str, Any], _host()._settings_handlers().api_token())
+    return cast(dict[str, Any], _get_handlers().api_token())
+
 
 def get_hf_token() -> dict[str, Any]:
     """Whether an HF token is configured. Never returns the secret."""
-    return cast(dict[str, Any], _host()._settings_handlers().hf_token())
+    return cast(dict[str, Any], _get_handlers().hf_token())
+
 
 def put_hf_token(body: HfTokenBody) -> dict[str, Any]:
     """Save ~/.kllm/hf_token (chmod 600). Empty string deletes the file."""
-    return cast(dict[str, Any], _host()._settings_handlers().save_hf_token(body))
+    return cast(dict[str, Any], _get_handlers().save_hf_token(body))
+
 
 def get_config() -> dict[str, Any]:
-    return cast(dict[str, Any], _host()._settings_handlers().get_config())
+    return cast(dict[str, Any], _get_handlers().get_config())
+
 
 def get_gpus() -> dict[str, Any]:
     """Enumerate local GPUs for pre-start selection."""
-    return cast(dict[str, Any], _host()._settings_handlers().get_gpus())
+    return cast(dict[str, Any], _get_handlers().get_gpus())
+
 
 def put_config(body: ConfigBody) -> dict[str, Any]:
-    return cast(dict[str, Any], _host()._settings_handlers().save_config(body))
+    return cast(dict[str, Any], _get_handlers().save_config(body))
+
 
 def get_home() -> dict[str, Any]:
     """Data-directory layout for the System Settings > Data directory panel."""
-    return cast(dict[str, Any], _host()._settings_handlers().home())
+    return cast(dict[str, Any], _get_handlers().home())
+
+
+def get_feature_flags() -> dict[str, Any]:
+    """Return all registered feature flags and their persisted boolean states."""
+    return cast(dict[str, Any], _get_handlers().get_feature_flags())
+
+
+def put_feature_flag(body: FeatureFlagBody) -> dict[str, Any]:
+    """Persist one feature flag update and return the updated feature flags map."""
+    return cast(dict[str, Any], _get_handlers().save_feature_flag(body))
+
+
+def create_settings_router(handlers: Any) -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/v1/api-token")
+    @router.get("/credentials/api-token")
+    def _api_token() -> dict[str, Any]:
+        return handlers.api_token()
+
+    @router.get("/v1/hf-token")
+    @router.get("/credentials/huggingface")
+    def _hf_token() -> dict[str, Any]:
+        return handlers.hf_token()
+
+    @router.put("/v1/hf-token")
+    @router.put("/credentials/huggingface")
+    def _put_hf_token(body: HfTokenBody) -> dict[str, Any]:
+        return handlers.save_hf_token(body)
+
+    @router.get("/v1/config")
+    @router.get("/node/config")
+    def _config() -> dict[str, Any]:
+        return handlers.get_config()
+
+    @router.get("/v1/gpus")
+    @router.get("/node/devices")
+    def _gpus() -> dict[str, Any]:
+        return handlers.get_gpus()
+
+    @router.put("/v1/config")
+    @router.put("/node/config")
+    def _put_config(body: ConfigBody) -> dict[str, Any]:
+        return handlers.save_config(body)
+
+    @router.get("/v1/home")
+    @router.get("/node/home")
+    def _home() -> dict[str, Any]:
+        return handlers.home()
+
+    @router.get("/v1/flags")
+    @router.get("/node/flags")
+    def _feature_flags() -> dict[str, Any]:
+        return handlers.get_feature_flags()
+
+    @router.put("/v1/flags")
+    @router.put("/node/flags")
+    def _put_feature_flag(body: FeatureFlagBody) -> dict[str, Any]:
+        return handlers.save_feature_flag(body)
+
+    return router
+
+
+create_router = create_settings_router

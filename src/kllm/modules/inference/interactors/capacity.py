@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -65,6 +66,7 @@ class CapacityService:
         )
         return {
             "node_id": state.node_id,
+            "hostname": platform.node() or "localhost",
             "host": lan_host,
             "lan_host": lan_host,
             "control_port": state.control_port,
@@ -76,6 +78,7 @@ class CapacityService:
             "backend": backend,
             "actual_backend": backend,
             "requested_backend": capacity.get("requested_backend"),
+            "installed_backends": list(capacity.get("installed_backends") or []),
             "devices": gpu_selection.device_payloads(),
             "unified_memory": capacity.get("unified_memory", False),
             "binary_version": capacity.get("binary_version"),
@@ -85,6 +88,8 @@ class CapacityService:
             "process_pid": state.process_pid,
             "process_role": state.process_role,
             "process_started_at": self._tracked_process_start(),
+            "platform": platform.system() or None,
+            "architecture": platform.machine() or None,
         }
 
     def ensure_master_member(self, *, persist: bool = False) -> bool:
@@ -130,6 +135,7 @@ class CapacityService:
                         "total_ram_bytes",
                         "available_ram_bytes",
                         "requested_backend",
+                        "installed_backends",
                         "unified_memory",
                         "binary_version",
                     )

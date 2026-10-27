@@ -22,17 +22,14 @@ def build_router(
 
     def profiler():
         # Optional service is owned and closed by the runtime registry.
-        from kllm.modules.primacpp.interactors.preparation import ProfileJobs
+        from kllm.modules.primacpp.interactors.preparation import get_profile_jobs
         from kllm.modules import models as model_ops
 
-        local = registry()
-        with local.lock:
-            if getattr(local, "prima_profiles", None) is None:
-                local.prima_profiles = ProfileJobs(
-                    local.root / "prima-profiles", local.capture,
-                    model_ops.resolve_local_model, state, local._kill,
-                )
-            return local.prima_profiles
+        return get_profile_jobs(registry(), state, model_ops.resolve_local_model)
+
+    def prima():
+        c = control()
+        return getattr(c, "prima", c)
 
     def authorize(request: Request, *, mutation=False, master=False):
         if not token_verifier(
@@ -85,6 +82,44 @@ def build_router(
         authorize(request)
         return await work(cluster_status)
 
+    @router.get("/node/prima-devices")
+    async def prima_devices(request: Request):
+        """The selected Prima build's own physical Vulkan device report.
+
+        The generic node inventory serves planning; this probe reads the exact
+        physical identity (UUID/driver) the pinned Prima runtime itself sees.
+        """
+        authorize(request)
+        from kllm.modules.primacpp.interactors.devices import (
+            discover_vulkan_devices,
+            stable_device_inventory,
+        )
+
+        def probe():
+            try:
+                runtime = registry().capture(None)
+            except ValueError as error:
+                return {"available": False, "reason": str(error)}
+            if runtime.get("engine") != "primacpp":
+                return {
+                    "available": False,
+                    "reason": "The selected runtime is not Prima; prepare a Prima build to probe its devices",
+                }
+            try:
+                devices = stable_device_inventory(discover_vulkan_devices(runtime))
+            except (ValueError, OSError) as error:
+                return {"available": False, "reason": str(error)[:500]}
+            capabilities = runtime.get("capabilities") or {}
+            return {
+                "available": True,
+                "devices": devices,
+                "features": capabilities.get("features", []),
+                "backends": capabilities.get("backends", []),
+            }
+
+        return await work(probe)
+
+
     @router.post("/node/runtimes/{identity}/prima-plan")
     async def prima_plan(identity: str, request: Request):
         """Read-only topology preview; never starts ranks or runs profiling."""
@@ -92,10 +127,23 @@ def build_router(
 
         authorize(request, master=True)
         value = await body(request, PlanBody)
-        return await work(lambda: control().prima.plan(identity, value))
+        def inspect():
+            from kllm.modules.runtimes.interactors.selection import use_runtime
+            from kllm.modules.inference.interactors.effective_config import effective_configuration
+            from kllm.modules.inference.interactors.deployment_review import DEPLOYMENT_REVIEW_VERSION
+
+            captured = registry().capture(identity)
+            prima_impl = prima()
+            # Do not resolve legacy saved settings here alone: preparation and
+            # Run must inspect the same fully materialized request settings.
+            with use_runtime(captured):
+                result = prima_impl.plan(identity, value)
+                return {**result, "deployment_review_version": DEPLOYMENT_REVIEW_VERSION,
+                        "effective_config": effective_configuration(value, result, prima_impl.resolve_model(value.model))}
+        return await work(inspect)
 
 
-    @router.post("/cluster/prima-preparations")
+    @router.post("/cluster/prima-preparations", status_code=202)
     async def prepare_prima(request: Request):
         from kllm.modules.inference.entities import PlanBody
         from kllm.modules.primacpp.entities import PreparationRequest
@@ -103,7 +151,7 @@ def build_router(
         raw = await body(request, PreparationRequest)
         try:
             settings = PlanBody.model_validate(raw.settings)
-            return await work(lambda: control().prima.start_preparation(
+            return await work(lambda: prima().start_preparation(
                 raw.runtime_id, settings, raw.plan_digest, raw.request_id,
                 include_profile=raw.include_profile))
         except (KeyError, ValueError) as error:
@@ -112,19 +160,78 @@ def build_router(
     @router.get("/cluster/prima-preparations/{identity}")
     async def prima_preparation(identity: str, request: Request):
         authorize(request, master=True)
-        return await work(lambda: control().prima.job(identity))
+        result = await work(lambda: prima().job(identity))
+        if result is None:
+            raise HTTPException(404, f"Preparation {identity} not found")
+        return result
+
+    @router.get("/cluster/prima-preparations/{identity}/coverage")
+    async def prima_preparation_coverage(identity: str, request: Request):
+        authorize(request, master=True)
+        return await work(lambda: prima().preparation_coverage(identity))
+
+    @router.post("/cluster/prima-preparations/{identity}/retry", status_code=202)
+    async def retry_prima_preparation(
+        identity: str,
+        request: Request,
+        stage: str | None = None,
+        stage_name: str | None = None,
+        node_id: str | None = None,
+    ):
+        from kllm.modules.primacpp.entities import ProfilingRetryRequest
+        authorize(request, mutation=True, master=True)
+        raw_bytes = await request.body()
+        req_data = ProfilingRetryRequest()
+        if raw_bytes.strip():
+            try:
+                req_data = ProfilingRetryRequest.model_validate_json(raw_bytes)
+            except Exception:
+                raise HTTPException(422, "Invalid retry request payload")
+        target_stage = stage or stage_name or req_data.stage_name
+        target_node = node_id or req_data.node_id
+        return await work(lambda: prima().retry_preparation(
+            identity, stage_name=target_stage, node_id=target_node
+        ))
 
     @router.get("/cluster/prima-preparations/{identity}/logs")
-    async def prima_preparation_logs(identity: str, request: Request):
+    async def prima_preparation_logs(
+        identity: str,
+        request: Request,
+        stage: str | None = None,
+        node: str | None = None,
+        level: str | None = None,
+        limit: int = 500,
+    ):
         import json
         authorize(request, master=True)
-        value = await work(lambda: control().prima.job(identity))
-        return {"text": json.dumps({"phase": value["phase"], "error": value.get("error"), "nodes": value.get("nodes", {})}, indent=2)[-65536:]}
+        job_data = await work(lambda: prima().job(identity))
+        if job_data is None:
+            raise HTTPException(404, f"Preparation {identity} not found")
+        logs_data = await work(
+            lambda: prima().preparation_logs(
+                identity, stage=stage, node=node, level=level, limit=limit
+            )
+        )
+        compat_summary = json.dumps(
+            {
+                "phase": job_data.get("phase"),
+                "error": job_data.get("error"),
+                "nodes": job_data.get("nodes", {}),
+            },
+            indent=2,
+        )
+        compat_text = (logs_data.get("text") or compat_summary)[-65536:]
+        return {
+            "text": compat_text,
+            "logs": logs_data.get("logs", []),
+            "total": len(logs_data.get("logs", [])),
+            "run_id": identity,
+        }
 
     @router.post("/cluster/prima-preparations/{identity}/cancel")
     async def cancel_prima_preparation(identity: str, request: Request):
         authorize(request, mutation=True, master=True)
-        return await work(lambda: control().prima.cancel(identity))
+        return await work(lambda: prima().cancel(identity))
 
     @router.post("/node/prima-profiles")
     async def profile(request: Request):
@@ -274,10 +381,7 @@ def build_router(
 
     return router
 
-LEGACY_V1: tuple[tuple[str, str, str], ...] = (
-    ('/v1/llama/setup', 'POST', 'llama_setup'),
-)
+# Runtime installation belongs to scripts/install.py; the agent exposes no install routes.
+LEGACY_V1: tuple[tuple[str, str, str], ...] = ()
 
-CONTROL_V2: tuple[tuple[str, str, str], ...] = (
-    ('/node/runtime', 'POST', 'llama_setup'),
-)
+CONTROL_V2: tuple[tuple[str, str, str], ...] = ()

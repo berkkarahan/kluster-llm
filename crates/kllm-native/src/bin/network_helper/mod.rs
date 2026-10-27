@@ -1,6 +1,9 @@
+mod direct;
 mod host;
 mod install;
 mod ipc;
+mod ports;
+mod watchdog;
 use crate::address_events::{self, AddressObserver};
 #[cfg(unix)]
 use crate::arp_conflict::{probe_native, start_native, IPv4ConflictObserver};
@@ -82,7 +85,11 @@ pub struct Scope {
     pub session: String,
     pub operation: String,
     pub revision: u64,
+    #[serde(default)]
+    pub assignment_revision: u64,
     pub phase: String,
+    #[serde(default)]
+    pub direct_ports: bool,
 }
 #[derive(Default, Deserialize, Serialize)]
 struct Journal {
@@ -93,6 +100,10 @@ struct Journal {
     operations: Vec<String>,
     #[serde(default)]
     revoked: bool,
+    #[serde(default)]
+    prima_ports: HashMap<String, ports::Owner>,
+    #[serde(default)]
+    prima_sequences: HashMap<String, u64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +123,10 @@ struct Request {
     decision: String,
     #[serde(default)]
     snapshot_digest: String,
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    request_id: String,
 }
 struct Helper {
     grant: Grant,
@@ -122,14 +137,24 @@ struct Helper {
     conflicts: HashMap<String, IPv4ConflictObserver>,
     expires: HashMap<String, Instant>,
     ownership: HashMap<String, (AddressObserver, u32, bool)>,
+    port_deadlines: HashMap<String, Instant>,
+    direct_ports: bool,
 }
 impl Helper {
+    #[cfg(test)]
     fn open(grant: Grant, path: PathBuf) -> Result<Self> {
+        Self::open_mode(grant, path, false)
+    }
+    fn open_mode(grant: Grant, path: PathBuf, direct_ports: bool) -> Result<Self> {
         let mut journal: Journal = if path.exists() {
             serde_json::from_slice(&fs::read(&path)?)?
         } else {
             Journal::default()
         };
+        // A restarted helper never resumes a serving firewall admission.
+        for owner in journal.prima_ports.values_mut() {
+            owner.phase = "cleanup_pending".into();
+        }
         for scope in journal.scopes.values_mut() {
             if scope.configured || scope.added {
                 scope.uncertain = true;
@@ -144,12 +169,25 @@ impl Helper {
             conflicts: HashMap::new(),
             expires: HashMap::new(),
             ownership: HashMap::new(),
+            port_deadlines: HashMap::new(),
+            direct_ports,
         };
         // A missing temporary address permits restoring DHCP after reboot. A
         // present address has lost native ownership continuity and needs review.
         let keys: Vec<_> = helper.journal.scopes.keys().cloned().collect();
         for key in keys {
+            if helper
+                .journal
+                .prima_ports
+                .values()
+                .any(|o| o.contract.network_id == key)
+            {
+                continue; // Native listeners must drain before network restoration.
+            }
             let scope = helper.journal.scopes.get_mut(&key).unwrap();
+            if direct_ports || scope.direct_ports {
+                continue; // Manual address/DHCP ownership belongs to the agent, not this process.
+            }
             if scope.configured
                 && !host::has_address(scope).unwrap_or(true)
                 && host::restore(scope).is_ok()
@@ -243,10 +281,47 @@ impl Helper {
         let phase = command["phase"]
             .as_str()
             .ok_or_else(|| refuse("Missing phase"))?;
-        if !matches!(phase, "prepare" | "apply" | "cleanup" | "rollback") {
+        if !matches!(
+            phase,
+            "prepare" | "apply" | "cleanup" | "rollback" | "reconcile"
+        ) {
             return Err(refuse("Unauthorized network phase"));
         }
+        if matches!(phase, "reconcile" | "cleanup" | "rollback")
+            && self
+                .journal
+                .prima_ports
+                .values()
+                .any(|o| o.contract.network_id == request.network)
+        {
+            return Err(refuse(
+                "Drain Prima listeners before changing their private assignment",
+            ));
+        }
+        if phase == "reconcile" {
+            self.check_ownership(&request.network)?;
+            let prior = self
+                .journal
+                .scopes
+                .get(&request.network)
+                .ok_or_else(|| refuse("Reconcile requires a prepared private assignment"))?;
+            let candidate = direct::reconcile_scope(prior, &command, &self.grant.node_id)?;
+            host::validate(&candidate)?;
+            self.journal
+                .scopes
+                .insert(request.network.clone(), candidate);
+        }
         if phase == "prepare" {
+            if self
+                .journal
+                .prima_ports
+                .values()
+                .any(|o| o.contract.network_id == request.network)
+            {
+                return Err(refuse(
+                    "Release owned Prima listeners before preparing this network again",
+                ));
+            }
             let assignment = &command["body"]["assignment"];
             if assignment["node_id"] != self.grant.node_id
                 || assignment["network_id"] != request.network
@@ -319,7 +394,12 @@ impl Helper {
                 session: session.clone(),
                 operation: operation.clone(),
                 revision,
+                assignment_revision: command["assignment_revision"]
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| refuse("Missing assignment revision"))?,
                 phase: phase.into(),
+                direct_ports: self.direct_ports,
             };
             host::validate(&scope)?;
             scope.original = host::configuration(&scope)?;
@@ -332,7 +412,7 @@ impl Helper {
                 ),
             );
             self.journal.scopes.insert(request.network.clone(), scope);
-        } else {
+        } else if phase != "reconcile" {
             let scope = self
                 .journal
                 .scopes
@@ -372,12 +452,48 @@ impl Helper {
         self.persist()
     }
     fn dispatch(&mut self, request: Request) -> Result<Value> {
+        if self.direct_ports {
+            if matches!(request.action.as_str(), "direct_observe" | "direct_forget") {
+                return self.dispatch_direct(&request);
+            }
+            if request.action != "status"
+                && request.action != "authorize"
+                && !request.action.starts_with("prima_ports_")
+            {
+                return Err(refuse(
+                    "Direct Prima mode cannot change addresses, DHCP or helper authorization",
+                ));
+            }
+        }
         if request.action == "status" {
+            let prima_recovery: Vec<_> = self
+                .journal
+                .prima_ports
+                .values()
+                .filter(|o| {
+                    o.phase != "active"
+                        || self
+                            .port_deadlines
+                            .get(&o.run_id)
+                            .is_none_or(|deadline| Instant::now() >= *deadline)
+                })
+                .map(|o| {
+                    json!({"network_id":o.contract.network_id,"run_id":o.run_id,
+                               "manifest_digest":o.contract.manifest_digest})
+                })
+                .collect();
             return Ok(
-                json!({"ready":!self.journal.revoked,"grant":self.grant,"cleanup_pending":self.journal.scopes.values().filter(|s| s.uncertain).map(|s| &s.network).collect::<Vec<_>>()}),
+                json!({"ready":!self.journal.revoked,"grant":self.grant,"cleanup_pending":self.journal.scopes.values().filter(|s| s.uncertain).map(|s| &s.network).collect::<Vec<_>>(),"prima_ports_version":2,"prima_ports_watchdog_version":1,"prima_ports_recovery_version":1,"prima_ports_owned_runs":self.journal.prima_ports.keys().collect::<Vec<_>>(),"prima_ports_cleanup_pending":self.journal.prima_ports.values().filter(|o| o.phase != "active").map(|o| &o.run_id).collect::<Vec<_>>(),"prima_listener_recovery":prima_recovery,
+                    "prima_direct_version":if self.direct_ports {1} else {0},
+                    "prima_direct_active_scopes":self.journal.scopes.values().filter(|s|s.added || s.configured || s.uncertain).map(|s|&s.network).collect::<Vec<_>>()}),
             );
         }
         if request.action == "revoke" {
+            if !self.journal.prima_ports.is_empty() {
+                return Err(refuse(
+                    "Release owned Prima listeners before disabling access",
+                ));
+            }
             if self
                 .journal
                 .scopes
@@ -396,6 +512,20 @@ impl Helper {
             self.authorize(&request)?;
             return Ok(json!({"ok":true}));
         }
+        if request.action.starts_with("prima_ports_") {
+            return self.dispatch_prima_ports(&request);
+        }
+        if matches!(request.action.as_str(), "delete" | "restore" | "resolve")
+            && self
+                .journal
+                .prima_ports
+                .values()
+                .any(|o| o.contract.network_id == request.network)
+        {
+            return Err(refuse(
+                "Release owned Prima listeners before restoring the private network",
+            ));
+        }
         if request.action == "review" || request.action == "resolve" {
             let scope = self
                 .journal
@@ -406,7 +536,10 @@ impl Helper {
                 return Err(refuse("This adapter does not need recovery"));
             }
             let current = host::review(scope)?;
-            let snapshot_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&current)?));
+            let snapshot_digest = Sha256::digest(serde_json::to_vec(&current)?)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
             if request.action == "review" {
                 return Ok(
                     json!({"network_id":scope.network,"exact_address_prefix":format!("{}/{}",scope.address,scope.prefix),"current":current,"original":scope.original,"snapshot_digest":snapshot_digest}),
@@ -642,14 +775,29 @@ pub fn main() -> Result<()> {
     if args[1] == "--install" {
         return install::install(Path::new(&args[2]));
     }
-    if args[1] != "--serve" {
+    if args[1] != "--serve" && args[1] != "--stdio-prima" {
         return Err(refuse("Unsupported command"));
+    }
+    if args[1] == "--stdio-prima" && !cfg!(windows) {
+        return Err(refuse("Direct Prima backend currently requires Windows"));
     }
     install::require_admin()?;
     let grant: Grant = serde_json::from_slice(&fs::read(&args[2])?)?;
     grant.validate()?;
     let path = Path::new(&args[2]).with_extension("journal.json");
-    let mut helper = Helper::open(grant.clone(), path)?;
+    let helper = std::sync::Arc::new(std::sync::Mutex::new(Helper::open_mode(
+        grant.clone(),
+        path,
+        args[1] == "--stdio-prima",
+    )?));
+    let _watchdog = watchdog::Watchdog::start(
+        std::sync::Arc::downgrade(&helper),
+        Duration::from_secs(1),
+        |helper, now| helper.expire_port_rules(now, ports::remove),
+    );
+    if args[1] == "--stdio-prima" {
+        return direct::serve(helper);
+    }
     ipc::serve(&grant.account, |raw| {
         let response = if raw.len() > 65536 {
             Err(refuse("Request exceeds 64 KiB"))
@@ -657,6 +805,9 @@ pub fn main() -> Result<()> {
             serde_json::from_slice::<Request>(raw)
                 .map_err(Into::into)
                 .and_then(|request| {
+                    let mut helper = helper
+                        .lock()
+                        .map_err(|_| refuse("Native helper ownership state is unavailable"))?;
                     let network = request.network.clone();
                     let mutating = matches!(
                         request.action.as_str(),
@@ -738,7 +889,9 @@ mod tests {
                 session: "session".into(),
                 operation: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into(),
                 revision: 1,
+                assignment_revision: 1,
                 phase: "prepare".into(),
+                direct_ports: false,
             },
         );
         assert!(helper

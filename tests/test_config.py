@@ -26,9 +26,10 @@ def test_default_config(kllm_home):
         "vram_percent": 80,
         "ram_percent": 80,
         "accel_backend": None,
+        "engine": "llamacpp",
         "split_mode": "layer",
         "unified_memory": None,
-        "flags": {"private-network-setup": False},
+        "flags": {"private-network-setup": False, "prima-auto-deploy": False},
     }
     assert config.resolve_memory_fraction("gpu") == 0.80
     assert config.resolve_memory_fraction("cpu") == 0.80
@@ -79,6 +80,18 @@ def test_save_and_load_split_mode(kllm_home):
     assert config.get_split_mode() == "tensor"
     with pytest.raises(ValueError):
         config.save_config({"split_mode": "pipeline"})
+
+
+def test_save_and_load_engine(kllm_home):
+    home, config = kllm_home
+    out = config.save_config({"engine": "primacpp"})
+    assert out["engine"] == "primacpp"
+    assert 'engine = "primacpp"' in (home / "config.toml").read_text(encoding="utf-8")
+    assert config.get_engine() == "primacpp"
+    config.save_config({"engine": "llamacpp"})
+    assert config.get_engine() == "llamacpp"
+    with pytest.raises(ValueError):
+        config.save_config({"engine": "exo"})
 
 
 def test_save_and_load_full_config(kllm_home):
@@ -154,23 +167,59 @@ def test_invalid_gpu_ids_rejected(kllm_home):
 
 def test_feature_flags_default_disabled(kllm_home):
     _, config = kllm_home
-    assert config.feature_flags() == {"private-network-setup": False}
+    assert config.feature_flags() == {"private-network-setup": False, "prima-auto-deploy": False}
     assert config.get_feature_flag("private-network-setup") is False
+    assert config.get_feature_flag("prima-auto-deploy") is False
     with pytest.raises(ValueError):
         config.get_feature_flag("nope")
 
 
-def test_set_feature_flag_roundtrip_and_toml(kllm_home):
+def test_set_feature_flag_roundtrip_and_sqlite(kllm_home):
     home, config = kllm_home
     assert config.set_feature_flag("private-network-setup", True) is True
-    text = (home / "config.toml").read_text(encoding="utf-8")
-    assert "[flags]" in text
-    assert "private-network-setup = true" in text
+    assert (home / "managed-network.sqlite").is_file()
+    if (home / "config.toml").exists():
+        assert "[flags]" not in (home / "config.toml").read_text(encoding="utf-8")
     assert config.get_feature_flag("private-network-setup") is True
+    assert config.get_feature_flag("prima-auto-deploy") is False
     config.set_feature_flag("private-network-setup", False)
-    text2 = (home / "config.toml").read_text(encoding="utf-8")
-    assert "[flags]" not in text2
     assert config.get_feature_flag("private-network-setup") is False
+
+
+def test_prima_auto_deploy_flag_roundtrip_and_sqlite(kllm_home):
+    home, config = kllm_home
+    assert config.get_feature_flag("prima-auto-deploy") is False
+    assert config.set_feature_flag("prima-auto-deploy", True) is True
+    assert (home / "managed-network.sqlite").is_file()
+    config.save_config({"device": "cpu"})
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    assert "[flags]" not in text
+    assert "prima-auto-deploy" not in text
+    assert config.get_feature_flag("prima-auto-deploy") is True
+    config.set_feature_flag("prima-auto-deploy", False)
+    assert config.get_feature_flag("prima-auto-deploy") is False
+
+
+def test_unified_sqlite_stores_coexist_in_single_db(kllm_home):
+    home, config = kllm_home
+    from kllm.modules.managed_network.gateways.store import NetworkStore
+    from kllm.modules.primacpp.gateways.store import ProfilingStore
+
+    net_store = NetworkStore(home)
+    prof_store = ProfilingStore(home)
+    try:
+        assert net_store.path == (home / "managed-network.sqlite").resolve()
+        assert prof_store.path == (home / "managed-network.sqlite").resolve()
+        assert not (home / "prima-profiles.sqlite").exists()
+
+        config.set_feature_flag("prima-auto-deploy", True)
+        assert config.feature_flags() == {
+            "private-network-setup": False,
+            "prima-auto-deploy": True,
+        }
+    finally:
+        prof_store.close()
+        net_store.close()
 
 
 def test_feature_flag_survives_other_config_saves(kllm_home):
@@ -188,7 +237,11 @@ def test_invalid_feature_flags_rejected(kllm_home):
     with pytest.raises(ValueError):
         config.set_feature_flag("private-network-setup", "yes")
     with pytest.raises(ValueError):
+        config.set_feature_flag("prima-auto-deploy", "yes")
+    with pytest.raises(ValueError):
         config.save_config({"flags": {"nope": True}})
     with pytest.raises(ValueError):
         config.save_config({"flags": {"private-network-setup": "yes"}})
-    assert config.feature_flags() == {"private-network-setup": False}
+    with pytest.raises(ValueError):
+        config.save_config({"flags": {"prima-auto-deploy": "yes"}})
+    assert config.feature_flags() == {"private-network-setup": False, "prima-auto-deploy": False}

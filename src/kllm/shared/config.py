@@ -16,12 +16,16 @@ SplitMode = Literal["layer", "row", "tensor"]
 DEFAULT_SPLIT_MODE: SplitMode = "layer"
 VALID_SPLIT_MODES = frozenset({"layer", "row", "tensor"})
 
+Engine = Literal["llamacpp", "primacpp"]
+DEFAULT_ENGINE: Engine = "llamacpp"
+VALID_ENGINES = frozenset({"llamacpp", "primacpp"})
+
 DEFAULT_VRAM_PERCENT = 80
 DEFAULT_RAM_PERCENT = 80
 MIN_MEMORY_PERCENT = 10
 MAX_MEMORY_PERCENT = 100
 
-FEATURE_FLAGS: tuple[str, ...] = ("private-network-setup",)
+FEATURE_FLAGS: tuple[str, ...] = ("private-network-setup", "prima-auto-deploy")
 
 
 def _normalize_device(value: Any) -> Device:
@@ -53,6 +57,20 @@ def _normalize_split_mode(value: Any) -> SplitMode:
     s = str(value).strip().lower()
     if s not in VALID_SPLIT_MODES:
         raise ValueError(f"split_mode must be one of {sorted(VALID_SPLIT_MODES)}, got {value!r}")
+    return s  # type: ignore[return-value]
+
+
+def _normalize_engine(value: Any) -> Engine:
+    """The node's engine mode: which engine's workflow this launch operates in.
+
+    ``primacpp`` switches the node's dashboard to the Prima settings; inference
+    selection still requires a qualified runtime of that engine.
+    """
+    if value is None:
+        return DEFAULT_ENGINE
+    s = str(value).strip().lower()
+    if s not in VALID_ENGINES:
+        raise ValueError(f"engine must be one of {sorted(VALID_ENGINES)}, got {value!r}")
     return s  # type: ignore[return-value]
 
 
@@ -131,6 +149,7 @@ def default_config() -> dict[str, Any]:
         "vram_percent": DEFAULT_VRAM_PERCENT,
         "ram_percent": DEFAULT_RAM_PERCENT,
         "accel_backend": None,
+        "engine": DEFAULT_ENGINE,
         "split_mode": DEFAULT_SPLIT_MODE,
         "unified_memory": None,
         "flags": default_flags(),
@@ -149,6 +168,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         cfg["ram_percent"] = _normalize_percent(raw["ram_percent"], field="ram_percent")
     if "accel_backend" in raw:
         cfg["accel_backend"] = _normalize_accel_backend(raw["accel_backend"])
+    if "engine" in raw:
+        cfg["engine"] = _normalize_engine(raw["engine"])
     if "split_mode" in raw:
         cfg["split_mode"] = _normalize_split_mode(raw["split_mode"])
     if "unified_memory" in raw:
@@ -176,17 +197,12 @@ def _write_toml(cfg: dict[str, Any]) -> str:
     accel = cfg.get("accel_backend")
     if accel is not None:
         lines.append(f'accel_backend = "{accel}"')
+    lines.append(f'engine = "{cfg["engine"]}"')
     lines.append(f'split_mode = "{cfg["split_mode"]}"')
     if cfg.get("unified_memory") is True:
         lines.append("unified_memory = true")
     elif cfg.get("unified_memory") is False:
         lines.append("unified_memory = false")
-    enabled_flags = sorted(name for name, enabled in (cfg.get("flags") or {}).items() if enabled)
-    if enabled_flags:
-        lines.append("")
-        lines.append("[flags]")
-        for name in enabled_flags:
-            lines.append(f"{name} = true")
     return "\n".join(lines) + "\n"
 
 
@@ -194,18 +210,20 @@ def load_config() -> dict[str, Any]:
     ensure_home()
     path = config_path()
     cfg = default_config()
-    if not path.exists():
-        return cfg
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - py3.10
-        import tomli as tomllib
+    if path.exists():
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - py3.10
+            import tomli as tomllib
 
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    # Empty gpu_ids array in TOML means "unset / all" for backward friendliness
-    if "gpu_ids" in raw and raw["gpu_ids"] == []:
-        raw = {**raw, "gpu_ids": None}
-    return _normalize_config({**cfg, **raw})
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        # Empty gpu_ids array in TOML means "unset / all" for backward friendliness
+        if "gpu_ids" in raw and raw["gpu_ids"] == []:
+            raw = {**raw, "gpu_ids": None}
+        raw_without_flags = {k: v for k, v in raw.items() if k != "flags"}
+        cfg = _normalize_config({**cfg, **raw_without_flags})
+    cfg["flags"] = feature_flags()
+    return cfg
 
 
 def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -219,6 +237,7 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "ram_percent",
         "gpu_ids",
         "accel_backend",
+        "engine",
         "split_mode",
         "unified_memory",
         "flags",
@@ -226,6 +245,11 @@ def save_config(cfg: dict[str, Any]) -> dict[str, Any]:
         if key in cfg:
             merged[key] = cfg[key]
     out = _normalize_config(merged)
+    if "flags" in cfg:
+        from kllm.shared.persistence.feature_flags import write_persisted_flags
+
+        write_persisted_flags(out["flags"])
+    out["flags"] = feature_flags()
     path = config_path()
     path.write_text(_write_toml(out), encoding="utf-8")
     return out
@@ -247,9 +271,20 @@ def get_split_mode() -> SplitMode:
     return _normalize_split_mode(load_config().get("split_mode"))
 
 
+def get_engine() -> Engine:
+    """The node's configured engine mode (drives the dashboard's Prima settings)."""
+    return _normalize_engine(load_config().get("engine"))
+
+
 def feature_flags() -> dict[str, bool]:
     """All known feature flags with their persisted or default values."""
-    return dict(load_config().get("flags") or default_flags())
+    from kllm.shared.persistence.feature_flags import read_persisted_flags
+
+    flags = default_flags()
+    for name, enabled in read_persisted_flags().items():
+        if name in flags:
+            flags[name] = bool(enabled)
+    return flags
 
 
 def get_feature_flag(name: str) -> bool:
@@ -264,9 +299,9 @@ def set_feature_flag(name: str, enabled: bool) -> bool:
         raise ValueError(f"unknown feature flag {name!r}; valid flags: {', '.join(FEATURE_FLAGS)}")
     if not isinstance(enabled, bool):
         raise ValueError(f"feature flag {name!r} must be true or false, got {enabled!r}")
-    flags = feature_flags()
-    flags[name] = enabled
-    save_config({"flags": flags})
+    from kllm.shared.persistence.feature_flags import write_persisted_flag
+
+    write_persisted_flag(name, enabled)
     return enabled
 
 

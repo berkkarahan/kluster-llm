@@ -40,19 +40,18 @@ struct Shared {
 }
 impl Shared {
     fn emit(&self, mut event: AddressEvent) {
-        // Callback contention can hide ordering; conservatively invalidate it.
-        match self.queue.try_lock() {
-            Ok(mut queue) => {
-                event.sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                if queue.len() >= 1024 {
-                    self.lost.store(true, Ordering::SeqCst);
-                } else {
-                    queue.push_back(event);
-                }
-            }
-            Err(_) => {
-                self.lost.store(true, Ordering::SeqCst);
-            }
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut queue = match self.queue.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        event.sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        if queue.len() >= 1024 {
+            self.lost.store(true, Ordering::SeqCst);
+        } else {
+            queue.push_back(event);
         }
     }
 }
@@ -106,15 +105,15 @@ impl AddressObserver {
                 thread::sleep(Duration::from_millis(2));
             }
         }
-        let mut queue = self
-            .shared
-            .queue
-            .lock()
-            .map_err(|_| failure("observer queue failed"))?;
+        let mut queue = match self.shared.queue.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let was_lost = self.shared.lost.swap(false, Ordering::SeqCst);
         let batch = Batch {
             epoch: self.shared.epoch.clone(),
             high_water: self.shared.sequence.load(Ordering::SeqCst),
-            health: if self.shared.lost.load(Ordering::SeqCst) {
+            health: if was_lost {
                 "gap"
             } else if self.shared.closed.load(Ordering::SeqCst) {
                 "closed"
@@ -126,10 +125,7 @@ impl AddressObserver {
         };
         serde_json::to_string(&batch).map_err(|_| failure("observer result encoding failed"))
     }
-    #[cfg_attr(
-        not(any(feature = "python-bindings", test)),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "python-bindings"), allow(dead_code))]
     pub fn invalidate_native(&self) {
         self.shared.lost.store(true, Ordering::SeqCst);
     }
@@ -567,13 +563,11 @@ pub fn start(interface_index: u32, epoch: String) -> io::Result<AddressObserver>
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
-    use super::{parse, Shared};
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, AtomicU64};
-    use std::sync::Mutex;
+    use super::*;
 
+    #[cfg(target_os = "macos")]
     fn shared() -> Shared {
         Shared {
             epoch: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
@@ -587,6 +581,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn route_message(flags: u32) -> [u8; 16] {
         let mut bytes = [0u8; 16];
         bytes[0..2].copy_from_slice(&16u16.to_ne_bytes());
@@ -598,6 +593,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn neighbor_cache_routes_are_not_route_changes() {
         let state = shared();
         parse(&route_message(0x400), &state).unwrap();
@@ -606,6 +602,127 @@ mod tests {
         let event = state.queue.lock().unwrap().pop_front().unwrap();
         assert_eq!(event.kind, "route_change");
         assert!(state.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_address_events_concurrency_no_spurious_gap() {
+        let shared = Arc::new(Shared {
+            epoch: "11111111-1111-4111-8111-111111111111".into(),
+            index: 1,
+            queue: Mutex::new(VecDeque::new()),
+            sequence: AtomicU64::new(0),
+            lost: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            barrier_request: AtomicU64::new(0),
+            barrier_ack: AtomicU64::new(0),
+        });
+
+        let observer = AddressObserver {
+            shared: shared.clone(),
+            #[cfg(unix)]
+            thread: Mutex::new(None),
+            #[cfg(windows)]
+            handles: Mutex::new(None),
+        };
+
+        let mut handles = Vec::new();
+        // 8 threads x 100 events = 800 total (< 1024 capacity)
+        for t in 0..8 {
+            let s = shared.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..100 {
+                    s.emit(AddressEvent {
+                        sequence: 0,
+                        kind: "route_change".into(),
+                        interface_index: 1,
+                        address: Some(format!("10.0.{}.{}", t, i % 250)),
+                        prefix_length: Some(24),
+                        dad_state: None,
+                    });
+                }
+            }));
+        }
+
+        let mut total_received = 0;
+        let mut had_gap = false;
+
+        for h in handles {
+            h.join().unwrap();
+            let json = observer.events_native().expect("events_native");
+            let val: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+            if val["health"] == "gap" {
+                had_gap = true;
+            }
+            if let Some(arr) = val["events"].as_array() {
+                total_received += arr.len();
+            }
+        }
+
+        let json = observer.events_native().expect("events_native");
+        let val: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        if val["health"] == "gap" {
+            had_gap = true;
+        }
+        if let Some(arr) = val["events"].as_array() {
+            total_received += arr.len();
+        }
+
+        assert_eq!(total_received, 800);
+        assert!(!had_gap, "Spurious gap occurred during concurrency!");
+    }
+
+    #[test]
+    fn test_address_events_overflow_and_recovery() {
+        let shared = Arc::new(Shared {
+            epoch: "22222222-2222-4222-8222-222222222222".into(),
+            index: 1,
+            queue: Mutex::new(VecDeque::new()),
+            sequence: AtomicU64::new(0),
+            lost: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            barrier_request: AtomicU64::new(0),
+            barrier_ack: AtomicU64::new(0),
+        });
+
+        let observer = AddressObserver {
+            shared: shared.clone(),
+            #[cfg(unix)]
+            thread: Mutex::new(None),
+            #[cfg(windows)]
+            handles: Mutex::new(None),
+        };
+
+        for _ in 0..1025 {
+            shared.emit(AddressEvent {
+                sequence: 0,
+                kind: "route_change".into(),
+                interface_index: 1,
+                address: Some("192.168.1.1".into()),
+                prefix_length: Some(24),
+                dad_state: None,
+            });
+        }
+
+        let json1 = observer.events_native().expect("events_native");
+        let val1: serde_json::Value = serde_json::from_str(&json1).unwrap();
+        assert_eq!(val1["health"], "gap");
+        assert_eq!(val1["events"].as_array().unwrap().len(), 1024);
+
+        for _ in 0..5 {
+            shared.emit(AddressEvent {
+                sequence: 0,
+                kind: "address_add".into(),
+                interface_index: 1,
+                address: Some("192.168.1.2".into()),
+                prefix_length: Some(24),
+                dad_state: None,
+            });
+        }
+
+        let json2 = observer.events_native().expect("events_native");
+        let val2: serde_json::Value = serde_json::from_str(&json2).unwrap();
+        assert_eq!(val2["health"], "continuous");
+        assert_eq!(val2["events"].as_array().unwrap().len(), 5);
     }
 }
 

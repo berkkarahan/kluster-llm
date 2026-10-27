@@ -43,7 +43,7 @@ impl BackendHint {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct GpuDevice {
     #[pyo3(get)]
@@ -65,7 +65,7 @@ impl GpuDevice {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct CapacitySnapshot {
     #[pyo3(get)]
@@ -356,7 +356,185 @@ pub fn parse_rocm_smi_vram_csv(text: &str) -> Option<u64> {
 }
 
 #[cfg(target_os = "windows")]
-fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
+fn list_windows_dxgi_gpus() -> Option<Vec<GpuDevice>> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIFactory1, IDXGIAdapter3,
+        DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
+        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+    };
+    use windows::core::Interface;
+
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1().ok()? };
+    let mut devices = Vec::new();
+    for index in 0..32 {
+        let adapter = match unsafe { factory.EnumAdapters1(index) } {
+            Ok(a) => a,
+            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(_) => break,
+        };
+        let desc = match unsafe { adapter.GetDesc1() } {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+            continue;
+        }
+        let name = String::from_utf16_lossy(&desc.Description)
+            .trim_matches('\0')
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+
+        let mut vram = desc.DedicatedVideoMemory as u64;
+
+        if let Ok(adapter3) = adapter.cast::<IDXGIAdapter3>() {
+            let mut mem_info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            if unsafe {
+                adapter3.QueryVideoMemoryInfo(
+                    0,
+                    DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+                    &mut mem_info as *mut _,
+                )
+            }
+            .is_ok()
+            {
+                if vram == 0 && mem_info.Budget > 0 {
+                    vram = mem_info.Budget;
+                }
+            }
+        }
+
+        if vram > 0 {
+            devices.push(GpuDevice {
+                index,
+                name,
+                vram_bytes: Some(vram),
+            });
+        }
+    }
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn list_windows_registry_gpus() -> Option<Vec<GpuDevice>> {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegGetValueW(
+            hKey: isize,
+            lpSubKey: *const u16,
+            lpValue: *const u16,
+            dwFlags: u32,
+            pdwType: *mut u32,
+            pvData: *mut u8,
+            pcbData: *mut u32,
+        ) -> i32;
+    }
+
+    const HKEY_LOCAL_MACHINE: isize = -2147483646; // 0x80000002
+    const RRF_RT_REG_SZ: u32 = 0x00000002;
+    const RRF_RT_REG_DWORD: u32 = 0x00000010;
+    const RRF_RT_REG_QWORD: u32 = 0x00000040;
+
+    let base_key = "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    let mut devices = Vec::new();
+
+    for i in 0..32 {
+        let subkey = format!("{base_key}\\{i:04}\0");
+        let subkey_utf16: Vec<u16> = subkey.encode_utf16().collect();
+
+        // 1. Query DriverDesc (REG_SZ)
+        let desc_name: Vec<u16> = "DriverDesc\0".encode_utf16().collect();
+        let mut desc_buf = [0u16; 256];
+        let mut desc_size = (desc_buf.len() * 2) as u32;
+        let mut val_type = 0u32;
+        let res = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey_utf16.as_ptr(),
+                desc_name.as_ptr(),
+                RRF_RT_REG_SZ,
+                &mut val_type,
+                desc_buf.as_mut_ptr() as *mut u8,
+                &mut desc_size,
+            )
+        };
+        if res != 0 {
+            continue;
+        }
+
+        let name = String::from_utf16_lossy(&desc_buf[..(desc_size as usize / 2)])
+            .trim_matches('\0')
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+
+        // 2. Query HardwareInformation.qwMemorySize (REG_QWORD)
+        let qw_name: Vec<u16> = "HardwareInformation.qwMemorySize\0".encode_utf16().collect();
+        let mut qw_vram = 0u64;
+        let mut qw_size = std::mem::size_of::<u64>() as u32;
+        let qw_res = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey_utf16.as_ptr(),
+                qw_name.as_ptr(),
+                RRF_RT_REG_QWORD,
+                &mut val_type,
+                &mut qw_vram as *mut u64 as *mut u8,
+                &mut qw_size,
+            )
+        };
+
+        let vram = if qw_res == 0 && qw_vram > 0 {
+            qw_vram
+        } else {
+            // 3. Fallback to AdapterRAM (REG_DWORD)
+            let ram_name: Vec<u16> = "AdapterRAM\0".encode_utf16().collect();
+            let mut dw_vram = 0u32;
+            let mut dw_size = std::mem::size_of::<u32>() as u32;
+            let dw_res = unsafe {
+                RegGetValueW(
+                    HKEY_LOCAL_MACHINE,
+                    subkey_utf16.as_ptr(),
+                    ram_name.as_ptr(),
+                    RRF_RT_REG_DWORD,
+                    &mut val_type,
+                    &mut dw_vram as *mut u32 as *mut u8,
+                    &mut dw_size,
+                )
+            };
+            if dw_res == 0 && dw_vram > 0 {
+                dw_vram as u64
+            } else {
+                0
+            }
+        };
+
+        if vram > 0 {
+            devices.push(GpuDevice {
+                index: i,
+                name,
+                vram_bytes: Some(vram),
+            });
+        }
+    }
+
+    if devices.is_empty() {
+        None
+    } else {
+        Some(devices)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn list_windows_powershell_gpus() -> Option<Vec<GpuDevice>> {
     // Win32_VideoController.AdapterRAM is a 32-bit field and saturates near
     // 4 GB (often 4293918720) for large discrete cards. Prefer the registry
     // QWORD HardwareInformation.qwMemorySize; fall back to AdapterRAM.
@@ -389,6 +567,26 @@ exit 0
     } else {
         Some(devices)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn list_windows_wmi_gpus() -> Option<Vec<GpuDevice>> {
+    // 1. Direct DXGI adapter enumeration with IDXGIAdapter3::QueryVideoMemoryInfo
+    if let Some(devices) = list_windows_dxgi_gpus() {
+        if !devices.is_empty() {
+            return Some(devices);
+        }
+    }
+
+    // 2. Direct Win32 registry enumeration without subprocess overhead
+    if let Some(devices) = list_windows_registry_gpus() {
+        if !devices.is_empty() {
+            return Some(devices);
+        }
+    }
+
+    // 3. Fallback to PowerShell registry query if direct methods fail
+    list_windows_powershell_gpus()
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
@@ -526,5 +724,33 @@ card1,17179869184,1024
         assert_eq!(BackendHint::Cuda.as_str(), "cuda");
         assert_eq!(BackendHint::Rocm.as_str(), "rocm");
         assert_eq!(BackendHint::Vulkan.as_str(), "vulkan");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_windows_dxgi_and_registry_gpu_query() {
+        let dxgi_res = list_windows_dxgi_gpus();
+        if let Some(ref devs) = dxgi_res {
+            for dev in devs {
+                assert!(!dev.name.is_empty(), "GPU name should not be empty");
+                assert!(dev.vram_bytes.is_some() && dev.vram_bytes.unwrap() > 0, "VRAM should be > 0");
+            }
+        }
+
+        let reg_res = list_windows_registry_gpus();
+        if let Some(ref devs) = reg_res {
+            for dev in devs {
+                assert!(!dev.name.is_empty(), "Registry GPU name should not be empty");
+                assert!(dev.vram_bytes.is_some() && dev.vram_bytes.unwrap() > 0, "Registry VRAM should be > 0");
+            }
+        }
+
+        let wmi_res = list_windows_wmi_gpus();
+        if let Some(ref devs) = wmi_res {
+            for dev in devs {
+                assert!(!dev.name.is_empty());
+                assert!(dev.vram_bytes.is_some());
+            }
+        }
     }
 }

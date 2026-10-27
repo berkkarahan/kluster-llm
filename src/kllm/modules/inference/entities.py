@@ -90,6 +90,7 @@ class RunSettingsFields(BaseModel):
     node_shares: dict[str, float] | None = None
     required_nodes: list[str] = Field(default_factory=list)
     node_priority: list[str] = Field(default_factory=list)
+    placement_strategy: Literal["auto", "capacity_first", "priority"] = "auto"
     # Automatic placement: fill workers before the master and give the master
     # only the trailing layers workers cannot hold.
     just_enough_master: bool = False
@@ -126,9 +127,17 @@ class RunSettingsFields(BaseModel):
         from kllm.modules.inference.interactors.parameter_catalog import canonicalize_parameters
 
         if isinstance(value, dict):
+            if isinstance(value.get("parameters"), dict):
+                merged = dict(value["parameters"])
+                for k, v in value.items():
+                    if k != "parameters":
+                        merged[k] = v
+                value = merged
             values = canonicalize_parameters(
                 value, legacy=cls.model_config.get("extra") == "ignore"
             )
+            if "placement_strategy" in values and values["placement_strategy"] is None:
+                values["placement_strategy"] = "auto"
             if values.get("mmproj") and "vision" not in values:
                 values["vision"] = True
             if values.get("draft_model") and "speculative" not in values:
@@ -255,6 +264,7 @@ class RunSettingsFields(BaseModel):
             "node_shares": self.node_shares,
             "required_nodes": list(self.required_nodes),
             "node_priority": list(self.node_priority),
+            "placement_strategy": self.placement_strategy,
             "just_enough_master": bool(self.just_enough_master),
             "mmap_mlock": self.mmap_mlock,
             "checkpoints": norm_auto_int(self.checkpoints),
@@ -294,11 +304,15 @@ class RunSettingsFields(BaseModel):
         return cls(model=model).normalized_auto_fields()
 
 
+InferenceParameters = RunSettingsFields
+
+
 class NetworkRequestFields(RunSettingsFields):
     # Request-only: normalization and remembered settings deliberately enumerate
     # the reusable fields above, so this selection never becomes a saved default.
     network_id: str | None = None
     settings_source: Literal["saved", "defaults"] = "saved"
+    prima_auto_deploy: bool | None = None
 
     @field_validator("network_id")
     @classmethod
@@ -314,8 +328,23 @@ class PlanBody(NetworkRequestFields):
     pass
 
 
+class EngineModelSettingsBody(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
+    runtime_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_revision: int = Field(ge=0)
+    parameter_set: dict[str, Any]
+
+
+class DeploymentReview(BaseModel):
+    """Ephemeral optimistic precondition, excluded from execution identity."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    runtime_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RunBody(NetworkRequestFields):
-    pass
+    review: DeploymentReview | None = Field(default=None, exclude=True)
 
 
 class LegacyPlanBody(PlanBody):

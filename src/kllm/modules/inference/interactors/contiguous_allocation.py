@@ -59,6 +59,7 @@ def allocate_contiguous(
     shared_budgets: Mapping[str, int] | None = None,
     allow_cpu_spill: bool = True,
     node_priority: Sequence[str] = (),
+    reserve_terminal_overhead: bool = False,
 ) -> ContiguousAllocation | None:
     count = len(costs)
     if len(required_nodes) > count - 1 or cpu_base > cpu_budget:
@@ -101,11 +102,18 @@ def allocate_contiguous(
                     if pool is not None:
                         budget = min(budget, pools[d.node_id] - state.shared_used[pool])
                     for end in range(start + 1, count + 1):
+                        term_reserve = (
+                            overhead
+                            if (reserve_terminal_overhead and end == count and d.memory_kind == "gpu")
+                            else 0
+                        )
                         used = prefix[end] - prefix[start] + overhead
-                        if used > budget:
+                        if used + term_reserve > budget:
                             break
                         shared = list(state.shared_used)
                         if pool is not None:
+                            if shared[pool] + used + term_reserve > pools[d.node_id]:
+                                break
                             shared[pool] += used
                         allocation = d.allocate(
                             layer_start=start,

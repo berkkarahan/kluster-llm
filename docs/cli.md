@@ -28,10 +28,45 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 
 ## Commands
 
+### Prima local staging buffer
+
+`KLLM_PRIMA_LOCAL_CHUNK_MIB` controls local model staging reads. Unset means **4 MiB**
+(4 × 1024 × 1024 bytes). Accepts integer values **1–64**; empty, malformed,
+fractional, zero, negative and out-of-range values refuse preparation before
+hashing, copying or worker commands. The owning agent resolves it once when a new
+preparation is admitted and records `local_chunk_bytes` on the job. It does not
+affect manifests, plan digests, profile identities, threads or the 24 KiB signed
+network chunk / 64 KiB frame limits.
+
+Set it before starting a **new** owning agent, for example during an agreed idle
+startup window:
+
+```powershell
+$env:KLLM_PRIMA_LOCAL_CHUNK_MIB = '8'
+uv run kllm start --engine primacpp
+# Restore the default for future agent launches:
+Remove-Item Env:KLLM_PRIMA_LOCAL_CHUNK_MIB
+```
+
+```bash
+KLLM_PRIMA_LOCAL_CHUNK_MIB=8 uv run kllm start --engine primacpp
+# Or export it for subsequent CLI launches; unset restores the default:
+export KLLM_PRIMA_LOCAL_CHUNK_MIB=8
+unset KLLM_PRIMA_LOCAL_CHUNK_MIB
+```
+
+The CLI's new-agent subprocess inherits its environment. A CLI attached to an
+already-running agent cannot change that agent's environment, and changing the
+shell variable does not retune an admitted job. `start` has replacement semantics;
+do not use it to apply this setting during active work. Activate changes only at
+the next agreed agent startup. No forwarding through an HTTP request is performed.
+
+### Command reference
+
 | Command | Description |
 |---------|-------------|
-| `kllm start [--key KEY] [--rpc-bind HOST] [--gpus 0,1]` | Start as master, advertise via mDNS, print join key |
-| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--gpus 0,1]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
+| `kllm start [--key KEY] [--rpc-bind HOST] [--gpus 0,1] [--backend BACKEND] [--engine llamacpp\|primacpp]` | Start as master, advertise via mDNS, print join key |
+| `kllm join --key KEY [--master HOST] [--master-port PORT] [--rpc-bind HOST] [--gpus 0,1] [--backend BACKEND] [--engine llamacpp\|primacpp]` | Join as worker (key-based mDNS discovery; `--master` skips discovery). `--port` is local agent only; `--master-port` is the remote control plane. On macOS Local Network / Zscaler blocks, auto-starts a localhost control-plane proxy (`cp_proxy_port` in status). |
 | `kllm gpus` | List local GPUs (indices for `--gpus`) |
 | `kllm config [--split-mode layer\|row\|tensor]` | Show local system settings or set the persistent split-mode default |
 | `kllm flags [<name>] [--enable\|--disable]` | Show or change local dashboard feature flags. `private-network-setup` gates the Home → Private 10GbE network panel (disabled by default); omit `<name>` to list all flags |
@@ -39,6 +74,7 @@ CLI/UI rebuild only: `uv run python scripts/build.py`. Optional: set `KLLM_LLAMA
 | `kllm stop` | Stop the local agent and any llama/rpc processes this machine started (tracked in `~/.kllm/.runtime.json`) |
 | `kllm update [--port PORT]` | Local maintenance: stop this node, `git pull --ff-only` (requires a clean checkout), then full rebuild (`scripts/install.py --sync`). Node stays stopped; start or join again when it finishes. |
 | `kllm cluster update` | Master: tell joined workers to `git pull --ff-only`, smart-rebuild (`install.py` if `llama-release` changed, else `build.py`), then rejoin. Requires a clean git checkout on each worker (`KLLM_REPO_ROOT` if needed). |
+| `kllm cluster browse [--key KEY] [--timeout SECONDS] [--verbose]` | Discover LAN masters with each mDNS layer, then the HTTP subnet fallback. `--verbose` prints the per-layer result, helper interpreters, interfaces, and tunnel/Zscaler detection. Exits non-zero when nothing matches. |
 | `kllm status` | Role, members (same identities as Home topology), capacity, last plan, RPC bind, `apply_error` / `apply_warning` when set |
 | `kllm logs [-f] [-n N] [--node ID] [--source agent\|llama\|rpc]` | Dump or follow cluster logs. Workers relay agent/llama/rpc output to the master journal so any node can debug from one stream. |
 | `kllm model download <URL\|org/repo:file.gguf\|org/repo:Q4_K_M>` | Master downloads into `~/.kllm/models/` (progress on `kllm status` / dashboard). Workers do **not** need a local GGUF copy. A Hugging Face file URL keeps its revision and full path. Repository and tree page URLs are not downloads. |
@@ -65,7 +101,7 @@ Workers accept signed commands from their paired current master. Runtime ownersh
 
 Before upgrading a cluster that used the old WireGuard overlay, stop/leave it on each node. A legacy tunnel is removed on stop/leave, but its config and keys are retained. If teardown fails, state is retained and LAN start/join is blocked until it is stopped. The old CLI `--overlay` flag and API `overlay` field are no longer accepted. Cluster Settings retain the **RPC bind** control and the dedicated fast Ethernet setup.
 
-Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN (falling back to a helper Python when the agent interpreter cannot see mDNS). Pass `--master` only when discovery is unavailable.
+Masters advertise a non-secret join-key fingerprint (`kid`) over mDNS. Workers join with only `--key`; the agent matches that fingerprint on the LAN through four layers: in-process mDNS, the bundled `kllm-mdns-browse` helper, `python -m ...mdns_probe` under platform interpreters (for example `/usr/bin/python3` on macOS), then an HTTP `/health` subnet probe. Pass `--master` only when discovery is unavailable. Run `kllm cluster browse --verbose` to see which layer answered or why each one failed.
 
 ## GPU selection (multi-GPU hosts)
 
@@ -92,10 +128,13 @@ gpu_ids = [0, 1]      # optional; omitted = all discrete local GPUs at Start/Joi
 vram_percent = 80     # used when device = gpu (scales selected VRAM)
 ram_percent = 80      # used when device = cpu (scales total RAM)
 accel_backend = "vulkan"  # optional; Cluster Backend selector (metal|cuda|rocm|vulkan)
+engine = "llamacpp"       # node engine mode: llamacpp | primacpp
 split_mode = "layer"      # layer (pipeline), row (legacy), or tensor (experimental)
 ```
 
 Precedence for the local engine preference on Start/Join: `KLLM_ACCEL_BACKEND` env → `accel_backend` in config → hardware probe. Omit `accel_backend` (or choose **auto** in the dashboard) to expose every device the installed llama.cpp binary lists. Each cluster node may use a different backend (Metal, Vulkan, CUDA, ROCm); RPC layer splits are designed for that mix. `kllm start --backend vulkan` and `kllm join --backend metal` write config before registering.
+
+`engine` is the node's engine mode, written by `kllm start --engine primacpp` / `kllm join --engine primacpp` (default `llamacpp`). It is reported as `engine` in the dashboard status and switches that node's Settings runtime section to the Prima settings (identity, qualification gates, builds, preparation). It does not change inference selection: a Prima target or local selection is still refused while Prima's qualification gates are open, and llama.cpp keeps serving. `scripts/install.py --engine primacpp` is the separate build-time flag that selects which engine artifact the managed installer builds.
 
 Precedence for `plan` / `run`: CLI `--device` (or dashboard/API request body) → master config → `gpu`. For local-only CLI/API clients, split mode follows explicit request `--split-mode` → master `split_mode` config → `layer`. The dashboard always requests `layer` for estimates, plans, and runs, even when an older config contains `row` or `tensor`; its next hardware-settings save also persists `layer`.
 

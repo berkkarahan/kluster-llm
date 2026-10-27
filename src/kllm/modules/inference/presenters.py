@@ -61,6 +61,7 @@ def build_plan_run_payload(
     node_priority: list[str] | None = None,
     just_enough_master: bool | None = None,
     network_id: str | None = None,
+    prima_auto_deploy: bool | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -130,6 +131,7 @@ def build_plan_run_payload(
         "node_priority": node_priority,
         "just_enough_master": just_enough_master,
         "network_id": network_id,
+        "prima_auto_deploy": prima_auto_deploy,
     }.items():
         if value is not None:
             payload[key] = value

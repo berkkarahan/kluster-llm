@@ -8,7 +8,7 @@ import subprocess
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
-from kllm.modules.runtimes.entities import RuntimeVersion, SourceRequest, runtime_id
+from kllm.modules.runtimes.entities import UPSTREAM, RuntimeVersion, SourceRequest, runtime_id
 from kllm.modules.primacpp.interactors.recipe import recipe_digest, recipe
 
 
@@ -59,13 +59,39 @@ def resolve(source: SourceRequest) -> RuntimeVersion:
     digest = ""
     if source.engine == "primacpp":
         pinned = recipe()
-        if source.repository != pinned["source_repository"] or commit != pinned["source_commit"]:
-            raise ValueError("Prima requires the supported pinned source repository and commit")
+        accept_prima_source(source, commit, pinned)
         digest = recipe_digest()
     return RuntimeVersion(
         **source.model_dump(), commit=commit, recipe_digest=digest,
         runtime_id=runtime_id(source.repository, commit, source.engine, digest),
     )
+
+
+def accept_prima_source(source: SourceRequest, commit: str, pinned: dict) -> None:
+    """Allow tags, branches, and commits on Prima repositories while rejecting unpatched upstream."""
+    rejected = {
+        UPSTREAM.removesuffix(".git").rstrip("/").lower(),
+        str(pinned.get("upstream_repository") or "").removesuffix(".git").rstrip("/").lower(),
+    }
+    repo = source.repository.removesuffix(".git").rstrip("/").lower()
+    if repo in rejected:
+        raise ValueError(
+            "Prima requires the pinned source repository or a Kluster-compatible Prima fork, not unpatched upstream"
+        )
+    release = str(pinned.get("source_release") or "")
+    release_commit = str(pinned.get("source_release_commit") or pinned.get("source_commit") or "")
+    if (
+        source.repository == pinned.get("source_repository")
+        and source.ref_type == "tag"
+        and release
+        and source.ref == release
+        and release_commit
+        and commit != release_commit
+    ):
+        raise ValueError(
+            f"Prima release {release!r} moved; the recipe pin stands at "
+            f"{release_commit[:12]}. Use it, or advance the recipe"
+        )
 
 
 def discover(repository: str) -> dict:

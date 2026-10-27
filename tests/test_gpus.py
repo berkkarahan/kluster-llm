@@ -436,7 +436,7 @@ def test_join_uses_explicit_gpu_and_cpu_devices_without_renumbering(client, monk
     kid = join_key_id("secret")
     captured: dict = {}
 
-    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765):
+    def fake_browse(timeout: float = 2.0, key: str | None = None, port: int = 18765, trace=None):
         return [DiscoveredMaster(name="kllm-m", host="192.168.10.1", port=18765, key_id=kid)]
 
     class FakeResp:

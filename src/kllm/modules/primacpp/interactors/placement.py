@@ -6,10 +6,17 @@ from collections import defaultdict
 from typing import Any
 
 from kllm.modules.primacpp.entities import LayerRange, PrimaTopology, RankAllocation
-from kllm.modules.primacpp.interactors.platforms import normalize_platform, require_shared_ring_backend
+from kllm.modules.primacpp.interactors.platforms import (
+    _vulkan_device_name,
+    normalize_platform,
+    prima_member_backend,
+    prima_members_view,
+    require_shared_ring_backend,
+)
 
 
 def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopology:
+    members = prima_members_view(members)
     if plan.get("fit_status") == "overflow":
         raise ValueError("Cannot create a Prima execution topology for an overflowing plan")
     if (plan.get("split_mode") or "layer") != "layer":
@@ -100,6 +107,8 @@ def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopol
                     raise ValueError(f"{node}: selected GPU is absent from the node inventory")
                 else:
                     device = str(devices[rpc_index]["device"])
+            elif prima_member_backend(member) == "vulkan":
+                device = _vulkan_device_name(device, 0)
             if device in gpu_by_device and device != next(reversed(gpu_by_device)):
                 raise ValueError(f"{node}: Prima cannot represent interleaved GPU device layers exactly")
             gpu_by_device[device] = gpu_by_device.get(device, 0) + row["layer_end"] - row["layer_start"]
@@ -107,6 +116,8 @@ def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopol
         output_gpu = output is not None and output.get("memory_kind", "gpu") == "gpu" and node == master
         if output_gpu:
             output_device = str(output["device"])
+            if prima_member_backend(member) == "vulkan":
+                output_device = _vulkan_device_name(output_device, 0)
             if not gpu_by_device:
                 gpu_by_device[output_device] = 0
             if len(gpu_by_device) != 1 or output_device not in gpu_by_device:
@@ -141,7 +152,7 @@ def topology_from_plan(plan: dict, members: dict, runtime_id: str) -> PrimaTopol
     # Only ranks that offload to a GPU constrain the ring; a CPU-only coordinator does not.
     require_shared_ring_backend([
         (rank.node_id, normalize_platform(members[rank.node_id].get("platform")),
-         members[rank.node_id].get("actual_backend") or members[rank.node_id].get("backend"))
+         prima_member_backend(members[rank.node_id]))
         for rank in ranks if rank.ngl or rank.output_gpu
     ])
     return PrimaTopology(

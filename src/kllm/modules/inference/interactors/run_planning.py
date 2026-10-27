@@ -270,10 +270,24 @@ def validate_split_mode(settings: dict[str, Any], result: dict[str, Any]) -> Non
 
 
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
+    from kllm.modules.primacpp.interactors.platforms import prima_members_view
+    from kllm.modules.runtimes.interactors.selection import selected_runtime, snapshot
+
     path = model_ops.resolve_local_model(body.model)
+    active_runtime = snapshot()
+    if active_runtime is None:
+        try:
+            active_runtime = selected_runtime()
+        except (OSError, ValueError):
+            active_runtime = None
+    plan_members = (
+        prima_members_view(members, runtime=active_runtime)
+        if (active_runtime or {}).get("engine") == "primacpp"
+        else members
+    )
     nodes = [
         node if isinstance(node, PlacementNodeInput) else PlacementNodeInput.from_mapping(node)
-        for node in cluster_nodes(members)
+        for node in cluster_nodes(plan_members)
     ]
     if not nodes:
         raise HTTPException(400, "no cluster members")

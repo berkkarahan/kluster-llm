@@ -32,6 +32,10 @@ def selected_runtime() -> dict | None:
             return None
         data = json.loads(path.read_text())
         value = data.get("running")
+        if value is None:
+            target_id = (data.get("target") or {}).get("version", {}).get("runtime_id")
+            if target_id:
+                value = (data.get("versions", {}).get(target_id) or {}).get("build")
         if value is None and data.get("selected"):
             value = data["versions"][data["selected"]].get("build")
             if value is None:

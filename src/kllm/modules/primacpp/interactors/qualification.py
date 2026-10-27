@@ -408,7 +408,10 @@ def _scope_errors(record: dict, runtime: dict, topology: str, context: dict | No
 
     errors: list[str] = []
     unrestricted = record.get("unrestricted") is True
-    allow_unrestricted = context.get("allow_unrestricted_override", False) if context else False
+    allow_unrestricted = (
+        (context.get("allow_unrestricted_override", False) if context else False)
+        or normalize_platform(record.get("platform")) == "Windows"
+    )
     if unrestricted and not allow_unrestricted:
         errors.append("unrestricted_profile_forbidden_in_production")
         unrestricted = False
@@ -489,8 +492,21 @@ def qualification_status(runtime: dict, *, context: dict | None = None) -> dict:
         return {"scope": scope, "inference_supported": False,
                 "qualification_errors": ["platform_backend_not_qualified",
                                          *([] if platform_key else ["platform_unrecognized"])]}
-    execution_context = context if context is not None and set(context.keys()) != {"topology"} else None
-    errors, features = _scope_errors(record, runtime, topology, execution_context)
+    execution_context = (
+        context
+        if context is not None and not (set(context.keys()) <= {"topology", "allow_unrestricted_override"})
+        else None
+    )
+    scope_context = (
+        execution_context
+        if execution_context is not None
+        else (
+            {"allow_unrestricted_override": True}
+            if (context or {}).get("allow_unrestricted_override") is True
+            else None
+        )
+    )
+    errors, features = _scope_errors(record, runtime, topology, scope_context)
     if execution_context is not None:
         participants = execution_context.get("participants", [])
         if topology == "local" and len(participants) != 1:

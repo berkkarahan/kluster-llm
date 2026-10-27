@@ -125,6 +125,8 @@ class ProfilingCoordinator:
         ]
 
         # Initial nodes from members
+        from kllm.modules.primacpp.interactors.platforms import prima_member_backend
+
         members = self.control.members(body)
         nodes_data = [
             {
@@ -132,7 +134,7 @@ class ProfilingCoordinator:
                 "role": m.get("role", "worker"),
                 "rank_index": idx,
                 "assigned_address": m.get("host") or m.get("lan_host") or "127.0.0.1",
-                "backend": m.get("backend", "cpu"),
+                "backend": prima_member_backend(m) or "cpu",
             }
             for idx, (node_id, m) in enumerate(members.items())
         ]

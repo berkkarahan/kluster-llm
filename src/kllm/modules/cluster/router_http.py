@@ -235,6 +235,11 @@ class MembershipHandlers:
         accepted = body.node_id in state.members
         if accepted:
             update = body.model_dump(exclude={"resource_session"})
+            if (
+                update.get("installed_backends") is None
+                and state.members[body.node_id].get("installed_backends") is not None
+            ):
+                update.pop("installed_backends", None)
             if not update.get("process_pid") and state.members[body.node_id].get("process_pid"):
                 try:
                     self._store().end_node(body.node_id)

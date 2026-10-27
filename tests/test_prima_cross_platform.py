@@ -78,6 +78,124 @@ def test_mixed_gpu_backends_are_rejected_naming_both_nodes_and_backends():
         topology_from_plan(plan, members, RUNTIME_ID)
 
 
+def test_metal_plus_vulkan_nodes_are_advertised_and_placed_as_vulkan():
+    from kllm.modules.primacpp.interactors.platforms import prima_member_backend, prima_members_view
+    from kllm.modules.primacpp.interactors.preparation import profiling_backend
+
+    mac_master = {
+        **member("master", "10.0.0.1", "Darwin", "arm64", backend="metal"),
+        "installed_backends": ["metal", "vulkan"],
+        "devices": [{"index": 0, "device": "MTL0", "name": "Apple M3 Max", "backend": "metal"}],
+    }
+    mac_worker = {
+        **member("worker", "10.0.0.2", "Darwin", "arm64", backend="metal"),
+        "runtime": {"prepared": {"backend": "metal+vulkan"}},
+        "devices": [{"index": 0, "device": "MTL0", "name": "Apple M3 Pro", "backend": "metal"}],
+        "rpc_devices": [
+            {"index": 0, "device": "MTL0", "backend": "metal", "memory_kind": "gpu"},
+            {"index": 1, "device": "CPU", "backend": "cpu", "memory_kind": "ram"},
+        ],
+    }
+    win_worker = member("worker", "10.0.0.3", "Windows", "AMD64", backend="vulkan")
+    members = {"m": mac_master, "w1": mac_worker, "w2": win_worker}
+
+    normalized = prima_members_view(members)
+    assert normalized["m"]["backend"] == "vulkan"
+    assert normalized["m"]["actual_backend"] == "vulkan"
+    assert normalized["m"]["unified_memory"] is True
+    assert normalized["m"]["devices"][0]["device"] == "Vulkan0"
+    assert normalized["m"]["devices"][0]["backend"] == "vulkan"
+    assert normalized["w1"]["devices"][0]["device"] == "Vulkan0"
+    assert normalized["w1"]["rpc_devices"][0]["device"] == "Vulkan0"
+    assert normalized["w1"]["rpc_devices"][0]["backend"] == "vulkan"
+
+    plan = {
+        "estimated_layers": 6,
+        "cpu_layers": 0,
+        "device_allocations": [
+            {"node_id": "m", "device": "MTL0", "layer_start": 0, "layer_end": 2, "layers": 2, "memory_kind": "gpu", "local": True},
+            {"node_id": "w1", "device": "RPC[10.0.0.2:50052]/0", "rpc_index": 0, "layer_start": 2, "layer_end": 4, "layers": 2, "memory_kind": "gpu", "local": False},
+            gpu_row("w2", 4, 6, local=False),
+        ],
+    }
+    topology = topology_from_plan(plan, members, RUNTIME_ID)
+    assert [rank.devices for rank in topology.ranks] == [["Vulkan0"], ["Vulkan0"], ["Vulkan0"]]
+    assert participant_platforms(topology, members) == {
+        "m": {"rank": 0, "platform": "Darwin", "architecture": "arm64", "backend": "vulkan"},
+        "w1": {"rank": 1, "platform": "Darwin", "architecture": "arm64", "backend": "vulkan"},
+        "w2": {"rank": 2, "platform": "Windows", "architecture": "AMD64", "backend": "vulkan"},
+    }
+    assert prima_member_backend(mac_master) == "vulkan"
+    assert profiling_backend({"backend": "metal+vulkan"}, mac_master) == "vulkan"
+
+
+def test_execute_plan_and_materialize_use_vulkan_for_metal_plus_vulkan_nodes(monkeypatch, tmp_path):
+    from kllm.modules.inference.entities import PlanBody
+    from kllm.modules.inference.interactors import run_planning
+    from kllm.modules.primacpp.interactors import planner
+    from kllm.modules.runtimes.interactors.selection import use_runtime
+
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"G" * (64 * 1024 * 1024))
+    monkeypatch.setattr(run_planning.model_ops, "resolve_local_model", lambda _: model)
+    monkeypatch.setattr(run_planning, "read_model_layout", lambda _: None)
+    monkeypatch.setattr(planner, "model_architecture", lambda _: "llama")
+
+    members = {
+        "mac": {
+            "node_id": "mac",
+            "role": "master",
+            "host": "10.0.0.1",
+            "rpc_bind": "10.0.0.1",
+            "platform": "Darwin",
+            "architecture": "arm64",
+            "backend": "metal",
+            "actual_backend": "metal",
+            "installed_backends": ["metal", "vulkan"],
+            "total_ram_bytes": 64 * 1024**3,
+            "available_ram_bytes": 48 * 1024**3,
+            "vram_bytes": 48 * 1024**3,
+            "devices": [
+                {
+                    "index": 0,
+                    "device": "MTL0",
+                    "name": "Apple M3 Max",
+                    "backend": "metal",
+                    "vram_bytes": 48 * 1024**3,
+                    "free_bytes": 48 * 1024**3,
+                }
+            ],
+        }
+    }
+    runtime = {
+        "runtime_id": RUNTIME_ID,
+        "engine": "primacpp",
+        "platform": "Darwin",
+        "backend": "metal+vulkan",
+        "commit": recipe()["source_commit"],
+        "recipe_digest": recipe_digest(),
+        "capabilities": {"features": ["vulkan_flash_attn_v1"]},
+    }
+    body = PlanBody(model=str(model), context=4096)
+    with use_runtime(runtime):
+        plan_result = run_planning.execute_plan(body, members)
+        assert {a["backend"] for a in plan_result["device_allocations"]} == {"vulkan"}
+        assert {a["device"] for a in plan_result["device_allocations"]} == {"Vulkan0"}
+        assert members["mac"]["backend"] == "metal"
+        preview_result = planner.preview(body, runtime, members, model, run_planning.execute_plan)
+        assert preview_result["participant_platforms"]["mac"]["backend"] == "vulkan"
+        manifest, _ = planner.materialize(
+            body,
+            runtime,
+            members,
+            model,
+            run_planning.execute_plan,
+            expected_digest=preview_result["plan_digest"],
+        )
+        assert manifest.backends == {"mac": "vulkan"}
+        assert [r.devices for r in manifest.ranks] == [["Vulkan0"]]
+
+
 def test_members_without_platform_still_plan_and_never_become_windows():
     members = {"m": member("master", "10.0.0.1"), "w": member("worker", "10.0.0.2")}
     plan = {"estimated_layers": 4, "cpu_layers": 0, "device_allocations": [
@@ -118,8 +236,13 @@ def test_scope_follows_the_nodes_own_platform_and_reports_missing_evidence(
 ):
     status = qualification.qualification_status(runtime_for(platform, backend), context={"topology": topology})
     assert status["scope"] == f"{prefix}-vulkan-{topology}"
-    assert status["inference_supported"] is True
-    assert status["qualification_errors"] == []
+    if prefix == "windows":
+        assert status["inference_supported"] is True
+        assert status["qualification_errors"] == []
+    else:
+        assert status["inference_supported"] is False
+        assert "qualification_evidence_missing" in status["qualification_errors"]
+        assert "platform_backend_not_qualified" not in status["qualification_errors"]
 
     unverified = copy.deepcopy(qualification.policy())
     for record in unverified["scopes"].values():
@@ -141,9 +264,14 @@ def test_shipped_policy_defines_every_platform_scope_without_any_evidence():
         for topology in ("local", "distributed"):
             record = scopes[f"{prefix}-vulkan-{topology}"]
             assert record["topology"] == topology and record["backend"] == "vulkan"
-            assert record["unrestricted"] is True
-            assert all(record["gates"].values())
-            assert record["receipts"] == ["default-prima-runtime"]
+            if prefix == "windows":
+                assert record["unrestricted"] is True
+                assert all(record["gates"].values())
+                assert record["receipts"] == ["default-prima-runtime"]
+            else:
+                assert record["unrestricted"] is False
+                assert not any(record["gates"].values())
+                assert record["receipts"] == []
 
 
 @pytest.mark.parametrize("platform,backend", [("Windows", "cuda"), ("Linux", "metal+vulkan"), ("Darwin", "metal"),

@@ -26,6 +26,7 @@ class HeartbeatPayloadBuilder:
     _OPTIONAL_MEMBER_FIELDS = (
         "actual_backend",
         "requested_backend",
+        "installed_backends",
         "devices",
         "unified_memory",
         "binary_version",

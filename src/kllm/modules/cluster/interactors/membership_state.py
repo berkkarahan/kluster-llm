@@ -16,6 +16,7 @@ _SNAPSHOT_OPTIONAL = (
     "architecture",
     "actual_backend",
     "requested_backend",
+    "installed_backends",
     "devices",
     "rpc_devices",
     "rpc_capabilities",

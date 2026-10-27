@@ -79,6 +79,7 @@ class CapacityService:
             "backend": backend,
             "actual_backend": backend,
             "requested_backend": capacity.get("requested_backend"),
+            "installed_backends": list(capacity.get("installed_backends") or []),
             "devices": gpu_selection.device_payloads(),
             "unified_memory": capacity.get("unified_memory", False),
             "binary_version": capacity.get("binary_version"),
@@ -141,6 +142,7 @@ class CapacityService:
                         "total_ram_bytes",
                         "available_ram_bytes",
                         "requested_backend",
+                        "installed_backends",
                         "unified_memory",
                         "binary_version",
                     )

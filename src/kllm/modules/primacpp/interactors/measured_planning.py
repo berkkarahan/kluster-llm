@@ -7,6 +7,7 @@ from kllm.modules.runtimes.entities import body_digest
 from kllm.modules.runtimes.interactors.registry import file_digest
 from kllm.modules.primacpp.interactors.devices import discover_vulkan_devices, select_vulkan_devices
 from kllm.modules.primacpp.interactors.placement import topology_from_plan
+from kllm.modules.primacpp.interactors.platforms import prima_member_backend
 from kllm.modules.primacpp.interactors.profiles import generation_settings, generation_hardware
 
 
@@ -69,7 +70,7 @@ def measured_local_candidates(feasible, body, runtime, model, cache):
         if decline:
             return _unmeasured(feasible, decline)
         rank = topology.ranks[0]
-        if not rank.ngl or (members[rank.node_id].get("actual_backend") or members[rank.node_id].get("backend")) != "vulkan":
+        if not rank.ngl or prima_member_backend(members[rank.node_id], runtime=runtime) != "vulkan":
             return _unmeasured(feasible, "Profiled planning requires a Vulkan GPU rank")
         candidates.append((plan, members, topology, rank))
     if not cache.root.exists():

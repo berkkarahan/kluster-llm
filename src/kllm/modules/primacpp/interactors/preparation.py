@@ -33,10 +33,12 @@ TERMINAL = {"prepared", "failed", "cancelled", "interrupted"}
 
 
 def profiling_backend(runtime: dict, member: dict) -> str:
+    from kllm.modules.primacpp.interactors.platforms import prima_member_backend
+
     available = str(runtime["backend"]).split("+")
     if len(available) == 1:
         return available[0]
-    selected = member.get("actual_backend") or member.get("backend")
+    selected = prima_member_backend(member, runtime=runtime)
     if selected not in available:
         raise ValueError("Select an available Prima accelerator backend before profiling")
     return str(selected)

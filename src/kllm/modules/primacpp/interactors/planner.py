@@ -21,12 +21,12 @@ from kllm.modules.primacpp.interactors.placement import (
     topology_from_plan, network_edges, require_layer_execution,
 )
 from kllm.modules.primacpp.interactors.model_support import architecture_support, model_architecture
-from kllm.modules.primacpp.interactors.platforms import normalize_platform
+from kllm.modules.primacpp.interactors.platforms import normalize_platform, prima_member_backend
 from kllm.modules.primacpp.interactors.recipe import qualification_errors
 from kllm.modules.runtimes.entities import body_digest
 
 
-def participant_platforms(topology, members: dict) -> dict:
+def participant_platforms(topology, members: dict, runtime: dict | None = None) -> dict:
     """Reported OS, architecture and backend per planned rank; unreported values stay None."""
     result = {}
     for rank in topology.ranks:
@@ -35,7 +35,7 @@ def participant_platforms(topology, members: dict) -> dict:
             "rank": rank.rank,
             "platform": normalize_platform(member.get("platform")),
             "architecture": member.get("architecture"),
-            "backend": member.get("actual_backend") or member.get("backend"),
+            "backend": prima_member_backend(member, runtime=runtime),
         }
     return result
 
@@ -272,7 +272,7 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         capabilities = runtime.get("capabilities") or {}
         kv_error = vulkan_kv_cache_error(
             topology.ranks,
-            {node: info["backend"] for node, info in participant_platforms(topology, members).items()},
+            {node: info["backend"] for node, info in participant_platforms(topology, members, runtime=runtime).items()},
             resolved if isinstance(resolved, dict) else {},
             capabilities.get("features", []),
             capabilities=capabilities)
@@ -292,7 +292,7 @@ def preview(body, runtime: dict, members: dict, model: Path, execute_plan, *, sc
         "prima_topology": topology.model_dump() if topology else None,
         "network_edges": network_edges(topology) if topology else [],
         "runtime_required_nodes": [r.node_id for r in topology.ranks] if topology else [],
-        "participant_platforms": participant_platforms(topology, members) if topology else {},
+        "participant_platforms": participant_platforms(topology, members, runtime=runtime) if topology else {},
         "candidate_count": len(feasible),
         "profiling": profiling,
         "scheduler": scheduler_report.model_dump(),
@@ -344,7 +344,7 @@ def materialize(
     backends = {}
     for rank in topology.ranks:
         member = members[rank.node_id]
-        backend = member.get("actual_backend") or member.get("backend")
+        backend = prima_member_backend(member, runtime=runtime)
         if (rank.ngl or rank.output_gpu) and backend not in ("vulkan", "metal", "cuda", "rocm"):
             raise ValueError(
                 f"{rank.node_id}: select an explicit GPU backend before preparing Prima"

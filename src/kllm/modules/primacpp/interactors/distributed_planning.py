@@ -93,7 +93,9 @@ def score_candidates(feasible, body, runtime, model_sha256, layout, profiles, co
             cpu_count = len(layers) - rank.ngl
             compute += sum(value.cpu_layer_ms_by_index[i] for i in layers[:cpu_count])
             if rank.ngl or rank.output_gpu:
-                backend = members[rank.node_id].get("actual_backend") or members[rank.node_id].get("backend")
+                from kllm.modules.primacpp.interactors.platforms import prima_member_backend
+
+                backend = prima_member_backend(members[rank.node_id], runtime=runtime)
                 if (backend != "vulkan" or value.backend != "vulkan" or len(rank.devices) != 1
                         or len(devices) != 1 or rank.devices[0] not in (devices[0]["name"], devices[0]["device_identity"])
                         or value.gpu_transfer_bytes != 4 * embedding or value.gpu_upload_ms is None

@@ -199,6 +199,8 @@ def resolve_launch_settings(body: RunSettingsFields) -> ResolvedLaunchSettings:
         )
     if result["flash_attention"] == "auto" and quantized_v:
         result["flash_attention"] = "on"
+    if prima and result["flash_attention"] == "auto":
+        result["flash_attention"] = "on" if prima_vulkan_fa else "off"
     if result["threads"] > available_threads():
         raise HTTPException(400, f"threads must be 1–{available_threads()} on the master")
     result["requested_batch_size"] = result["batch_size"]

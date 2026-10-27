@@ -79,6 +79,7 @@ class RegisterBody(BaseModel):
     ram_percent: int = Field(default=80, ge=10, le=100)
     actual_backend: str | None = None
     requested_backend: str | None = None
+    installed_backends: list[str] | None = None
     devices: list[dict[str, Any]] = Field(default_factory=list)
     rpc_devices: list[dict[str, Any]] = Field(default_factory=list)
     rpc_capabilities: list[dict[str, Any]] = Field(default_factory=list)

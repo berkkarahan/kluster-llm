@@ -91,6 +91,7 @@ def build_register_payload(
         "backend": backend,
         "actual_backend": backend,
         "requested_backend": cap.get("requested_backend"),
+        "installed_backends": list(cap.get("installed_backends") or []),
         "devices": gpus,
         "unified_memory": cap.get("unified_memory", False),
         "binary_version": cap.get("binary_version"),

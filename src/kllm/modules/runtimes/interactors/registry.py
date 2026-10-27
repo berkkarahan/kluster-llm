@@ -366,7 +366,8 @@ class RuntimeRegistry:
             if entry["build"]:
                 try:
                     self.verify(entry["build"])
-                    if request.backend in ("auto", entry["build"]["backend"]):
+                    built_backend = str(entry["build"]["backend"] or "")
+                    if request.backend in ("auto", built_backend, *built_backend.split("+")):
                         return {
                             "job_id": None,
                             "runtime_id": request.runtime_id,

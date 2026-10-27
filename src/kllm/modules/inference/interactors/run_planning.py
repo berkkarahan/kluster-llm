@@ -272,6 +272,7 @@ def validate_split_mode(settings: dict[str, Any], result: dict[str, Any]) -> Non
 def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, Any]:
     from kllm.modules.primacpp.interactors.platforms import prima_members_view
     from kllm.modules.runtimes.interactors.selection import selected_runtime, snapshot
+    from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active, auto_plan
 
     path = model_ops.resolve_local_model(body.model)
     active_runtime = snapshot()
@@ -280,6 +281,9 @@ def execute_plan(body: RunSettingsFields, members: dict[str, Any]) -> dict[str, 
             active_runtime = selected_runtime()
         except (OSError, ValueError):
             active_runtime = None
+
+    if is_prima_auto_deploy_active(body, runtime=active_runtime):
+        return auto_plan(body, members, model=path, runtime=active_runtime)
     plan_members = (
         prima_members_view(members, runtime=active_runtime)
         if (active_runtime or {}).get("engine") == "primacpp"

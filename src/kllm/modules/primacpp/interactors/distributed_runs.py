@@ -50,6 +50,172 @@ class DistributedPrimaRuns:
                     return manifest, owner
         raise ValueError("Prepare the exact Prima plan and assets under the current master authority before Run")
 
+    def _auto_stage(self, body, model, plan, members, runtime):
+        import json
+        import shutil
+        from starlette.exceptions import HTTPException
+        from kllm.modules.primacpp.interactors.planner import materialize
+        from kllm.modules.primacpp.interactors.adapters import adapter_paths
+        from kllm.modules.primacpp.interactors.execution import (
+            Asset,
+            ExecutionManifest,
+            ParticipantEvidence,
+            authority_owner,
+            validate_asset_batch,
+        )
+
+        owner = authority_owner(self.control.service.channels.master_authority())
+        manifest, files = materialize(
+            body,
+            runtime,
+            members,
+            model,
+            lambda *_: plan,
+            expected_digest=plan.get("plan_digest"),
+            adapters=adapter_paths(body.model_dump()),
+            companions={
+                kind: self.control.resolve_model(value)
+                for kind, value in (
+                    ("draft", body.draft_model if body.draft_enabled() else None),
+                    ("projector", body.mmproj),
+                )
+                if value
+            },
+        )
+
+        created_paths = []
+        remote_jobs: dict[str, str] = {}
+        try:
+            evidence = {}
+            for rank in manifest.ranks:
+                self._check()
+                if rank.node_id == self.control.service.state().node_id:
+                    evidence[rank.node_id] = self.control.observe_participant(
+                        runtime["runtime_id"], rank, manifest.backends[rank.node_id]
+                    )
+                else:
+                    try:
+                        raw = self.control._call(
+                            rank.node_id,
+                            manifest.run_id,
+                            "prima_inventory",
+                            {
+                                "runtime_id": runtime["runtime_id"],
+                                "rank": rank.model_dump(),
+                                "backend": manifest.backends[rank.node_id],
+                            },
+                        )
+                        evidence[rank.node_id] = ParticipantEvidence.model_validate(raw)
+                    except Exception as exc:
+                        raise HTTPException(
+                            504,
+                            detail={
+                                "code": "PRIMA_STAGING_FAILED",
+                                "node_id": rank.node_id,
+                                "message": f"Worker {rank.node_id} failed during inventory collection: {exc}",
+                            },
+                        ) from exc
+
+            manifest = ExecutionManifest.model_validate(
+                manifest.model_copy(update={"participant_evidence": evidence}).model_dump()
+            )
+
+            manifest_file = self.control.root / manifest.run_id / "execution.json"
+            manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            created_paths.append(self.control.root / manifest.run_id)
+            manifest_file.write_text(json.dumps(manifest.model_dump(), sort_keys=True, separators=(",", ":")))
+            files.append(
+                (
+                    Asset(
+                        name="execution.json",
+                        kind="manifest",
+                        sha256=manifest.digest,
+                        size=manifest_file.stat().st_size,
+                    ),
+                    manifest_file,
+                )
+            )
+            validate_asset_batch([asset for asset, _ in files], include_manifest=True)
+
+            for rank in manifest.ranks:
+                self._check()
+                node_id = rank.node_id
+                if node_id == self.control.service.state().node_id:
+                    for asset, p in files:
+                        self.control.receiver.stager.prepare(
+                            asset.sha256,
+                            asset.size,
+                            lambda offset, path=p: self.control._file_chunks(path, offset, check=self._check),
+                            check=self._check,
+                        )
+                else:
+                    try:
+                        prep = self.control._call(
+                            node_id,
+                            manifest.run_id,
+                            "prima_prepare",
+                            {
+                                "runtime_id": manifest.runtime_id,
+                                "assets": [a.model_dump() for a, _ in files],
+                                "operation_id": manifest.run_id,
+                            },
+                        )
+                        remote_jobs[node_id] = prep["job_id"]
+                        offsets = dict(prep.get("offsets") or {})
+                        for asset, p in files:
+                            offset = offsets.get(asset.sha256, 0)
+                            if offset < asset.size:
+                                self.control.grants.grant(node_id, manifest.run_id, asset, p, check=self._check)
+                            while offset < asset.size:
+                                self._check()
+                                chunk = self.control.grants.chunk(node_id, manifest.run_id, asset.sha256, offset)
+                                reply = self.control._call(
+                                    node_id,
+                                    manifest.run_id,
+                                    "prima_asset_chunk",
+                                    {"job_id": remote_jobs[node_id], "chunk": chunk},
+                                )
+                                offset = reply.get("offset")
+                        status = self.control._call(node_id, manifest.run_id, "prima_status", {"job_id": remote_jobs[node_id]})
+                        if status.get("phase") != "prepared":
+                            raise ValueError(status.get("error") or "Worker preparation failed")
+                    except HTTPException:
+                        raise
+                    except Exception as exc:
+                        raise HTTPException(
+                            504,
+                            detail={
+                                "code": "PRIMA_STAGING_FAILED",
+                                "node_id": node_id,
+                                "message": f"Worker {node_id} staging failed or timed out: {exc}",
+                            },
+                        ) from exc
+
+            with self.control.lock:
+                self.control.jobs[manifest.run_id] = {
+                    "job_id": manifest.run_id,
+                    "phase": "prepared",
+                    "runtime_id": runtime["runtime_id"],
+                    "plan_digest": plan.get("plan_digest"),
+                    "request_settings_digest": body_digest(body.model_dump()),
+                    "command_owner": owner,
+                    "expires_at": time.time() + 3600,
+                    "manifest": manifest.model_dump(),
+                    "manifest_digest": manifest.digest,
+                    "nodes": {},
+                }
+            self.preparation = manifest.run_id
+            return manifest, owner
+        except Exception:
+            for path in created_paths:
+                shutil.rmtree(path, ignore_errors=True)
+            for nid, jid in remote_jobs.items():
+                try:
+                    self.control._call(nid, manifest.run_id, "prima_cancel", {"job_id": jid})
+                except Exception:
+                    pass
+            raise
+
     def launch(self, body, model, plan, members):
         if self.coordinator.active or self.control.rank.owner or self.control.service.state().process_pid:
             raise ValueError("Stop and reconcile the previous Prima run before starting another")
@@ -59,7 +225,14 @@ class DistributedPrimaRuns:
         try:
             runtime = self.control.registry.capture((snapshot() or {}).get("runtime_id"))
             require_qualified(runtime)
-            manifest, owner = self._prepared(body, plan, runtime)
+            try:
+                manifest, owner = self._prepared(body, plan, runtime)
+            except ValueError:
+                from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active
+                if is_prima_auto_deploy_active(body):
+                    manifest, owner = self._auto_stage(body, model, plan, members, runtime)
+                else:
+                    raise
             model_asset = next((a for a in manifest.assets if a.kind == "model"), None)
             total_bytes = model_asset.size if model_asset else (model.stat().st_size if model.exists() else 0)
             load_progress.begin(
@@ -70,7 +243,11 @@ class DistributedPrimaRuns:
             )
             self.control.runs.bind_resources(manifest, owner)
             self.run_id = manifest.run_id
-            if len(manifest.ranks) < 2 or not body.network_id or manifest.network_id != body.network_id:
+            from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active
+            auto_active = is_prima_auto_deploy_active(body)
+            if len(manifest.ranks) < 2:
+                raise ValueError("Distributed Prima requires at least 2 ranks")
+            if not auto_active and (not body.network_id or manifest.network_id != body.network_id):
                 raise ValueError("Distributed Prima requires the prepared private-network manifest")
             if not manifest.participant_evidence:
                 raise ValueError("Prepare signed participant hardware evidence before distributed Prima Run")
@@ -110,7 +287,11 @@ class DistributedPrimaRuns:
             return
         if authority_owner(control.service.channels.master_authority()) != self.coordinator.command_owner:
             raise ValueError("Prima master authority changed; cleanup remains owned")
-        members = control.service.prima_admission.members(manifest.network_id)
+        members = (
+            control.service.prima_admission.members(manifest.network_id)
+            if manifest.network_id
+            else control.service.state().members
+        )
         if inventory_identity(members, manifest.network_id) != manifest.inventory_digest:
             raise ValueError("Prima private inventory changed; prepare a new plan")
         if self.runtime is not None and self.context is not None:
@@ -408,6 +589,9 @@ class PrimaRuns:
                     self.distributed.dispatch_generation = generation
                     return self.distributed.launch(body, model, plan, members)
                 self.local.dispatch_generation = generation
+                from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active
+                if is_prima_auto_deploy_active(body) and getattr(body, "network_id", None):
+                    body = body.model_copy(update={"network_id": None})
                 return self.local.launch(body, model, plan, members)
             finally:
                 self._starting = False
@@ -422,7 +606,8 @@ class PrimaRuns:
             result = self.local.stop()
             if self.control.ports.owner:
                 manifest = ExecutionManifest.model_validate(self.control.ports.owner["manifest"])
-                self.control.ports.release(manifest.network_id, manifest.run_id)
+                if manifest.network_id:
+                    self.control.ports.release(manifest.network_id, manifest.run_id)
             self._release_if_idle()
             return result
 

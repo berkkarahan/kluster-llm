@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kllm.shared.state import ClusterState
+from kllm.shared import config as kllm_config
 from kllm.modules.logs.interactors.logging_control import overview as logging_overview
 
 StatusPayload = dict[str, Any]
@@ -51,6 +52,12 @@ class DashboardStatusService:
         self._runtimes = runtimes
         self._network_directory = network_directory
 
+    def _resolved_feature_flags(self) -> dict[str, bool]:
+        flags = dict(self._feature_flags()) if self._feature_flags is not None else kllm_config.feature_flags()
+        if "prima-auto-deploy" not in flags:
+            flags["prima-auto-deploy"] = False
+        return flags
+
     def status(self) -> StatusPayload:
         """Build the full status response, including a fresh local capacity probe."""
         state = self._state()
@@ -83,7 +90,7 @@ class DashboardStatusService:
             **self._common_state_fields(state),
             **({"rpc_lifecycle": self._rpc_lifecycle()} if self._rpc_lifecycle else {}),
             **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
-            **({"feature_flags": self._feature_flags()} if self._feature_flags else {}),
+            "feature_flags": self._resolved_feature_flags(),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
             "device": config.get("device", self._default_device),
@@ -137,7 +144,7 @@ class DashboardStatusService:
             **self._common_state_fields(state),
             **({"rpc_lifecycle": self._rpc_lifecycle()} if self._rpc_lifecycle else {}),
             **({"managed_networks": self._managed_networks()} if self._managed_networks else {}),
-            **({"feature_flags": self._feature_flags()} if self._feature_flags else {}),
+            "feature_flags": self._resolved_feature_flags(),
             "inference_up": bool(activity.get("server_ready")),
             "inference_activity": activity,
             "device": config.get("device", self._default_device),

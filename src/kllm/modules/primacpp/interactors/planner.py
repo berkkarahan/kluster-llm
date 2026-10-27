@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from itertools import combinations
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from starlette.exceptions import HTTPException
@@ -332,7 +333,14 @@ def candidate_profile_edges(manifest, feasible, *, segmented=False):
 def materialize(
     body, runtime, members, model, execute_plan, *, expected_digest: str, companions=None, adapters=None, score=None
 ):
-    value = preview(body, runtime, members, model, execute_plan, score=score)
+    auto_deploy = getattr(body, "prima_auto_deploy", None)
+    if auto_deploy is None:
+        from kllm.shared import config as kllm_config
+        auto_deploy = kllm_config.get_feature_flag("prima-auto-deploy")
+    if auto_deploy:
+        value = auto_plan(body, members, model=model, runtime=runtime)
+    else:
+        value = preview(body, runtime, members, model, execute_plan, score=score)
     if value["plan_digest"] != expected_digest:
         raise ValueError("Prima plan changed; refresh the plan before preparation")
     if value["placement_errors"]:
@@ -438,3 +446,375 @@ def choose_measured_candidate(
         scores.append(score)
     index = min(range(len(scores)), key=lambda i: (scores[i], i))
     return feasible[index], {"status": "profiled_estimate", "predicted_decode_ms": scores[index]}
+
+
+def is_prima_auto_deploy_active(body: Any, runtime: dict[str, Any] | None = None) -> bool:
+    from kllm.shared import config as kllm_config
+    from kllm.modules.runtimes.interactors.selection import selected_runtime, snapshot
+
+    explicit = getattr(body, "prima_auto_deploy", None)
+    if explicit is False:
+        return False
+    if explicit is True:
+        return True
+    if not kllm_config.get_feature_flag("prima-auto-deploy"):
+        return False
+    if runtime is None:
+        runtime = snapshot()
+        if runtime is None:
+            try:
+                runtime = selected_runtime()
+            except Exception:
+                runtime = None
+    return bool(runtime and runtime.get("engine") == "primacpp")
+
+
+def auto_plan(
+    body: Any,
+    members: dict[str, Any],
+    *,
+    model: Path | str | None = None,
+    runtime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from kllm.modules.models.interactors.gguf_meta import read_model_layout
+    from kllm.modules.primacpp.entities import DeviceProfile
+    from kllm.modules.primacpp.interactors.highs_scheduler import solve_highs_halda_schedule
+    from kllm.modules.primacpp.interactors.platforms import _vulkan_device_name, prima_members_view, prima_member_backend
+    from kllm.modules.runtimes.interactors.selection import selected_runtime, snapshot
+    from kllm.modules import models as model_ops
+    import time
+
+    # 0. Model path resolution
+    if model is None:
+        model = model_ops.resolve_local_model(body.model)
+    elif not isinstance(model, Path):
+        model = Path(model)
+
+    # 1. Fast Refusal on corrupt / 0-byte models (FR-016)
+    if not model.exists():
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRIMA_MODEL_CORRUPT", "message": f"Model file {model.name} does not exist"},
+        )
+    try:
+        stat = model.stat()
+    except OSError as err:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRIMA_MODEL_CORRUPT", "message": str(err)},
+        ) from None
+
+    if stat.st_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRIMA_MODEL_CORRUPT", "message": f"Model file {model.name} is 0-byte or empty"},
+        )
+
+    try:
+        layout = read_model_layout(model)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRIMA_MODEL_CORRUPT", "message": f"Corrupt GGUF layout in {model.name}: {exc}"},
+        ) from None
+
+    if layout is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRIMA_MODEL_CORRUPT", "message": f"Corrupt or non-GGUF model file {model.name}"},
+        )
+
+    # 2. Runtime & Architecture Support (FR-013)
+    if runtime is None:
+        runtime = snapshot()
+        if runtime is None:
+            try:
+                runtime = selected_runtime()
+            except Exception:
+                runtime = {"runtime_id": "0" * 64, "engine": "primacpp", "capabilities": {}}
+
+    capabilities = (runtime or {}).get("capabilities") or {}
+    arch = (layout or {}).get("architecture") or model_architecture(model)
+    support = architecture_support(arch, capabilities)
+    if support.get("error"):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "PRIMA_MODEL_UNSUPPORTED", "message": support["error"]},
+        )
+
+    # 3. Discover online cluster participants without manual layer/fraction limits (FR-006, FR-007)
+    plan_members = (
+        prima_members_view(members, runtime=runtime)
+        if (runtime or {}).get("engine") == "primacpp"
+        else members
+    )
+    if not plan_members:
+        raise HTTPException(status_code=400, detail={"code": "NO_CLUSTER_MEMBERS", "message": "no cluster members"})
+
+    total_layers = int(
+        (layout or {}).get("n_layers")
+        or len((layout or {}).get("layers") or [])
+        or 32
+    )
+    total_layers = max(1, total_layers)
+
+    model_size_bytes = stat.st_size
+    layer_weights = list((layout or {}).get("layer_bytes") or [])
+    if not layer_weights and (layout or {}).get("layers"):
+        layer_weights = [
+            int(item.get("bytes", 0))
+            for item in ((layout or {}).get("layers") or [])
+            if isinstance(item, dict) and item.get("bytes")
+        ]
+    if layer_weights:
+        bytes_per_layer_weight = max(1, int(sum(layer_weights) // len(layer_weights)))
+    else:
+        bytes_per_layer_weight = max(1, model_size_bytes // total_layers)
+
+    context = getattr(body, "context", 4096) or 4096
+    bytes_per_layer_kv = max(1, int(context * 4 * 1024))
+    io_bytes = int((layout or {}).get("input_bytes", 0) or 0) + int((layout or {}).get("output_bytes", 0) or 0)
+
+    gpu_budgets: dict[str, int] = {}
+    ram_budgets: dict[str, int] = {}
+    profiles: dict[str, DeviceProfile] = {}
+
+    now = time.time()
+    for nid, m in plan_members.items():
+        mb = prima_member_backend(m, runtime=runtime)
+        vram = int(m.get("vram_bytes") or 0)
+        has_gpu = mb not in ("cpu", "unknown") and (vram > 0 or bool(m.get("devices")))
+        ram = int(m.get("available_ram_bytes") or m.get("total_ram_bytes") or 8 * 1024**3)
+        gpu_budgets[nid] = vram if has_gpu else 0
+        ram_budgets[nid] = ram
+        profiles[nid] = DeviceProfile(
+            runtime_id=(runtime or {}).get("runtime_id", "0" * 64),
+            model_sha256="0" * 64,
+            node_id=nid,
+            hardware_digest="0" * 64,
+            settings_digest="0" * 64,
+            backend=mb if has_gpu else "cpu",
+            measured_at=now,
+            cpu_layer_ms=10.0,
+            gpu_layer_ms=2.0 if has_gpu else None,
+            disk_read_bytes_s=1_000_000_000.0,
+            memory_available_bytes=vram if has_gpu else ram,
+        )
+
+    base_plan = {
+        "estimated_layers": total_layers,
+        "model_size_bytes": model_size_bytes,
+        "weights_estimate_bytes": model_size_bytes,
+        "kv_estimate_bytes": total_layers * bytes_per_layer_kv,
+        "node_gpu_budget_bytes": gpu_budgets,
+        "node_ram_budget_bytes": ram_budgets,
+        "split_mode": "layer",
+    }
+
+    scheduler_report = solve_highs_halda_schedule(
+        body=body,
+        runtime=runtime or {},
+        members=plan_members,
+        base_plan=base_plan,
+        layout=layout,
+        profiles=profiles,
+    )
+
+    # 4. Handle Infeasible Capacity (FR-005)
+    feasible = (
+        scheduler_report.fallback_reason != "milp_infeasible_for_cluster_budget"
+        and bool(scheduler_report.node_allocations)
+        and sum(a.w_m for a in scheduler_report.node_allocations) == total_layers
+    )
+    if not feasible:
+        total_required = model_size_bytes + total_layers * bytes_per_layer_kv + io_bytes
+        total_available = sum(gpu_budgets.values()) + sum(ram_budgets.values())
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PRIMA_INSUFFICIENT_CAPACITY",
+                "message": (
+                    f"Cluster capacity is insufficient to host {model.name}. "
+                    f"Required memory: {total_required} bytes, Available memory: {total_available} bytes."
+                ),
+                "required_bytes": total_required,
+                "available_bytes": total_available,
+                "required_breakdown": {
+                    "weights_bytes": model_size_bytes,
+                    "kv_bytes": total_layers * bytes_per_layer_kv,
+                    "io_bytes": io_bytes,
+                },
+                "available_breakdown": {
+                    "vram_bytes": sum(gpu_budgets.values()),
+                    "ram_bytes": sum(ram_budgets.values()),
+                },
+            },
+        )
+
+    # 5. Build allocations and topology
+    master_id = next(
+        (str(nid) for nid, m in plan_members.items() if (m or {}).get("role") == "master" or (m or {}).get("is_master")),
+        next(iter(plan_members.keys())),
+    )
+
+    allocs = scheduler_report.node_allocations
+    master_alloc = next((a for a in allocs if a.node_id == master_id), None)
+    worker_allocs = [a for a in allocs if a.node_id != master_id and a.w_m > 0]
+
+    device_allocations = []
+    plan_cpu_layers = 0
+
+    if not worker_allocs:
+        # Single-node deployment
+        w = master_alloc.w_m if master_alloc else total_layers
+        ngl = min(master_alloc.n_m if master_alloc else 0, w)
+        cpu_l = w - ngl
+        plan_cpu_layers = cpu_l
+        m_devs = plan_members[master_id].get("devices") or []
+        m_dev = str(m_devs[0].get("name") or m_devs[0].get("device") or "0") if m_devs else "0"
+        if prima_member_backend(plan_members[master_id], runtime=runtime) == "vulkan":
+            m_dev = _vulkan_device_name(m_dev, 0)
+        if ngl > 0:
+            device_allocations.append({
+                "node_id": master_id,
+                "device": m_dev,
+                "layer_start": cpu_l,
+                "layer_end": total_layers,
+                "layers": ngl,
+                "memory_kind": "gpu",
+                "local": True,
+                "backend": prima_member_backend(plan_members[master_id], runtime=runtime),
+                "budget_bytes": gpu_budgets.get(master_id, 0),
+                "estimated_bytes": ngl * bytes_per_layer_weight,
+            })
+    else:
+        # Multi-node deployment
+        cur_layer = 0
+        for w_alloc in worker_allocs:
+            w = w_alloc.w_m
+            start = cur_layer
+            end = cur_layer + w
+            cur_layer = end
+            ngl = min(w_alloc.n_m, w)
+            cpu_l = w - ngl
+            w_devs = plan_members[w_alloc.node_id].get("devices") or []
+            w_dev = str(w_devs[0].get("name") or w_devs[0].get("device") or "0") if w_devs else "0"
+            if prima_member_backend(plan_members[w_alloc.node_id], runtime=runtime) == "vulkan":
+                w_dev = _vulkan_device_name(w_dev, 0)
+            if cpu_l > 0:
+                device_allocations.append({
+                    "node_id": w_alloc.node_id,
+                    "device": "cpu",
+                    "layer_start": start,
+                    "layer_end": end - ngl,
+                    "layers": cpu_l,
+                    "memory_kind": "ram",
+                    "local": False,
+                    "backend": "cpu",
+                    "budget_bytes": ram_budgets.get(w_alloc.node_id, 0),
+                    "estimated_bytes": cpu_l * bytes_per_layer_weight,
+                })
+            if ngl > 0:
+                device_allocations.append({
+                    "node_id": w_alloc.node_id,
+                    "device": w_dev,
+                    "layer_start": end - ngl,
+                    "layer_end": end,
+                    "layers": ngl,
+                    "memory_kind": "gpu",
+                    "local": False,
+                    "backend": prima_member_backend(plan_members[w_alloc.node_id], runtime=runtime),
+                    "budget_bytes": gpu_budgets.get(w_alloc.node_id, 0),
+                    "estimated_bytes": ngl * bytes_per_layer_weight,
+                })
+        remaining_w = total_layers - cur_layer
+        if remaining_w > 0 and master_alloc:
+            ngl_m = min(master_alloc.n_m, remaining_w)
+            cpu_m = remaining_w - ngl_m
+            m_devs = plan_members[master_id].get("devices") or []
+            m_dev = str(m_devs[0].get("name") or m_devs[0].get("device") or "0") if m_devs else "0"
+            if prima_member_backend(plan_members[master_id], runtime=runtime) == "vulkan":
+                m_dev = _vulkan_device_name(m_dev, 0)
+            if cpu_m > 0:
+                device_allocations.append({
+                    "node_id": master_id,
+                    "device": "cpu",
+                    "layer_start": cur_layer,
+                    "layer_end": total_layers - ngl_m,
+                    "layers": cpu_m,
+                    "memory_kind": "ram",
+                    "local": True,
+                    "backend": "cpu",
+                    "budget_bytes": ram_budgets.get(master_id, 0),
+                    "estimated_bytes": cpu_m * bytes_per_layer_weight,
+                })
+            if ngl_m > 0:
+                device_allocations.append({
+                    "node_id": master_id,
+                    "device": m_dev,
+                    "layer_start": total_layers - ngl_m,
+                    "layer_end": total_layers,
+                    "layers": ngl_m,
+                    "memory_kind": "gpu",
+                    "local": True,
+                    "backend": prima_member_backend(plan_members[master_id], runtime=runtime),
+                    "budget_bytes": gpu_budgets.get(master_id, 0),
+                    "estimated_bytes": ngl_m * bytes_per_layer_weight,
+                })
+
+    plan = {
+        "device_allocations": device_allocations,
+        "cpu_layers": plan_cpu_layers,
+        "ngl": sum(a["layers"] for a in device_allocations if a.get("memory_kind") == "gpu"),
+        "estimated_layers": total_layers,
+        "model_size_bytes": model_size_bytes,
+        "split_mode": "layer",
+        "fit_status": "fits",
+        "node_gpu_budget_bytes": gpu_budgets,
+        "node_ram_budget_bytes": ram_budgets,
+        "resolved_launch_settings": {
+            "context": context,
+            "parallel_slots": getattr(body, "parallel_slots", 1) if getattr(body, "parallel_slots", 1) != "auto" else 1,
+            "split_mode": "layer",
+            "prima_graphs": True,
+        },
+    }
+
+    topology = topology_from_plan(plan, plan_members, runtime["runtime_id"])
+    topology = topology.model_copy(update={"scheduler_report": scheduler_report})
+
+    identity = {
+        "runtime_id": runtime["runtime_id"],
+        "settings": body.model_dump(),
+        "model": {"name": model.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
+        "inventory_digest": inventory_identity(members, getattr(body, "network_id", None)),
+        "placement": _stable_placement(plan),
+    }
+
+    return {
+        **plan,
+        "engine": "primacpp",
+        "runtime_id": runtime["runtime_id"],
+        "transport": "prima-ring-tcp",
+        "plan_digest": body_digest(identity),
+        "inventory_digest": identity["inventory_digest"],
+        "prima_topology": topology.model_dump(),
+        "network_edges": network_edges(topology),
+        "runtime_required_nodes": [r.node_id for r in topology.ranks],
+        "participant_platforms": participant_platforms(topology, members, runtime=runtime),
+        "candidate_count": 1,
+        "profiling": {
+            "status": "auto_planned",
+            "predicted_decode_ms": scheduler_report.objective_step_ms,
+            "scheduler": scheduler_report.model_dump(),
+        },
+        "scheduler": scheduler_report.model_dump(),
+        "placement_mode": scheduler_report.scheduler_mode,
+        "inference_supported": True,
+        "placement_errors": [],
+        "qualification_errors": [],
+        "qualification_warnings": [],
+        "model_support": support,
+        "fit_status": "fits",
+    }
+

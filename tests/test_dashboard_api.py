@@ -104,13 +104,59 @@ def test_status_exposes_feature_flags(client):
     from kllm.shared import config as kllm_config
 
     body = c.get("/v1/status").json()
-    assert body["feature_flags"] == {"private-network-setup": False}
-    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": False}
+    assert body["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
+    v2_body = c.get("/v2/cluster/status").json()
+    assert v2_body["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
 
     assert kllm_config.set_feature_flag("private-network-setup", True) is True
     body = c.get("/v1/status").json()
-    assert body["feature_flags"] == {"private-network-setup": True}
-    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True}
+    assert body["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": False}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": False}
+
+    assert kllm_config.set_feature_flag("prima-auto-deploy", True) is True
+    body = c.get("/v1/status").json()
+    assert body["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": True}
+    v2_body = c.get("/v2/cluster/status").json()
+    assert v2_body["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": True}
+    assert agent_runtime._live_status()["feature_flags"] == {"private-network-setup": True, "prima-auto-deploy": True}
+
+    assert kllm_config.set_feature_flag("prima-auto-deploy", False) is False
+    assert kllm_config.set_feature_flag("private-network-setup", False) is False
+    body = c.get("/v1/status").json()
+    assert body["feature_flags"] == {"private-network-setup": False, "prima-auto-deploy": False}
+
+
+def test_toggling_prima_auto_deploy_does_not_interrupt_active_run(client, monkeypatch):
+    c, agent, _ = client
+    from kllm.shared import config as kllm_config
+    monkeypatch.setattr(agent_runtime, "_inference_activity", lambda: {"server_ready": True})
+
+    # Simulate an active inference run on the master
+    agent.STATE.role = "master"
+    agent.STATE.process_pid = 4242
+    agent.STATE.process_role = "master"
+    agent.STATE.model_name = "test-model.gguf"
+    agent.STATE.inference_activity = {"server_ready": True}
+    agent.STATE.active_config = {"process_pid": 4242, "model": "test-model.gguf"}
+
+    # Initially enabled
+    kllm_config.set_feature_flag("prima-auto-deploy", True)
+    status_enabled = c.get("/v1/status").json()
+    assert status_enabled["feature_flags"]["prima-auto-deploy"] is True
+    assert status_enabled["inference_up"] is True
+    assert status_enabled["process_pid"] == 4242
+    assert status_enabled["model_name"] == "test-model.gguf"
+
+    # Toggle off at runtime
+    kllm_config.set_feature_flag("prima-auto-deploy", False)
+    status_disabled = c.get("/v1/status").json()
+    assert status_disabled["feature_flags"]["prima-auto-deploy"] is False
+    # Active workload is completely uninterrupted
+    assert status_disabled["inference_up"] is True
+    assert status_disabled["process_pid"] == 4242
+    assert status_disabled["model_name"] == "test-model.gguf"
+    assert status_disabled["active_config"] == {"process_pid": 4242, "model": "test-model.gguf"}
 
 
 def test_status_exposes_the_configured_engine(client):

@@ -34,6 +34,37 @@ _generations = itertools.count(1)
 _closing: dict[Path, "SQLiteStore"] = {}
 _registry_lock = threading.RLock()
 
+_KNOWN_APP_TABLES: frozenset[str] = frozenset(
+    {
+        "feature_flags",
+        # managed_network tables
+        "metadata",
+        "peers",
+        "node_directory",
+        "authority",
+        "channels",
+        "networks",
+        "assignments",
+        "operations",
+        "results",
+        "journals",
+        "commands",
+        "reservations",
+        "leases",
+        "evidence",
+        # primacpp profiling tables
+        "profiling_runs",
+        "profiling_stages",
+        "profiling_nodes",
+        "profiling_node_stage_tasks",
+        "measured_node_profiles",
+        "measured_link_profiles",
+        "profiling_logs",
+        "profiling_qualification_results",
+        "sqlite_sequence",
+    }
+)
+
 
 @contextmanager
 def file_lock(path: Path, timeout: float) -> Iterator[None]:
@@ -171,7 +202,13 @@ class SQLiteStore:
     @staticmethod
     def _validate_schema(db: Connection, metadata: MetaData, existing: set[str]) -> None:
         inspector = inspect(db)
-        if not set(metadata.tables) <= existing:
+        expected_tables = set(metadata.tables)
+        present_tables = expected_tables & existing
+        if not present_tables:
+            if not (existing <= _KNOWN_APP_TABLES):
+                raise sqlite3.DatabaseError("storage schema is incomplete or unsupported")
+            return
+        if present_tables != expected_tables:
             raise sqlite3.DatabaseError("storage schema is incomplete or unsupported")
         for table in metadata.tables.values():
             columns = {c["name"]: c for c in inspector.get_columns(table.name)}

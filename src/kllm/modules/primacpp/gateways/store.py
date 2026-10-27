@@ -33,7 +33,7 @@ class ProfilingStore:
     def __init__(self, home_or_path: Path, *, options: SQLiteOptions | None = None):
         target = Path(home_or_path).absolute()
         if target.is_dir() or not target.name.endswith(".sqlite"):
-            self.path = (target / "prima-profiles.sqlite").resolve()
+            self.path = (target / "managed-network.sqlite").resolve()
         else:
             self.path = target.resolve()
 
@@ -46,7 +46,7 @@ class ProfilingStore:
     def active_for(cls, home_or_path: Path) -> "ProfilingStore | None":
         target = Path(home_or_path).absolute()
         if target.is_dir() or not target.name.endswith(".sqlite"):
-            target = (target / "prima-profiles.sqlite").resolve()
+            target = (target / "managed-network.sqlite").resolve()
         else:
             target = target.resolve()
         with _open_stores_lock:

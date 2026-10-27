@@ -1015,5 +1015,30 @@ export class RunInteractor {
     }
   }
 
+  async autoDeploy(modelId?: string) {
+    const targetModel = modelId ?? this.selectedModel;
+    if (!targetModel) throw new Error('No model selected');
+    this.busy = '/v2/inference/runs';
+    try {
+      if (this.selectedNetworkId) await this.loadToken();
+      const payload: Record<string, unknown> = {
+        model: targetModel,
+        prima_auto_deploy: true,
+      };
+      if (this.selectedNetworkId) {
+        payload.network_id = this.selectedNetworkId;
+      }
+      const data = (await this.post('/v2/inference/runs', payload)) as Record<string, unknown>;
+      this.activeRunConfig = (data.effective_config ?? null) as EffectiveConfig | null;
+      const plan = (data.plan ?? {}) as Record<string, unknown>;
+      if (Object.keys(plan).length) {
+        this.planResult = plan;
+      }
+      return data;
+    } finally {
+      this.busy = '';
+    }
+  }
+
 }
 

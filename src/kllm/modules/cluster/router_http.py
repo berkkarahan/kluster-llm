@@ -213,6 +213,7 @@ CONTROL_V2_NODE_STATUS: tuple[tuple[str, str, str], ...] = (
 
 CONTROL_V2_CLUSTER: tuple[tuple[str, str, str], ...] = (
     ('/cluster', 'GET', 'status'),
+    ('/cluster/status', 'GET', 'status'),
     ('/cluster', 'POST', 'start_master'),
     ('/cluster', 'DELETE', 'stop'),
 )

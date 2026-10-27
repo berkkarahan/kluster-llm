@@ -85,6 +85,12 @@ def config_path() -> Path:
     return home_dir() / "config.toml"
 
 
+def app_db_path(home: Path | None = None) -> Path:
+    """Unified application SQLite database path."""
+    base = Path(home) if home is not None else home_dir()
+    return base / "managed-network.sqlite"
+
+
 def runtime_path() -> Path:
     """Hidden registry of processes started by kllm (agent + children)."""
     return home_dir() / ".runtime.json"

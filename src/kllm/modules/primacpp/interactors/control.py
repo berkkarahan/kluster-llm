@@ -475,6 +475,10 @@ class PrimaControl:
         if runtime.get("engine") != "primacpp":
             raise ValueError("Prima preparation requires a Prima runtime")
         model = model or self.resolve_model(body.model)
+        from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active, auto_plan
+        if is_prima_auto_deploy_active(body, runtime=runtime):
+            effective_members = members if members is not None else self.members(body)
+            return auto_plan(body, effective_members, model=model, runtime=runtime)
         return preview(body, runtime, members if members is not None else self.members(body), model,
             lambda b, m: self._capacity_plan(runtime, b, m),
             score=lambda feasible: self._measured_plan(runtime, body, model, feasible))

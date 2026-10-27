@@ -312,6 +312,7 @@ class NetworkRequestFields(RunSettingsFields):
     # the reusable fields above, so this selection never becomes a saved default.
     network_id: str | None = None
     settings_source: Literal["saved", "defaults"] = "saved"
+    prima_auto_deploy: bool | None = None
 
     @field_validator("network_id")
     @classmethod

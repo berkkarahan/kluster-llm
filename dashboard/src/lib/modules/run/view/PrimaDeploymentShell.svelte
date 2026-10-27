@@ -1,8 +1,40 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  let { tab = $bindable('settings'), section = $bindable('overview'), search = $bindable(''), technical = $bindable(false), dirty, issues = [], focus, matches = [], children, nextDeployment, footer }:
-    { tab?: string; section?: string; search?: string; technical?: boolean; dirty: boolean; issues?: {field:string; message:string; section:string}[];
-      focus:(field:string)=>void; matches?: {field:string;label:string}[]; children:Snippet; nextDeployment:Snippet; footer:Snippet } = $props();
+  let {
+    tab = $bindable('settings'),
+    section = $bindable('overview'),
+    search = $bindable(''),
+    technical = $bindable(false),
+    dirty,
+    issues = [],
+    focus,
+    matches = [],
+    running = false,
+    modelName = '',
+    reason = '',
+    onStop,
+    runningModel,
+    children,
+    nextDeployment,
+    footer
+  }: {
+    tab?: string;
+    section?: string;
+    search?: string;
+    technical?: boolean;
+    dirty: boolean;
+    issues?: { field: string; message: string; section: string }[];
+    focus: (field: string) => void;
+    matches?: { field: string; label: string }[];
+    running?: boolean;
+    modelName?: string;
+    reason?: string;
+    onStop?: () => void;
+    runningModel?: Snippet;
+    children: Snippet;
+    nextDeployment: Snippet;
+    footer: Snippet;
+  } = $props();
   const tabs = [['settings','Deployment settings'],['deployment','Next deployment']];
   function navigateTab(event: KeyboardEvent, index: number) {
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
@@ -14,6 +46,20 @@
   const sections = [['overview','Overview'],['computers','Computers'],['memory','Memory & speed'],['features','Responses & features'],['expert','Expert']];
 </script>
 <div class="workspace">
+  {#if runningModel}
+    {@render runningModel()}
+  {:else if running || reason}
+    <section class="panel running-model" aria-label="Running model">
+      <div>
+        <span class="tag">{running ? 'Running' : 'Starting or stopping'}</span>
+        <strong>{modelName || 'Loading model'}</strong>
+        {#if reason}<p class="small muted">{reason}</p>{/if}
+      </div>
+      <button
+        class="btn btn-danger"
+        onclick={() => onStop?.()}>Stop model</button>
+    </section>
+  {/if}
   <div class="main-tabs" role="tablist" aria-label="Prima deployment">
     {#each tabs as [id,title], index}
       <button type="button" role="tab" id={`prima-tab-${id}`} aria-controls={`prima-panel-${id}`} aria-selected={tab === id} tabindex={tab === id ? 0 : -1} onclick={() => tab=id} onkeydown={event => navigateTab(event,index)}>{title}</button>
@@ -71,5 +117,6 @@
   .issues { padding:20px; }
   .matches { display:grid;gap:8px;margin-top:12px; }
   footer { border-top:1px solid var(--border); }
-
+  .running-model { padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; }
+  .running-model strong { margin-left: 12px; }
 </style>

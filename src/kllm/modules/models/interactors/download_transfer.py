@@ -73,7 +73,8 @@ def stream_download(
             with stream_client(
                 "GET", url, headers=req_headers, follow_redirects=True, timeout=timeout
             ) as response:
-                if response.status_code == 416:
+                status_code = getattr(response, "status_code", 200)
+                if status_code == 416:
                     try:
                         part.unlink()
                     except OSError:
@@ -84,7 +85,7 @@ def stream_download(
 
                 response.raise_for_status()
 
-                is_partial = response.status_code == 206
+                is_partial = status_code == 206
                 if not is_partial:
                     offset = 0
                     open_mode = "wb"

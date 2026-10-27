@@ -1773,17 +1773,17 @@ set_cluster_providers(
 )
 set_model_handlers_provider(_model_handlers)
 set_inference_providers(
-    observed_inference=_observed_inference,
-    active_config=_active_config,
-    connection_url=_connection_url,
-    connection_request_url=_connection_request_url,
-    master_lan_host=_master_lan_host,
-    inference_activity=_inference_activity,
-    run_settings_handlers=_run_settings_handlers,
-    engine_settings_handlers=_engine_settings_handlers,
-    template_validation_service=_template_validation_service,
-    inference_handlers=_inference_handlers,
-    managed_network_service=_managed_network_service,
+    observed_inference=lambda *a, **k: _observed_inference(*a, **k),
+    active_config=lambda: _active_config(),
+    connection_url=lambda *a, **k: _connection_url(*a, **k),
+    connection_request_url=lambda *a, **k: _connection_request_url(*a, **k),
+    master_lan_host=lambda: _master_lan_host(),
+    inference_activity=lambda: _inference_activity(),
+    run_settings_handlers=lambda: _run_settings_handlers(),
+    engine_settings_handlers=lambda: _engine_settings_handlers(),
+    template_validation_service=lambda: _template_validation_service(),
+    inference_handlers=lambda: _inference_handlers(),
+    managed_network_service=lambda: getattr(app.state, "managed_network", None),
     managed_network_error=lambda: getattr(app.state, "managed_network_error", None),
 )
 

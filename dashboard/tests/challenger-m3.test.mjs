@@ -519,6 +519,7 @@ test('Challenger Milestone 3 Empirical Stress Tests', async (suite) => {
       await t.test('4.2 Client Hydration and Live Interaction in Chrome browser via CDP', { skip: !chrome && 'Chrome required' }, async () => {
         const profile = mkdtempSync(join(tmpdir(), 'kllm-challenger-m3-'));
         let browserProcess, httpServer, ws;
+        let retried = false;
 
         try {
           httpServer = createHttpServer((req, res) => {
@@ -623,6 +624,7 @@ test('Challenger Milestone 3 Empirical Stress Tests', async (suite) => {
                 };
               } else if (pathname.includes('/v2/cluster/prima-preparations')) {
                 if (pathname.includes('/retry')) {
+                  retried = true;
                   result = { run_id: 'run-chrome-1', status: 'running', retrying_stage: 'link_profile' };
                 } else if (pathname.includes('/coverage')) {
                   result = {
@@ -634,14 +636,14 @@ test('Challenger Milestone 3 Empirical Stress Tests', async (suite) => {
                 } else {
                   result = {
                     run_id: 'run-chrome-1',
-                    status: 'failed',
-                    phase: 'failed',
+                    status: retried ? 'running' : 'failed',
+                    phase: retried ? 'preparing' : 'failed',
                     current_stage: 'link_profile',
                     stages: [
                       { stage_name: 'materialize', stage_order: 1, status: 'completed', attempt: 1, progress_fraction: 1, progress_label: 'Done', bytes_done: 0, bytes_total: 0, error_message: null },
                       { stage_name: 'asset_sync', stage_order: 2, status: 'completed', attempt: 1, progress_fraction: 1, progress_label: 'Done', bytes_done: 100, bytes_total: 100, error_message: null },
                       { stage_name: 'node_profile', stage_order: 3, status: 'completed', attempt: 1, progress_fraction: 1, progress_label: 'Done', bytes_done: 0, bytes_total: 0, error_message: null },
-                      { stage_name: 'link_profile', stage_order: 4, status: 'failed', attempt: 1, progress_fraction: 0.4, progress_label: 'Timeout', bytes_done: 0, bytes_total: 0, error_message: 'Timed out 50052' },
+                      { stage_name: 'link_profile', stage_order: 4, status: retried ? 'running' : 'failed', attempt: retried ? 2 : 1, progress_fraction: retried ? 0.05 : 0.4, progress_label: retried ? 'Retrying stage...' : 'Timeout', error_message: retried ? null : 'Timed out 50052' },
                       { stage_name: 'plan_qualification', stage_order: 5, status: 'pending', attempt: 1, progress_fraction: 0, progress_label: 'Pending', bytes_done: 0, bytes_total: 0, error_message: null },
                     ],
                     nodes: { master1: { role: 'master', status: 'prepared' }, worker1: { role: 'worker', status: 'prepared' } },

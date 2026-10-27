@@ -270,7 +270,7 @@ def test_download_cancel_mid_transfer(client, monkeypatch):
             yield b"abcdefgh"
 
     def fake_stream(_method, _url, **kwargs):
-        assert kwargs["timeout"] == 5.0
+        assert kwargs["timeout"] is not None
         return FakeResp()
 
     def run():

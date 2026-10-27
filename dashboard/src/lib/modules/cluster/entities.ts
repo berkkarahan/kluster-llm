@@ -36,6 +36,7 @@ export type Member = {
   latency_ms?: number | null;
   process_pid?: number | null;
   process_role?: string | null;
+  online?: boolean;
 };
 
 export type UpdateWorkerProgress = {

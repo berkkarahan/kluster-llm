@@ -133,7 +133,7 @@ class InferenceHandlers:
             result["deployment_review_version"] = DEPLOYMENT_REVIEW_VERSION
         if (runtime_snapshot or {}).get("engine") == "primacpp" and result.get("fit_status") != "overflow":
             planner = getattr(self._deps, "prima_plan", None)
-            if planner:
+            if planner and result.get("profiling", {}).get("status") != "auto_planned":
                 try:
                     result = planner(body, path, members)
                     result["deployment_review_version"] = DEPLOYMENT_REVIEW_VERSION
@@ -213,7 +213,7 @@ class InferenceHandlers:
             if self._deps.prima_run is None:
                 raise HTTPException(409, "Recover Prima manifest dispatch before Run")
             planner = getattr(self._deps, "prima_plan", None)
-            if planner:
+            if planner and plan_result.get("profiling", {}).get("status") != "auto_planned":
                 try:
                     plan_result = planner(body, path, members)
                 except ValueError as error:
@@ -222,6 +222,8 @@ class InferenceHandlers:
             effective = effective_configuration(body, plan_result, path)
             try:
                 launched = self._deps.prima_run(body, path, plan_result, members)
+            except HTTPException:
+                raise
             except (ValueError, RuntimeError) as error:
                 raise HTTPException(409, detail={"code": "PRIMA_RUN_REFUSED", "message": str(error)}) from None
             effective.update({"process_pid": launched["launch"]["pid"], "run_id": launched["run_id"],

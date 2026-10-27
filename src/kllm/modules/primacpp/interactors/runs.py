@@ -101,11 +101,18 @@ class LocalPrimaRuns:
         pinned = snapshot()
         runtime = self.control.registry.capture((pinned or {}).get("runtime_id"))
         require_qualified(runtime)
-        if body.network_id:
-            raise ValueError("Network-bound Prima runs require separate distributed qualification")
-        def score(feasible):
-            return feasible[0], plan.get("profiling", {"status": "unmeasured", "predicted_decode_ms": None})
-        planned = preview(body, runtime, members, model, lambda *_: plan, score=score)
+        from kllm.modules.primacpp.interactors.planner import is_prima_auto_deploy_active
+        if is_prima_auto_deploy_active(body):
+            if getattr(body, "network_id", None):
+                body = body.model_copy(update={"network_id": None})
+            planned = plan
+            score = None
+        else:
+            if body.network_id:
+                raise ValueError("Network-bound Prima runs require separate distributed qualification")
+            def score(feasible):
+                return feasible[0], plan.get("profiling", {"status": "unmeasured", "predicted_decode_ms": None})
+            planned = preview(body, runtime, members, model, lambda *_: plan, score=score)
         manifest, files = materialize(body, runtime, members, model, lambda *_: plan,
                                       expected_digest=planned["plan_digest"], score=score,
                                       adapters=adapter_paths(body.model_dump()),

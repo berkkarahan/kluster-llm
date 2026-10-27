@@ -13,7 +13,7 @@ const concurrency = 1;
 const files = (await readdir(root))
   .filter((file) => file.endsWith('.test.mjs'))
   .sort();
-const browserFiles = new Set(['models.test.mjs', 'usage-workspace.test.mjs', 'managed-network.test.mjs', 'run-planning.test.mjs', 'polish-browser.test.mjs', 'runtime-browser.test.mjs', 'prima-settings.test.mjs']);
+const browserFiles = new Set(['models.test.mjs', 'usage-workspace.test.mjs', 'managed-network.test.mjs', 'run-planning.test.mjs', 'polish-browser.test.mjs', 'runtime-browser.test.mjs', 'prima-settings.test.mjs', 'challenger-m3.test.mjs']);
 const parallelFiles = serial ? [] : files.filter((file) => !browserFiles.has(file));
 const sequentialFiles = serial ? files : files.filter((file) => browserFiles.has(file));
 

@@ -4,6 +4,7 @@
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import PrimaDeploymentShell from './PrimaDeploymentShell.svelte';
   import PrimaDeploymentSummary from './PrimaDeploymentSummary.svelte';
+  import PrimaAutoDeployView from './PrimaAutoDeployView.svelte';
   import ErrorMessage from '#lib/shared/ErrorMessage.svelte';
   import { primaPlacementError } from '#lib/modules/runtimes/presenter';
   import DownloadPanel from '#lib/modules/models/view/DownloadPanel.svelte';
@@ -39,14 +40,23 @@
   import { runtimeRunReason } from '#lib/modules/run/runtime-readiness';
   import type { RunInteractor } from '../interactor.svelte';
   import type { RuntimesInteractor } from '#lib/modules/runtimes/interactor.svelte';
+  import type { ClusterInteractor } from '#lib/modules/cluster/interactor.svelte';
 
   let {
     presenter = createApp().run,
-    runtimes = createApp().runtimes
+    runtimes = createApp().runtimes,
+    cluster = presenter.cluster ?? createApp().cluster
   }: {
     presenter?: RunInteractor;
     runtimes?: RuntimesInteractor;
+    cluster?: ClusterInteractor;
   } = $props();
+
+  const isAutoDeploy = $derived(
+    Boolean(
+      (cluster?.status ?? presenter?.status)?.feature_flags?.['prima-auto-deploy']
+    )
+  );
 
   let section = $state('overview');
   let tab = $state('settings');
@@ -345,12 +355,15 @@
   <header class="page-heading">
     <div>
       <p class="eyebrow">Deploy · Prima.cpp</p>
-      <h1 id="page-title">Deploy a model</h1>
-      <p>Configure a draft and review the deployment before running.</p>
+      <h1 id="page-title">{isAutoDeploy ? 'Deploy a model (One-Click)' : 'Deploy a model'}</h1>
+      <p>{isAutoDeploy ? 'Select a model and deploy across the cluster with automatic planning.' : 'Configure a draft and review the deployment before running.'}</p>
     </div>
     <div class="prima-header-badges">
       <span class="chip chip-info">Prima engine</span>
       <span class="chip mono">prima-ring-tcp</span>
+      {#if isAutoDeploy}
+        <span class="chip chip-accent">auto-deploy</span>
+      {/if}
       {#if targetPrimaVersion}
         <span class="chip mono">{targetPrimaVersion.name || targetPrimaVersion.commit?.slice(0, 10) || targetPrimaVersion.runtime_id}</span>
       {/if}
@@ -358,12 +371,12 @@
     </div>
   </header>
 
-  {#if deployment.lifecycleReason}
+  {#if deployment.lifecycleReason || presenter.status?.inference_up}
     <section class="panel running-model" aria-label="Running model">
       <div>
         <span class="tag">{presenter.status?.inference_up ? 'Running' : 'Starting or stopping'}</span>
         <strong>{presenter.status?.model_name ?? 'Loading model'}</strong>
-        <p class="small muted">{deployment.lifecycleReason}</p>
+        <p class="small muted">{deployment.lifecycleReason || 'Inference is currently active.'}</p>
       </div>
       <button
         class="btn btn-danger"
@@ -372,12 +385,24 @@
     </section>
   {/if}
 
-  <DownloadPanel />
-  {#if presenter.capabilitiesError}<p class="notice" role="status">{presenter.capabilitiesError}</p>{/if}
-  {#if presenter.settingsLoadError}<div class="notice" role="alert">{presenter.settingsLoadError}<button class="btn" onclick={() => selectPrimaModel(presenter.selectedModel)}>Retry settings</button></div>{/if}
-  {#if presenter.status?.apply_error}<ErrorMessage source="apply" message={presenter.status.apply_error} />{/if}
-  <div class="deploy-progress-slot"><LoadProgressPanel {presenter} /></div>
-  <PrimaDeploymentShell bind:tab bind:section bind:search bind:technical dirty={presenter.settingsDirty()} {issues} {matches} focus={focusField}>
+  {#if isAutoDeploy}
+    <PrimaAutoDeployView {presenter} {runtimes} {cluster} />
+  {:else}
+    <DownloadPanel />
+    {#if presenter.capabilitiesError}<p class="notice" role="status">{presenter.capabilitiesError}</p>{/if}
+    {#if presenter.settingsLoadError}<div class="notice" role="alert">{presenter.settingsLoadError}<button class="btn" onclick={() => selectPrimaModel(presenter.selectedModel)}>Retry settings</button></div>{/if}
+    {#if presenter.status?.apply_error}<ErrorMessage source="apply" message={presenter.status.apply_error} />{/if}
+    <div class="deploy-progress-slot"><LoadProgressPanel {presenter} /></div>
+    <PrimaDeploymentShell
+      bind:tab
+      bind:section
+      bind:search
+      bind:technical
+      dirty={presenter.settingsDirty()}
+      {issues}
+      {matches}
+      focus={focusField}
+    >
     {#snippet children()}
       <fieldset disabled={presenter.status?.role !== 'master' || presenter.settingsLoading}
         oninput={() => presenter.noteRawDraftEdit()} onchange={() => presenter.noteRawDraftEdit()}>
@@ -1078,6 +1103,7 @@
       <p class="small muted">Prima-only model settings · revision {presenter.settingsRevision}. Saving never changes active inference.</p>
     {/snippet}
   </PrimaDeploymentShell>
+  {/if}
 </div>
 
 <dialog bind:this={defaultsDialog} aria-labelledby="prima-defaults-title">

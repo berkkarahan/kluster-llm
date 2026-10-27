@@ -104,6 +104,7 @@ CONTROL_FIELDS = {
     "settings_source",
     "remember",
     "advanced_open",
+    "prima_auto_deploy",
 }
 SAMPLING_DEFAULTS = {
     "temperature": 0.7,
